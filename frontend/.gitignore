@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Test coverage
+coverage/
+
+# Tooling caches
+.vite/
+*.tsbuildinfo
+
+# Local env overrides (never commit secrets)
+*.local

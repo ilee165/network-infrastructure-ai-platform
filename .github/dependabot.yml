@@ -1,0 +1,40 @@
+# Dependabot configuration (D16 / ADR-0016): weekly dependency updates for every
+# package ecosystem in the repo. CI (ci.yml) gates every update PR.
+version: 2
+
+updates:
+  # Backend Python dependencies (backend/pyproject.toml).
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - backend
+
+  # Frontend npm dependencies (frontend/package.json + lockfile).
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - frontend
+
+  # GitHub Actions used by .github/workflows/.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - ci
+
+  # Base images in deploy/docker/*.Dockerfile.
+  - package-ecosystem: docker
+    directory: /deploy/docker
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - docker

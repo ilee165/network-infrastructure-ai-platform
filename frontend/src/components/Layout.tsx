@@ -1,0 +1,119 @@
+/**
+ * Application shell: collapsible sidebar navigation + header with
+ * environment / LLM-profile badges. Pages render through the router outlet.
+ */
+
+import { NavLink, Outlet } from "react-router-dom";
+import { useUiStore } from "../stores/ui";
+
+interface NavItem {
+  to: string;
+  label: string;
+  /** Two-letter glyph shown when the sidebar is collapsed. */
+  abbr: string;
+  end?: boolean;
+}
+
+const NAV_ITEMS: NavItem[] = [
+  { to: "/", label: "Dashboard", abbr: "DB", end: true },
+  { to: "/devices", label: "Devices", abbr: "DV" },
+  { to: "/topology", label: "Topology", abbr: "TP" },
+  { to: "/chat", label: "Chat", abbr: "CH" },
+  { to: "/changes", label: "Changes", abbr: "CR" },
+  { to: "/audit", label: "Audit", abbr: "AU" },
+];
+
+/** Map Vite's build mode onto the short env label used by the badge. */
+function envLabel(): string {
+  const mode = import.meta.env.MODE;
+  if (mode === "development") {
+    return "dev";
+  }
+  if (mode === "production") {
+    return "prod";
+  }
+  return mode;
+}
+
+export function Layout() {
+  const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
+  const toggleSidebar = useUiStore((state) => state.toggleSidebar);
+  const theme = useUiStore((state) => state.theme);
+  const llmProfile = import.meta.env.VITE_LLM_PROFILE ?? "local";
+
+  return (
+    <div
+      data-theme={theme}
+      className="flex h-screen overflow-hidden bg-carbon-950 text-zinc-300"
+    >
+      <aside
+        className={`flex h-full ${sidebarCollapsed ? "w-14" : "w-56"} flex-col border-r border-carbon-700 bg-carbon-900`}
+      >
+        <div className="flex h-12 items-center gap-2 border-b border-carbon-700 px-3">
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded bg-accent/15 font-mono text-xs font-bold text-accent">
+            NO
+          </span>
+          {!sidebarCollapsed && (
+            <span className="font-mono text-xs uppercase tracking-widest text-zinc-400">
+              netops
+            </span>
+          )}
+        </div>
+        <nav aria-label="Primary" className="flex flex-col gap-1 p-2">
+          {NAV_ITEMS.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              aria-label={item.label}
+              title={item.label}
+              className={({ isActive }) =>
+                [
+                  "flex items-center gap-3 rounded px-2.5 py-2 text-sm transition-colors",
+                  isActive
+                    ? "bg-carbon-800 text-zinc-100"
+                    : "text-zinc-500 hover:bg-carbon-850 hover:text-zinc-200",
+                ].join(" ")
+              }
+            >
+              <span className="w-5 shrink-0 text-center font-mono text-[10px] uppercase tracking-wider">
+                {item.abbr}
+              </span>
+              {!sidebarCollapsed && <span>{item.label}</span>}
+            </NavLink>
+          ))}
+        </nav>
+        <button
+          type="button"
+          onClick={toggleSidebar}
+          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          className="mt-auto border-t border-carbon-700 px-3 py-2 text-left font-mono text-xs text-zinc-500 transition-colors hover:text-zinc-200"
+        >
+          {sidebarCollapsed ? "»" : "« collapse"}
+        </button>
+      </aside>
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-12 shrink-0 items-center justify-between border-b border-carbon-700 bg-carbon-900 px-4">
+          <div className="flex min-w-0 items-baseline gap-3">
+            <h1 className="truncate text-sm font-semibold text-zinc-100">NetOps Console</h1>
+            <span className="hidden truncate text-xs text-zinc-500 sm:inline">
+              AI Network Operations Platform
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="badge" data-testid="env-badge">
+              env: {envLabel()}
+            </span>
+            <span className="badge" data-testid="llm-profile-badge">
+              llm: {llmProfile}
+            </span>
+          </div>
+        </header>
+        <main className="min-h-0 flex-1 overflow-y-auto p-6">
+          <Outlet />
+        </main>
+      </div>
+    </div>
+  );
+}

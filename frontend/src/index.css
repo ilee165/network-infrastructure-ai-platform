@@ -1,0 +1,70 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Minimal design tokens for the dark operations-console aesthetic (ADR-0012).
+ * Color/spacing tokens live in tailwind.config.ts; this file holds base
+ * element styling and the small set of shared component classes.
+ */
+
+:root {
+  color-scheme: dark;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-carbon-950 font-sans text-sm text-zinc-300 antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply rounded bg-carbon-700;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-carbon-950;
+  }
+}
+
+@layer components {
+  /* Raised container: cards, tables, canvases. */
+  .panel {
+    @apply rounded-md border border-carbon-700 bg-carbon-900;
+  }
+
+  /* Compact monospace badge: env/profile indicators, milestone tags. */
+  .badge {
+    @apply inline-flex items-center gap-1 rounded border border-carbon-600 bg-carbon-800 px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-zinc-400;
+  }
+
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded border border-carbon-600 bg-carbon-800 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors;
+  }
+
+  .btn:hover:not(:disabled) {
+    @apply bg-carbon-700 text-zinc-100;
+  }
+
+  .btn:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+
+  .input {
+    @apply rounded border border-carbon-600 bg-carbon-950 px-3 py-1.5 text-xs text-zinc-300 placeholder:text-zinc-600 focus:border-accent focus:outline-none;
+  }
+
+  .input:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+}

@@ -1,0 +1,155 @@
+# AI Network Operations Platform - Docker Compose stack (M0; ADR-0013 / D13).
+#
+# Run from the REPOSITORY ROOT after `cp .env.example .env`:
+#
+#   docker compose -f deploy/docker/docker-compose.yml up -d
+#   docker compose -f deploy/docker/docker-compose.yml --profile local-llm up -d
+#
+# Recommended: add `--env-file .env` so compose variable interpolation (used
+# for the neo4j credentials below) reads the root .env — without it compose
+# only interpolates from the shell environment. Full first-run notes:
+# deploy/docker/README.md.
+#
+# Canonical service names (DECISIONS-BRIEF section 1): api, worker, frontend,
+# postgres, neo4j, redis, ollama (profile "local-llm"). Data stores are not
+# published to the host by default (secure by default); uncomment the ports
+# stanzas for local debugging only.
+
+name: netops
+
+services:
+  # FastAPI REST + WebSocket API (uvicorn; default CMD of the backend image).
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/backend.Dockerfile
+    image: netops-backend:dev
+    env_file: ../../.env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
+    # Healthcheck (GET /api/v1/health/live) is baked into the image.
+
+  # Celery worker - same image as `api`, command overridden to consume the
+  # four canonical D8 queues (ADR-0008).
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/backend.Dockerfile
+    image: netops-backend:dev
+    command: celery -A app.workers.celery_app worker -Q discovery,config,packet,docs
+    env_file: ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
+    # The image HEALTHCHECK targets uvicorn on :8000, which the worker does
+    # not serve - override with a Celery broker round-trip ping.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app inspect ping --timeout 10"]
+      interval: 30s
+      timeout: 15s
+      start_period: 30s
+      retries: 3
+
+  # nginx serving the Vite SPA on 8080; proxies /api/ to the api service
+  # (deploy/docker/nginx.conf).
+  frontend:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/frontend.Dockerfile
+    image: netops-frontend:dev
+    ports:
+      - "8080:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # System of record + pgvector embeddings (ADR-0004). Credentials match the
+  # NETOPS_DATABASE_URL default (postgresql+asyncpg://netops:netops@postgres:5432/netops);
+  # change both together if you customize them.
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: netops
+      POSTGRES_PASSWORD: netops
+      POSTGRES_DB: netops
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netops -d netops"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 12
+    restart: unless-stopped
+    # ports: ["5432:5432"]  # dev debugging only
+
+  # Topology / knowledge graph (ADR-0005). Auth is wired from NETOPS_NEO4J_*
+  # via compose interpolation. NOTE: the neo4j image REJECTS the default
+  # password "neo4j" (and any password shorter than 8 characters) - set
+  # NETOPS_NEO4J_PASSWORD in .env and pass `--env-file .env` (or export the
+  # variables) so the value reaches this container. See deploy/docker/README.md.
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: ${NETOPS_NEO4J_USER:-neo4j}/${NETOPS_NEO4J_PASSWORD:-neo4j}
+    volumes:
+      - neo4jdata:/data
+    healthcheck:
+      # Unauthenticated HTTP discovery endpoint - probes process readiness
+      # without coupling the healthcheck to credentials.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 12
+    restart: unless-stopped
+    # ports: ["7474:7474", "7687:7687"]  # dev debugging only
+
+  # Celery broker/result backend + cache (ADR-0008).
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  # Local-first LLM inference (ADR-0009 profile "local"). Optional:
+  #   docker compose -f deploy/docker/docker-compose.yml --profile local-llm up -d
+  # Without this profile, configure an external provider via NETOPS_LLM_PROFILE.
+  ollama:
+    image: ollama/ollama
+    profiles: ["local-llm"]
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 5
+    restart: unless-stopped
+
+# Named volumes per ADR-0013 (the `pcaps` volume lands with packet analysis, M5).
+volumes:
+  pgdata:
+  neo4jdata:
+  redisdata:
+  ollama-models:
