@@ -34,7 +34,7 @@ def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
             except yaml.YAMLError:
                 parsed = None
             if isinstance(parsed, dict):
-                return parsed, text[end + 5 :]
+                return parsed, text[end + 5 :].removeprefix("\n")
     return {}, text
 
 
