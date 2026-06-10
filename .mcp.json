@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "tools/obsidian-mcp/.venv/Scripts/python.exe",
+      "args": ["-m", "obsidian_mcp"],
+      "env": {
+        "OBSIDIAN_VAULT_ROOT": "D:\\Brains\\Network-brain\\Network-infra-projects"
+      }
+    }
+  }
+}
