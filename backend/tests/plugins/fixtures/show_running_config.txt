@@ -1,0 +1,47 @@
+Building configuration...
+
+Current configuration : 1840 bytes
+!
+version 15.7
+service timestamps debug datetime msec
+service timestamps log datetime msec
+no service password-encryption
+!
+hostname core-rtr01
+!
+boot-start-marker
+boot-end-marker
+!
+no aaa new-model
+!
+ip cef
+no ipv6 cef
+!
+interface GigabitEthernet0/0
+ description WAN uplink to edge-rtr01
+ ip address 192.0.2.10 255.255.255.252
+ duplex full
+ speed 1000
+!
+interface GigabitEthernet0/1
+ ip address 10.10.0.1 255.255.255.0
+ duplex full
+ speed 1000
+!
+interface GigabitEthernet0/2
+ description spare port
+ no ip address
+ shutdown
+!
+router ospf 1
+ router-id 10.10.0.1
+ network 10.10.0.0 0.0.0.255 area 0
+!
+ip route 0.0.0.0 0.0.0.0 192.0.2.9
+!
+line con 0
+line vty 0 4
+ login local
+ transport input ssh
+!
+end

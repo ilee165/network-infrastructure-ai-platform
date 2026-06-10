@@ -7,7 +7,7 @@
 # one image *assigned* to each container, per ADR-0013 Decision 2):
 #   api    -> default CMD below (uvicorn)
 #   worker -> compose overrides the command:
-#             celery -A app.workers.celery_app worker -Q discovery,config,packet,docs
+#             celery -A app.workers.celery_app worker -Q discovery,config,packet,docs,system
 #
 # The build context is the REPOSITORY ROOT (docker-compose.yml sets
 # `context: ../..`), so paths below are repo-relative:

@@ -120,5 +120,5 @@ docker compose -f deploy/docker/docker-compose.yml down -v            # stop AND
 
 Both backend containers run the same `netops-backend` image (ADR-0013): `api`
 uses the image's default `uvicorn` command; `worker` overrides it with
-`celery -A app.workers.celery_app worker -Q discovery,config,packet,docs`.
+`celery -A app.workers.celery_app worker -Q discovery,config,packet,docs,system`.
 Rebuild after backend or frontend changes with `up -d --build`.

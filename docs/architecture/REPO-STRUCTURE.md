@@ -1,7 +1,7 @@
 # Repository Structure
 
 **Project:** AI Network Operations Platform
-**Status:** Draft v0.1 — Iteration 1 (Phase 1: Architecture)
+**Status:** Draft v0.2 — Iteration 1 (Phase 1: Architecture; amended 2026-06-10 to ratify the M0 as-built layout — see section 9)
 **Date:** 2026-06-09
 **Authority:** Expands `DECISIONS-BRIEF.md` §3 (which itself derives from `CLAUDE.md`). This document is the blueprint that Phase 2 scaffolding follows **exactly** — directory names, file names, and module boundaries below are normative. Anything the brief does not decide is chosen conservatively and marked **PROPOSED**; PROPOSED items are defaults we build on until confirmed by ADR or the Consultant Agent process (`docs/consultant/QUESTIONS.md`).
 
@@ -61,6 +61,8 @@ backend/
 └── app/
     ├── main.py                      # FastAPI app factory (composition root): mounts api routers, health, /metrics,
     │                                #   middleware (auth, audit context, request logging) (D15)
+    ├── db.py                        # Async SQLAlchemy 2.0 engine + session factory (D2, D4) — top-level
+    │                                #   module, NOT core/db.py (as-built placement ratified, §9 A1)
     │
     ├── core/                        # Cross-cutting foundations — imports NOTHING from feature modules (§3 rule)
     │   ├── config.py                # pydantic-settings Settings; env prefix NETOPS_, nested via "__" (PROPOSED)
@@ -69,15 +71,16 @@ backend/
     │   ├── crypto.py                # AES-256-GCM envelope encryption + master-key loader (env/file/KMS-compatible) (D11)
     │   ├── audit.py                 # Append-only audit-write primitive: actor, action, target, before/after, trace link (D11)
     │   ├── errors.py                # NetOpsError exception hierarchy + FastAPI handlers + uniform error envelope
-    │   ├── db.py                    # Async SQLAlchemy 2.0 engine + session factory (D2, D4)
     │   ├── redis.py                 # Redis client factory: cache, rate limiting (Celery broker configured in workers/) (D8)
     │   └── observability.py         # Prometheus registry/metrics helpers, optional OTel tracer, probe helpers (D15)
     │
     ├── api/
     │   ├── deps.py                  # Shared dependencies: db session, current_user, require_role(), pagination params
-    │   ├── health.py                # Unversioned GET /healthz (live) + /readyz (deps reachable); paths PROPOSED (D15)
     │   └── v1/                      # All business routes under /api/v1 — router set fixed by brief §3
     │       ├── router.py            # Aggregates the ten v1 routers below onto one APIRouter(prefix="/api/v1")
+    │       ├── health.py            # GET /api/v1/health/live + /api/v1/health/ready (per-dependency
+    │       │                        #   postgres/neo4j/redis status, degrades gracefully) — versioned
+    │       │                        #   paths ratified, supersede P3's /healthz+/readyz (§9 A2) (D15)
     │       ├── auth.py              # /auth: login, refresh, logout; local users + pluggable OIDC (D10)
     │       ├── devices.py           # /devices: inventory CRUD + credential references; secrets never returned (D11)
     │       ├── discovery.py         # /discovery: start runs (enqueues Celery job), run status, artifact views
@@ -447,7 +450,7 @@ Declared in `backend/pyproject.toml`; the CI `lint` stage fails on violation (D1
 
 ### 4.5 API routes (D10, §3)
 
-- Versioned prefix: `/api/v1`. Unversioned: `/healthz`, `/readyz` (paths PROPOSED), `/metrics` (D15), FastAPI's own `/docs` swagger UI.
+- Versioned prefix: `/api/v1`, **including health**: `GET /api/v1/health/live` and `GET /api/v1/health/ready` (ratified as-built — supersedes P3's unversioned `/healthz`+`/readyz`; §9 A2). Unversioned: `/metrics` (D15), FastAPI's own `/docs` swagger UI.
 - Resource collections are plural nouns matching router file names: `/api/v1/devices`, `/api/v1/changes`, `/api/v1/packets`, `/api/v1/audit` (read-only), `/api/v1/docs` (generated documents).
 - Path params: `{<singular>_id}` — `/api/v1/devices/{device_id}`.
 - Sub-resources/actions as nested POSTs: `POST /api/v1/discovery/runs`, `POST /api/v1/changes/{change_request_id}/approve`, `POST /api/v1/changes/{change_request_id}/reject` (PROPOSED concrete paths).
@@ -547,7 +550,7 @@ Conservative defaults made in this document that the brief does not decide. Each
 |---|---|---|---|
 | P1 | `LICENSE` file | Present at repo root; license choice open | §1 |
 | P2 | `docs/vendors/` capability-matrix pages | One page per `vendor_id` | §1, §6 checklist |
-| P3 | Health endpoint paths | `/healthz` + `/readyz`, unversioned | §2 `api/health.py`, §4.5 |
+| P3 | Health endpoint paths | **Superseded (§9 A2):** `/api/v1/health/live` + `/api/v1/health/ready`, versioned | §2 `api/v1/health.py`, §4.5 |
 | P4 | Settings env prefix | `NETOPS_`, nested via `__` | §2 `core/config.py`, §4.1 |
 | P5 | UUID primary keys | App-generated UUIDv4 `id` on all tables | §2 `models/base.py`, §4.2 |
 | P6 | `services/documentation.py` | Deterministic doc rendering shared by docs queue + Documentation Agent | §2 |
@@ -568,4 +571,29 @@ Conservative defaults made in this document that the brief does not decide. Each
 
 ---
 
-*End of REPO-STRUCTURE.md — Phase 2 scaffolding (`M0` in `docs/roadmap/MVP.md`) creates exactly the tree in section 2 and wires the import-linter contracts in section 3.3 before any feature code lands.*
+## 9. As-built deviations (M0 scaffold — decision record)
+
+The M0 scaffold deviates from the v0.1 blueprint in the ways recorded below. Entries marked
+**RATIFIED** are now normative and supersede any conflicting text elsewhere in this document
+(sections 2, 4.5, and 8 have been amended in place where load-bearing). Entries marked
+**M0-INTERIM** are accepted as-built for M0 and converge to the blueprint form at the milestone
+noted. Other agents must build against the **as-built** column.
+
+| # | v0.1 blueprint | As built (build against this) | Disposition |
+|---|---|---|---|
+| A1 | `app/core/db.py` | `app/db.py` — top-level module; `main.py` and `api/v1/health.py` import `app.db`; special-cased in the import-linter core contract so `core` stays free of engine/session wiring | **RATIFIED** |
+| A2 | Unversioned `GET /healthz` + `GET /readyz` in `api/health.py` (P3) | `GET /api/v1/health/live` (no deps) + `GET /api/v1/health/ready` (per-dependency postgres/neo4j/redis status, degrades gracefully) in `api/v1/health.py` | **RATIFIED** — the canonical M0 contract chose versioned health paths; P3 superseded |
+| A3 | `app/schemas/normalized/` package (one module per model family) | `app/schemas/normalized.py` single module | **M0-INTERIM** — split into the package form when the model set grows (M1+) |
+| A4 | `app/llm/registry.py` + `app/llm/providers/<provider>.py` | `app/llm/providers.py` single module (registry + providers) | **M0-INTERIM** — split when additional providers land |
+| A5 | `tests/unit/<pkg>` mirror with fixtures at `tests/fixtures/vendors/<vendor_id>/` | `tests/<pkg>` (suite is unit-only at M0, so the `unit/` level is omitted); vendor fixtures at `tests/plugins/fixtures/` | **M0-INTERIM** — the `unit/` level and `tests/fixtures/vendors/` return when `tests/integration/` lands (M1+) |
+| A6 | `deploy/docker/.env.example` | `.env.example` at the repo root (compose reads it via `env_file: ../../.env` and `--env-file .env` from the repo root) | **RATIFIED** |
+| A7 | `LICENSE` at repo root (P1) | Absent — license choice still open via `docs/consultant/QUESTIONS.md` | **OPEN** — add once the license is decided |
+
+Import-linter status: `backend/pyproject.toml` (frozen at M0) declares only a subset of the
+section 3.3 contracts; contracts 1, 2, 5, and 6 — and the extension of the core contract's
+forbidden modules to `app.agents`/`app.llm`/`app.plugins`/`app.schemas` — must be wired when
+pyproject is next unfrozen. This is an M1 entry gate item.
+
+---
+
+*End of REPO-STRUCTURE.md — Phase 2 scaffolding (`M0` in `docs/roadmap/MVP.md`) creates the tree in section 2 as amended by the section 9 as-built record, and wires the import-linter contracts in section 3.3 before any feature code lands (remaining contracts: M1 entry gate, see section 9).*

@@ -38,13 +38,14 @@ services:
     # Healthcheck (GET /api/v1/health/live) is baked into the image.
 
   # Celery worker - same image as `api`, command overridden to consume the
-  # four canonical D8 queues (ADR-0008).
+  # four canonical D8 queues (ADR-0008) plus the default `system` queue
+  # (system.* tasks, e.g. the system.healthcheck broker round-trip probe).
   worker:
     build:
       context: ../..
       dockerfile: deploy/docker/backend.Dockerfile
     image: netops-backend:dev
-    command: celery -A app.workers.celery_app worker -Q discovery,config,packet,docs
+    command: celery -A app.workers.celery_app worker -Q discovery,config,packet,docs,system
     env_file: ../../.env
     depends_on:
       postgres:

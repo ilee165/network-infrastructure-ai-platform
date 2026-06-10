@@ -8,9 +8,9 @@ docs/
 **/.pytest_cache/
 **/.coverage
 **/htmlcov/
-.venv/
-venv/
-node_modules/
+**/.venv/
+**/venv/
+**/node_modules/
 frontend/dist/
 frontend/coverage/
 .env

@@ -8,7 +8,7 @@ M1. Credential-vault envelope encryption (D11) lands in ``core/crypto.py`` (M1).
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 
 import bcrypt
 import jwt
@@ -75,7 +75,7 @@ def decode_access_token(token: str, settings: Settings) -> dict[str, Any]:
         raise AuthError("Token has expired") from exc
     except jwt.InvalidTokenError as exc:
         raise AuthError("Invalid authentication token") from exc
-    return cast(dict[str, Any], claims)
+    return claims
 
 
 def hash_password(password: str) -> str:

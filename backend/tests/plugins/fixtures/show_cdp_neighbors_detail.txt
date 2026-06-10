@@ -1,0 +1,39 @@
+-------------------------
+Device ID: dist-sw01.example.net
+Entry address(es):
+  IP address: 10.10.0.2
+Platform: cisco WS-C3850-24T,  Capabilities: Switch IGMP
+Interface: GigabitEthernet0/1,  Port ID (outgoing port): GigabitEthernet1/0/24
+Holdtime : 132 sec
+
+Version :
+Cisco IOS Software [Denali], Catalyst L3 Switch Software (CAT3K_CAA-UNIVERSALK9-M), Version 16.3.5b, RELEASE SOFTWARE (fc1)
+Technical Support: http://www.cisco.com/techsupport
+Copyright (c) 1986-2017 by Cisco Systems, Inc.
+
+advertisement version: 2
+VTP Management Domain: 'LAB'
+Native VLAN: 1
+Duplex: full
+Management address(es):
+  IP address: 10.10.0.2
+
+-------------------------
+Device ID: edge-rtr01.example.net
+Entry address(es):
+  IP address: 192.0.2.9
+Platform: Cisco CISCO2911/K9,  Capabilities: Router Source-Route-Bridge
+Interface: GigabitEthernet0/0,  Port ID (outgoing port): GigabitEthernet0/1
+Holdtime : 154 sec
+
+Version :
+Cisco IOS Software, C2900 Software (C2900-UNIVERSALK9-M), Version 15.7(3)M2, RELEASE SOFTWARE (fc2)
+Technical Support: http://www.cisco.com/techsupport
+Copyright (c) 1986-2018 by Cisco Systems, Inc.
+
+advertisement version: 2
+Management address(es):
+  IP address: 192.0.2.9
+
+
+Total cdp entries displayed : 2
