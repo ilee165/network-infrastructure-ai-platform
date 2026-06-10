@@ -40,3 +40,15 @@ cd tools/obsidian-mcp
 ```
 
 Tests run against a tmp fixture vault — they never touch the real vault.
+The fixture embeds faithful snapshots of the four real templates (H2 sets
+verified against the vault) rather than copying them at test time.
+
+## Known limitations
+
+- Heading detection is not fenced-code-block aware: a line like
+  `# tcpdump -i eth0` at column 0 inside a ``` code block is treated as a
+  heading by `append_note` section boundaries, section validation, and search
+  ranking. Avoid `#`-prefixed column-0 lines inside code blocks in notes that
+  agents append to.
+- `list_notes` without a folder returns a flat list ordered folder-by-folder,
+  not a nested grouping.

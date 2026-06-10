@@ -37,6 +37,18 @@ class TestSearch:
         with pytest.raises(VaultError, match="Empty query"):
             search(vault, "   ")
 
+    def test_non_utf8_file_does_not_break_search(self, vault: Vault) -> None:
+        (vault.root / "00-Inbox" / "bad-encoding.md").write_bytes(b"caf\xe9 latin-1 bytes")
+        hits = search(vault, "bgp")
+        assert any(h.path == "04-Knowledge/BGP.md" for h in hits)
+
+    def test_h1_token_not_double_counted(self, vault: Vault) -> None:
+        (vault.root / "00-Inbox" / "Zebra.md").write_text(
+            "# zebra\n\nplain body\n", encoding="utf-8"
+        )
+        hits = search(vault, "zebra")
+        assert hits[0].score == 3  # title weight only; H1 line not also counted as heading
+
     def test_title_falls_back_to_filename(self, vault: Vault) -> None:
         (vault.root / "00-Inbox" / "no-heading.md").write_text("plain text", encoding="utf-8")
         hits = search(vault, "plain")

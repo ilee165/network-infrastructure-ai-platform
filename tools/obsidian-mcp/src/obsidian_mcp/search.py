@@ -42,16 +42,23 @@ def search(vault: Vault, query: str, folder: str | None = None, limit: int = 10)
 
     scored: list[tuple[int, float, SearchHit]] = []
     for path in vault.list_md(folder):
-        text = path.read_text(encoding="utf-8")
+        # errors="replace": one non-UTF-8 file must not break vault-wide search
+        text = path.read_text(encoding="utf-8", errors="replace")
         if not all(t in text.lower() for t in tokens):
             continue
         lines = text.splitlines()
         title = path.stem
-        for line in lines:
+        title_idx = -1
+        for i, line in enumerate(lines):
             if line.startswith("# "):
                 title = line[2:].strip()
+                title_idx = i
                 break
-        heading_lines = "\n".join(line for line in lines if heading_text(line) is not None)
+        heading_lines = "\n".join(
+            line
+            for i, line in enumerate(lines)
+            if i != title_idx and heading_text(line) is not None
+        )
         body_lines = "\n".join(line for line in lines if heading_text(line) is None)
         title_l, headings_l, body_l = title.lower(), heading_lines.lower(), body_lines.lower()
         score = sum(

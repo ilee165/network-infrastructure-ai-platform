@@ -42,11 +42,14 @@ def create_server(vault: Vault) -> FastMCP:
 
     @mcp.tool()
     def list_notes(folder: str | None = None) -> list[dict[str, str]]:
-        """List markdown notes (path + title), optionally within one folder."""
+        """List markdown notes (path + title), optionally within one folder.
+
+        Returns a flat list ordered folder-by-folder (no nested grouping).
+        """
         results = []
         for p in vault.list_md(folder):
             title = p.stem
-            for line in p.read_text(encoding="utf-8").splitlines():
+            for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
                 if line.startswith("# "):
                     title = line[2:].strip()
                     break

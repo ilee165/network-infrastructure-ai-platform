@@ -80,6 +80,11 @@ class TestSaveExisting:
         with pytest.raises(VaultError, match="not found"):
             vault.save_existing("04-Knowledge/EIGRP.md", "x")
 
+    def test_rewrite_leaves_no_temp_file(self, vault: Vault) -> None:
+        vault.save_existing("04-Knowledge/OSPF.md", "# OSPF\n\nupdated\n")
+        assert list((vault.root / "04-Knowledge").glob("*.tmp")) == []
+        assert "updated" in vault.read_note("04-Knowledge/OSPF.md").body
+
 
 class TestListMd:
     def test_excludes_dot_dirs_and_assets(self, vault: Vault) -> None:

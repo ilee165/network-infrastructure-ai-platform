@@ -144,7 +144,10 @@ class Vault:
         target = self.resolve(rel_path)
         if not target.is_file():
             raise VaultError(f"Note not found: {rel_path}")
-        target.write_text(text, encoding="utf-8")
+        # Atomic replace: a crash mid-write must not truncate a hub note.
+        tmp = target.parent / (target.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, target)
 
     def list_md(self, folder: str | None = None) -> list[Path]:
         base = self.resolve(folder) if folder else self.root

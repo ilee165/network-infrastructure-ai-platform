@@ -57,3 +57,9 @@ async def test_get_template_lists_required_sections(server) -> None:
 async def test_error_surfaces_message(server) -> None:
     with pytest.raises(Exception, match="Unknown kind"):
         await server.call_tool("create_note", {"kind": "diary", "title": "x", "content": "y"})
+
+
+async def test_list_notes_tolerates_non_utf8(server, vault: Vault) -> None:
+    (vault.root / "00-Inbox" / "bad-encoding.md").write_bytes(b"\xff\xfe junk")
+    result = await server.call_tool("list_notes", {})
+    assert "BGP" in str(result)
