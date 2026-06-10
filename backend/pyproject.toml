@@ -1,0 +1,146 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "netops-backend"
+version = "0.1.0"
+description = "AI Network Operations Platform - modular-monolith backend (FastAPI api + Celery worker)"
+requires-python = ">=3.11"
+dependencies = [
+    # Web / API (D2)
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2",
+    "pydantic-settings",
+    # Persistence (D4)
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg",
+    "alembic",
+    "pgvector",
+    # Async jobs + cache (D8)
+    "celery[redis]",
+    "redis",
+    # Observability (D15)
+    "structlog",
+    # HTTP client (D7)
+    "httpx",
+    # Graph store (D5)
+    "neo4j",
+    # Security (D10, D11)
+    "cryptography",
+    "pyjwt",
+    "passlib[bcrypt]",
+    # Agent orchestration + multi-LLM (D3, D9)
+    "langgraph",
+    "langchain-core",
+    "langchain-anthropic",
+    "langchain-openai",
+    "langchain-ollama",
+    # CLI output parsing (D7)
+    "textfsm",
+    "ntc-templates",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "import-linter",
+]
+
+# Vendor plugin discovery group (D6 / ADR-0006). M1: first plugins (cisco_ios,
+# cisco_iosxe, eos) register here as
+#   <vendor_id> = "app.plugins.vendors.<vendor_id>.plugin:<Vendor>Plugin"
+[project.entry-points."netops.plugins"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# ---------------------------------------------------------------------------
+# Lint / format (D16)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+# ---------------------------------------------------------------------------
+# Type checking (D16). Strict flags on app.core / app.plugins / app.agents;
+# the rest of the tree is checked at a moderate baseline.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+packages = ["app"]
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+# Per-module strict mode (mypy does not allow `strict = true` in overrides,
+# so the individual strict flags are enumerated).
+module = ["app.core.*", "app.plugins.*", "app.agents.*"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+disallow_untyped_calls = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+warn_return_any = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+# Vendor / third-party libraries without (complete) type stubs.
+module = [
+    "asyncpg.*",
+    "celery.*",
+    "kombu.*",
+    "langchain_anthropic.*",
+    "langchain_core.*",
+    "langchain_ollama.*",
+    "langchain_openai.*",
+    "langgraph.*",
+    "neo4j.*",
+    "ntc_templates.*",
+    "passlib.*",
+    "pgvector.*",
+    "textfsm.*",
+]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Tests (D16)
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+    "integration: requires compose-backed Postgres/Neo4j/Redis (excluded from the unit run)",
+    "lab: requires real network devices; never runs in CI",
+]
+
+# ---------------------------------------------------------------------------
+# Module boundaries (REPO-STRUCTURE §3.3). Only the contracts whose member
+# packages exist at M0 are declared; the full six-contract set lands as the
+# agents/engines/plugins/services packages are created (M1+).
+# ---------------------------------------------------------------------------
+[tool.importlinter]
+root_package = "app"
+
+[[tool.importlinter.contracts]]
+name = "app.core imports nothing app-internal (REPO-STRUCTURE §3.2 row 1)"
+type = "forbidden"
+source_modules = ["app.core"]
+forbidden_modules = ["app.api", "app.db", "app.main", "app.models", "app.workers"]
