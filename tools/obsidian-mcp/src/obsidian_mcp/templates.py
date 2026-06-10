@@ -42,9 +42,7 @@ def required_sections(vault: Vault, kind: str) -> list[str]:
 
 
 def missing_sections(content: str, required: list[str]) -> list[str]:
-    have = {
-        t.lower() for line in content.splitlines() if (t := heading_text(line)) is not None
-    }
+    have = {t.lower() for line in content.splitlines() if (t := heading_text(line)) is not None}
     return [s for s in required if s.lower() not in have]
 
 

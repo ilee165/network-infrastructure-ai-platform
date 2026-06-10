@@ -35,8 +35,16 @@ class TestRequiredSections:
     def test_incident_sections_are_h2_only(self, vault: Vault) -> None:
         sections = required_sections(vault, "incident")
         assert sections == [
-            "Summary", "Start Time", "End Time", "Impact", "Root Cause", "Timeline",
-            "Systems Impacted", "Resolution", "Lessons Learned", "Prevention Actions",
+            "Summary",
+            "Start Time",
+            "End Time",
+            "Impact",
+            "Root Cause",
+            "Timeline",
+            "Systems Impacted",
+            "Resolution",
+            "Lessons Learned",
+            "Prevention Actions",
             "Related",
         ]
 
@@ -74,14 +82,10 @@ class TestSanitize:
 
 class TestNoteRelPath:
     def test_flat_kind(self) -> None:
-        assert note_rel_path("runbook", "BGP Neighbor Down") == (
-            "06-Runbooks/BGP Neighbor Down.md"
-        )
+        assert note_rel_path("runbook", "BGP Neighbor Down") == ("06-Runbooks/BGP Neighbor Down.md")
 
     def test_flat_kind_strips_slashes(self) -> None:
-        assert note_rel_path("incident", "2026/06/10 outage") == (
-            "07-Incidents/20260610 outage.md"
-        )
+        assert note_rel_path("incident", "2026/06/10 outage") == ("07-Incidents/20260610 outage.md")
 
     def test_project_kind_allows_subfolders(self) -> None:
         assert note_rel_path("project", "AI Platform/Milestone M1") == (
@@ -97,8 +101,16 @@ class TestCreateNote:
     VALID_INCIDENT = "\n".join(
         f"## {s}\n\nN/A\n"
         for s in [
-            "Summary", "Start Time", "End Time", "Impact", "Root Cause", "Timeline",
-            "Systems Impacted", "Resolution", "Lessons Learned", "Prevention Actions",
+            "Summary",
+            "Start Time",
+            "End Time",
+            "Impact",
+            "Root Cause",
+            "Timeline",
+            "Systems Impacted",
+            "Resolution",
+            "Lessons Learned",
+            "Prevention Actions",
             "Related",
         ]
     )
@@ -138,11 +150,23 @@ class TestCreateNote:
         content = "\n".join(
             f"## {s}\n\nN/A\n"
             for s in [
-                "Executive Summary", "Business Objective", "Current State", "Desired State",
-                "Scope", "Requirements", "Assumptions", "Constraints", "Dependencies",
-                "Architecture Overview", "Vendor Technologies", "Risks",
-                "Implementation Plan", "Validation Plan", "Rollback Plan",
-                "Lessons Learned", "Related Notes",
+                "Executive Summary",
+                "Business Objective",
+                "Current State",
+                "Desired State",
+                "Scope",
+                "Requirements",
+                "Assumptions",
+                "Constraints",
+                "Dependencies",
+                "Architecture Overview",
+                "Vendor Technologies",
+                "Risks",
+                "Implementation Plan",
+                "Validation Plan",
+                "Rollback Plan",
+                "Lessons Learned",
+                "Related Notes",
             ]
         )
         rel = create_note(vault, "project", "AI Platform/Overview", content)

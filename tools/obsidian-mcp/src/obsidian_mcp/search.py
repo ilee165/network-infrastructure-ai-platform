@@ -35,9 +35,7 @@ def _extract_snippets(lines: list[str], tokens: list[str]) -> list[str]:
     return snippets
 
 
-def search(
-    vault: Vault, query: str, folder: str | None = None, limit: int = 10
-) -> list[SearchHit]:
+def search(vault: Vault, query: str, folder: str | None = None, limit: int = 10) -> list[SearchHit]:
     tokens = [t for t in query.lower().split() if t]
     if not tokens:
         raise VaultError("Empty query")

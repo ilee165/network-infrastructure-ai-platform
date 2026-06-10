@@ -7,9 +7,19 @@ import pytest
 from obsidian_mcp.vault import Vault
 
 FOLDERS = [
-    "00-Inbox", "01-Dashboard", "02-Projects", "03-Architecture", "04-Knowledge",
-    "05-Vendors", "06-Runbooks", "07-Incidents", "08-Labs", "09-Reference",
-    "10-Templates", "Assets", ".obsidian",
+    "00-Inbox",
+    "01-Dashboard",
+    "02-Projects",
+    "03-Architecture",
+    "04-Knowledge",
+    "05-Vendors",
+    "06-Runbooks",
+    "07-Incidents",
+    "08-Labs",
+    "09-Reference",
+    "10-Templates",
+    "Assets",
+    ".obsidian",
 ]
 
 RUNBOOK_TEMPLATE = """# {{Runbook Name}}
