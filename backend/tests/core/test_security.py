@@ -36,9 +36,7 @@ class TestJwt:
         assert claims["sub"] == "alice"
 
     def test_expired_token_raises_auth_error(self, settings: Settings) -> None:
-        token = create_access_token(
-            "alice", settings, expires_delta=timedelta(seconds=-10)
-        )
+        token = create_access_token("alice", settings, expires_delta=timedelta(seconds=-10))
         with pytest.raises(AuthError, match="expired"):
             decode_access_token(token, settings)
 

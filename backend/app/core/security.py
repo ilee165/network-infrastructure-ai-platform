@@ -10,8 +10,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+import bcrypt
 import jwt
-from passlib.context import CryptContext
 
 from app.core.config import Settings
 from app.core.errors import AuthError
@@ -19,7 +19,8 @@ from app.core.errors import AuthError
 #: Canonical JWT signing algorithm (D10: short-lived HS256 access tokens).
 ALGORITHM = "HS256"
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+#: bcrypt hard input limit; modern bcrypt (>=4.1) rejects longer secrets.
+_BCRYPT_MAX_PASSWORD_BYTES = 72
 
 
 def create_access_token(
@@ -78,13 +79,29 @@ def decode_access_token(token: str, settings: Settings) -> dict[str, Any]:
 
 
 def hash_password(password: str) -> str:
-    """Hash *password* with bcrypt (salted, work factor from passlib defaults).
+    """Hash *password* with bcrypt (salted, library-default work factor).
 
-    Note: bcrypt only considers the first 72 bytes of input.
+    Raises:
+        ValueError: If the UTF-8 encoding of *password* exceeds bcrypt's
+            72-byte input limit — enforce a shorter maximum at the API layer.
     """
-    return cast(str, _pwd_context.hash(password))
+    secret = password.encode("utf-8")
+    if len(secret) > _BCRYPT_MAX_PASSWORD_BYTES:
+        msg = f"Password exceeds bcrypt's {_BCRYPT_MAX_PASSWORD_BYTES}-byte limit"
+        raise ValueError(msg)
+    return bcrypt.hashpw(secret, bcrypt.gensalt()).decode("ascii")
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    """Constant-time verification of *password* against a stored bcrypt hash."""
-    return bool(_pwd_context.verify(password, hashed))
+    """Constant-time verification of *password* against a stored bcrypt hash.
+
+    Returns ``False`` (never raises) for over-long passwords or a malformed
+    stored hash, so callers can treat any mismatch uniformly.
+    """
+    secret = password.encode("utf-8")
+    if len(secret) > _BCRYPT_MAX_PASSWORD_BYTES:
+        return False
+    try:
+        return bcrypt.checkpw(secret, hashed.encode("ascii"))
+    except ValueError:
+        return False

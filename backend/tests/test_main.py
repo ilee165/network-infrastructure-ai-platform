@@ -21,9 +21,7 @@ async def test_response_carries_generated_request_id(client: httpx.AsyncClient) 
 
 
 async def test_inbound_request_id_is_preserved(client: httpx.AsyncClient) -> None:
-    response = await client.get(
-        "/api/v1/health/live", headers={"X-Request-ID": "trace-me-12345"}
-    )
+    response = await client.get("/api/v1/health/live", headers={"X-Request-ID": "trace-me-12345"})
     assert response.headers["X-Request-ID"] == "trace-me-12345"
 
 

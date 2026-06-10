@@ -20,8 +20,13 @@ from app import db
 from app.api.v1 import api_router
 from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers
-from app.core.logging import bind_request_id, configure_logging, get_logger, new_request_id
-from app.core.logging import reset_request_id
+from app.core.logging import (
+    bind_request_id,
+    configure_logging,
+    get_logger,
+    new_request_id,
+    reset_request_id,
+)
 
 API_V1_PREFIX = "/api/v1"
 

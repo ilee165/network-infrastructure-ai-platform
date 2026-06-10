@@ -30,7 +30,7 @@ dependencies = [
     # Security (D10, D11)
     "cryptography",
     "pyjwt",
-    "passlib[bcrypt]",
+    "bcrypt>=4.1",
     # Agent orchestration + multi-LLM (D3, D9)
     "langgraph",
     "langchain-core",
@@ -113,7 +113,6 @@ module = [
     "langgraph.*",
     "neo4j.*",
     "ntc_templates.*",
-    "passlib.*",
     "pgvector.*",
     "textfsm.*",
 ]
