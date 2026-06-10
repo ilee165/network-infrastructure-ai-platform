@@ -95,3 +95,56 @@ class TestListMd:
     def test_unknown_folder_raises(self, vault: Vault) -> None:
         with pytest.raises(VaultError, match="not a folder"):
             vault.list_md("99-Nope")
+
+
+class TestAppendToSection:
+    NOTE = """---
+created: 2026-06-10
+---
+
+# Log
+
+## Iterations
+
+- iteration 1
+
+## Decisions
+
+- D1
+"""
+
+    def test_appends_to_middle_section_before_next_heading(self) -> None:
+        from obsidian_mcp.vault import append_to_section
+
+        out = append_to_section(self.NOTE, "Iterations", "- iteration 2")
+        body = out.split("## Decisions")[0]
+        assert "- iteration 1" in body
+        assert "- iteration 2" in body
+        assert out.index("- iteration 2") > out.index("- iteration 1")
+        assert out.index("- iteration 2") < out.index("## Decisions")
+
+    def test_appends_to_last_section_at_eof(self) -> None:
+        from obsidian_mcp.vault import append_to_section
+
+        out = append_to_section(self.NOTE, "Decisions", "- D2")
+        assert out.rstrip().endswith("- D2")
+
+    def test_match_is_case_insensitive(self) -> None:
+        from obsidian_mcp.vault import append_to_section
+
+        out = append_to_section(self.NOTE, "iterations", "- x")
+        assert "- x" in out
+
+    def test_frontmatter_is_preserved_and_never_matched(self) -> None:
+        from obsidian_mcp.vault import append_to_section
+
+        out = append_to_section(self.NOTE, "Iterations", "- y")
+        assert out.startswith("---\ncreated: 2026-06-10\n---\n")
+
+    def test_unknown_section_lists_headings(self) -> None:
+        from obsidian_mcp.vault import VaultError, append_to_section
+
+        with pytest.raises(VaultError) as exc:
+            append_to_section(self.NOTE, "Nope", "- z")
+        msg = str(exc.value)
+        assert "Log" in msg and "Iterations" in msg and "Decisions" in msg
