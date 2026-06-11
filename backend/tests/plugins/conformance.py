@@ -33,7 +33,7 @@ Three case families are generated:
   and carry the plugin's ``vendor_id`` as ``source_vendor``.
 
 Capabilities whose typed interface has not landed in ``plugins/base.py`` yet
-(e.g. ``DISCOVERY_SSH`` before its milestone) get the implementation case
+(e.g. ``DISCOVERY_API`` before its milestone) get the implementation case
 only — the interface/fixture contract attaches automatically once the
 interface exists and is mapped in ``_INTERFACE_SPECS``.
 
@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 
@@ -57,12 +57,15 @@ from app.plugins.base import (
     BgpCapability,
     Capability,
     ConfigBackupCapability,
+    DiscoverySnmpCapability,
+    DiscoverySshCapability,
     InterfacesCapability,
     NeighborsCapability,
     PluginCapability,
     RoutesCapability,
     VendorPlugin,
 )
+from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     NeighborProtocol,
     NormalizedBgpPeer,
@@ -76,6 +79,7 @@ __all__ = [
     "CapabilityFactory",
     "ConformanceCase",
     "FixtureReplayTransport",
+    "FixtureSnmpTransport",
     "make_conformance_cases",
 ]
 
@@ -91,20 +95,30 @@ class _InterfaceSpec:
 
     ``item_model`` is the normalized record type the data method must return
     a non-empty list of; ``None`` means the method returns a non-empty ``str``
-    (``CONFIG_BACKUP``). ``neighbor_protocol`` pins the ``protocol`` field for
-    the two neighbor capabilities served by the shared interface.
+    (``CONFIG_BACKUP``) — unless ``facts_model`` is set, in which case the
+    method returns a single :class:`DeviceFacts` whose ``vendor_id`` must
+    match the plugin (``DISCOVERY_SSH``/``DISCOVERY_SNMP``).
+    ``neighbor_protocol`` pins the ``protocol`` field for the two neighbor
+    capabilities served by the shared interface.
     """
 
     interface: type[PluginCapability]
     method: str
     item_model: type[NormalizedRecord] | None
     neighbor_protocol: NeighborProtocol | None = None
+    facts_model: type[DeviceFacts] | None = None
 
 
 #: Capability -> typed-interface contract from app.plugins.base. Extend this
 #: mapping when a new capability interface lands (OSPF, ACL, …); existing
 #: plugin conformance tests pick the new contract up automatically.
 _INTERFACE_SPECS: dict[Capability, _InterfaceSpec] = {
+    Capability.DISCOVERY_SSH: _InterfaceSpec(
+        DiscoverySshCapability, "get_device_facts", None, facts_model=DeviceFacts
+    ),
+    Capability.DISCOVERY_SNMP: _InterfaceSpec(
+        DiscoverySnmpCapability, "get_device_facts", None, facts_model=DeviceFacts
+    ),
     Capability.INTERFACES: _InterfaceSpec(
         InterfacesCapability, "get_interfaces", NormalizedInterface
     ),
@@ -140,6 +154,29 @@ class FixtureReplayTransport:
                 f"(bundled fixtures cover: {known})"
             )
         return self._responses[command]
+
+
+class FixtureSnmpTransport:
+    """:class:`SnmpReadTransport` replaying recorded SNMP values.
+
+    No device, no network (D16): OIDs outside the bundled value map fail
+    immediately, listing what the plugin's fixtures actually cover.
+    """
+
+    def __init__(self, values: Mapping[str, str]) -> None:
+        self._values = dict(values)
+        self.requests: list[list[str]] = []
+
+    def get(self, oids: Sequence[str]) -> dict[str, str]:
+        self.requests.append(list(oids))
+        missing = [oid for oid in oids if oid not in self._values]
+        if missing:
+            known = ", ".join(repr(known) for known in sorted(self._values)) or "none"
+            raise AssertionError(
+                f"conformance: plugin requested unexpected OID(s) {missing!r} "
+                f"(bundled fixtures cover: {known})"
+            )
+        return {oid: self._values[oid] for oid in oids}
 
 
 @dataclass(frozen=True)
@@ -292,6 +329,10 @@ def _check_fixture_outputs(
     instance = capability_factory(impl)
     result = getattr(instance, spec.method)()
 
+    if spec.facts_model is not None:
+        _check_facts(ctx, result, spec.facts_model, plugin.vendor_id)
+        return
+
     if spec.item_model is None:
         assert isinstance(result, str), f"{ctx}: must return str, got {type(result).__name__}"
         assert result.strip(), f"{ctx}: returned empty output for the bundled fixture"
@@ -301,6 +342,29 @@ def _check_fixture_outputs(
     assert result, f"{ctx}: returned no records for the bundled fixture — expected at least one"
     for index, item in enumerate(result):
         _check_record(ctx, index, item, spec, plugin.vendor_id)
+
+
+def _check_facts(
+    ctx: str,
+    result: object,
+    facts_model: type[DeviceFacts],
+    vendor_id: str,
+) -> None:
+    assert isinstance(result, facts_model), (
+        f"{ctx}: must return {facts_model.__name__}, got {type(result).__name__}"
+    )
+    try:
+        facts_model.model_validate(result.model_dump(mode="python"))
+    except ValidationError as exc:
+        details = "; ".join(
+            f"field {'.'.join(str(loc) for loc in error['loc'])!r}: {error['msg']}"
+            for error in exc.errors()
+        )
+        raise AssertionError(f"{ctx} fails {facts_model.__name__} validation: {details}") from exc
+    assert result.vendor_id == vendor_id, (
+        f"{ctx}: field 'vendor_id' is {result.vendor_id!r}, "
+        f"expected the plugin vendor_id {vendor_id!r}"
+    )
 
 
 def _check_record(

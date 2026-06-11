@@ -19,12 +19,15 @@ from app.plugins.base import (
     Capability,
     CommandTransport,
     ConfigBackupCapability,
+    DiscoverySnmpCapability,
+    DiscoverySshCapability,
     InterfacesCapability,
     NeighborsCapability,
     PluginCapability,
     RoutesCapability,
     VendorPlugin,
 )
+from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     InterfaceAdminStatus,
     InterfaceOperStatus,
@@ -141,18 +144,18 @@ class TestCaseGeneration:
             case.run()
 
     def test_capability_without_typed_interface_gets_no_fixture_case(self) -> None:
-        # DISCOVERY_SSH has no typed interface in plugins/base.py yet (it lands
+        # DISCOVERY_API has no typed interface in plugins/base.py yet (it lands
         # with its milestone); the suite checks the implementation class only.
         class _Discovery(PluginCapability):
-            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DISCOVERY_SSH})
+            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DISCOVERY_API})
 
         plugin = _plugin(
-            frozenset({Capability.DISCOVERY_SSH}), {Capability.DISCOVERY_SSH: _Discovery}
+            frozenset({Capability.DISCOVERY_API}), {Capability.DISCOVERY_API: _Discovery}
         )
         cases = _cases(plugin)
         ids = [case.id for case in cases]
-        assert "implementation:discovery_ssh" in ids
-        assert "fixtures:discovery_ssh" not in ids
+        assert "implementation:discovery_api" in ids
+        assert "fixtures:discovery_api" not in ids
         for case in cases:
             case.run()
 
@@ -289,6 +292,40 @@ class TestFixtureChecks:
         )
         case = _case(_cases(plugin), "fixtures:neighbors_lldp")
         with pytest.raises(AssertionError, match="protocol"):
+            case.run()
+
+    def test_device_facts_pass_when_vendor_matches(self) -> None:
+        class _GoodDiscovery(DiscoverySshCapability):
+            def get_device_facts(self) -> DeviceFacts:
+                return DeviceFacts(hostname="sw01", vendor_id=VENDOR_ID)
+
+        plugin = _plugin(
+            frozenset({Capability.DISCOVERY_SSH}), {Capability.DISCOVERY_SSH: _GoodDiscovery}
+        )
+        _case(_cases(plugin), "fixtures:discovery_ssh").run()
+
+    def test_device_facts_vendor_mismatch_is_reported(self) -> None:
+        class _ForeignDiscovery(DiscoverySnmpCapability):
+            def get_device_facts(self) -> DeviceFacts:
+                return DeviceFacts(hostname="sw01", vendor_id="other_vendor")
+
+        plugin = _plugin(
+            frozenset({Capability.DISCOVERY_SNMP}), {Capability.DISCOVERY_SNMP: _ForeignDiscovery}
+        )
+        case = _case(_cases(plugin), "fixtures:discovery_snmp")
+        with pytest.raises(AssertionError, match="vendor_id"):
+            case.run()
+
+    def test_device_facts_wrong_return_type_is_reported(self) -> None:
+        class _WrongFacts(DiscoverySshCapability):
+            def get_device_facts(self) -> DeviceFacts:
+                return {"hostname": "sw01"}  # type: ignore[return-value]
+
+        plugin = _plugin(
+            frozenset({Capability.DISCOVERY_SSH}), {Capability.DISCOVERY_SSH: _WrongFacts}
+        )
+        case = _case(_cases(plugin), "fixtures:discovery_ssh")
+        with pytest.raises(AssertionError, match="DeviceFacts"):
             case.run()
 
     def test_blank_running_config_is_reported(self) -> None:

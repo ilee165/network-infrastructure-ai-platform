@@ -79,6 +79,8 @@ class TestPluginDeclaration:
         assert plugin.display_name == "Cisco IOS"
         assert plugin.capabilities == frozenset(
             {
+                Capability.DISCOVERY_SSH,
+                Capability.DISCOVERY_SNMP,
                 Capability.INTERFACES,
                 Capability.ROUTES,
                 Capability.NEIGHBORS_LLDP,

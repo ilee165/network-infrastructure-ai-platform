@@ -24,17 +24,31 @@ from app.plugins.base import (
     Capability,
     CommandTransport,
     ConfigBackupCapability,
+    DiscoverySnmpCapability,
+    DiscoverySshCapability,
     InterfacesCapability,
     NeighborsCapability,
     PluginCapability,
     RoutesCapability,
+    SnmpReadTransport,
     VendorPlugin,
 )
 from app.plugins.vendors.cisco_ios import parsers
+from app.plugins.vendors.cisco_ios.parsers import (
+    SNMP_OID_SYSDESCR,
+    SNMP_OID_SYSNAME,
+    SNMP_OID_SYSOBJECTID,
+)
+from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import NormalizedInterface, NormalizedNeighbor, NormalizedRoute
 
 __all__ = [
+    "SNMP_OID_SYSDESCR",
+    "SNMP_OID_SYSNAME",
+    "SNMP_OID_SYSOBJECTID",
     "CiscoIosConfigBackup",
+    "CiscoIosDiscoverySnmp",
+    "CiscoIosDiscoverySsh",
     "CiscoIosInterfaces",
     "CiscoIosNeighbors",
     "CiscoIosPlugin",
@@ -44,11 +58,15 @@ __all__ = [
 VENDOR_ID = "cisco_ios"
 
 # Command text — must match the ntc-templates index entries for cisco_ios.
+SHOW_VERSION = "show version"
 SHOW_INTERFACES = "show interfaces"
 SHOW_IP_ROUTE = "show ip route"
 SHOW_CDP_NEIGHBORS_DETAIL = "show cdp neighbors detail"
 SHOW_LLDP_NEIGHBORS_DETAIL = "show lldp neighbors detail"
 SHOW_RUNNING_CONFIG = "show running-config"
+
+#: System-MIB OIDs collected by SNMP discovery, in request order.
+_SNMP_DISCOVERY_OIDS = (SNMP_OID_SYSDESCR, SNMP_OID_SYSOBJECTID, SNMP_OID_SYSNAME)
 
 
 class _CiscoIosCommandCapability(PluginCapability):
@@ -72,6 +90,39 @@ class _CiscoIosCommandCapability(PluginCapability):
     def _now() -> datetime:
         """Collection instant stamped onto normalized records."""
         return datetime.now(UTC)
+
+
+class CiscoIosDiscoverySsh(_CiscoIosCommandCapability, DiscoverySshCapability):
+    """``DISCOVERY_SSH``: ``show version`` → :class:`DeviceFacts`."""
+
+    def get_device_facts(self) -> DeviceFacts:
+        """Collect and parse the device identity over the CLI transport."""
+        output = self._run(SHOW_VERSION)
+        return parsers.parse_device_facts(output)
+
+
+class CiscoIosDiscoverySnmp(DiscoverySnmpCapability):
+    """``DISCOVERY_SNMP``: system-MIB GET → :class:`DeviceFacts` (best-effort).
+
+    Takes an :class:`~app.plugins.base.SnmpReadTransport` (the M1-08
+    ``SnmpClient`` in production, fakes in tests). The returned values are
+    recorded verbatim as a :class:`~app.plugins.base.RawOutput` — one line
+    per OID — before mapping, mirroring the CLI capabilities' audit trail.
+    """
+
+    def __init__(self, snmp: SnmpReadTransport, device_id: UUID) -> None:
+        super().__init__()
+        self._snmp = snmp
+        self._device_id = device_id
+
+    def get_device_facts(self) -> DeviceFacts:
+        """Query sysDescr/sysObjectID/sysName and map them to device facts."""
+        values = self._snmp.get(list(_SNMP_DISCOVERY_OIDS))
+        self._record_raw(
+            f"SNMP GET {' '.join(_SNMP_DISCOVERY_OIDS)}",
+            "\n".join(f"{oid} = {values.get(oid, '')}" for oid in _SNMP_DISCOVERY_OIDS),
+        )
+        return parsers.parse_snmp_device_facts(values)
 
 
 class CiscoIosInterfaces(_CiscoIosCommandCapability, InterfacesCapability):
@@ -127,15 +178,17 @@ class CiscoIosConfigBackup(_CiscoIosCommandCapability, ConfigBackupCapability):
 class CiscoIosPlugin(VendorPlugin):
     """Cisco IOS (``vendor_id="cisco_ios"``) — M0/M1 reference plugin.
 
-    Declares only what is implemented (REPO-STRUCTURE §6 step 4): interface
-    inventory, route collection, LLDP/CDP neighbors, and config backup.
-    DISCOVERY_SSH/DISCOVERY_SNMP land in M1 with the transport layer.
+    Declares only what is implemented (REPO-STRUCTURE §6 step 4): the full
+    M1 capability set — SSH/SNMP discovery, interface inventory, route
+    collection, LLDP/CDP neighbors — plus config backup.
     """
 
     vendor_id: ClassVar[str] = VENDOR_ID
     display_name: ClassVar[str] = "Cisco IOS"
     capabilities: ClassVar[frozenset[Capability]] = frozenset(
         {
+            Capability.DISCOVERY_SSH,
+            Capability.DISCOVERY_SNMP,
             Capability.INTERFACES,
             Capability.ROUTES,
             Capability.NEIGHBORS_LLDP,
@@ -146,6 +199,8 @@ class CiscoIosPlugin(VendorPlugin):
 
     def _capability_classes(self) -> Mapping[Capability, type[PluginCapability]]:
         return {
+            Capability.DISCOVERY_SSH: CiscoIosDiscoverySsh,
+            Capability.DISCOVERY_SNMP: CiscoIosDiscoverySnmp,
             Capability.INTERFACES: CiscoIosInterfaces,
             Capability.ROUTES: CiscoIosRoutes,
             Capability.NEIGHBORS_LLDP: CiscoIosNeighbors,

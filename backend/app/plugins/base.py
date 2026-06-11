@@ -17,7 +17,7 @@ Defined here, exactly per brief §4 / ADR-0006:
   (``plugins/transport/ssh.py``, ADR-0007).
 
 Capability interfaces not yet listed here (OSPF, ACL, FIREWALL_POLICY,
-CONFIG_RESTORE/DEPLOY, DDI_*, PACKET_CAPTURE, HA_STATUS, DISCOVERY_*) are
+CONFIG_RESTORE/DEPLOY, DDI_*, PACKET_CAPTURE, HA_STATUS, DISCOVERY_API) are
 added with the milestone that ships their first implementation (M1–M5);
 adding one requires no change to existing plugins.
 
@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import ClassVar, Protocol, runtime_checkable
@@ -38,6 +38,7 @@ from typing import ClassVar, Protocol, runtime_checkable
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from app.core.errors import PluginError
+from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     NormalizedBgpPeer,
     NormalizedInterface,
@@ -51,11 +52,14 @@ __all__ = [
     "CommandTransport",
     "ConfigBackupCapability",
     "ConnectionParams",
+    "DiscoverySnmpCapability",
+    "DiscoverySshCapability",
     "InterfacesCapability",
     "NeighborsCapability",
     "PluginCapability",
     "RawOutput",
     "RoutesCapability",
+    "SnmpReadTransport",
     "TransportKind",
     "VendorPlugin",
 ]
@@ -154,6 +158,20 @@ class CommandTransport(Protocol):
         ...
 
 
+@runtime_checkable
+class SnmpReadTransport(Protocol):
+    """A read-only SNMP session: GET over a set of OIDs.
+
+    Satisfied by :class:`app.plugins.transport.snmp.SnmpClient` (M1-08);
+    tests use in-memory fakes. Values are pretty-printed strings keyed by
+    dotted-decimal OID — no normalization at the transport layer.
+    """
+
+    def get(self, oids: Sequence[str]) -> dict[str, str]:
+        """SNMP GET for *oids*; returns ``{dotted_oid: pretty_value}``."""
+        ...
+
+
 class PluginCapability(ABC):
     """Base class for all capability implementations.
 
@@ -178,6 +196,36 @@ class PluginCapability(ABC):
         """Record *output* verbatim for audit persistence; returns it unchanged."""
         self._raw_outputs.append(RawOutput(command=command, output=output))
         return output
+
+
+class DiscoverySshCapability(PluginCapability):
+    """``Capability.DISCOVERY_SSH`` — device identity facts over CLI (M1).
+
+    Implementations collect the vendor's version/identity command through a
+    :class:`CommandTransport` and return :class:`DeviceFacts`.
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DISCOVERY_SSH})
+
+    @abstractmethod
+    def get_device_facts(self) -> DeviceFacts:
+        """Return the device identity facts observed over SSH/CLI."""
+
+
+class DiscoverySnmpCapability(PluginCapability):
+    """``Capability.DISCOVERY_SNMP`` — device identity facts via SNMP (M1).
+
+    Implementations query the system MIB (sysName/sysDescr/sysObjectID)
+    through an :class:`SnmpReadTransport` and map the values to
+    :class:`DeviceFacts` — best-effort: only ``hostname``/``vendor_id`` are
+    guaranteed.
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DISCOVERY_SNMP})
+
+    @abstractmethod
+    def get_device_facts(self) -> DeviceFacts:
+        """Return the device identity facts observed over SNMP."""
 
 
 class InterfacesCapability(PluginCapability):

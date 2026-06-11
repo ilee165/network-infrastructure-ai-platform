@@ -11,6 +11,7 @@ raise :class:`~app.core.errors.PluginError`.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_interface, ip_network
 from typing import cast
@@ -20,6 +21,7 @@ from ntc_templates.parse import ParsingException, parse_output
 from pydantic import ValidationError
 
 from app.core.errors import PluginError
+from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     InterfaceAdminStatus,
     InterfaceDuplex,
@@ -33,14 +35,28 @@ from app.schemas.normalized import (
 
 __all__ = [
     "PLATFORM",
+    "SNMP_OID_SYSDESCR",
+    "SNMP_OID_SYSNAME",
+    "SNMP_OID_SYSOBJECTID",
     "parse_cdp_neighbors",
+    "parse_device_facts",
     "parse_interfaces",
     "parse_lldp_neighbors",
     "parse_routes",
+    "parse_snmp_device_facts",
 ]
 
 PLATFORM = "cisco_ios"
 """ntc-templates platform key (must match the template index)."""
+
+# System-MIB OIDs queried by SNMP discovery (RFC 1213 / SNMPv2-MIB).
+SNMP_OID_SYSDESCR = "1.3.6.1.2.1.1.1.0"
+SNMP_OID_SYSOBJECTID = "1.3.6.1.2.1.1.2.0"
+SNMP_OID_SYSNAME = "1.3.6.1.2.1.1.5.0"
+
+#: ``sysDescr`` patterns for best-effort fact extraction (SNMP discovery).
+_SYSDESCR_VERSION_RE = re.compile(r"Version\s+([^,\s]+)", re.IGNORECASE)
+_SYSDESCR_MODEL_RE = re.compile(r"Cisco IOS Software,\s+(\S+)\s+Software")
 
 _SPEED_RE = re.compile(r"(\d+)\s*([GM])b", re.IGNORECASE)
 _BANDWIDTH_KBIT_RE = re.compile(r"(\d+)\s*Kbit", re.IGNORECASE)
@@ -136,6 +152,64 @@ def _duplex(value: str) -> InterfaceDuplex | None:
 def _capability_tokens(value: str) -> tuple[str, ...]:
     """Split CDP (``Router Switch IGMP``) / LLDP (``B,R``) capability strings."""
     return tuple(token for token in re.split(r"[,\s]+", value.strip()) if token)
+
+
+def _first_str(value: object) -> str | None:
+    """First non-blank string of a TextFSM field that may be scalar or list."""
+    if isinstance(value, list):
+        value = next((item for item in value if str(item).strip()), "")
+    text = str(value).strip()
+    return text or None
+
+
+def parse_device_facts(raw_output: str) -> DeviceFacts:
+    """Parse ``show version`` output into :class:`DeviceFacts`.
+
+    ``hardware``/``serial`` are list-valued TextFSM fields (one entry per
+    stack member / chassis); the facts carry the first entry.
+    """
+    rows = _parse_with_template("show version", raw_output)
+    if not rows:
+        raise PluginError(
+            "cisco_ios: 'show version' output did not match the ntc-templates template "
+            "(no rows parsed)"
+        )
+    row = cast("dict[str, object]", rows[0])
+    try:
+        return DeviceFacts(
+            hostname=_first_str(row.get("hostname")) or "",
+            vendor_id=PLATFORM,
+            model=_first_str(row.get("hardware")),
+            os_version=_first_str(row.get("version")),
+            serial=_first_str(row.get("serial")),
+        )
+    except ValidationError as exc:
+        raise PluginError(f"cisco_ios: invalid 'show version' row: {exc}") from exc
+
+
+def parse_snmp_device_facts(values: Mapping[str, str]) -> DeviceFacts:
+    """Map system-MIB GET *values* (``{dotted_oid: pretty_value}``) to facts.
+
+    ``sysName`` is required (it becomes ``hostname``); ``os_version`` and
+    ``model`` are best-effort extractions from ``sysDescr``; ``serial`` is
+    not exposed by the system MIB and stays ``None``.
+    """
+    hostname = values.get(SNMP_OID_SYSNAME, "").strip()
+    if not hostname:
+        raise PluginError(
+            f"cisco_ios: SNMP discovery returned no sysName ({SNMP_OID_SYSNAME}) — "
+            "cannot establish device identity"
+        )
+    sysdescr = values.get(SNMP_OID_SYSDESCR, "")
+    version_match = _SYSDESCR_VERSION_RE.search(sysdescr)
+    model_match = _SYSDESCR_MODEL_RE.search(sysdescr)
+    return DeviceFacts(
+        hostname=hostname,
+        vendor_id=PLATFORM,
+        model=model_match.group(1) if model_match else None,
+        os_version=version_match.group(1).rstrip(",") if version_match else None,
+        serial=None,
+    )
 
 
 def parse_interfaces(

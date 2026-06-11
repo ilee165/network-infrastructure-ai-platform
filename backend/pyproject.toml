@@ -62,6 +62,7 @@ dev = [
 # cisco_iosxe, eos) register here as
 #   <vendor_id> = "app.plugins.vendors.<vendor_id>.plugin:<Vendor>Plugin"
 [project.entry-points."netops.plugins"]
+cisco_ios = "app.plugins.vendors.cisco_ios.plugin:CiscoIosPlugin"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
