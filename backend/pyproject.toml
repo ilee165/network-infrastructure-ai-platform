@@ -120,6 +120,7 @@ module = [
     "neo4j.*",
     "ntc_templates.*",
     "pgvector.*",
+    "pysnmp.*",
     "textfsm.*",
 ]
 ignore_missing_imports = true
