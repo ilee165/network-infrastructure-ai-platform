@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import null, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -353,6 +353,157 @@ async def test_neighbor_natural_key_unique(session: AsyncSession, device: Device
     session.add(NormalizedNeighborRow(**common))
     await session.flush()
     session.add(NormalizedNeighborRow(**common))
+    with pytest.raises(IntegrityError):
+        await session.flush()
+    await session.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Natural keys with absent optional components ('' sentinel, not NULL)
+# ---------------------------------------------------------------------------
+
+
+async def test_route_natural_key_unique_for_global_connected_route(
+    session: AsyncSession, device: Device
+) -> None:
+    """Global-table connected routes (no vrf, no next_hop) must still dedupe.
+
+    Optional key columns store the ``''`` sentinel instead of NULL, so the
+    unique constraint fires under default NULLS DISTINCT semantics on both
+    SQLite and PostgreSQL.
+    """
+    common = {
+        **_provenance(device, uuid.uuid4()),
+        "prefix": "192.0.2.0/24",
+        "protocol": RouteProtocol.CONNECTED,
+        "interface": "GigabitEthernet0/1",
+    }
+    session.add(NormalizedRouteRow(**common))
+    await session.flush()
+    session.add(NormalizedRouteRow(**common))
+    with pytest.raises(IntegrityError):
+        await session.flush()
+    await session.rollback()
+
+
+async def test_neighbor_natural_key_unique_without_neighbor_interface(
+    session: AsyncSession, device: Device
+) -> None:
+    """Neighbors that omit neighbor_interface must still dedupe ('' sentinel)."""
+    common = {
+        **_provenance(device, uuid.uuid4()),
+        "protocol": NeighborProtocol.LLDP,
+        "local_interface": "GigabitEthernet0/3",
+        "neighbor_name": "lab-ap-01",
+    }
+    session.add(NormalizedNeighborRow(**common))
+    await session.flush()
+    session.add(NormalizedNeighborRow(**common))
+    with pytest.raises(IntegrityError):
+        await session.flush()
+    await session.rollback()
+
+
+async def test_route_optional_key_columns_default_to_sentinel(
+    session: AsyncSession, device: Device
+) -> None:
+    """Omitted vrf/next_hop/interface persist as '' (the absent sentinel)."""
+    route = NormalizedRouteRow(
+        **_provenance(device, uuid.uuid4()),
+        prefix="198.51.100.1/32",
+        protocol=RouteProtocol.LOCAL,
+    )
+    session.add(route)
+    await session.commit()
+
+    reloaded = (
+        await session.execute(
+            select(NormalizedRouteRow)
+            .where(NormalizedRouteRow.id == route.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert reloaded.vrf == ""
+    assert reloaded.next_hop == ""
+    assert reloaded.interface == ""
+
+
+async def test_neighbor_interface_defaults_to_sentinel(
+    session: AsyncSession, device: Device
+) -> None:
+    """Omitted neighbor_interface persists as '' (the absent sentinel)."""
+    neighbor = NormalizedNeighborRow(
+        **_provenance(device, uuid.uuid4()),
+        protocol=NeighborProtocol.CDP,
+        local_interface="GigabitEthernet0/4",
+        neighbor_name="lab-phone-01",
+    )
+    session.add(neighbor)
+    await session.commit()
+
+    reloaded = (
+        await session.execute(
+            select(NormalizedNeighborRow)
+            .where(NormalizedNeighborRow.id == neighbor.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert reloaded.neighbor_interface == ""
+
+
+async def test_explicit_none_coerces_to_sentinel_in_orm(
+    session: AsyncSession, device: Device
+) -> None:
+    """ORM writers passing Pydantic ``None`` get the '' sentinel automatically.
+
+    SQLAlchemy applies the Python-side default when an attribute is None, so
+    naive ``next_hop=route.next_hop`` mappings stay NULL-free.
+    """
+    route = NormalizedRouteRow(
+        **_provenance(device, uuid.uuid4()),
+        prefix="10.1.0.0/16",
+        protocol=RouteProtocol.CONNECTED,
+        next_hop=None,
+        vrf=None,
+        interface="GigabitEthernet0/6",
+    )
+    session.add(route)
+    await session.flush()
+    stored = (
+        await session.execute(
+            text("SELECT vrf, next_hop FROM normalized_routes WHERE prefix = '10.1.0.0/16'")
+        )
+    ).one()
+    assert tuple(stored) == ("", "")
+
+
+async def test_natural_key_columns_reject_sql_null(session: AsyncSession, device: Device) -> None:
+    """A forced SQL NULL in a natural-key column violates NOT NULL.
+
+    NULL would silently disable the unique constraint (NULLS DISTINCT), so the
+    DDL must reject it outright.
+    """
+    session.add(
+        NormalizedRouteRow(
+            **_provenance(device, uuid.uuid4()),
+            prefix="10.2.0.0/16",
+            protocol=RouteProtocol.CONNECTED,
+            next_hop=null(),
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await session.flush()
+    await session.rollback()
+
+    session.add(
+        NormalizedNeighborRow(
+            **_provenance(device, uuid.uuid4()),
+            protocol=NeighborProtocol.LLDP,
+            local_interface="GigabitEthernet0/5",
+            neighbor_name="lab-sw-03",
+            neighbor_interface=null(),
+        )
+    )
     with pytest.raises(IntegrityError):
         await session.flush()
     await session.rollback()

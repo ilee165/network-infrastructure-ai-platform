@@ -12,6 +12,13 @@ Aggregates:
 - ``Normalized*Row`` — relational projections of the Pydantic models in
   :mod:`app.schemas.normalized`, with natural-key unique constraints so the
   normalization pipeline can upsert idempotently (MVP §3 exit criteria).
+  Optional natural-key components (``vrf``, ``next_hop``, ``interface``,
+  ``neighbor_interface``) are NOT NULL with the ``''`` sentinel meaning
+  "absent" — NULL would silently disable the unique constraint under default
+  NULLS DISTINCT semantics on both SQLite and PostgreSQL, and ON CONFLICT
+  arbiter inference would never match. Writers map Pydantic ``None`` → ``''``
+  (the ORM's Python-side default already coerces attributes left at ``None``)
+  and readers map ``''`` back to ``None``.
 
 Design decision (fixed): rows reference ``raw_artifacts`` via a plain indexed
 ``raw_artifact_id`` UUID with **no** DB-level FK — PostgreSQL requires FKs to
@@ -226,7 +233,10 @@ class NormalizedInterfaceRow(UuidPkMixin, TimestampMixin, _ProvenanceMixin, Base
 class NormalizedRouteRow(UuidPkMixin, TimestampMixin, _ProvenanceMixin, Base):
     """Relational projection of :class:`app.schemas.normalized.NormalizedRoute`.
 
-    ``prefix`` is the CIDR string of ``NormalizedRoute.destination``.
+    ``prefix`` is the CIDR string of ``NormalizedRoute.destination``. The
+    natural-key columns ``vrf``/``next_hop``/``interface`` are NOT NULL with
+    the ``''`` sentinel for "absent" (global table, connected/local routes) —
+    see the module docstring for why NULL is forbidden in natural keys.
     """
 
     __tablename__ = "normalized_routes"
@@ -236,15 +246,20 @@ class NormalizedRouteRow(UuidPkMixin, TimestampMixin, _ProvenanceMixin, Base):
 
     prefix: Mapped[str] = mapped_column(String(64), nullable=False)
     protocol: Mapped[RouteProtocol] = mapped_column(_wire_enum(RouteProtocol), nullable=False)
-    next_hop: Mapped[str | None] = mapped_column(String(64))
-    interface: Mapped[str | None] = mapped_column(String(255))
-    vrf: Mapped[str | None] = mapped_column(String(64))
+    next_hop: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    interface: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    vrf: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     distance: Mapped[int | None]
     metric: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class NormalizedNeighborRow(UuidPkMixin, TimestampMixin, _ProvenanceMixin, Base):
-    """Relational projection of :class:`app.schemas.normalized.NormalizedNeighbor`."""
+    """Relational projection of :class:`app.schemas.normalized.NormalizedNeighbor`.
+
+    ``neighbor_interface`` is a natural-key column: NOT NULL with the ``''``
+    sentinel when the peer does not report a port ID — see the module
+    docstring for why NULL is forbidden in natural keys.
+    """
 
     __tablename__ = "normalized_neighbors"
     __table_args__ = (
@@ -256,7 +271,7 @@ class NormalizedNeighborRow(UuidPkMixin, TimestampMixin, _ProvenanceMixin, Base)
     protocol: Mapped[NeighborProtocol] = mapped_column(_wire_enum(NeighborProtocol), nullable=False)
     local_interface: Mapped[str] = mapped_column(String(255), nullable=False)
     neighbor_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    neighbor_interface: Mapped[str | None] = mapped_column(String(255))
+    neighbor_interface: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     neighbor_platform: Mapped[str | None] = mapped_column(String(255))
     neighbor_address: Mapped[str | None] = mapped_column(String(64))
     neighbor_capabilities: Mapped[list[str]] = mapped_column(

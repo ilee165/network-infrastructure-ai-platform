@@ -77,6 +77,18 @@ def test_normalized_tables_have_natural_key_unique_constraints() -> None:
         assert expected in uniques
 
 
+def test_natural_key_columns_are_not_nullable() -> None:
+    """Every natural-key column is NOT NULL ('' sentinel for absent values).
+
+    A nullable key column would silently disable the unique constraint under
+    default NULLS DISTINCT semantics (SQLite and PostgreSQL alike), breaking
+    idempotent upserts and ON CONFLICT arbiter matching.
+    """
+    for name, expected in NORMALIZED_NATURAL_KEYS.items():
+        for column_name in expected:
+            assert not _table(name).columns[column_name].nullable, f"{name}.{column_name}"
+
+
 def test_raw_artifact_id_is_plain_indexed_uuid_without_fk() -> None:
     """Linkage to the partitioned raw_artifacts table is a bare indexed UUID.
 
