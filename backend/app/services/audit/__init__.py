@@ -1,0 +1,29 @@
+"""Append-only audit trail writer (brief §7, ADR-0004, ADR-0011)."""
+
+from app.services.audit.service import (
+    AUTH_LOGIN,
+    AUTH_REFRESH,
+    CREDENTIAL_CREATED,
+    CREDENTIAL_DECRYPTED,
+    CREDENTIAL_ROTATED,
+    DEVICE_CREATED,
+    DEVICE_DELETED,
+    DEVICE_UPDATED,
+    DISCOVERY_RUN_FINISHED,
+    DISCOVERY_RUN_STARTED,
+    record,
+)
+
+__all__ = [
+    "AUTH_LOGIN",
+    "AUTH_REFRESH",
+    "CREDENTIAL_CREATED",
+    "CREDENTIAL_DECRYPTED",
+    "CREDENTIAL_ROTATED",
+    "DEVICE_CREATED",
+    "DEVICE_DELETED",
+    "DEVICE_UPDATED",
+    "DISCOVERY_RUN_FINISHED",
+    "DISCOVERY_RUN_STARTED",
+    "record",
+]
