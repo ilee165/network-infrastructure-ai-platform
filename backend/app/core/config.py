@@ -8,9 +8,10 @@ rename fields without an ADR.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Development-only fallback. ``Settings`` refuses to start with this value in prod.
@@ -55,6 +56,17 @@ class Settings(BaseSettings):
 
     #: JWT access-token lifetime in minutes (core/security.py default expiry).
     access_token_expire_minutes: int = 30
+
+    #: Credential-vault master key (ADR-0011): urlsafe-base64, decodes to 32 bytes.
+    #: Consumed by ``core/crypto.EnvKeyProvider``; never logged or serialized.
+    kek: SecretStr | None = None
+
+    #: Path to a file holding the urlsafe-base64 KEK (mounted Docker/K8s secret).
+    #: Consumed by ``core/crypto.FileKeyProvider``; ``kek`` wins when both are set.
+    kek_file: Path | None = None
+
+    #: Version label stored with every wrapped DEK; bump together with KEK rotation.
+    kek_version: str = "v1"
 
     @model_validator(mode="after")
     def _forbid_default_secret_in_prod(self) -> Settings:
