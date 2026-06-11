@@ -132,6 +132,18 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 
 
 @pytest.fixture()
+def auth_headers(
+    users: dict[str, User], make_token: Callable[..., str]
+) -> Callable[[str], dict[str, str]]:
+    """Bearer ``Authorization`` headers for the seeded user of a given role."""
+
+    def _headers(role: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {make_token(users[role])}"}
+
+    return _headers
+
+
+@pytest.fixture()
 def make_token(settings: Settings) -> Callable[..., str]:
     """Mint JWTs directly (bypassing /auth/login) for dependency-level tests."""
 
