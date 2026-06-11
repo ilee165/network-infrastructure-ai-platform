@@ -40,6 +40,9 @@ dependencies = [
     # CLI output parsing (D7)
     "textfsm",
     "ntc-templates",
+    # Device transports (D7): SSH CLI + SNMP v2c/v3
+    "netmiko",
+    "pysnmp",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +53,9 @@ dev = [
     "ruff",
     "mypy",
     "import-linter",
+    # In-memory async SQLite for DB-backed unit tests (Postgres-only DDL is
+    # exercised by `integration`-marked tests against compose Postgres).
+    "aiosqlite",
 ]
 
 # Vendor plugin discovery group (D6 / ADR-0006). M1: first plugins (cisco_ios,
