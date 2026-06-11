@@ -549,6 +549,45 @@ def test_collect_device_snmp_fallback_when_ssh_fails(
     assert [d.hostname for d in devices] == ["snmp-10.0.0.1"]
 
 
+def test_collect_device_snmp_not_triggered_when_ssh_connects_but_facts_fail(
+    eager_celery: None, fakes: FakeEnv, db_url: str
+) -> None:
+    """SNMP must NOT fire when SSH connected successfully but vendor recognition failed.
+
+    The design decision is: SNMP is a *transport* fallback, used only when SSH
+    never connects.  If SSH establishes a session (outcome.connected=True) but
+    the plugin cannot parse 'show version', the device should be reported as a
+    permanent failure rather than falling back to SNMP.
+    """
+    fakes.fail_facts = {"10.0.0.1"}  # SSH connects; facts are unparseable
+    fakes.snmp_alive = {"10.0.0.1"}  # SNMP would succeed — must NOT be called
+    run_id = _seed_run(
+        db_url,
+        seeds=["10.0.0.1"],
+        hop_limit=0,
+        allowlist=["10.0.0.0/24"],
+        credentials=[
+            SSH_CRED,
+            {
+                "name": "lab-snmp",
+                "kind": CredentialKind.SNMP_V2C,
+                "secret": "public-community",
+            },
+        ],
+    )
+
+    result = tasks.collect_device.apply(args=[str(run_id), "10.0.0.1"])
+
+    assert result.state == "SUCCESS"
+    payload = result.get()
+    # Permanent failure — no retry, no SNMP fallback.
+    assert payload["ok"] is False
+    # SSH connected, so hostname in snmp_alive must NOT have been used as source.
+    assert payload.get("vendor_id") != "snmp-10.0.0.1"
+    # SSH transport *did* connect — verify that.
+    assert fakes.ssh_attempts.get("10.0.0.1", 0) == 1
+
+
 def test_collect_device_permanent_failure_returns_not_ok_without_retry(
     eager_celery: None, fakes: FakeEnv, db_url: str
 ) -> None:

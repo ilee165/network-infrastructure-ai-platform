@@ -438,7 +438,7 @@ def collect_device(
         failures.extend(outcome.failures)
         if outcome.result is None and not outcome.connected:
             transient = outcome.transport_error
-    if outcome.result is None and snmp_creds:
+    if outcome.result is None and not outcome.connected and snmp_creds:
         outcome = _collect_over_snmp(registry, target_ip, snmp_creds, device_id)
         failures.extend(outcome.failures)
         if outcome.result is None:
