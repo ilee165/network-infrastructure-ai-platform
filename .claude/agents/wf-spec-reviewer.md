@@ -18,6 +18,9 @@ Review method:
   tautological tests as findings.
 - Run a targeted test only when it is cheap and decisive for a specific doubt;
   the implementer already ran the full gates — do not re-run them.
+- If `graphify-out/graph.json` exists at the repo root, use
+  `graphify path "<A>" "<B>"` to check cross-file impact of the diff instead
+  of reading neighboring modules wholesale; verify findings in source.
 
 Severity scale: critical = spec violation or broken behavior; major =
 requirement missing/wrong but contained; minor = polish. approved=true only

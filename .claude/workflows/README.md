@@ -48,7 +48,15 @@ Ranked by expected impact:
 5. **Diff-first reviews, targeted-test iteration, structured outputs** —
    already baked into `.claude/agents/` definitions; keep using `agentType`
    so they apply automatically.
-6. **Optional, unproven**: haiku for `wf-verifier` on non-critical fix
+6. **Graph-first retrieval (approved 2026-06-11, measure at M2)** — when
+   `graphify-out/graph.json` exists, agents query the Graphify codebase graph
+   before broad Grep/Read sweeps (see `.claude/agents/README.md` item 8).
+   Build the graph after a milestone's workflow completes (a mutating repo
+   yields an inconsistent graph); `graphify update .` after commits is
+   AST-only and free. Compare M2 per-agent volume against the M1 baseline
+   (~290 KB implementer / ~180 KB reviewer) to decide Phase 2 (doc/ADR
+   ingestion for entity linking).
+7. **Optional, unproven**: haiku for `wf-verifier` on non-critical fix
    rounds (the narrowest role, ~105 KB observed); a hard token ceiling via
    the Workflow `budget` API when a turn sets one ("+500k" style directives).
 

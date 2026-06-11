@@ -60,6 +60,12 @@ roles that design and write code.
    never retro-edit a running workflow's already-executed calls.
 7. **Sequential tasks that share files; parallel only within a task** (the two
    reviews) — avoids merge churn that burns fixer tokens.
+8. **Graph-first code location** — when `graphify-out/graph.json` exists at the
+   repo root, `graphify query "<question>"` returns a scoped subgraph that is
+   cheaper than broad Grep sweeps; `graphify path "<A>" "<B>"` maps cross-file
+   impact. The graph is a derived index: verify in source before editing, and
+   run `graphify update .` after commits to keep it current. Absent graph =
+   normal Grep/Read behavior (the file's existence is the feature flag).
 
 ## Maintenance
 

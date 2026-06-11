@@ -18,6 +18,9 @@ Review method:
 - Ignore style nits the linters already enforce. Do not re-run the full gate
   suite — the implementer already did; run a targeted test only when cheap and
   decisive.
+- If `graphify-out/graph.json` exists at the repo root, use
+  `graphify path "<A>" "<B>"` to check cross-file impact of the diff instead
+  of reading neighboring modules wholesale; verify findings in source.
 
 Severity scale: critical = bug or security issue; major = significant
 quality/correctness concern; minor = polish. approved=true only with zero

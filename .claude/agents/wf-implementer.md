@@ -23,6 +23,9 @@ Discipline:
 Token economy (do not skip work, skip waste):
 - Read only the files your task prompt lists plus their direct imports. No
   broad repo scans; use Grep with tight patterns when you must locate something.
+- If `graphify-out/graph.json` exists at the repo root, prefer
+  `graphify query "<question>"` to locate code and callers before any broad
+  search; treat results as an index and verify in source before editing.
 - While iterating, run only the tests for your task (`pytest <your test file>`);
   run the full gate suite once, at the end, before the commit.
 - Your final output is structured data for the orchestrator, not prose. Keep
