@@ -1,0 +1,20 @@
+Interface Ethernet1 detected 1 LLDP neighbors:
+
+  age 120
+    Chassis ID     : 0050.5600.aabb
+  - Port ID type : Interface Alias
+    Port ID        : Ethernet49/1
+  - System Name: "spine01.example.net"
+    System Description: "Arista Networks EOS version 4.28.3M running on an Arista Networks DCS-7050TX-64"
+    Management Address : 10.0.255.1
+
+Interface Ethernet2 detected 1 LLDP neighbors:
+
+  age 85
+    Chassis ID     : 0050.5600.ccdd
+  - Port ID type : Interface Alias
+    Port ID        : Ethernet49/2
+  - System Name: "spine02.example.net"
+    System Description: "Arista Networks EOS version 4.28.3M running on an Arista Networks DCS-7050TX-64"
+    Management Address : 10.0.255.2
+

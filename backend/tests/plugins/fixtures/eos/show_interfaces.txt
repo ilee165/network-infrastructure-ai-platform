@@ -1,0 +1,63 @@
+Ethernet1 is up, line protocol is up (connected)
+  Hardware is Ethernet, address is 001c.7300.1234 (bia 001c.7300.1234)
+  Description: "uplink-to-spine01"
+  Internet address is 10.0.0.1/30
+  MTU 9214 bytes, BW 10000000 kbit
+  Full-duplex, 10Gb/s
+  Up 3 days, 12 hours, 30 minutes
+  15 link status changes since last cleared (to/from notpresent excluded)
+     5 minute input rate 1234560 bps, 120 packets/second
+     5 minute output rate 2345670 bps, 130 packets/second
+     20000000 packets input, 3000000000 bytes
+     0 runts, 0 giants
+     0 input errors, 0 CRC, 0 alignment, 0 symbol, 0 input discards
+     0 PAUSE input
+     19000000 packets output, 2800000000 bytes
+     0 output errors, 0 late collision
+     0 PAUSE output
+Ethernet2 is up, line protocol is up (connected)
+  Hardware is Ethernet, address is 001c.7300.5678 (bia 001c.7300.5678)
+  Description: "uplink-to-spine02"
+  Internet address is 10.0.0.5/30
+  MTU 9214 bytes, BW 10000000 kbit
+  Full-duplex, 10Gb/s
+  Up 3 days, 12 hours, 29 minutes
+  12 link status changes since last cleared (to/from notpresent excluded)
+     5 minute input rate 987650 bps, 95 packets/second
+     5 minute output rate 876540 bps, 88 packets/second
+     18000000 packets input, 2700000000 bytes
+     0 runts, 0 giants
+     0 input errors, 0 CRC, 0 alignment, 0 symbol, 0 input discards
+     0 PAUSE input
+     17000000 packets output, 2500000000 bytes
+     0 output errors, 0 late collision
+     0 PAUSE output
+Ethernet3 is adminDown, line protocol is down (disabled)
+  Hardware is Ethernet, address is 001c.7300.9abc (bia 001c.7300.9abc)
+  Description: "unused-port"
+  MTU 9214 bytes, BW 10000000 kbit
+  Full-duplex, 10Gb/s
+  Down 10 days, 0 hours, 0 minutes
+  2 link status changes since last cleared (to/from notpresent excluded)
+     0 packets input, 0 bytes
+     0 runts, 0 giants
+     0 input errors, 0 CRC, 0 alignment, 0 symbol, 0 input discards
+     0 packets output, 0 bytes
+     0 output errors, 0 late collision
+Management0 is up, line protocol is up (connected)
+  Hardware is DEC other, address is 001c.7300.9999 (bia 001c.7300.9999)
+  Description: "oob-mgmt"
+  Internet address is 192.168.0.10/24
+  MTU 1500 bytes, BW 1000000 kbit
+  Full-duplex, 1Gb/s
+  Up 10 days, 5 hours, 20 minutes
+  3 link status changes since last cleared (to/from notpresent excluded)
+     5 minute input rate 1234 bps, 2 packets/second
+     5 minute output rate 567 bps, 1 packets/second
+     5000 packets input, 500000 bytes
+     0 runts, 0 giants
+     0 input errors, 0 CRC, 0 alignment, 0 symbol, 0 input discards
+     0 PAUSE input
+     4000 packets output, 400000 bytes
+     0 output errors, 0 late collision
+     0 PAUSE output
