@@ -4,11 +4,12 @@ Factories take :class:`~app.core.config.Settings` explicitly so tests and
 short-lived probes can build isolated engines; the module-level accessors lazily
 cache one engine/sessionmaker per process for the api/worker runtime.
 
-M1: a FastAPI ``get_session`` dependency (session-per-request) joins
-``app/api/deps.py`` alongside the first domain models.
+:func:`get_session` is the FastAPI session-per-request dependency (M1).
 """
 
 from __future__ import annotations
+
+from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -47,6 +48,16 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     if _sessionmaker is None:
         _sessionmaker = create_sessionmaker(get_engine())
     return _sessionmaker
+
+
+async def get_session() -> AsyncIterator[AsyncSession]:
+    """FastAPI dependency: one :class:`AsyncSession` per request.
+
+    The session is closed (and any in-flight transaction released) when the
+    request scope exits; commit/rollback is the caller's responsibility.
+    """
+    async with get_sessionmaker()() as session:
+        yield session
 
 
 async def dispose_engine() -> None:

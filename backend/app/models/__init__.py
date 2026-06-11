@@ -1,10 +1,42 @@
 """SQLAlchemy models (system of record, D4).
 
-M0 ships only :class:`~app.models.base.Base`. M1: device, credential,
-discovery, normalized_*, user/role and audit models join — one module per
-aggregate per REPO-STRUCTURE §2.
+Every model module is imported here so that ``Base.metadata`` is complete the
+moment ``app.models`` is imported — Alembic autogenerate and the test-suite
+``create_all`` both rely on this. One module per aggregate (REPO-STRUCTURE §2).
 """
 
+from app.models.audit import AuditLog
 from app.models.base import Base
+from app.models.identity import Role, User
+from app.models.inventory import (
+    CredentialKind,
+    Device,
+    DeviceCredential,
+    DeviceStatus,
+    DiscoveryRun,
+    DiscoveryRunStatus,
+    NormalizedInterfaceRow,
+    NormalizedNeighborRow,
+    NormalizedRouteRow,
+    RawArtifact,
+)
+from app.models.mixins import TimestampMixin, UuidPkMixin
 
-__all__ = ["Base"]
+__all__ = [
+    "AuditLog",
+    "Base",
+    "CredentialKind",
+    "Device",
+    "DeviceCredential",
+    "DeviceStatus",
+    "DiscoveryRun",
+    "DiscoveryRunStatus",
+    "NormalizedInterfaceRow",
+    "NormalizedNeighborRow",
+    "NormalizedRouteRow",
+    "RawArtifact",
+    "Role",
+    "TimestampMixin",
+    "User",
+    "UuidPkMixin",
+]
