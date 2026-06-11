@@ -1,0 +1,47 @@
+------------------------------------------------
+Local Intf: Gi1/0/1
+Chassis id: 0050.56b3.1234
+Port id: Gi1
+Port Description: downlink to core-sw01
+System Name: core-rtr01.example.net
+
+System Description:
+Cisco IOS XE Software, Version 17.03.04a running on CSR1000V
+
+Time remaining: 112 seconds
+System Capabilities: B,R
+Enabled Capabilities: R
+Management Addresses:
+    IP: 10.0.0.2
+Auto Negotiation - not supported
+Physical media capabilities - not advertised
+Media Attachment Unit type - not advertised
+Vlan ID: - not advertised
+
+------------------------------------------------
+Local Intf: Gi1/0/2
+Chassis id: 0023.ebd4.5678
+Port id: Gi0/1
+Port Description: uplink to core-sw01
+System Name: access-sw02.example.net
+
+System Description:
+Cisco IOS Software, C2960X Software (C2960X-UNIVERSALK9-M), Version 15.2(7)E3, RELEASE SOFTWARE (fc1)
+
+Time remaining: 98 seconds
+System Capabilities: B,S
+Enabled Capabilities: B,S
+Management Addresses:
+    IP: 172.16.0.2
+Auto Negotiation - supported, enabled
+Physical media capabilities:
+    1000baseT(FD)
+    100base-TX(FD)
+    100base-TX(HD)
+    10base-T(FD)
+    10base-T(HD)
+Media Attachment Unit type: 16
+Vlan ID: 1
+
+
+Total entries displayed: 2

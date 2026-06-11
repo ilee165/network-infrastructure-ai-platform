@@ -1,0 +1,59 @@
+Building configuration...
+
+Current configuration : 4231 bytes
+!
+! Last configuration change at 08:30:00 UTC Mon Jun 10 2026
+! NVRAM config last updated at 08:30:05 UTC Mon Jun 10 2026
+!
+version 17.6
+service timestamps debug datetime msec
+service timestamps log datetime msec
+service password-encryption
+!
+hostname core-sw01
+!
+boot-start-marker
+boot-end-marker
+!
+!
+aaa new-model
+!
+!
+ip domain name example.net
+!
+!
+spanning-tree mode rapid-pvst
+spanning-tree extend system-id
+!
+!
+interface GigabitEthernet1/0/1
+ description uplink to core-rtr01
+ no switchport
+ ip address 10.0.0.1 255.255.255.252
+ ip ospf 1 area 0
+ negotiation auto
+!
+interface GigabitEthernet1/0/2
+ description access port VLAN10
+ switchport access vlan 10
+ switchport mode access
+ spanning-tree portfast
+!
+interface GigabitEthernet1/0/48
+ description reserved for OOB mgmt
+ shutdown
+!
+interface Vlan10
+ description User VLAN
+ ip address 172.16.0.1 255.255.255.0
+!
+router ospf 1
+ router-id 10.0.0.1
+ passive-interface default
+ no passive-interface GigabitEthernet1/0/1
+ network 10.0.0.0 0.0.0.3 area 0
+ network 172.16.0.0 0.0.0.255 area 0
+!
+ip route 0.0.0.0 0.0.0.0 10.0.0.2
+!
+end
