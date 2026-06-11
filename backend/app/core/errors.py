@@ -82,6 +82,14 @@ class AuthError(NetOpsError):
     slug = "unauthorized"
 
 
+class ForbiddenError(NetOpsError):
+    """Authenticated but not authorized: the caller's role rank is insufficient."""
+
+    status_code = 403
+    title = "Forbidden"
+    slug = "forbidden"
+
+
 class PluginError(NetOpsError):
     """A vendor plugin operation failed (connection, command, or parse)."""
 
