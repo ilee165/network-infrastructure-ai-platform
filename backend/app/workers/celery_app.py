@@ -34,8 +34,8 @@ def create_celery_app() -> Celery:
         "netops",
         broker=settings.redis_url,
         backend=settings.redis_url,
-        include=["app.workers.tasks.system"],
-        # M1+: "app.workers.tasks.discovery", ".config", ".packet", ".docs"
+        include=["app.workers.tasks.system", "app.workers.tasks.discovery"],
+        # M2+: "app.workers.tasks.config", ".packet", ".docs"
     )
     celery.conf.update(
         # JSON-only serialization (no pickle — secure by default).
