@@ -153,3 +153,17 @@ name = "app.core imports nothing app-internal (REPO-STRUCTURE §3.2 row 1)"
 type = "forbidden"
 source_modules = ["app.core"]
 forbidden_modules = ["app.api", "app.db", "app.main", "app.models", "app.workers"]
+
+[[tool.importlinter.contracts]]
+name = "app.knowledge imports only core/schemas/models/llm (REPO-STRUCTURE §3.2 row 5)"
+type = "forbidden"
+source_modules = ["app.knowledge"]
+forbidden_modules = [
+    "app.agents",
+    "app.api",
+    "app.engines",
+    "app.main",
+    "app.plugins",
+    "app.services",
+    "app.workers",
+]
