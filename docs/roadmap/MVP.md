@@ -76,6 +76,8 @@ Integration tests need real-ish devices. **PROPOSED:** a `containerlab` topology
 
 ## 3. M1 — Inventory, credential vault, discovery engine, first three plugins
 
+> **Status: COMPLETE** (2026-06-12, branch `release/m1`). 18 tasks delivered via orchestrated workflow `wf_a7368a4c-6a1`; all gates green (backend 605 unit tests, 95% coverage; frontend 17 tests). Lab-only exit criteria (live LLDP/CDP walk, SNMP against real devices) remain tagged for lab validation.
+
 **Goal:** Discover a real Cisco IOS / Cisco IOS-XE / Arista EOS estate over SSH and SNMP into a normalized, audited inventory — the data foundation every later milestone consumes.
 
 **In scope**

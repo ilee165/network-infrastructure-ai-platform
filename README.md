@@ -2,7 +2,7 @@
 
 A self-hosted, AI-powered Network Operations Platform for enterprise infrastructure teams. It functions as an AI Network Engineer: discovery, troubleshooting, packet analysis, configuration management, DDI management, documentation generation, and automation execution across multi-vendor environments — local-first, secure by default, with a human approving every change and every AI decision explained and audited.
 
-> **Status:** Milestone **M0** (repository scaffold) of the [MVP roadmap](docs/roadmap/MVP.md). Not yet feature-complete — see the roadmap for what lands when.
+> **Status:** Milestone **M1** (inventory, credential vault, discovery engine, first three vendor plugins) complete on `release/m1`; see the [MVP roadmap](docs/roadmap/MVP.md). Not yet feature-complete — M2 (topology) is next.
 
 ## Architecture at a glance
 
