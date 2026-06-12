@@ -7,8 +7,8 @@ EOS-specific notes
 - No CDP support on EOS — ``NEIGHBORS_CDP`` is intentionally absent from the
   declared capability set (EOS uses LLDP exclusively for L2 neighbor discovery).
 - ``show version`` on EOS does **not** emit ``hostname``; :meth:`EosDiscoverySsh`
-  returns ``hostname=""`` from the CLI path.  SNMP discovery (``sysName``)
-  provides the authoritative hostname.
+  returns a placeholder hostname (serial > sys_mac > model) from the CLI path.
+  SNMP discovery (``sysName``) provides the authoritative hostname.
 - ``show ip route`` PROTOCOL is multi-token for eBGP/iBGP (``"B E"`` / ``"B I"``).
 
 Command strings live in module-level ``SHOW_*`` constants — the single
@@ -94,8 +94,9 @@ class EosDiscoverySsh(_EosCommandCapability, DiscoverySshCapability):
     """``DISCOVERY_SSH``: ``show version`` → :class:`DeviceFacts`.
 
     EOS ``show version`` does not include the device hostname; the returned
-    :class:`DeviceFacts` will have ``hostname=""`` when using the SSH path.
-    Use SNMP discovery (``sysName``) for authoritative hostname resolution.
+    :class:`DeviceFacts` carries a non-empty placeholder hostname (serial >
+    sys_mac > model) when using the SSH path.  Use SNMP discovery
+    (``sysName``) for authoritative hostname resolution.
     The parser stamps ``vendor_id="arista_eos"`` (ntc-templates platform key);
     we overwrite it with the plugin vendor_id ``"eos"`` on return.
     """

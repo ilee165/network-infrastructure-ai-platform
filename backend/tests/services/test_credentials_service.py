@@ -264,6 +264,21 @@ async def test_rotate_kek_with_no_credentials_returns_zero(session: AsyncSession
     assert await _audit_rows(session, "credential.rotated") == []
 
 
+async def test_rotate_kek_skips_credentials_already_on_current_version(
+    session: AsyncSession,
+) -> None:
+    """Credentials already wrapped under the current KEK are not rewrapped or audited."""
+    provider = _provider()
+    credential = await _create(session, provider)
+    wrapped_dek_before = credential.wrapped_dek
+
+    count = await vault.rotate_kek(session, provider, actor="user:admin")
+
+    assert count == 0
+    assert credential.wrapped_dek == wrapped_dek_before
+    assert await _audit_rows(session, "credential.rotated") == []
+
+
 # ---------------------------------------------------------------------------
 # DecryptedSecret redaction + log hygiene
 # ---------------------------------------------------------------------------
@@ -281,7 +296,9 @@ def test_decrypted_secret_repr_and_str_redacted() -> None:
 
 async def test_no_plaintext_in_structlog_capture_across_lifecycle(session: AsyncSession) -> None:
     """create + rotate + decrypt + rotate_kek emit no plaintext to the log stream."""
-    provider = _provider()
+    keys = {"v1": os.urandom(KEY_BYTES), "v2": os.urandom(KEY_BYTES)}
+    provider = _RotatingProvider(keys, current="v1")
+    rotated_provider = _RotatingProvider(keys, current="v2")
     with structlog.testing.capture_logs() as captured:
         credential = await _create(session, provider)
         await vault.rotate_secret(
@@ -292,7 +309,7 @@ async def test_no_plaintext_in_structlog_capture_across_lifecycle(session: Async
             actor="user:alice",
         )
         await vault.decrypt(session, provider, credential, actor="user:alice", reason="lifecycle")
-        await vault.rotate_kek(session, provider, actor="user:alice")
+        await vault.rotate_kek(session, rotated_provider, actor="user:alice")
 
     blob = str(captured)
     assert len(captured) >= 4  # one audit event per operation

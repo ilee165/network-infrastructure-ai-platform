@@ -207,7 +207,7 @@ def parse_snmp_device_facts(values: Mapping[str, str]) -> DeviceFacts:
         hostname=hostname,
         vendor_id=PLATFORM,
         model=model_match.group(1) if model_match else None,
-        os_version=version_match.group(1).rstrip(",") if version_match else None,
+        os_version=version_match.group(1) if version_match else None,
         serial=None,
     )
 

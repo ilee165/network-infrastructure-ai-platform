@@ -395,7 +395,7 @@ def _check_record(
     )
     if spec.neighbor_protocol is not None:
         assert isinstance(item, NormalizedNeighbor)  # implied by item_model
-        assert item.protocol is spec.neighbor_protocol, (
+        assert item.protocol == spec.neighbor_protocol, (
             f"{item_ctx} field 'protocol' is {item.protocol.value!r}, "
             f"expected {spec.neighbor_protocol.value!r}"
         )

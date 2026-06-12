@@ -195,18 +195,25 @@ async def rotate_kek(
     """Rewrap every credential's DEK under the provider's current KEK version.
 
     Cheap rotation per ADR-0011: only the wrapped DEK changes; payload
-    ciphertext is never re-encrypted. Audits ``credential.rotated`` per
-    credential and returns the number of credentials rewrapped.
+    ciphertext is never re-encrypted. Credentials already wrapped under the
+    provider's current KEK version are skipped (no rewrap, no audit row).
+    Audits ``credential.rotated`` per rewrapped credential and returns the
+    number of credentials rewrapped.
 
     Raises:
         UnknownKekVersionError: If any stored ``kek_version`` cannot be
             supplied by *provider* (the old KEK is needed to unwrap).
     """
+    current_version = provider.current_version()
     credentials = (await session.execute(select(DeviceCredential))).scalars().all()
+    rewrapped_count = 0
     for credential in credentials:
         old_version = credential.kek_version
+        if old_version == current_version:
+            continue
         rewrapped = rewrap(_envelope(credential), provider)
         _store(credential, rewrapped)
+        rewrapped_count += 1
         await audit.record(
             session,
             actor=actor,
@@ -219,4 +226,4 @@ async def rotate_kek(
                 "to_kek_version": rewrapped.kek_version,
             },
         )
-    return len(credentials)
+    return rewrapped_count

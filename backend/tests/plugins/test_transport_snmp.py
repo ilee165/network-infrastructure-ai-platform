@@ -231,7 +231,8 @@ class TestSnmpGet:
         assert target.kwargs["timeout"] == 9.0
         assert target.kwargs["retries"] == 4
 
-    def test_get_empty_oids_raises(self, fake_pysnmp: SimpleNamespace) -> None:
+    def test_get_empty_oids_raises(self) -> None:
+        # No fake_pysnmp fixture: the empty-OID guard fires before any pysnmp call.
         client = SnmpClient(make_v2c_params())
         with pytest.raises(ValueError, match="at least one OID"):
             client.get([])
@@ -348,6 +349,19 @@ class TestSnmpWalk:
         with pytest.raises(SnmpTransportError, match="Request timed out"):
             SnmpClient(make_v2c_params()).walk("1.3.6.1.2.1.2.2.1.2")
         assert fake_pysnmp.engines[0].closed is True
+
+    def test_walk_wraps_pysnmp_error_without_secrets(self, fake_pysnmp: SimpleNamespace) -> None:
+        original = PySnmpError(f"walk iterator blew up; community={COMMUNITY}")
+        fake_pysnmp.walk_batches = [
+            (None, 0, 0, [varbind("1.3.6.1.2.1.2.2.1.2.1", "Gi0/0")]),
+            original,
+        ]
+        with pytest.raises(SnmpTransportError) as excinfo:
+            SnmpClient(make_v2c_params()).walk("1.3.6.1.2.1.2.2.1.2")
+        assert COMMUNITY not in str(excinfo.value)
+        assert "PySnmpError" in str(excinfo.value)
+        assert excinfo.value.__cause__ is original
+        assert fake_pysnmp.engines[0].closed is True  # cleanup despite the failure
 
     def test_walk_closes_engine_dispatcher(self, fake_pysnmp: SimpleNamespace) -> None:
         SnmpClient(make_v2c_params()).walk("1.3.6.1.2.1.2.2.1.2")

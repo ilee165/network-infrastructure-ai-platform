@@ -14,11 +14,11 @@ import { Fragment, useState } from "react";
 import {
   listDeviceInterfaces,
   listDeviceNeighbors,
+  listDevices,
   type DeviceInterfaceRead,
   type DeviceNeighborRead,
   type DeviceRead,
 } from "../api/devices";
-import { listDevices } from "../api/devices";
 import { listRuns, startRun } from "../api/discovery";
 import type { RunStatus, StartRunRequest } from "../api/discovery";
 import { PageHeader } from "../components/PageHeader";

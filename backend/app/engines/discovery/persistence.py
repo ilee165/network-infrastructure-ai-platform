@@ -279,11 +279,15 @@ _ARTIFACT_TOKENS: dict[str, tuple[str, ...]] = {
 
 def _pick_artifact(artifacts: dict[str, RawArtifact], kind: str) -> RawArtifact:
     """Pick the artifact backing rows of *kind* by command-text token match."""
+    try:
+        tokens = _ARTIFACT_TOKENS[kind]
+    except KeyError:
+        raise ValueError(f"unknown normalized artifact kind {kind!r}") from None
     if not artifacts:
         raise ValueError(f"no raw artifacts available to back normalized {kind!r} rows")
     for command, artifact in artifacts.items():
         lowered = command.lower()
-        if any(token in lowered for token in _ARTIFACT_TOKENS[kind]):
+        if any(token in lowered for token in tokens):
             return artifact
     return next(iter(artifacts.values()))
 

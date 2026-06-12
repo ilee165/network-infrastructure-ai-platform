@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.models.audit import AuditLog
 
-logger = get_logger(__name__)
+_logger = get_logger(__name__)
 
 # M1 audit action vocabulary. Routes, services, and engines must reuse these
 # constants instead of re-typing the strings.
@@ -59,7 +59,7 @@ async def record(
     )
     session.add(entry)
     await session.flush()
-    logger.info(
+    _logger.info(
         "audit.recorded",
         audit_id=str(entry.id),
         actor=actor,

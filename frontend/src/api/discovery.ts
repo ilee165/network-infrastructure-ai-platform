@@ -6,11 +6,12 @@
  */
 
 import { apiFetch } from "./client";
+import type { DeviceStatus } from "./devices";
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
 export type DiscoveryRunStatus = "pending" | "running" | "succeeded" | "failed";
-export type DeviceStatus = "new" | "active" | "unreachable" | "decommissioned";
+export type { DeviceStatus } from "./devices";
 
 // ── Response shapes ───────────────────────────────────────────────────────────
 
