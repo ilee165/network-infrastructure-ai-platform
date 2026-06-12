@@ -1,31 +1,500 @@
 /**
- * Devices: the normalized multi-vendor inventory view.
+ * Devices: normalized multi-vendor inventory view with discovery launcher.
  *
- * Populated in M1 by the discovery engine (SSH/SNMP via the Cisco IOS,
- * Cisco IOS-XE, and Arista EOS plugins) — until then this is an honest
- * empty state, never fake rows.
+ * Populated by the discovery engine (SSH/SNMP via the Cisco IOS, Cisco
+ * IOS-XE, and Arista EOS plugins). Provides:
+ *  - Inventory table (hostname, mgmt IP, vendor, model, OS, status, last discovered)
+ *  - Row expansion for interfaces and neighbors
+ *  - Discovery launcher: seed IPs, hop limit, allowlist CIDRs, credential names
+ *  - Discovery runs list with status badges (polls while pending/running)
  */
 
-import { EmptyState } from "../components/EmptyState";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Fragment, useState } from "react";
+import {
+  listDeviceInterfaces,
+  listDeviceNeighbors,
+  type DeviceInterfaceRead,
+  type DeviceNeighborRead,
+  type DeviceRead,
+} from "../api/devices";
+import { listDevices } from "../api/devices";
+import { getRun, listRuns, startRun } from "../api/discovery";
+import type { RunStatus, StartRunRequest } from "../api/discovery";
 import { PageHeader } from "../components/PageHeader";
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/** Refresh the runs list while any run is pending/running. */
+const RUNS_POLL_MS = 3_000;
+
+const PILL_BASE =
+  "inline-flex items-center rounded border px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider";
+
+type RunStatusValue = RunStatus["status"];
+
+const RUN_PILL: Record<RunStatusValue, string> = {
+  pending: "border-status-warn/40 bg-status-warn/10 text-status-warn",
+  running: "border-accent/40 bg-accent/10 text-accent",
+  succeeded: "border-status-ok/40 bg-status-ok/10 text-status-ok",
+  failed: "border-status-error/40 bg-status-error/10 text-status-error",
+};
+
+// ── Status badge ──────────────────────────────────────────────────────────────
+
+function DeviceStatusBadge({ status }: { status: DeviceRead["status"] }) {
+  const styles: Record<DeviceRead["status"], string> = {
+    active: "border-status-ok/40 bg-status-ok/10 text-status-ok",
+    new: "border-carbon-600 bg-carbon-800 text-zinc-400",
+    unreachable: "border-status-error/40 bg-status-error/10 text-status-error",
+    decommissioned: "border-carbon-600 bg-carbon-900 text-zinc-600",
+  };
+  return <span className={`${PILL_BASE} ${styles[status]}`}>{status}</span>;
+}
+
+// ── Expanded: interfaces table ────────────────────────────────────────────────
+
+function InterfacesPanel({ deviceId }: { deviceId: string }) {
+  const { data, isPending, error } = useQuery({
+    queryKey: ["device-interfaces", deviceId],
+    queryFn: () => listDeviceInterfaces(deviceId),
+  });
+
+  if (isPending) {
+    return <p className="text-xs text-zinc-500 px-4 py-2">Loading interfaces…</p>;
+  }
+  if (error) {
+    return <p className="text-xs text-status-error px-4 py-2">{error.message}</p>;
+  }
+  if (!data || data.length === 0) {
+    return <p className="text-xs text-zinc-500 px-4 py-2">No interfaces recorded.</p>;
+  }
+
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="border-b border-carbon-700 text-left text-zinc-500">
+          <th className="py-1 pr-4 font-medium">Name</th>
+          <th className="py-1 pr-4 font-medium">IP</th>
+          <th className="py-1 pr-4 font-medium">Admin</th>
+          <th className="py-1 pr-4 font-medium">Oper</th>
+          <th className="py-1 pr-4 font-medium">Speed</th>
+          <th className="py-1 font-medium">Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        {data.map((iface: DeviceInterfaceRead) => (
+          <tr key={iface.id} className="border-b border-carbon-800 last:border-0">
+            <td className="py-1 pr-4 font-mono text-zinc-200">{iface.name}</td>
+            <td className="py-1 pr-4 font-mono text-zinc-300">{iface.ip_address ?? "—"}</td>
+            <td className="py-1 pr-4">{iface.admin_status}</td>
+            <td className="py-1 pr-4">{iface.oper_status}</td>
+            <td className="py-1 pr-4">
+              {iface.speed_mbps != null ? `${iface.speed_mbps} Mbps` : "—"}
+            </td>
+            <td className="py-1 text-zinc-500">{iface.description ?? "—"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// ── Expanded: neighbors table ─────────────────────────────────────────────────
+
+function NeighborsPanel({ deviceId }: { deviceId: string }) {
+  const { data, isPending, error } = useQuery({
+    queryKey: ["device-neighbors", deviceId],
+    queryFn: () => listDeviceNeighbors(deviceId),
+  });
+
+  if (isPending) {
+    return <p className="text-xs text-zinc-500 px-4 py-2">Loading neighbors…</p>;
+  }
+  if (error) {
+    return <p className="text-xs text-status-error px-4 py-2">{error.message}</p>;
+  }
+  if (!data || data.length === 0) {
+    return <p className="text-xs text-zinc-500 px-4 py-2">No neighbors recorded.</p>;
+  }
+
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="border-b border-carbon-700 text-left text-zinc-500">
+          <th className="py-1 pr-4 font-medium">Protocol</th>
+          <th className="py-1 pr-4 font-medium">Local Port</th>
+          <th className="py-1 pr-4 font-medium">Neighbor</th>
+          <th className="py-1 pr-4 font-medium">Remote Port</th>
+          <th className="py-1 font-medium">Platform</th>
+        </tr>
+      </thead>
+      <tbody>
+        {data.map((nb: DeviceNeighborRead) => (
+          <tr key={nb.id} className="border-b border-carbon-800 last:border-0">
+            <td className="py-1 pr-4 font-mono uppercase text-zinc-400">{nb.protocol}</td>
+            <td className="py-1 pr-4 font-mono text-zinc-200">{nb.local_interface}</td>
+            <td className="py-1 pr-4 text-zinc-200">{nb.neighbor_name}</td>
+            <td className="py-1 pr-4 text-zinc-300">{nb.neighbor_interface ?? "—"}</td>
+            <td className="py-1 text-zinc-500">{nb.neighbor_platform ?? "—"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// ── Expanded detail row ───────────────────────────────────────────────────────
+
+type DetailTab = "interfaces" | "neighbors";
+
+function DeviceDetailPanel({ deviceId }: { deviceId: string }) {
+  const [tab, setTab] = useState<DetailTab>("interfaces");
+
+  const tabBtn = (t: DetailTab, label: string) => (
+    <button
+      type="button"
+      onClick={() => setTab(t)}
+      className={`px-3 py-1 text-xs font-medium transition-colors ${
+        tab === t
+          ? "border-b-2 border-accent text-zinc-100"
+          : "text-zinc-500 hover:text-zinc-300"
+      }`}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="bg-carbon-950 border-t border-carbon-700 px-4 pb-4 pt-2">
+      <div className="mb-2 flex gap-1 border-b border-carbon-700">
+        {tabBtn("interfaces", "Interfaces")}
+        {tabBtn("neighbors", "Neighbors")}
+      </div>
+      {tab === "interfaces" ? (
+        <InterfacesPanel deviceId={deviceId} />
+      ) : (
+        <NeighborsPanel deviceId={deviceId} />
+      )}
+    </div>
+  );
+}
+
+// ── Inventory table ───────────────────────────────────────────────────────────
+
+function DeviceTable({ devices }: { devices: DeviceRead[] }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const toggle = (id: string) => setExpanded((prev) => (prev === id ? null : id));
+
+  return (
+    <div className="panel overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b border-carbon-700 text-left text-zinc-500">
+            <th className="px-4 py-2 font-medium">Hostname</th>
+            <th className="px-4 py-2 font-medium">Mgmt IP</th>
+            <th className="px-4 py-2 font-medium">Vendor</th>
+            <th className="px-4 py-2 font-medium">Model</th>
+            <th className="px-4 py-2 font-medium">OS Version</th>
+            <th className="px-4 py-2 font-medium">Status</th>
+            <th className="px-4 py-2 font-medium">Last Discovered</th>
+          </tr>
+        </thead>
+        <tbody>
+          {devices.map((device) => (
+            <Fragment key={device.id}>
+              <tr
+                className="cursor-pointer border-b border-carbon-800 transition-colors last:border-0 hover:bg-carbon-800/50"
+                onClick={() => toggle(device.id)}
+              >
+                <td className="px-4 py-2 font-mono text-zinc-100">{device.hostname}</td>
+                <td className="px-4 py-2 font-mono text-zinc-300">{device.mgmt_ip}</td>
+                <td className="px-4 py-2 text-zinc-300">{device.vendor_id ?? "—"}</td>
+                <td className="px-4 py-2 text-zinc-300">{device.model ?? "—"}</td>
+                <td className="px-4 py-2 text-zinc-300">{device.os_version ?? "—"}</td>
+                <td className="px-4 py-2">
+                  <DeviceStatusBadge status={device.status} />
+                </td>
+                <td className="px-4 py-2 text-zinc-500">
+                  {device.last_discovered_at
+                    ? new Date(device.last_discovered_at).toLocaleString()
+                    : "—"}
+                </td>
+              </tr>
+              {expanded === device.id && (
+                <tr>
+                  <td colSpan={7} className="p-0">
+                    <DeviceDetailPanel deviceId={device.id} />
+                  </td>
+                </tr>
+              )}
+            </Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ── Discovery run row ─────────────────────────────────────────────────────────
+
+function RunRow({ run }: { run: RunStatus }) {
+  // Poll this individual run while it is still in-progress.
+  const isActive = run.status === "pending" || run.status === "running";
+  useQuery({
+    queryKey: ["discovery-run", run.id],
+    queryFn: () => getRun(run.id),
+    refetchInterval: isActive ? RUNS_POLL_MS : false,
+    enabled: isActive,
+  });
+
+  return (
+    <tr className="border-b border-carbon-800 last:border-0">
+      <td className="px-4 py-2 font-mono text-[11px] text-zinc-500">{run.id.slice(0, 8)}…</td>
+      <td className="px-4 py-2">
+        <span
+          data-testid={`run-status-${run.status}`}
+          className={`${PILL_BASE} ${RUN_PILL[run.status]}`}
+        >
+          {run.status}
+        </span>
+      </td>
+      <td className="px-4 py-2 font-mono text-xs text-zinc-300">{run.seeds.join(", ")}</td>
+      <td className="px-4 py-2 text-xs text-zinc-500">{run.hop_limit}</td>
+      <td className="px-4 py-2 text-xs text-zinc-500">
+        {new Date(run.created_at).toLocaleString()}
+      </td>
+      {run.error ? (
+        <td className="px-4 py-2 text-xs text-status-error">{run.error}</td>
+      ) : (
+        <td className="px-4 py-2 text-xs text-zinc-600">—</td>
+      )}
+    </tr>
+  );
+}
+
+// ── Discovery launcher ────────────────────────────────────────────────────────
+
+function DiscoveryLauncher() {
+  const queryClient = useQueryClient();
+
+  const [seeds, setSeeds] = useState("");
+  const [hopLimit, setHopLimit] = useState("1");
+  const [allowlist, setAllowlist] = useState("");
+  const [credentials, setCredentials] = useState("");
+
+  const { data: runsData } = useQuery({
+    queryKey: ["discovery-runs"],
+    queryFn: () => listRuns({ limit: 20 }),
+    // Poll while any run is active.
+    refetchInterval: (query) => {
+      const runs = query.state.data?.items ?? [];
+      const hasActive = runs.some(
+        (r) => r.status === "pending" || r.status === "running",
+      );
+      return hasActive ? RUNS_POLL_MS : false;
+    },
+  });
+
+  const mutation = useMutation({
+    mutationFn: (req: StartRunRequest) => startRun(req),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["discovery-runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["devices"] });
+      setSeeds("");
+      setAllowlist("");
+      setCredentials("");
+      setHopLimit("1");
+    },
+  });
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+
+    const seedList = seeds
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const allowlistCidrs = allowlist
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const credNames = credentials
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    mutation.mutate({
+      seeds: seedList,
+      hop_limit: parseInt(hopLimit, 10),
+      allowlist: allowlistCidrs,
+      credential_names: credNames,
+    });
+  }
+
+  const runs = runsData?.items ?? [];
+
+  return (
+    <section aria-label="Discovery" className="flex flex-col gap-4">
+      <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">
+        Discovery runs
+      </h3>
+
+      {/* Launcher form */}
+      <form onSubmit={handleSubmit} className="panel flex flex-wrap items-end gap-3 p-4">
+        <div className="flex flex-col gap-1">
+          <label htmlFor="launcher-seeds" className="text-[11px] text-zinc-500">
+            Seed IPs (comma/space separated)
+          </label>
+          <input
+            id="launcher-seeds"
+            data-testid="launcher-seeds-input"
+            type="text"
+            placeholder="10.0.0.1, 10.0.0.2"
+            value={seeds}
+            onChange={(e) => setSeeds(e.target.value)}
+            className="input w-56"
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label htmlFor="launcher-hop-limit" className="text-[11px] text-zinc-500">
+            Hop limit
+          </label>
+          <input
+            id="launcher-hop-limit"
+            data-testid="launcher-hop-limit-input"
+            type="number"
+            min={0}
+            value={hopLimit}
+            onChange={(e) => setHopLimit(e.target.value)}
+            className="input w-20"
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label htmlFor="launcher-allowlist" className="text-[11px] text-zinc-500">
+            Allowlist CIDRs
+          </label>
+          <input
+            id="launcher-allowlist"
+            data-testid="launcher-allowlist-input"
+            type="text"
+            placeholder="10.0.0.0/24"
+            value={allowlist}
+            onChange={(e) => setAllowlist(e.target.value)}
+            className="input w-40"
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label htmlFor="launcher-credentials" className="text-[11px] text-zinc-500">
+            Credential names
+          </label>
+          <input
+            id="launcher-credentials"
+            data-testid="launcher-credentials-input"
+            type="text"
+            placeholder="prod-ssh"
+            value={credentials}
+            onChange={(e) => setCredentials(e.target.value)}
+            className="input w-40"
+          />
+        </div>
+        <button
+          type="submit"
+          data-testid="launcher-submit-btn"
+          disabled={mutation.isPending || seeds.trim() === "" || allowlist.trim() === ""}
+          className="btn"
+        >
+          {mutation.isPending ? "Starting…" : "Start run"}
+        </button>
+        {mutation.isError ? (
+          <p className="w-full text-xs text-status-error">{mutation.error.message}</p>
+        ) : null}
+      </form>
+
+      {/* Runs list */}
+      {runs.length > 0 ? (
+        <div className="panel overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-carbon-700 text-left text-zinc-500">
+                <th className="px-4 py-2 font-medium">Run ID</th>
+                <th className="px-4 py-2 font-medium">Status</th>
+                <th className="px-4 py-2 font-medium">Seeds</th>
+                <th className="px-4 py-2 font-medium">Hops</th>
+                <th className="px-4 py-2 font-medium">Started</th>
+                <th className="px-4 py-2 font-medium">Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runs.map((run) => (
+                <RunRow key={run.id} run={run} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+
 export function DevicesPage() {
+  const { data, error, isPending } = useQuery({
+    queryKey: ["devices"],
+    queryFn: () => listDevices({ limit: 100 }),
+  });
+
+  const devices = data?.items ?? [];
+
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
         title="Devices"
         description="Normalized multi-vendor inventory: devices, interfaces, routes, and neighbors."
         actions={
-          <button type="button" className="btn" disabled title="Discovery engine lands in M1">
-            Run discovery
-          </button>
+          data ? (
+            <span className="badge">
+              {data.total} device{data.total !== 1 ? "s" : ""}
+            </span>
+          ) : null
         }
       />
-      <EmptyState
-        title="No devices discovered yet"
-        description="The discovery engine (SSH/SNMP through the Cisco IOS, Cisco IOS-XE, and Arista EOS plugins) populates this inventory from seed devices, with every raw command output preserved for audit."
-        milestone="M1"
-      />
+
+      {/* Inventory section */}
+      <section aria-label="Device inventory" className="flex flex-col gap-3">
+        <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">Inventory</h3>
+        {isPending ? (
+          <p role="status" className="text-xs text-zinc-500">
+            Loading inventory…
+          </p>
+        ) : null}
+        {error ? (
+          <div
+            role="alert"
+            className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
+          >
+            Inventory load failed: {error.message}
+          </div>
+        ) : null}
+        {!isPending && !error && devices.length === 0 ? (
+          <div
+            data-testid="devices-empty-state"
+            className="flex flex-col items-center justify-center gap-2 rounded-md border border-dashed border-carbon-600 bg-carbon-900/50 px-6 py-16 text-center"
+          >
+            <p className="text-sm font-medium text-zinc-200">No devices discovered yet</p>
+            <p className="max-w-md text-xs leading-relaxed text-zinc-500">
+              Start a discovery run below to seed the inventory from your network devices via
+              SSH/SNMP. The discovery engine uses the Cisco IOS, Cisco IOS-XE, and Arista EOS
+              plugins.
+            </p>
+          </div>
+        ) : null}
+        {devices.length > 0 ? <DeviceTable devices={devices} /> : null}
+      </section>
+
+      <DiscoveryLauncher />
     </div>
   );
 }
