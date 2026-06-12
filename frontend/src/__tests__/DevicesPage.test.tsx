@@ -244,4 +244,19 @@ describe("DevicesPage — run status list", () => {
     expect(await screen.findByTestId("run-status-pending")).toBeInTheDocument();
     expect(screen.getByText(/10\.0\.0\.1/)).toBeInTheDocument();
   });
+
+  it("never fires a per-run GET /discovery/runs/{id} request — status comes from the list poll only", async () => {
+    const mock = fetchRouted(EMPTY_LIST, RUNS_WITH_PENDING);
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    // Wait for the run badge to appear (list poll has resolved).
+    await screen.findByTestId("run-status-pending");
+
+    // No call should have targeted the individual run URL.
+    const perRunCalls = mock.mock.calls.filter(([url]: [string]) =>
+      new RegExp(`/discovery/runs/${PENDING_RUN.id}`).test(String(url)),
+    );
+    expect(perRunCalls).toHaveLength(0);
+  });
 });

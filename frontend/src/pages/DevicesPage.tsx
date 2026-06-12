@@ -19,7 +19,7 @@ import {
   type DeviceRead,
 } from "../api/devices";
 import { listDevices } from "../api/devices";
-import { getRun, listRuns, startRun } from "../api/discovery";
+import { listRuns, startRun } from "../api/discovery";
 import type { RunStatus, StartRunRequest } from "../api/discovery";
 import { PageHeader } from "../components/PageHeader";
 
@@ -240,15 +240,9 @@ function DeviceTable({ devices }: { devices: DeviceRead[] }) {
 // ── Discovery run row ─────────────────────────────────────────────────────────
 
 function RunRow({ run }: { run: RunStatus }) {
-  // Poll this individual run while it is still in-progress.
-  const isActive = run.status === "pending" || run.status === "running";
-  useQuery({
-    queryKey: ["discovery-run", run.id],
-    queryFn: () => getRun(run.id),
-    refetchInterval: isActive ? RUNS_POLL_MS : false,
-    enabled: isActive,
-  });
-
+  // Status is kept live by the list-level refetchInterval on ['discovery-runs']
+  // in DiscoveryLauncher. No per-row poll needed — it would fire requests whose
+  // results are discarded (the prop value from the parent is what renders).
   return (
     <tr className="border-b border-carbon-800 last:border-0">
       <td className="px-4 py-2 font-mono text-[11px] text-zinc-500">{run.id.slice(0, 8)}…</td>
