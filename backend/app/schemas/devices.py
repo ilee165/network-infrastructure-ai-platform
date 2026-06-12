@@ -60,6 +60,7 @@ class DeviceCreate(BaseModel):
     os_version: str | None = Field(default=None, max_length=128)
     serial: str | None = Field(default=None, max_length=128)
     status: DeviceStatus = DeviceStatus.NEW
+    site: str | None = Field(default=None, max_length=128)
     credential_id: uuid.UUID | None = None
 
 
@@ -75,6 +76,7 @@ class DeviceUpdate(BaseModel):
     os_version: str | None = Field(default=None, max_length=128)
     serial: str | None = Field(default=None, max_length=128)
     status: DeviceStatus | None = None
+    site: str | None = Field(default=None, max_length=128)
     credential_id: uuid.UUID | None = None
 
 
@@ -91,6 +93,7 @@ class DeviceRead(BaseModel):
     os_version: str | None
     serial: str | None
     status: DeviceStatus
+    site: str | None
     credential_id: uuid.UUID | None
     last_discovered_at: datetime | None
     created_at: datetime

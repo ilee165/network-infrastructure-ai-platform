@@ -136,6 +136,7 @@ class Device(UuidPkMixin, TimestampMixin, Base):
     status: Mapped[DeviceStatus] = mapped_column(
         _wire_enum(DeviceStatus), nullable=False, default=DeviceStatus.NEW
     )
+    site: Mapped[str | None] = mapped_column(String(128))
     credential_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("device_credentials.id"), index=True
     )

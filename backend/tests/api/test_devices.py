@@ -341,6 +341,90 @@ class TestDeviceDelete:
         assert response.status_code == 404
 
 
+class TestDeviceSiteAssignment:
+    """M2-03: static site assignment — set, clear, persist through list/detail."""
+
+    async def test_create_with_site(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        body = await _create_device(client, auth_headers("engineer"), site="dc-west-1")
+        assert body["site"] == "dc-west-1"
+
+    async def test_create_without_site_is_none(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        body = await _create_device(client, auth_headers("engineer"))
+        assert body["site"] is None
+
+    async def test_site_appears_in_list(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        engineer = auth_headers("engineer")
+        await _create_device(client, engineer, site="dc-east-1")
+        response = await client.get("/api/v1/devices", headers=auth_headers("viewer"))
+        assert response.status_code == 200
+        items = response.json()["items"]
+        assert items[0]["site"] == "dc-east-1"
+
+    async def test_site_appears_in_detail(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        created = await _create_device(client, auth_headers("engineer"), site="dc-north-1")
+        response = await client.get(
+            f"/api/v1/devices/{created['id']}", headers=auth_headers("viewer")
+        )
+        assert response.status_code == 200
+        assert response.json()["site"] == "dc-north-1"
+
+    async def test_patch_sets_site(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        created = await _create_device(client, auth_headers("engineer"))
+        response = await client.patch(
+            f"/api/v1/devices/{created['id']}",
+            json={"site": "dc-west-1"},
+            headers=auth_headers("engineer"),
+        )
+        assert response.status_code == 200
+        assert response.json()["site"] == "dc-west-1"
+
+    async def test_patch_clears_site(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        created = await _create_device(client, auth_headers("engineer"), site="dc-west-1")
+        response = await client.patch(
+            f"/api/v1/devices/{created['id']}",
+            json={"site": None},
+            headers=auth_headers("engineer"),
+        )
+        assert response.status_code == 200
+        assert response.json()["site"] is None
+
+    async def test_site_max_length_is_validated(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        response = await client.post(
+            "/api/v1/devices",
+            json=_payload(site="x" * 129),
+            headers=auth_headers("engineer"),
+        )
+        assert response.status_code == 422
+
+
 class TestDeviceAuditTrail:
     async def test_full_crud_audit_rows(
         self,
