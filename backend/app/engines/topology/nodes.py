@@ -129,6 +129,7 @@ class InterfaceNode(GraphNode):
     admin_status: InterfaceAdminStatus
     oper_status: InterfaceOperStatus
     mac_address: str | None
+    ip_address: str | None
 
 
 class IPAddressNode(GraphNode):
@@ -272,6 +273,7 @@ def derive_nodes(
                     admin_status=row.admin_status,
                     oper_status=row.oper_status,
                     mac_address=row.mac_address,
+                    ip_address=row.ip_address,
                 )
                 for row in interfaces
             ),

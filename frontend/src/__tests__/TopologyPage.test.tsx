@@ -19,13 +19,17 @@ import { toCytoscapeElements } from "../pages/topology-graph";
 
 interface TapHandler {
   selector: string;
-  handler: (evt: { target: { id: () => string } }) => void;
+  handler: (evt: { target: { id: () => string } | MockCyInstance }) => void;
 }
 
 interface MockCyInstance {
   options: unknown;
   handlers: TapHandler[];
-  on: (event: string, selector: string, handler: TapHandler["handler"]) => void;
+  on: (
+    event: string,
+    selectorOrHandler: string | TapHandler["handler"],
+    handler?: TapHandler["handler"],
+  ) => void;
   destroy: ReturnType<typeof vi.fn>;
   resize: ReturnType<typeof vi.fn>;
   fit: ReturnType<typeof vi.fn>;
@@ -39,9 +43,15 @@ vi.mock("cytoscape", () => {
     const instance: MockCyInstance = {
       options,
       handlers: [],
-      on(event, selector, handler) {
+      on(event, selectorOrHandler, handler?) {
         if (event === "tap") {
-          this.handlers.push({ selector, handler });
+          if (typeof selectorOrHandler === "function") {
+            // Two-argument form: cy.on('tap', handler) — background tap
+            this.handlers.push({ selector: "", handler: selectorOrHandler });
+          } else if (handler !== undefined) {
+            // Three-argument form: cy.on('tap', 'node', handler)
+            this.handlers.push({ selector: selectorOrHandler, handler });
+          }
         }
       },
       destroy: vi.fn(),
@@ -69,6 +79,20 @@ function tapNode(id: string): void {
   for (const { selector, handler } of lastCy().handlers) {
     if (selector === "node") {
       handler({ target: { id: () => id } });
+    }
+  }
+}
+
+/**
+ * Fire a background tap (no node selected) on the most recently created
+ * cytoscape instance. The handler receives ``evt.target === cy`` which is
+ * exactly what TopologyCanvas checks to clear the selection.
+ */
+function tapBackground(): void {
+  const cy = lastCy();
+  for (const { selector, handler } of cy.handlers) {
+    if (selector === "") {
+      handler({ target: cy });
     }
   }
 }
@@ -107,6 +131,7 @@ const GRAPH: TopologyGraph = {
         admin_status: "up",
         oper_status: "down",
         mac_address: "00:11:22:33:44:55",
+        ip_address: "10.0.0.1/24",
       },
     },
     {
@@ -316,7 +341,7 @@ describe("TopologyPage — node detail panel", () => {
     expect(panel).toHaveTextContent("hq-dc");
   });
 
-  it("renders interface fields when an Interface node is clicked", async () => {
+  it("renders interface fields including IP when an Interface node is clicked", async () => {
     vi.stubGlobal("fetch", fetchGraph(GRAPH));
     renderPage();
 
@@ -326,5 +351,21 @@ describe("TopologyPage — node detail panel", () => {
     const panel = await screen.findByTestId("topology-detail-panel");
     expect(panel).toHaveTextContent("GigabitEthernet0/1");
     expect(panel).toHaveTextContent("down");
+    expect(panel).toHaveTextContent("10.0.0.1/24");
+  });
+
+  it("clears the detail panel when the background is tapped", async () => {
+    vi.stubGlobal("fetch", fetchGraph(GRAPH));
+    renderPage();
+
+    await waitFor(() => expect(cyInstances.length).toBeGreaterThan(0));
+
+    // Select a node first so the detail panel is visible.
+    tapNode(DEVICE_KEY);
+    expect(await screen.findByTestId("topology-detail-panel")).toBeInTheDocument();
+
+    // Tap background — detail panel must revert to the empty hint.
+    tapBackground();
+    expect(await screen.findByTestId("topology-detail-empty")).toBeInTheDocument();
   });
 });

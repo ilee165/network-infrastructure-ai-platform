@@ -84,7 +84,7 @@ export function toCytoscapeElements(graph: TopologyGraph): CytoscapeElement[] {
   }));
   const edges: CytoscapeElement[] = graph.edges.map((edge) => ({
     data: {
-      id: `${edge.source}→${edge.target}:${edge.type}`,
+      id: `${edge.source}:${edge.target}:${edge.type}`,
       label: edge.type,
       display: edge.type,
       source: edge.source,
@@ -117,6 +117,7 @@ export function detailFields(node: TopologyNode): { label: string; value: string
         { label: "Name", value: nodeProp(node, "name") },
         { label: "Admin Status", value: nodeProp(node, "admin_status") },
         { label: "Oper Status", value: nodeProp(node, "oper_status") },
+        { label: "IP", value: nodeProp(node, "ip_address") },
         { label: "MAC", value: nodeProp(node, "mac_address") },
       ];
     case "IPAddress":

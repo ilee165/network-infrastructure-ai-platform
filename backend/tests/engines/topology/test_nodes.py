@@ -152,10 +152,11 @@ class TestDeviceNodes:
 
 
 class TestInterfaceNodes:
-    def test_carries_name_statuses_and_mac(self) -> None:
+    def test_carries_name_statuses_mac_and_ip_address(self) -> None:
         iface = make_interface(
             uuid4(),
             "Gi0/0",
+            ip_address="10.1.0.1/24",
             mac_address="aa:bb:cc:dd:ee:ff",
             admin_status=InterfaceAdminStatus.UP,
             oper_status=InterfaceOperStatus.DOWN,
@@ -168,8 +169,14 @@ class TestInterfaceNodes:
                 admin_status=InterfaceAdminStatus.UP,
                 oper_status=InterfaceOperStatus.DOWN,
                 mac_address="aa:bb:cc:dd:ee:ff",
+                ip_address="10.1.0.1/24",
             ),
         )
+
+    def test_ip_address_none_when_interface_has_no_address(self) -> None:
+        iface = make_interface(uuid4(), "Gi0/1")
+        derived = derive_nodes([], [iface], [])
+        assert derived.interfaces[0].ip_address is None
 
     def test_sorted_by_name_then_pg_id(self) -> None:
         device_id = uuid4()
@@ -349,6 +356,7 @@ class TestNeo4jProperties:
             admin_status=InterfaceAdminStatus.UP,
             oper_status=InterfaceOperStatus.DOWN,
             mac_address=None,
+            ip_address=None,
         )
         props = node.neo4j_properties(PROJECTED_AT)
         assert props["admin_status"] == "up"

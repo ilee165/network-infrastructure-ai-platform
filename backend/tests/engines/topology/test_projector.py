@@ -118,6 +118,7 @@ def small_nodes() -> DerivedNodes:
                 admin_status="up",
                 oper_status="up",
                 mac_address=None,
+                ip_address="10.0.0.1/24",
             ),
             InterfaceNode(
                 pg_id=IF2,
@@ -125,6 +126,7 @@ def small_nodes() -> DerivedNodes:
                 admin_status="up",
                 oper_status="down",
                 mac_address="aa:bb:cc:dd:ee:ff",
+                ip_address=None,
             ),
         ),
         ip_addresses=(IPAddressNode(pg_id=IF1, address="10.0.0.1"),),
