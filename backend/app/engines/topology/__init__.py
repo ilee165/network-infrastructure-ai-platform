@@ -30,9 +30,21 @@ from app.engines.topology.nodes import (
     VrfNode,
     derive_nodes,
 )
+from app.engines.topology.projector import (
+    DEFAULT_BATCH_SIZE,
+    PROJECTED_NODE_LABELS,
+    PROJECTED_REL_TYPES,
+    DerivedEdges,
+    full_rebuild,
+    project,
+)
 
 __all__ = [
+    "DEFAULT_BATCH_SIZE",
+    "PROJECTED_NODE_LABELS",
+    "PROJECTED_REL_TYPES",
     "ConnectedToEdge",
+    "DerivedEdges",
     "DerivedL3Edges",
     "DerivedNodes",
     "DeviceNode",
@@ -53,4 +65,6 @@ __all__ = [
     "build_l2_edges",
     "build_l3_edges",
     "derive_nodes",
+    "full_rebuild",
+    "project",
 ]
