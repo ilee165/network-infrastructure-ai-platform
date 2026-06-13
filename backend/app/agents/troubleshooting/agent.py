@@ -338,17 +338,24 @@ class TroubleshootingAgent(BaseSpecialistAgent):
             classification = state["classification"]
             trace = state["trace"]
             assert trace is not None  # noqa: S101 - symptom always sets the trace
-            evidence = state["evidence"]
-            answer = _compose_answer(classification, evidence)
-            await recorder.record_step(
-                trace.trace_id,
-                TraceStep(
-                    kind=TraceStepKind.CONCLUSION,
-                    summary=answer,
-                    evidence=evidence,
-                ),
-            )
-            completed = await recorder.complete(trace.trace_id)
+            # Guard: hypothesis may not have written 'evidence' if it raised
+            # before returning (e.g. an unexpected exception); default to []
+            # so the trace is always completed and no KeyError escapes.
+            evidence: list[EvidenceRef] = state.get("evidence", [])
+            completed = trace
+            try:
+                answer = _compose_answer(classification, evidence)
+                await recorder.record_step(
+                    trace.trace_id,
+                    TraceStep(
+                        kind=TraceStepKind.CONCLUSION,
+                        summary=answer,
+                        evidence=evidence,
+                    ),
+                )
+            finally:
+                # Always complete the trace so it is never left permanently open.
+                completed = await recorder.complete(trace.trace_id)
             return {"messages": [AIMessage(content=answer)], "trace": completed}
 
         graph: StateGraph[
@@ -412,9 +419,20 @@ def _evidence_from_tool_output(
 
 
 def _record_matches(record: dict[str, Any], target: str) -> bool:
-    """Whether *record* concerns the user-named *target* (peer/prefix/acl/id)."""
+    """Whether *record* concerns the user-named *target* (peer/prefix/acl/id).
+
+    Exact equality is used for IP addresses and prefixes to avoid false
+    positives: '10.0.0.2' must not match '10.0.0.20' or '10.0.0.200'.
+    For prefix matching a bare host address like '10.0.0.0' is allowed to
+    match '10.0.0.0/24' (the needle matches the network part before '/').
+    All other string fields (e.g. ACL name) also use exact equality.
+    """
     needle = target.strip().lower()
-    return any(isinstance(value, str) and needle in value.lower() for value in record.values())
+    return any(
+        isinstance(value, str)
+        and (needle == value.lower() or value.lower().startswith(needle + "/"))
+        for value in record.values()
+    )
 
 
 def _record_id(record: dict[str, Any]) -> str:

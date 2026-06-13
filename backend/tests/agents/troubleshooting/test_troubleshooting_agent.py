@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Annotated, Any
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import Field
 
@@ -294,6 +295,208 @@ class TestBgpPeerDownDiagnosis:
         # No fabricated evidence.
         all_evidence = [ref for step in recorder.list_traces()[0].steps for ref in step.evidence]
         assert not all_evidence
+
+
+# ---------------------------------------------------------------------------
+# Fixture-backed fake tools for OSPF, ACL, and routing domains
+# (finding 4: the tool-wiring dicts must be exercised for all four domains)
+# ---------------------------------------------------------------------------
+
+OSPF_NEIGHBOR_ID = "192.0.2.1"
+
+_OSPF_PAYLOAD = json.dumps(
+    {
+        "device_id": DEVICE_Y,
+        "neighbors": [
+            {
+                "neighbor_id": OSPF_NEIGHBOR_ID,
+                "interface": "GigabitEthernet0/0",
+                "state": "exstart",
+                "neighbor_address": "192.0.2.1",
+                "area": "0.0.0.0",
+                "priority": 1,
+                "dead_time_seconds": 30,
+            }
+        ],
+    }
+)
+
+ACL_NAME = "BLOCK_HTTP"
+
+_ACL_PAYLOAD = json.dumps(
+    {
+        "device_id": DEVICE_Y,
+        "acls": [
+            {
+                "acl_name": ACL_NAME,
+                "action": "deny",
+                "protocol": "tcp",
+                "sequence": 10,
+                "source": "10.0.0.0/8",
+                "source_port": None,
+                "destination": "0.0.0.0/0",
+                "destination_port": "80",
+                "hits": 42,
+            }
+        ],
+    }
+)
+
+ROUTE_PREFIX = "10.1.0.0/24"
+
+_ROUTING_PAYLOAD = json.dumps(
+    {
+        "device_id": DEVICE_Y,
+        "routes": [
+            {
+                "prefix": ROUTE_PREFIX,
+                "protocol": "bgp",
+                "next_hop": "10.0.0.2",
+                "interface": None,
+                "vrf": None,
+                "distance": 20,
+                "metric": 0,
+            }
+        ],
+    }
+)
+
+
+@netops_tool(classification=ToolClassification.READ_ONLY, name="read_live_ospf_neighbors")
+async def _fake_ospf_neighbors(
+    device_id: Annotated[str, Field(description="device UUID")],
+) -> str:
+    """Fixture-backed OSPF read: neighbor 192.0.2.1 stuck in EXSTART."""
+    return _OSPF_PAYLOAD
+
+
+@netops_tool(classification=ToolClassification.READ_ONLY, name="read_live_acls")
+async def _fake_acls(
+    device_id: Annotated[str, Field(description="device UUID")],
+) -> str:
+    """Fixture-backed ACL read: BLOCK_HTTP denies TCP port 80."""
+    return _ACL_PAYLOAD
+
+
+@netops_tool(classification=ToolClassification.READ_ONLY, name="get_device_routes")
+async def _fake_routes(
+    device_id: Annotated[str, Field(description="device UUID")],
+    prefix: Annotated[str | None, Field(default=None, description="optional prefix filter")] = None,
+) -> str:
+    """Fixture-backed routing read: one BGP route for 10.1.0.0/24."""
+    return _ROUTING_PAYLOAD
+
+
+@contextmanager
+def _tool_patched(fake_tool: NetOpsTool) -> Iterator[None]:
+    """Swap one real tool for a fixture-backed fake in TROUBLESHOOTING_TOOLS."""
+    import app.agents.troubleshooting.tools as _tools_mod
+
+    original = _tools_mod.TROUBLESHOOTING_TOOLS[:]
+    _tools_mod.TROUBLESHOOTING_TOOLS[:] = [
+        fake_tool if t.name == fake_tool.name else t for t in original
+    ]
+    try:
+        yield
+    finally:
+        _tools_mod.TROUBLESHOOTING_TOOLS[:] = original
+
+
+# ---------------------------------------------------------------------------
+# Parametrized graph tests for OSPF, ACL, and routing domains (finding 4)
+# Exercises: _DOMAIN_TOOL mapping, _TOOL_RECORD_KEY, and _RECORD_SUMMARY
+# ---------------------------------------------------------------------------
+
+
+class TestOspfAclRoutingGraphDomains:
+    """End-to-end graph tests for OSPF, ACL, and routing — mirrors BGP tests.
+
+    A typo or wrong key in _DOMAIN_TOOL, _TOOL_RECORD_KEY, or _RECORD_SUMMARY
+    for any of these three domains would be caught here.
+    """
+
+    @pytest.mark.parametrize(
+        "domain, target, fake_tool, expected_tool_name, expected_evidence_kind, target_in_ref",
+        [
+            (
+                "ospf",
+                OSPF_NEIGHBOR_ID,
+                _fake_ospf_neighbors,
+                "read_live_ospf_neighbors",
+                "ospf_neighbor",
+                OSPF_NEIGHBOR_ID,
+            ),
+            (
+                "acl",
+                ACL_NAME,
+                _fake_acls,
+                "read_live_acls",
+                "acl_entry",
+                ACL_NAME,
+            ),
+            (
+                "routing",
+                ROUTE_PREFIX,
+                _fake_routes,
+                "get_device_routes",
+                "route",
+                ROUTE_PREFIX,
+            ),
+        ],
+    )
+    async def test_domain_graph_calls_correct_tool_and_produces_evidence(
+        self,
+        domain: str,
+        target: str,
+        fake_tool: NetOpsTool,
+        expected_tool_name: str,
+        expected_evidence_kind: str,
+        target_in_ref: str,
+    ) -> None:
+        """Full graph run for a domain yields the correct tool call and evidence kind."""
+        recorder = InMemoryTraceRecorder()
+        agent = _make_agent(trace_recorder=recorder)
+        llm = scripted_model(
+            [_classification_reply(domain=domain, device_id=DEVICE_Y, target=target)]
+        )
+        graph = agent.build_graph(llm)
+        with _tool_patched(fake_tool):
+            result = await graph.ainvoke(
+                {
+                    "messages": [
+                        HumanMessage(
+                            content=f"Diagnose {domain} problem for {target} on {DEVICE_Y}"
+                        )
+                    ]
+                }
+            )
+
+        # A final AIMessage answer was produced.
+        final = result["messages"][-1]
+        assert isinstance(final, AIMessage)
+
+        # The trace completed with at least one evidence ref of the right kind.
+        traces = recorder.list_traces()
+        assert len(traces) == 1
+        trace = traces[0]
+        assert trace.is_complete
+
+        tool_steps = [s for s in trace.steps if s.kind is TraceStepKind.TOOL_CALL]
+        assert tool_steps, f"expected a TOOL_CALL step for domain '{domain}'"
+        assert tool_steps[0].tool_name == expected_tool_name, (
+            f"expected tool '{expected_tool_name}', got '{tool_steps[0].tool_name}'"
+        )
+
+        all_evidence = [ref for step in trace.steps for ref in step.evidence]
+        kind_refs = [r for r in all_evidence if r.kind == expected_evidence_kind]
+        assert kind_refs, (
+            f"expected at least one '{expected_evidence_kind}' evidence ref; "
+            f"got kinds: {[r.kind for r in all_evidence]}"
+        )
+        assert any(target_in_ref.lower() in r.reference.lower() for r in kind_refs), (
+            f"expected reference containing '{target_in_ref}'; "
+            f"got refs: {[r.reference for r in kind_refs]}"
+        )
 
 
 # ---------------------------------------------------------------------------

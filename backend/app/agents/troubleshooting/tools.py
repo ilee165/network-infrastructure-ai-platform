@@ -36,6 +36,7 @@ never aborts a multi-evidence diagnosis.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Annotated, Any
 from uuid import UUID
@@ -153,19 +154,26 @@ async def _read_live(device_id: str, capability_name: str, method_name: str) -> 
     try:
         # Fail fast (and explainably) when the vendor lacks the capability —
         # "FortiOS plugin does not implement OSPF analysis" (ADR-0006).
-        get_default_registry().resolve(vendor_id, capability)
+        impl = get_default_registry().resolve(vendor_id, capability)
     except NetOpsError as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
-    # The (vendor, capability) pair resolves; executing it needs a credentialed
-    # transport (M5). Tests substitute fixture-backed fake tools for this body.
-    _ = (uid, method_name)
-    return {
-        "error": (
-            f"live {capability.value!r} read for vendor {vendor_id!r} is not yet wired: "
-            "the credential/transport session lands in M5"
-        )
-    }
+    # The capability method is a synchronous blocking call (netmiko/pysnmp,
+    # ADR-0007 §3). Run it via asyncio.to_thread to keep the FastAPI event
+    # loop unblocked (D2: async-first backend). The transport/credential seam
+    # (D11) is injected in M5; until then, constructing a real transport raises
+    # NotImplementedError at the transport-construction seam — not here.
+    # TODO(M5): inject a credentialed transport into impl before this call.
+    try:
+        records = await asyncio.to_thread(getattr(impl, method_name))
+    except NotImplementedError:
+        return {
+            "error": (
+                f"live {capability.value!r} read for vendor {vendor_id!r} is not yet wired: "
+                "the credential/transport session lands in M5"
+            )
+        }
+    return {"records": [r.model_dump(mode="json") for r in records]}
 
 
 # ---------------------------------------------------------------------------
