@@ -5,15 +5,24 @@ rather than acting. In autonomous runs it records the question plus a
 recommended default in ``docs/consultant/QUESTIONS.md`` and proceeds on the
 default.
 
-Register via the framework registry:
+A process-wide singleton and its registry are available for direct import::
 
-    from app.agents.consultant import consultant_agent, registry
-    registry.register(consultant_agent)
+    from app.agents.consultant import ConsultantAgent, consultant_agent, registry
 
-or import :class:`~app.agents.consultant.agent.ConsultantAgent` directly and
-pass a custom ``questions_path`` for tests.
+Pass a custom ``questions_path`` when constructing your own instance for tests::
+
+    from app.agents.consultant import ConsultantAgent
+    agent = ConsultantAgent(questions_path=tmp_path / "QUESTIONS.md")
 """
 
 from app.agents.consultant.agent import ConsultantAgent
+from app.agents.framework.registry import AgentRegistry
 
-__all__ = ["ConsultantAgent"]
+#: Process-wide registry for the consultant package.
+registry: AgentRegistry = AgentRegistry()
+
+#: Process-wide singleton — registered in *registry* at import time.
+consultant_agent: ConsultantAgent = ConsultantAgent()
+registry.register(consultant_agent)
+
+__all__ = ["ConsultantAgent", "consultant_agent", "registry"]

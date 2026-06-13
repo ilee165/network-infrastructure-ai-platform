@@ -43,7 +43,7 @@ _logger = get_logger(__name__)
 #: ``questions_path`` constructor argument (used in tests to avoid touching
 #: the real docs tree).
 _DEFAULT_QUESTIONS_PATH = (
-    Path(__file__).resolve().parents[5] / "docs" / "consultant" / "QUESTIONS.md"
+    Path(__file__).resolve().parents[4] / "docs" / "consultant" / "QUESTIONS.md"
 )
 
 

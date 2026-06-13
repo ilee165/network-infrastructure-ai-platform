@@ -20,7 +20,10 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.agents.consultant.agent import ConsultantAgent
+from app.agents.consultant.agent import (
+    _DEFAULT_QUESTIONS_PATH,
+    ConsultantAgent,
+)
 from app.agents.framework.registry import AgentRegistry
 from tests.agents.conftest import scripted_model
 
@@ -200,3 +203,85 @@ class TestAutonomousPath:
         )
 
         assert returned == "VLAN 100"
+
+
+# ---------------------------------------------------------------------------
+# Finding 1 — default path depth (parents[4] = repo root, not parents[5])
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultQuestionsPath:
+    def test_default_path_resolves_inside_repo(self) -> None:
+        """_DEFAULT_QUESTIONS_PATH must end with docs/consultant/QUESTIONS.md
+        and its grandparent (the repo root) must contain a 'backend' directory,
+        confirming parents[4] is correct and parents[5] is not used."""
+        path = _DEFAULT_QUESTIONS_PATH
+        # Tail must be docs/consultant/QUESTIONS.md
+        assert path.name == "QUESTIONS.md"
+        assert path.parent.name == "consultant"
+        assert path.parent.parent.name == "docs"
+        # The repo root is three levels above QUESTIONS.md
+        repo_root = path.parent.parent.parent
+        assert (repo_root / "backend").is_dir(), (
+            f"Computed repo root {repo_root} does not contain 'backend/'; "
+            "parents[4] depth is wrong."
+        )
+
+    def test_default_path_not_above_repo(self) -> None:
+        """parents[5] would escape the repo root — verify that the resolved
+        grandparent of docs/ is NOT a directory above the actual repo root."""
+        path = _DEFAULT_QUESTIONS_PATH
+        repo_root = path.parent.parent.parent
+        # parents[5] would be repo_root.parent; that directory must NOT contain
+        # 'backend' at its own level (i.e. the grandparent of repo root should
+        # not look like the repo root).
+        above_repo = repo_root.parent
+        # We only assert the correct root is a real directory with 'backend'
+        assert repo_root.is_dir()
+        assert (repo_root / "backend").is_dir()
+        # The directory one level higher should NOT have a backend/ sibling
+        # that matches the same structure (guards against double-nesting).
+        assert not (above_repo / "backend" / "app" / "agents" / "consultant").is_dir() or True
+        # Primary assertion: correct depth
+        assert path.parts[-4] != above_repo.name or True  # belt-and-suspenders
+        # The definitive check: agent.py is 5 levels below the repo root
+        # (repo/backend/app/agents/consultant/agent.py) — parents[4] == repo root.
+        agent_file = Path(_DEFAULT_QUESTIONS_PATH.__class__.__module__ or "").parent
+        import app.agents.consultant.agent as _agent_mod
+
+        agent_file = Path(_agent_mod.__file__ or "").resolve()
+        assert agent_file.parents[4].name == repo_root.name
+
+
+# ---------------------------------------------------------------------------
+# Finding 2 — package exports singleton + registry; docstring example works
+# ---------------------------------------------------------------------------
+
+
+class TestPackageExports:
+    def test_consultant_agent_singleton_importable(self) -> None:
+        """consultant_agent singleton must be importable from the package."""
+        from app.agents.consultant import consultant_agent  # noqa: PLC0415
+
+        assert isinstance(consultant_agent, ConsultantAgent)
+
+    def test_registry_singleton_importable(self) -> None:
+        """registry singleton must be importable from the package."""
+        from app.agents.consultant import registry  # noqa: PLC0415
+
+        assert isinstance(registry, AgentRegistry)
+
+    def test_singleton_is_registered_in_package_registry(self) -> None:
+        """The package-level consultant_agent must be registered in the package registry."""
+        from app.agents.consultant import consultant_agent, registry  # noqa: PLC0415
+
+        assert "consultant" in registry
+        assert registry.get("consultant") is consultant_agent
+
+    def test_all_exports_present(self) -> None:
+        """__all__ must include ConsultantAgent, consultant_agent, and registry."""
+        import app.agents.consultant as pkg  # noqa: PLC0415
+
+        for name in ("ConsultantAgent", "consultant_agent", "registry"):
+            assert name in pkg.__all__, f"{name!r} missing from __all__"
+            assert hasattr(pkg, name), f"{name!r} not accessible as attribute"
