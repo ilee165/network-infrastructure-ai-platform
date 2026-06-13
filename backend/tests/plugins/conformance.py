@@ -54,6 +54,7 @@ from pydantic import ValidationError
 
 from app.core.errors import PluginError
 from app.plugins.base import (
+    AclCapability,
     BgpCapability,
     Capability,
     ConfigBackupCapability,
@@ -61,6 +62,7 @@ from app.plugins.base import (
     DiscoverySshCapability,
     InterfacesCapability,
     NeighborsCapability,
+    OspfCapability,
     PluginCapability,
     RoutesCapability,
     VendorPlugin,
@@ -68,9 +70,11 @@ from app.plugins.base import (
 from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     NeighborProtocol,
+    NormalizedAclEntry,
     NormalizedBgpPeer,
     NormalizedInterface,
     NormalizedNeighbor,
+    NormalizedOspfNeighbor,
     NormalizedRecord,
     NormalizedRoute,
 )
@@ -130,6 +134,8 @@ _INTERFACE_SPECS: dict[Capability, _InterfaceSpec] = {
         NeighborsCapability, "get_cdp_neighbors", NormalizedNeighbor, NeighborProtocol.CDP
     ),
     Capability.BGP: _InterfaceSpec(BgpCapability, "get_bgp_peers", NormalizedBgpPeer),
+    Capability.OSPF: _InterfaceSpec(OspfCapability, "get_ospf_neighbors", NormalizedOspfNeighbor),
+    Capability.ACL: _InterfaceSpec(AclCapability, "get_acls", NormalizedAclEntry),
     Capability.CONFIG_BACKUP: _InterfaceSpec(ConfigBackupCapability, "fetch_running_config", None),
 }
 

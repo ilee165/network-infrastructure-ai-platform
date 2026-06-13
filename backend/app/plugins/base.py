@@ -40,13 +40,16 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from app.core.errors import PluginError
 from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
+    NormalizedAclEntry,
     NormalizedBgpPeer,
     NormalizedInterface,
     NormalizedNeighbor,
+    NormalizedOspfNeighbor,
     NormalizedRoute,
 )
 
 __all__ = [
+    "AclCapability",
     "BgpCapability",
     "Capability",
     "CommandTransport",
@@ -56,6 +59,7 @@ __all__ = [
     "DiscoverySshCapability",
     "InterfacesCapability",
     "NeighborsCapability",
+    "OspfCapability",
     "PluginCapability",
     "RawOutput",
     "RoutesCapability",
@@ -277,6 +281,26 @@ class BgpCapability(PluginCapability):
     @abstractmethod
     def get_bgp_peers(self) -> list[NormalizedBgpPeer]:
         """Return BGP peering sessions as normalized records."""
+
+
+class OspfCapability(PluginCapability):
+    """``Capability.OSPF`` — OSPF neighbor/adjacency state."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.OSPF})
+
+    @abstractmethod
+    def get_ospf_neighbors(self) -> list[NormalizedOspfNeighbor]:
+        """Return OSPF neighbor adjacencies as normalized records."""
+
+
+class AclCapability(PluginCapability):
+    """``Capability.ACL`` — access-control list entries."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.ACL})
+
+    @abstractmethod
+    def get_acls(self) -> list[NormalizedAclEntry]:
+        """Return ACL entries as normalized records."""
 
 
 class ConfigBackupCapability(PluginCapability):
