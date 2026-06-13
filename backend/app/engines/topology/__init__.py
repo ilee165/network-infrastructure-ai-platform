@@ -5,6 +5,10 @@ package derives the typed graph nodes (and, in later tasks, relationships
 and projection plumbing) from inventory rows.
 """
 
+from app.engines.topology.diff import (
+    TopologyDiff,
+    diff_snapshots,
+)
 from app.engines.topology.edges import (
     ConnectedToEdge,
     DerivedL3Edges,
@@ -66,12 +70,14 @@ __all__ = [
     "SiteNode",
     "SnapshotData",
     "SubnetNode",
+    "TopologyDiff",
     "VlanNode",
     "VrfNode",
     "build_l2_edges",
     "build_l3_edges",
     "build_snapshot",
     "derive_nodes",
+    "diff_snapshots",
     "full_rebuild",
     "project",
     "upsert_snapshot",
