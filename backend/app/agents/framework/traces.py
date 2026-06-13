@@ -13,11 +13,15 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import NotFoundError
+from app.models.agents import ReasoningTraceRow, ReasoningTraceStep
+from app.models.agents import TraceStepKind as OrmTraceStepKind
 
 
 def _utcnow() -> datetime:
@@ -174,3 +178,163 @@ class InMemoryTraceRecorder:
     def list_traces(self) -> list[ReasoningTrace]:
         """Return all retained traces in insertion order."""
         return list(self._traces.values())
+
+
+def _trace_uuid(trace_id: str) -> uuid.UUID:
+    """Parse a hex ``trace_id`` into a :class:`uuid.UUID`.
+
+    ``ReasoningTrace.trace_id`` is a 32-char hex string (``uuid4().hex``); the
+    persistence layer keys on a real ``uuid.UUID``. A malformed id can never
+    name an existing row, so it is surfaced as :class:`NotFoundError` rather
+    than a raw ``ValueError``.
+    """
+    try:
+        return uuid.UUID(hex=trace_id)
+    except ValueError:
+        raise NotFoundError(f"reasoning trace '{trace_id}' does not exist") from None
+
+
+class PostgresTraceRecorder:
+    """Database-backed trace recorder — the M3 implementation (brief §5/§6).
+
+    Persists each agent run to the ``reasoning_traces`` / ``reasoning_trace_steps``
+    tables created in M3-01 and reloads them losslessly, so "explain every AI
+    decision" is a durable artifact. Implements the same :class:`TraceRecorder`
+    protocol as :class:`InMemoryTraceRecorder`; the two are interchangeable at
+    runtime via :func:`build_trace_recorder`.
+
+    One recorder serves one :class:`~app.models.agents.AgentSession` (supervisor
+    run): ``session_id`` is the FK every persisted trace carries. Each method
+    runs in its own short transaction obtained from the injected sessionmaker,
+    so the recorder owns no long-lived session and is safe to share across the
+    concurrent specialist subgraphs of a single run.
+    """
+
+    def __init__(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        *,
+        session_id: uuid.UUID,
+    ) -> None:
+        self._sessionmaker = sessionmaker
+        self._session_id = session_id
+
+    async def start(self, agent_name: str) -> ReasoningTrace:
+        """Open and persist a new trace for *agent_name*."""
+        trace = ReasoningTrace(agent_name=agent_name)
+        async with self._sessionmaker() as session:
+            session.add(
+                ReasoningTraceRow(
+                    id=_trace_uuid(trace.trace_id),
+                    session_id=self._session_id,
+                    agent_name=agent_name,
+                    started_at=trace.started_at,
+                )
+            )
+            await session.commit()
+        return trace
+
+    async def record_step(self, trace_id: str, step: TraceStep) -> ReasoningTrace:
+        """Append *step* to the persisted trace and return the reloaded trace."""
+        row_id = _trace_uuid(trace_id)
+        async with self._sessionmaker() as session:
+            await self._require_trace(session, trace_id, row_id)
+            next_ordinal = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ReasoningTraceStep)
+                    .where(ReasoningTraceStep.trace_id == row_id)
+                )
+            ).scalar_one()
+            session.add(
+                ReasoningTraceStep(
+                    trace_id=row_id,
+                    ordinal=next_ordinal,
+                    kind=OrmTraceStepKind(step.kind.value),
+                    summary=step.summary,
+                    detail=step.detail,
+                    tool_name=step.tool_name,
+                    evidence=[ref.model_dump() for ref in step.evidence],
+                    occurred_at=step.occurred_at,
+                )
+            )
+            await session.commit()
+        return await self.get(trace_id)
+
+    async def complete(self, trace_id: str) -> ReasoningTrace:
+        """Stamp ``completed_at`` on the persisted trace (idempotent)."""
+        row_id = _trace_uuid(trace_id)
+        async with self._sessionmaker() as session:
+            row = await self._require_trace(session, trace_id, row_id)
+            if row.completed_at is None:
+                row.completed_at = _utcnow()
+                await session.commit()
+        return await self.get(trace_id)
+
+    async def get(self, trace_id: str) -> ReasoningTrace:
+        """Reload the persisted trace and its ordered steps as Pydantic models."""
+        row_id = _trace_uuid(trace_id)
+        async with self._sessionmaker() as session:
+            row = await self._require_trace(session, trace_id, row_id)
+            step_rows = (
+                (
+                    await session.execute(
+                        select(ReasoningTraceStep)
+                        .where(ReasoningTraceStep.trace_id == row_id)
+                        .order_by(ReasoningTraceStep.ordinal)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return ReasoningTrace(
+            trace_id=row.id.hex,
+            agent_name=row.agent_name,
+            started_at=row.started_at,
+            completed_at=row.completed_at,
+            steps=[_step_from_row(step) for step in step_rows],
+        )
+
+    async def _require_trace(
+        self, session: AsyncSession, trace_id: str, row_id: uuid.UUID
+    ) -> ReasoningTraceRow:
+        """Load the trace row or raise :class:`NotFoundError`."""
+        row = (
+            await session.execute(select(ReasoningTraceRow).where(ReasoningTraceRow.id == row_id))
+        ).scalar_one_or_none()
+        if row is None:
+            raise NotFoundError(f"reasoning trace '{trace_id}' does not exist")
+        return row
+
+
+def _step_from_row(row: ReasoningTraceStep) -> TraceStep:
+    """Rebuild a :class:`TraceStep` from its persisted row."""
+    evidence_payload: list[dict[str, Any]] = row.evidence
+    return TraceStep(
+        kind=TraceStepKind(row.kind.value),
+        summary=row.summary,
+        detail=row.detail,
+        tool_name=row.tool_name,
+        evidence=[EvidenceRef.model_validate(ref) for ref in evidence_payload],
+        occurred_at=row.occurred_at,
+    )
+
+
+def build_trace_recorder(
+    sessionmaker: async_sessionmaker[AsyncSession] | None,
+    *,
+    session_id: uuid.UUID | None,
+) -> TraceRecorder:
+    """Select the trace recorder for the current execution context (DI hook).
+
+    Runtime passes a sessionmaker and the active ``AgentSession`` id to get a
+    :class:`PostgresTraceRecorder`; tests pass ``None`` to get the in-memory
+    recorder. Requiring ``session_id`` whenever a sessionmaker is supplied keeps
+    the FK to ``agent_sessions`` non-optional at the boundary rather than
+    failing later at flush time.
+    """
+    if sessionmaker is None:
+        return InMemoryTraceRecorder()
+    if session_id is None:
+        raise ValueError("session_id is required for the Postgres trace recorder")
+    return PostgresTraceRecorder(sessionmaker, session_id=session_id)
