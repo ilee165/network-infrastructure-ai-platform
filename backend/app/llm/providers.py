@@ -189,8 +189,15 @@ def _build_provider_model(
                 temperature=temperature,
             )
         if selected == "anthropic":
+            import os
+
             from langchain_anthropic import ChatAnthropic
 
+            # langchain_anthropic silently accepts an empty key and only fails
+            # at call time; enforce the credential requirement eagerly so the
+            # error surfaces at configuration time (ADR-0009 D3 secure-by-default).
+            if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+                raise ValueError("ANTHROPIC_API_KEY is not set; cannot use the 'anthropic' profile")
             # `model_name` is the field ("model" is its runtime alias);
             # timeout/stop are required-by-signature with None semantics.
             return ChatAnthropic(

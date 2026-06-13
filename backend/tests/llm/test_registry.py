@@ -116,6 +116,25 @@ class TestExternalEgressAudit:
         # The factory works with no sink injected (logs the egress event).
         assert isinstance(LoggingLLMAuditSink(), LLMAuditSink)
 
+    def test_openai_profile_without_key_raises_config_error(self, settings: Settings) -> None:
+        """Spec gate: selecting an external profile with no key must raise LLMProfileError.
+
+        The autouse ``_clean_provider_env`` fixture strips OPENAI_API_KEY, so
+        no monkeypatch is needed here — the precondition is already satisfied.
+        """
+        with pytest.raises(LLMProfileError):
+            get_chat_model("openai", settings)
+
+    def test_anthropic_profile_without_key_raises_config_error(self, settings: Settings) -> None:
+        """Spec gate: anthropic profile without ANTHROPIC_API_KEY raises LLMProfileError."""
+        with pytest.raises(LLMProfileError):
+            get_chat_model("anthropic", settings)
+
+    def test_azure_profile_without_key_raises_config_error(self, settings: Settings) -> None:
+        """Spec gate: azure profile without AZURE_OPENAI_API_KEY raises LLMProfileError."""
+        with pytest.raises(LLMProfileError):
+            get_chat_model("azure", settings)
+
 
 # --------------------------------------------------------------------------- #
 # Structured-output helper: JSON parse + one bounded retry                    #

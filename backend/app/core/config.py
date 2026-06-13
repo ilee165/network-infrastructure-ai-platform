@@ -80,13 +80,24 @@ class Settings(BaseSettings):
 
         Each role maps to its own ``llm_role_<role>`` setting, falling back to
         the base :attr:`llm_profile` when unset — so a stock deployment runs
-        every role on the local model. Raises :class:`KeyError` for an unknown
-        role; callers translate that into a typed platform error.
+        every role on the local model.
+
+        Raises
+        ------
+        ValueError
+            When *role* is not one of the supported roles (``reasoning``,
+            ``fast``). Callers in ``app/llm/providers.py`` translate this into a
+            typed :class:`~app.llm.providers.LLMProfileError` before surfacing
+            it to the API layer.
         """
         role_overrides = {
             "reasoning": self.llm_role_reasoning,
             "fast": self.llm_role_fast,
         }
+        if role not in role_overrides:
+            raise ValueError(
+                f"unknown LLM role {role!r}; supported roles: {', '.join(role_overrides)}"
+            )
         return role_overrides[role] or self.llm_profile
 
     @model_validator(mode="after")
