@@ -21,10 +21,18 @@ QUEUE_DISCOVERY = "discovery"
 QUEUE_CONFIG = "config"
 QUEUE_PACKET = "packet"
 QUEUE_DOCS = "docs"
+#: Topology projection queue (M2): Postgres -> Neo4j sync after discovery.
+QUEUE_TOPOLOGY = "topology"
 #: Default queue for operational tasks (not a D8 work queue).
 QUEUE_SYSTEM = "system"
 
-WORK_QUEUES: tuple[str, ...] = (QUEUE_DISCOVERY, QUEUE_CONFIG, QUEUE_PACKET, QUEUE_DOCS)
+WORK_QUEUES: tuple[str, ...] = (
+    QUEUE_DISCOVERY,
+    QUEUE_CONFIG,
+    QUEUE_PACKET,
+    QUEUE_DOCS,
+    QUEUE_TOPOLOGY,
+)
 
 
 def create_celery_app() -> Celery:
@@ -34,7 +42,11 @@ def create_celery_app() -> Celery:
         "netops",
         broker=settings.redis_url,
         backend=settings.redis_url,
-        include=["app.workers.tasks.system", "app.workers.tasks.discovery"],
+        include=[
+            "app.workers.tasks.system",
+            "app.workers.tasks.discovery",
+            "app.workers.tasks.topology",
+        ],
         # M2+: "app.workers.tasks.config", ".packet", ".docs"
     )
     celery.conf.update(
@@ -56,12 +68,14 @@ def create_celery_app() -> Celery:
             Queue(QUEUE_CONFIG),
             Queue(QUEUE_PACKET),
             Queue(QUEUE_DOCS),
+            Queue(QUEUE_TOPOLOGY),
         ),
         task_routes={
             "discovery.*": {"queue": QUEUE_DISCOVERY},
             "config.*": {"queue": QUEUE_CONFIG},
             "packet.*": {"queue": QUEUE_PACKET},
             "docs.*": {"queue": QUEUE_DOCS},
+            "topology.*": {"queue": QUEUE_TOPOLOGY},
             "system.*": {"queue": QUEUE_SYSTEM},
         },
     )

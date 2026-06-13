@@ -240,6 +240,10 @@ def fakes(env: FakeEnv, db_url: str, monkeypatch: pytest.MonkeyPatch) -> FakeEnv
     monkeypatch.setattr(tasks, "_key_provider", lambda: PROVIDER)
     monkeypatch.setattr(tasks, "_open_ssh", lambda params: FakeSshTransport(env, params.host))
     monkeypatch.setattr(tasks, "_make_snmp_client", lambda params: FakeSnmpClient(env, params.host))
+    # Neutralize the post-run topology projection by default so eager-mode runs
+    # never reach a real Postgres/Neo4j; the dispatch-trigger test re-patches
+    # send_task with its own spy on top of this no-op.
+    monkeypatch.setattr(celery_app, "send_task", lambda *a, **k: None)
     return env
 
 
@@ -422,6 +426,38 @@ def test_failed_status_when_no_device_succeeds(
     run = _fetch_run(db_url, run_id)
     assert run.status is DiscoveryRunStatus.FAILED
     assert run.finished_at is not None
+
+
+def test_topology_sync_enqueued_on_success_not_on_failure(
+    eager_celery: None, fakes: FakeEnv, db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The topology projection is dispatched only when devices were discovered."""
+    enqueued: list[tuple[str, list[Any]]] = []
+    monkeypatch.setattr(
+        celery_app,
+        "send_task",
+        lambda name, args=None, **kw: enqueued.append((name, args)),
+    )
+
+    ok_cred = {"name": "topo-ok-ssh", "kind": CredentialKind.SSH, "secret": "hunter2-secret"}
+    bad_cred = {"name": "topo-bad-ssh", "kind": CredentialKind.SSH, "secret": "hunter2-secret"}
+
+    # Success: one device, no expansion.
+    fakes.topology = {"10.0.0.1": []}
+    ok_run = _seed_run(
+        db_url, seeds=["10.0.0.1"], hop_limit=0, allowlist=["10.0.0.0/24"], credentials=[ok_cred]
+    )
+    tasks.run_discovery.apply(args=[str(ok_run)]).get()
+    assert enqueued == [("topology.sync_after_run", [str(ok_run)])]
+
+    # Failure: the only seed is unrecognizable -> FAILED, no topology sync.
+    enqueued.clear()
+    fakes.fail_facts = {"10.0.0.9"}
+    failed_run = _seed_run(
+        db_url, seeds=["10.0.0.9"], hop_limit=0, allowlist=["10.0.0.0/24"], credentials=[bad_cred]
+    )
+    tasks.run_discovery.apply(args=[str(failed_run)]).get()
+    assert enqueued == []
 
 
 def test_invalid_plan_marks_run_failed(eager_celery: None, fakes: FakeEnv, db_url: str) -> None:

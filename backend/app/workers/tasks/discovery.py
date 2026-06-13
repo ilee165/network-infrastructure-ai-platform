@@ -628,4 +628,25 @@ def run_discovery(run_id: str) -> dict[str, Any]:
         error = None
     asyncio.run(_finish_run(run_uuid, status, stats, error))
     logger.info("discovery.run_finished", run_id=run_id, status=status.value)
+
+    # Project the refreshed inventory into Neo4j once the run has devices
+    # (SUCCEEDED or PARTIAL). The topology sync is fire-and-forget: it runs on
+    # its own queue and its failure never reflects back on this run's status
+    # (ADR-0005 failure isolation; the run is already finished + committed).
+    if status is not DiscoveryRunStatus.FAILED:
+        _trigger_topology_sync(run_id)
     return {"run_id": run_id, "status": status.value, "stats": stats}
+
+
+def _trigger_topology_sync(run_id: str) -> None:
+    """Enqueue ``topology.sync_after_run`` for *run_id* (best-effort dispatch).
+
+    Dispatched by task name (``send_task``) so the discovery module never
+    imports the topology task module. A dispatch error (broker hiccup) is
+    logged and swallowed — the run is already finished and must not regress.
+    """
+    try:
+        celery_app.send_task("topology.sync_after_run", args=[run_id])
+        logger.info("discovery.topology_sync_enqueued", run_id=run_id)
+    except Exception:  # dispatch failures must not fail an already-finished run
+        logger.warning("discovery.topology_sync_dispatch_failed", run_id=run_id)

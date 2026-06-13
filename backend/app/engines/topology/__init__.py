@@ -47,6 +47,11 @@ from app.engines.topology.snapshots import (
     build_snapshot,
     upsert_snapshot,
 )
+from app.engines.topology.sync import (
+    DerivedTopology,
+    derive_topology,
+    snapshot_lists,
+)
 
 __all__ = [
     "DEFAULT_BATCH_SIZE",
@@ -56,6 +61,7 @@ __all__ = [
     "DerivedEdges",
     "DerivedL3Edges",
     "DerivedNodes",
+    "DerivedTopology",
     "DeviceNode",
     "EdgeEndpoint",
     "GraphNode",
@@ -77,8 +83,10 @@ __all__ = [
     "build_l3_edges",
     "build_snapshot",
     "derive_nodes",
+    "derive_topology",
     "diff_snapshots",
     "full_rebuild",
     "project",
+    "snapshot_lists",
     "upsert_snapshot",
 ]
