@@ -31,7 +31,7 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import Enum as SaEnum
-from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -133,7 +133,20 @@ class ReasoningTraceStep(Base):
     """
 
     __tablename__ = "reasoning_trace_steps"
-    __table_args__ = {"postgresql_partition_by": "RANGE (created_at)"}
+    # PostgreSQL requires every unique constraint on a partitioned table to
+    # include the partition key.  The composite (trace_id, ordinal, created_at)
+    # enforces uniqueness of ordinals within a trace while satisfying that rule.
+    # Without this constraint a recorder bug that emits two steps with the same
+    # ordinal would silently corrupt the trace at the DB level.
+    __table_args__ = (
+        UniqueConstraint(
+            "trace_id",
+            "ordinal",
+            "created_at",
+            name="uq_reasoning_trace_steps_trace_ordinal",
+        ),
+        {"postgresql_partition_by": "RANGE (created_at)"},
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), primary_key=True, default=utcnow)

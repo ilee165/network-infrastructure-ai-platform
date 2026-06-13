@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -47,11 +48,18 @@ def _offline_upgrade_sql() -> str:
 
 
 @pytest.fixture()
-def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin a PostgreSQL-dialect URL so offline rendering is deterministic."""
+def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Pin a PostgreSQL-dialect URL so offline rendering is deterministic.
+
+    cache_clear() is called both before yield (so the patched env var takes
+    effect immediately) and after yield (so the LRU cache does not retain the
+    patched URL after monkeypatch teardown restores the original env var).
+    """
     monkeypatch.setenv(
         "NETOPS_DATABASE_URL", "postgresql+asyncpg://netops:netops@127.0.0.1:5432/netops"
     )
+    get_settings.cache_clear()
+    yield
     get_settings.cache_clear()
 
 
@@ -83,6 +91,20 @@ def test_offline_sql_partitions_traces_monthly() -> None:
 def test_offline_sql_adds_audit_log_reasoning_trace_link() -> None:
     sql = _offline_upgrade_sql()
     assert "ALTER TABLE audit_log ADD COLUMN reasoning_trace_id" in sql
+
+
+@pytest.mark.usefixtures("_postgres_dialect_env")
+def test_offline_sql_unique_index_on_trace_steps_ordinal() -> None:
+    """Migration must emit a UNIQUE index on (trace_id, ordinal, created_at).
+
+    PostgreSQL requires the partition key (created_at) in every unique
+    constraint on a partitioned table.  Without it a recorder bug that emits
+    two steps with the same ordinal corrupts the trace silently.
+    """
+    sql = _offline_upgrade_sql()
+    assert "uq_reasoning_trace_steps_trace_ordinal" in sql, (
+        "missing unique index uq_reasoning_trace_steps_trace_ordinal in migration SQL"
+    )
 
 
 # ---------------------------------------------------------------------------

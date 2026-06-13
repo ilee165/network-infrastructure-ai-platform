@@ -127,6 +127,16 @@ def _create_reasoning_trace_steps() -> None:
     op.create_index(
         op.f("ix_reasoning_trace_steps_trace_id"), "reasoning_trace_steps", ["trace_id"]
     )
+    # PostgreSQL requires unique constraints on partitioned tables to include the
+    # partition key.  The composite (trace_id, ordinal, created_at) enforces
+    # per-trace ordinal uniqueness while satisfying that rule.  A recorder bug
+    # that emits two steps with the same ordinal is rejected at the DB level.
+    op.create_index(
+        "uq_reasoning_trace_steps_trace_ordinal",
+        "reasoning_trace_steps",
+        ["trace_id", "ordinal", "created_at"],
+        unique=True,
+    )
 
 
 def _create_partitions() -> None:
@@ -167,6 +177,7 @@ def downgrade() -> None:
             for suffix, _lower, _upper in reversed(_PARTITION_WINDOWS):
                 op.execute(f"DROP TABLE {parent}_{suffix}")
 
+    op.drop_index("uq_reasoning_trace_steps_trace_ordinal", table_name="reasoning_trace_steps")
     op.drop_table("reasoning_trace_steps")
     op.drop_table("reasoning_traces")
     op.drop_table("agent_sessions")
