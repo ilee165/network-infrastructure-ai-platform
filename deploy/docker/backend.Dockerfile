@@ -15,7 +15,7 @@
 # ---------------------------------------------------------------------------
 
 # ---- builder: install the project + dependencies into a relocatable venv ----
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
@@ -32,7 +32,7 @@ COPY backend/app ./app
 RUN pip install .
 
 # ---- runtime: slim, non-root, venv + migrations only ------------------------
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
