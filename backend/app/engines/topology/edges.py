@@ -226,6 +226,7 @@ def build_l2_edges(
 
     merged: dict[tuple[EdgeEndpoint, EdgeEndpoint], tuple[set[str], dict[EdgeEndpoint, str]]] = {}
     unresolved_names: set[str] = set()
+    phantom_local_ids: set[str] = set()
     unresolved = 0
 
     for row in ordered_rows:
@@ -233,7 +234,15 @@ def build_l2_edges(
         remote_device = index.resolve(row)
         if local_device is None or remote_device is None:
             unresolved += 1
-            unresolved_names.add(row.neighbor_name)
+            if local_device is None:
+                # The reporting device is not in the supplied devices list.
+                # The neighbor name itself may be perfectly resolvable, so it
+                # must NOT be added to unresolved_names.
+                phantom_local_ids.add(str(row.device_id))
+            else:
+                # Remote neighbor could not be matched — this is the true
+                # "unresolved neighbor" case the field name describes.
+                unresolved_names.add(row.neighbor_name)
             continue
 
         local = _endpoint(local_device, row.local_interface, interfaces_by_name)

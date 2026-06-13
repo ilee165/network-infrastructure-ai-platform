@@ -191,6 +191,9 @@ class TestNeighborResolution:
         result = build_l2_edges(devices, interfaces, neighbors)
         assert result.edges == ()
         assert result.report.unresolved_neighbors == 1
+        # "edge-1" is a resolvable neighbor; only remote-lookup failures belong
+        # in unresolved_neighbor_names.
+        assert result.report.unresolved_neighbor_names == ()
 
 
 class TestEndpointFallback:
