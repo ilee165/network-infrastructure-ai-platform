@@ -263,13 +263,18 @@ async def _export_graph_multisets(
         async for record in result:
             nodes.append([record["label"], str(record["key"])])
 
+        _edge_key = (
+            "[l IN labels({n}) WHERE l IN $labels][0]"
+            " + ':' + coalesce({n}.pg_id, {n}.cidr,"
+            " toString({n}.vlan_id), {n}.name)"
+        )
         result = await session.run(
             "MATCH (a)-[r]->(b) "
             "WHERE any(l IN labels(a) WHERE l IN $labels) "
             "  AND any(l IN labels(b) WHERE l IN $labels) "
             "RETURN type(r) AS rel_type, "
-            "       coalesce(a.pg_id, a.cidr, toString(a.vlan_id), a.name) AS src, "
-            "       coalesce(b.pg_id, b.cidr, toString(b.vlan_id), b.name) AS dst",
+            f"       {_edge_key.format(n='a')} AS src, "
+            f"       {_edge_key.format(n='b')} AS dst",
             labels=list(PROJECTED_NODE_LABELS),
         )
         async for record in result:
@@ -278,10 +283,19 @@ async def _export_graph_multisets(
 
 
 async def _destroy_graph(client: Neo4jClient) -> None:
-    """DETACH DELETE every projected label — simulates Neo4j volume loss."""
+    """DETACH DELETE every projected label — simulates Neo4j volume loss.
+
+    Uses a single execute_write transaction so the wipe is atomic: a partial
+    failure mid-label does not leave the graph in a half-destroyed state.
+    """
+    labels = list(PROJECTED_NODE_LABELS)
+
+    async def _wipe(tx: Any) -> None:
+        for label in labels:
+            await tx.run(f"MATCH (n:{label}) DETACH DELETE n")
+
     async with client.session() as session:
-        for label in PROJECTED_NODE_LABELS:
-            await session.run(f"MATCH (n:{label}) DETACH DELETE n")
+        await session.execute_write(_wipe)
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +328,9 @@ async def test_full_rebuild_is_isomorphic_after_total_graph_loss() -> None:
         await _seed_postgres(sessionmaker)
 
         # First rebuild: Postgres -> Neo4j, then read the live graph back.
-        await rebuild(run_id=RUN_ID)
+        # run_id=None: the D5 isomorphism contract does not require a snapshot
+        # write — that is the D6 diff-foundation contract tested separately.
+        await rebuild(run_id=None)
         nodes_a, edges_a = await _export_graph_multisets(client)
         snapshot_a = build_snapshot(nodes_a, edges_a)
 
@@ -327,7 +343,7 @@ async def test_full_rebuild_is_isomorphic_after_total_graph_loss() -> None:
         empty_nodes, empty_edges = await _export_graph_multisets(client)
         assert empty_nodes == [] and empty_edges == [], "graph not actually destroyed"
 
-        await rebuild(run_id=RUN_ID)
+        await rebuild(run_id=None)
         nodes_b, edges_b = await _export_graph_multisets(client)
         snapshot_b = build_snapshot(nodes_b, edges_b)
 
