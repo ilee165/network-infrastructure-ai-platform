@@ -17,14 +17,16 @@ model, including the scripted fakes used in tests.
 from __future__ import annotations
 
 import re
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, cast
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agents.framework.registry import AgentRegistry
+from app.agents.framework.tools import agent_run_context
 from app.agents.framework.traces import (
     InMemoryTraceRecorder,
     ReasoningTrace,
@@ -33,6 +35,7 @@ from app.agents.framework.traces import (
     TraceStepKind,
 )
 from app.core.errors import NetOpsError
+from app.core.security import Role
 from app.llm.prompts import SUPERVISOR_ROUTING_PROMPT_ID, get_prompt
 
 #: String id of the supervisor itself (CLAUDE.md core agent #1).
@@ -190,3 +193,37 @@ def build_supervisor_graph(
     )
     graph.add_edge("finalize", END)
     return graph.compile(name=SUPERVISOR_NAME)
+
+
+async def run_supervisor(
+    graph: CompiledStateGraph[SupervisorState, None, SupervisorState, SupervisorState],
+    messages: Sequence[BaseMessage],
+    *,
+    role: Role,
+) -> SupervisorState:
+    """Drive the compiled supervisor *graph* as the invoking user (brief §7).
+
+    This is the production run entrypoint: an API route resolves the
+    authenticated :class:`~app.models.User` via ``get_current_user`` and passes
+    that user's role (``Role.from_name(user.role.name)``) here. The role is
+    bound with :func:`~app.agents.framework.tools.agent_run_context` for the
+    *entire* graph invocation, so every :class:`~app.agents.framework.tools.NetOpsTool`
+    executed inside any specialist subgraph sees the real caller role — a tool
+    whose ``min_role`` is ``operator``/``engineer``/``admin`` is reachable
+    through the agent exactly when (and only when) the user holds that rank
+    ("an agent can never do what its user cannot").
+
+    Without this binding the tool-layer RBAC contextvar stays unbound and
+    falls back to :attr:`~app.core.security.Role.VIEWER`, leaving every
+    higher-tier tool permanently unreachable through an agent run.
+
+    Returns the final :class:`SupervisorState` (the conversation plus its
+    completed :class:`~app.agents.framework.traces.ReasoningTrace`).
+    """
+    # The graph populates ``specialist`` and ``trace``; the entrypoint only
+    # seeds the conversation, so the partial input is cast to the state type
+    # the compiled graph accepts at its START node.
+    initial_state = cast(SupervisorState, {"messages": list(messages)})
+    with agent_run_context(role=role):
+        final_state = await graph.ainvoke(initial_state)
+    return cast(SupervisorState, final_state)

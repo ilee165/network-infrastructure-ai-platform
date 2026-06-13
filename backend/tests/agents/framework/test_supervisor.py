@@ -11,9 +11,16 @@ from app.agents.framework.supervisor import (
     SUPERVISOR_NAME,
     SupervisorRoutingError,
     build_supervisor_graph,
+    run_supervisor,
 )
-from app.agents.framework.tools import NetOpsTool, ToolClassification, netops_tool
+from app.agents.framework.tools import (
+    NetOpsTool,
+    RbacForbiddenError,
+    ToolClassification,
+    netops_tool,
+)
 from app.agents.framework.traces import InMemoryTraceRecorder, ReasoningTrace, TraceStepKind
+from app.core.security import Role
 from tests.agents.conftest import RecordingAuditSink, SpecialistFactory, scripted_model
 
 
@@ -21,6 +28,19 @@ def _bgp_tool(sink: RecordingAuditSink) -> NetOpsTool:
     @netops_tool(classification=ToolClassification.READ_ONLY, audit_sink=sink)
     async def get_bgp_peers(device: str) -> str:
         """Read BGP peer status from a device."""
+        return f"{device}: peer 10.0.0.2 is Idle"
+
+    return get_bgp_peers
+
+
+def _engineer_bgp_tool(sink: RecordingAuditSink) -> NetOpsTool:
+    @netops_tool(
+        classification=ToolClassification.READ_ONLY,
+        audit_sink=sink,
+        min_role=Role.ENGINEER,
+    )
+    async def get_bgp_peers(device: str) -> str:
+        """Read BGP peer status from a device (engineer-tier diagnostic read)."""
         return f"{device}: peer 10.0.0.2 is Idle"
 
     return get_bgp_peers
@@ -142,3 +162,78 @@ class TestRouting:
         graph = build_supervisor_graph(llm, registry)
         with pytest.raises(SupervisorRoutingError):
             await graph.ainvoke({"messages": [HumanMessage(content="help")]})
+
+
+def _engineer_tool_registry(
+    specialist_factory: SpecialistFactory, sink: RecordingAuditSink
+) -> AgentRegistry:
+    """A registry whose troubleshooting specialist carries an engineer-tier tool."""
+    registry = AgentRegistry()
+    registry.register(
+        specialist_factory("discovery", description="Discovers devices, interfaces, and neighbors.")
+    )
+    registry.register(
+        specialist_factory(
+            "troubleshooting",
+            description="Diagnoses routing, BGP, OSPF, DNS, and DHCP problems.",
+            tools=[_engineer_bgp_tool(sink)],
+        )
+    )
+    return registry
+
+
+def _engineer_run_script() -> list[AIMessage]:
+    return [
+        # 1. routing decision
+        AIMessage(content="troubleshooting"),
+        # 2. specialist requests its engineer-tier tool
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "get_bgp_peers", "args": {"device": "edge-1"}, "id": "call-1"}],
+        ),
+        # 3. specialist concludes
+        AIMessage(content="BGP peer 10.0.0.2 on edge-1 is down (Idle)."),
+    ]
+
+
+class TestRunSupervisorBindsRole:
+    """run_supervisor binds the invoking user's role for the whole graph run.
+
+    Brief §7 / finding M3-03: the run entrypoint enters ``agent_run_context``
+    with the authenticated user's role, so a non-viewer-tier tool is reachable
+    through a real agent run (not just via direct ``tool.ainvoke``).
+    """
+
+    async def test_engineer_role_reaches_engineer_tier_tool_through_the_run(
+        self, specialist_factory: SpecialistFactory, audit_sink: RecordingAuditSink
+    ) -> None:
+        registry = _engineer_tool_registry(specialist_factory, audit_sink)
+        graph = build_supervisor_graph(scripted_model(_engineer_run_script()), registry)
+
+        result = await run_supervisor(
+            graph,
+            [HumanMessage(content="why is BGP down on edge-1?")],
+            role=Role.ENGINEER,
+        )
+
+        # The engineer-tier tool actually executed inside the supervised run.
+        assert result["specialist"] == "troubleshooting"
+        assert result["messages"][-1].content == "BGP peer 10.0.0.2 on edge-1 is down (Idle)."
+        assert audit_sink.events[-1].tool_name == "get_bgp_peers"
+        assert audit_sink.events[-1].outcome == "success"
+
+    async def test_viewer_role_is_denied_the_engineer_tier_tool_through_the_run(
+        self, specialist_factory: SpecialistFactory, audit_sink: RecordingAuditSink
+    ) -> None:
+        # Without the role binding the run would fall back to viewer; assert the
+        # binding is honoured by showing a viewer caller is denied mid-run.
+        registry = _engineer_tool_registry(specialist_factory, audit_sink)
+        graph = build_supervisor_graph(scripted_model(_engineer_run_script()), registry)
+
+        with pytest.raises(RbacForbiddenError):
+            await run_supervisor(
+                graph,
+                [HumanMessage(content="why is BGP down on edge-1?")],
+                role=Role.VIEWER,
+            )
+        assert audit_sink.events[-1].outcome == "denied"

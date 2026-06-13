@@ -21,7 +21,11 @@ from app.agents.framework.approval import (
 )
 from app.agents.framework.base import AgentDefinitionError, BaseSpecialistAgent
 from app.agents.framework.registry import AgentRegistry
-from app.agents.framework.supervisor import SupervisorRoutingError, build_supervisor_graph
+from app.agents.framework.supervisor import (
+    SupervisorRoutingError,
+    build_supervisor_graph,
+    run_supervisor,
+)
 from app.agents.framework.tools import (
     AuditSink,
     BoundedExecution,
@@ -68,4 +72,5 @@ __all__ = [
     "TraceStepKind",
     "build_supervisor_graph",
     "netops_tool",
+    "run_supervisor",
 ]
