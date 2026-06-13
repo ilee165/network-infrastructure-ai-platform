@@ -23,12 +23,15 @@ from typing import ClassVar
 from uuid import UUID
 
 from app.plugins.base import (
+    AclCapability,
+    BgpCapability,
     Capability,
     CommandTransport,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
     InterfacesCapability,
     NeighborsCapability,
+    OspfCapability,
     PluginCapability,
     RoutesCapability,
     SnmpReadTransport,
@@ -41,16 +44,26 @@ from app.plugins.vendors.eos.parsers import (
     SNMP_OID_SYSOBJECTID,
 )
 from app.schemas.discovery import DeviceFacts
-from app.schemas.normalized import NormalizedInterface, NormalizedNeighbor, NormalizedRoute
+from app.schemas.normalized import (
+    NormalizedAclEntry,
+    NormalizedBgpPeer,
+    NormalizedInterface,
+    NormalizedNeighbor,
+    NormalizedOspfNeighbor,
+    NormalizedRoute,
+)
 
 __all__ = [
     "SNMP_OID_SYSDESCR",
     "SNMP_OID_SYSNAME",
     "SNMP_OID_SYSOBJECTID",
+    "EosAcl",
+    "EosBgp",
     "EosDiscoverySnmp",
     "EosDiscoverySsh",
     "EosInterfaces",
     "EosNeighbors",
+    "EosOspf",
     "EosPlugin",
     "EosRoutes",
 ]
@@ -62,6 +75,9 @@ SHOW_VERSION = "show version"
 SHOW_INTERFACES = "show interfaces"
 SHOW_IP_ROUTE = "show ip route"
 SHOW_LLDP_NEIGHBORS_DETAIL = "show lldp neighbors detail"
+SHOW_IP_BGP_SUMMARY = "show ip bgp summary"
+SHOW_IP_OSPF_NEIGHBOR = "show ip ospf neighbor"
+SHOW_IP_ACCESS_LISTS = "show ip access-lists"
 
 #: System-MIB OIDs collected by SNMP discovery, in request order.
 _SNMP_DISCOVERY_OIDS = (SNMP_OID_SYSDESCR, SNMP_OID_SYSOBJECTID, SNMP_OID_SYSNAME)
@@ -178,11 +194,58 @@ class EosNeighbors(_EosCommandCapability, NeighborsCapability):
         return []
 
 
+class EosBgp(_EosCommandCapability, BgpCapability):
+    """``BGP``: ``show ip bgp summary`` → :class:`NormalizedBgpPeer`.
+
+    EOS uses separate ``state`` and ``state_pfxrcd`` columns in the TextFSM
+    template (unlike IOS which overloads a single column).
+    """
+
+    def get_bgp_peers(self) -> list[NormalizedBgpPeer]:
+        """Collect and normalize the IPv4-unicast BGP peering sessions."""
+        output = self._run(SHOW_IP_BGP_SUMMARY)
+        records = parsers.parse_bgp_peers(
+            output, device_id=self._device_id, collected_at=self._now()
+        )
+        return [r.model_copy(update={"source_vendor": VENDOR_ID}) for r in records]
+
+
+class EosOspf(_EosCommandCapability, OspfCapability):
+    """``OSPF``: ``show ip ospf neighbor`` → :class:`NormalizedOspfNeighbor`.
+
+    EOS emits plain uppercase state tokens (``FULL``, ``2WAY``, …) without
+    the ``/DR``-role suffix seen in IOS output.
+    """
+
+    def get_ospf_neighbors(self) -> list[NormalizedOspfNeighbor]:
+        """Collect and normalize the OSPF neighbor adjacencies."""
+        output = self._run(SHOW_IP_OSPF_NEIGHBOR)
+        records = parsers.parse_ospf_neighbors(
+            output, device_id=self._device_id, collected_at=self._now()
+        )
+        return [r.model_copy(update={"source_vendor": VENDOR_ID}) for r in records]
+
+
+class EosAcl(_EosCommandCapability, AclCapability):
+    """``ACL``: ``show ip access-lists`` → :class:`NormalizedAclEntry`.
+
+    EOS uses CIDR notation for network prefixes and the ``modifier`` field for
+    destination port matches; host entries use the ``host <ip>`` form.
+    """
+
+    def get_acls(self) -> list[NormalizedAclEntry]:
+        """Collect and normalize the configured IP access-list entries."""
+        output = self._run(SHOW_IP_ACCESS_LISTS)
+        records = parsers.parse_acls(output, device_id=self._device_id, collected_at=self._now())
+        return [r.model_copy(update={"source_vendor": VENDOR_ID}) for r in records]
+
+
 class EosPlugin(VendorPlugin):
     """Arista EOS (``vendor_id="eos"``) — leaf/spine switching plugin.
 
-    Declares: SSH/SNMP discovery, interface inventory, route collection, and
-    LLDP neighbors.  CDP is intentionally absent — EOS does not implement it.
+    Declares: SSH/SNMP discovery, interface inventory, route collection,
+    LLDP neighbors, and the M3 troubleshooting trio (BGP/OSPF/ACL).
+    CDP is intentionally absent — EOS does not implement it.
     """
 
     vendor_id: ClassVar[str] = VENDOR_ID
@@ -194,6 +257,9 @@ class EosPlugin(VendorPlugin):
             Capability.INTERFACES,
             Capability.ROUTES,
             Capability.NEIGHBORS_LLDP,
+            Capability.BGP,
+            Capability.OSPF,
+            Capability.ACL,
         }
     )
 
@@ -204,4 +270,7 @@ class EosPlugin(VendorPlugin):
             Capability.INTERFACES: EosInterfaces,
             Capability.ROUTES: EosRoutes,
             Capability.NEIGHBORS_LLDP: EosNeighbors,
+            Capability.BGP: EosBgp,
+            Capability.OSPF: EosOspf,
+            Capability.ACL: EosAcl,
         }

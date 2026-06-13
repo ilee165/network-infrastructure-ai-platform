@@ -1,0 +1,7 @@
+IP Access List PERMIT-MGMT
+        10 permit ip 10.1.1.0/24 any
+        20 deny ip any any
+IP Access List BLOCK-TELNET
+        10 deny tcp any host 10.0.0.5 eq telnet
+        20 permit tcp 192.0.2.0/24 any eq www
+        30 permit ip any any
