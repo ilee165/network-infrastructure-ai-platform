@@ -1,8 +1,8 @@
-"""Edge builders (M2-05): L2 CONNECTED_TO from normalized neighbors.
+"""Edge builders (M2-05): L2 CONNECTED_TO + L3 edge sets.
 
 Fixtures construct ORM rows directly (no session) — building is a pure
 function over in-memory ``Device`` / ``NormalizedInterfaceRow`` /
-``NormalizedNeighborRow`` instances.
+``NormalizedNeighborRow`` / ``NormalizedRouteRow`` instances.
 """
 
 from __future__ import annotations
@@ -12,14 +12,27 @@ from uuid import UUID, uuid4
 
 from app.engines.topology import (
     ConnectedToEdge,
+    DerivedL3Edges,
     EdgeEndpoint,
+    HasInterfaceEdge,
+    InSubnetEdge,
+    L3AdjacentEdge,
+    RoutesToEdge,
     build_l2_edges,
+    build_l3_edges,
+    derive_nodes,
 )
-from app.models.inventory import Device, NormalizedInterfaceRow, NormalizedNeighborRow
+from app.models.inventory import (
+    Device,
+    NormalizedInterfaceRow,
+    NormalizedNeighborRow,
+    NormalizedRouteRow,
+)
 from app.schemas.normalized import (
     InterfaceAdminStatus,
     InterfaceOperStatus,
     NeighborProtocol,
+    RouteProtocol,
 )
 
 COLLECTED_AT = datetime(2026, 6, 12, 12, 0, tzinfo=UTC)
@@ -322,3 +335,176 @@ class TestL2Determinism:
         (built,) = build_l2_edges(devices, interfaces, neighbors).edges
         assert isinstance(built, ConnectedToEdge)
         assert built.model_config.get("frozen") is True
+
+
+# ---------------------------------------------------------------------------
+# L3 builders (sub-deliverable B)
+# ---------------------------------------------------------------------------
+
+
+def make_route(
+    device_id: UUID,
+    prefix: str,
+    *,
+    vrf: str = "",
+    next_hop: str = "",
+    protocol: RouteProtocol = RouteProtocol.STATIC,
+    metric: int | None = None,
+    distance: int | None = None,
+) -> NormalizedRouteRow:
+    return NormalizedRouteRow(
+        id=uuid4(),
+        device_id=device_id,
+        raw_artifact_id=uuid4(),
+        collected_at=COLLECTED_AT,
+        source_vendor="cisco_ios",
+        prefix=prefix,
+        protocol=protocol,
+        next_hop=next_hop,
+        interface="",
+        vrf=vrf,
+        metric=metric,
+        distance=distance,
+    )
+
+
+class TestHasInterfaceEdges:
+    def test_one_edge_per_interface_of_known_device(self) -> None:
+        devices, interfaces = l2_inventory()
+        derived = build_l3_edges(devices, interfaces, [])
+        assert len(derived.has_interface) == 4
+        assert (
+            HasInterfaceEdge(device_pg_id=str(devices[0].id), interface_pg_id=str(interfaces[0].id))
+            in derived.has_interface
+        )
+
+    def test_interface_of_unknown_device_skipped(self) -> None:
+        orphan = make_interface(uuid4(), "Gi0/0")
+        derived = build_l3_edges([], [orphan], [])
+        assert derived.has_interface == ()
+
+
+class TestInSubnetEdges:
+    def test_interface_with_ip_links_to_network_cidr(self) -> None:
+        device = make_device("core-1", "10.0.0.1")
+        iface = make_interface(device.id, "Gi0/0", ip_address="10.10.0.1/24")
+        derived = build_l3_edges([device], [iface], [])
+        assert derived.in_subnet == (
+            InSubnetEdge(interface_pg_id=str(iface.id), cidr="10.10.0.0/24"),
+        )
+
+    def test_interface_without_ip_has_no_edge(self) -> None:
+        device = make_device("core-1", "10.0.0.1")
+        iface = make_interface(device.id, "Gi0/0")
+        derived = build_l3_edges([device], [iface], [])
+        assert derived.in_subnet == ()
+
+
+class TestL3AdjacentEdges:
+    def test_devices_sharing_subnet_are_adjacent(self) -> None:
+        core = make_device("core-1", "10.0.0.1")
+        edge = make_device("edge-1", "10.0.0.2")
+        ifaces = [
+            make_interface(core.id, "Gi0/0", ip_address="10.10.0.1/24"),
+            make_interface(edge.id, "Gi0/0", ip_address="10.10.0.2/24"),
+        ]
+        derived = build_l3_edges([core, edge], ifaces, [])
+        a, b = sorted([str(core.id), str(edge.id)])
+        assert derived.l3_adjacent == (
+            L3AdjacentEdge(device_a_pg_id=a, device_b_pg_id=b, cidrs=("10.10.0.0/24",)),
+        )
+
+    def test_self_pairs_excluded(self) -> None:
+        core = make_device("core-1", "10.0.0.1")
+        ifaces = [
+            make_interface(core.id, "Gi0/0", ip_address="10.10.0.1/24"),
+            make_interface(core.id, "Gi0/1", ip_address="10.10.0.2/24"),
+        ]
+        derived = build_l3_edges([core], ifaces, [])
+        assert derived.l3_adjacent == ()
+
+    def test_pair_sharing_two_subnets_is_one_edge_with_both_cidrs(self) -> None:
+        core = make_device("core-1", "10.0.0.1")
+        edge = make_device("edge-1", "10.0.0.2")
+        ifaces = [
+            make_interface(core.id, "Gi0/0", ip_address="10.10.0.1/24"),
+            make_interface(edge.id, "Gi0/0", ip_address="10.10.0.2/24"),
+            make_interface(core.id, "Gi0/1", ip_address="10.20.0.1/24"),
+            make_interface(edge.id, "Gi0/1", ip_address="10.20.0.2/24"),
+        ]
+        derived = build_l3_edges([core, edge], ifaces, [])
+        (built,) = derived.l3_adjacent
+        assert built.cidrs == ("10.10.0.0/24", "10.20.0.0/24")
+
+
+class TestRoutesToEdges:
+    def test_route_yields_device_to_subnet_edge_with_props(self) -> None:
+        core = make_device("core-1", "10.0.0.1")
+        route = make_route(
+            core.id,
+            "192.168.50.0/24",
+            vrf="MGMT",
+            next_hop="10.10.0.254",
+            protocol=RouteProtocol.OSPF,
+            metric=20,
+            distance=110,
+        )
+        derived = build_l3_edges([core], [], [route])
+        assert derived.routes_to == (
+            RoutesToEdge(
+                device_pg_id=str(core.id),
+                cidr="192.168.50.0/24",
+                protocol="ospf",
+                next_hop="10.10.0.254",
+                vrf="MGMT",
+                metric=20,
+                distance=110,
+            ),
+        )
+
+    def test_route_prefix_normalized_to_network_cidr(self) -> None:
+        core = make_device("core-1", "10.0.0.1")
+        route = make_route(core.id, "10.10.0.1/24")
+        derived = build_l3_edges([core], [], [route])
+        assert derived.routes_to[0].cidr == "10.10.0.0/24"
+
+    def test_route_target_subnets_exist_as_derived_nodes(self) -> None:
+        # ADR-0005 invariant: every ROUTES_TO endpoint is a projected Subnet.
+        core = make_device("core-1", "10.0.0.1")
+        routes = [make_route(core.id, "0.0.0.0/0"), make_route(core.id, "172.16.0.0/16")]
+        derived_edges = build_l3_edges([core], [], routes)
+        derived_nodes = derive_nodes([core], [], routes)
+        subnet_cidrs = {node.cidr for node in derived_nodes.subnets}
+        assert {edge.cidr for edge in derived_edges.routes_to} <= subnet_cidrs
+
+    def test_identical_route_rows_dedupe_to_one_edge(self) -> None:
+        core = make_device("core-1", "10.0.0.1")
+        routes = [make_route(core.id, "0.0.0.0/0"), make_route(core.id, "0.0.0.0/0")]
+        derived = build_l3_edges([core], [], routes)
+        assert len(derived.routes_to) == 1
+
+    def test_route_of_unknown_device_skipped(self) -> None:
+        derived = build_l3_edges([], [], [make_route(uuid4(), "0.0.0.0/0")])
+        assert derived.routes_to == ()
+
+
+class TestL3Determinism:
+    def test_input_order_does_not_change_output(self) -> None:
+        core = make_device("core-1", "10.0.0.1")
+        edge = make_device("edge-1", "10.0.0.2")
+        ifaces = [
+            make_interface(core.id, "Gi0/0", ip_address="10.10.0.1/24"),
+            make_interface(edge.id, "Gi0/0", ip_address="10.10.0.2/24"),
+            make_interface(edge.id, "Gi0/1"),
+        ]
+        routes = [
+            make_route(core.id, "0.0.0.0/0", next_hop="10.10.0.254"),
+            make_route(edge.id, "192.168.50.0/24", vrf="MGMT"),
+        ]
+        forward = build_l3_edges([core, edge], ifaces, routes)
+        reverse = build_l3_edges([edge, core], ifaces[::-1], routes[::-1])
+        assert forward == reverse
+
+    def test_empty_inputs_yield_empty_edge_sets(self) -> None:
+        derived = build_l3_edges([], [], [])
+        assert derived == DerivedL3Edges()

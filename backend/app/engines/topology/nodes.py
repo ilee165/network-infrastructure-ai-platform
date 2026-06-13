@@ -11,9 +11,9 @@ Derivation rules (approved M2 plan):
 
 - ``Device`` / ``Interface`` map 1:1 from rows and carry ``pg_id`` (the UUID
   of the source Postgres row).
-- ``Subnet`` comes from each interface ``ip_address`` *network*. Route
-  prefixes are **not** subnets — routes only contribute ``ROUTES_TO`` edges
-  to already-derived subnets (M2-05).
+- ``Subnet`` comes from each interface ``ip_address`` *network* AND from
+  each route ``prefix`` (M2-05: every ``ROUTES_TO`` edge needs a real
+  projected Subnet endpoint).
 - ``IPAddress`` comes from each interface ``ip_address`` *host*, deduped by
   address (lowest interface ``pg_id`` wins, deterministically).
 - ``Vlan`` from distinct interface ``vlan_id``; ``VRF`` from distinct
@@ -30,7 +30,15 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from enum import StrEnum
-from ipaddress import IPv4Address, IPv6Address, ip_address, ip_interface
+from ipaddress import (
+    IPv4Address,
+    IPv4Network,
+    IPv6Address,
+    IPv6Network,
+    ip_address,
+    ip_interface,
+    ip_network,
+)
 from typing import Any, ClassVar, TypeVar
 from uuid import UUID
 
@@ -211,6 +219,16 @@ def _addr_sort_key(address: IPv4Address | IPv6Address) -> tuple[int, int]:
     return (address.version, int(address))
 
 
+def route_prefix_network(prefix: str) -> IPv4Network | IPv6Network:
+    """Canonical network of a route ``prefix`` (host bits tolerated).
+
+    Shared by Subnet-node derivation and the ``ROUTES_TO`` edge builder
+    (M2-05) so route edges always key the exact CIDR string their Subnet
+    endpoint was projected under.
+    """
+    return ip_network(prefix, strict=False)
+
+
 def derive_nodes(
     devices: Sequence[Device],
     interfaces: Sequence[NormalizedInterfaceRow],
@@ -264,10 +282,15 @@ def derive_nodes(
         )
     )
 
+    # Route prefixes are projected Subnet nodes too (M2-05): every ROUTES_TO
+    # edge must land on a real endpoint.
+    subnet_networks = {iface.network for iface, _ in addressed} | {
+        route_prefix_network(row.prefix) for row in routes
+    }
     subnet_nodes = tuple(
         SubnetNode(cidr=str(network))
         for network in sorted(
-            {iface.network for iface, _ in addressed},
+            subnet_networks,
             key=lambda net: (net.version, int(net.network_address), net.prefixlen),
         )
     )
@@ -283,8 +306,6 @@ def derive_nodes(
     _site_names: set[str] = {s for device in devices if (s := (device.site or "").strip())}
     site_nodes = tuple(SiteNode(name=name) for name in sorted(_site_names))
 
-    # Route prefixes deliberately create no Subnet nodes (M2-05: ROUTES_TO
-    # edges attach only to subnets derived from interface addressing).
     return DerivedNodes(
         devices=device_nodes,
         interfaces=interface_nodes,

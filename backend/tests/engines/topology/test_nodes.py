@@ -190,10 +190,25 @@ class TestSubnetNodes:
             SubnetNode(cidr="10.20.0.0/24"),
         )
 
-    def test_route_prefixes_do_not_create_subnets(self) -> None:
+    def test_route_prefixes_create_subnets(self) -> None:
+        # M2-05: every ROUTES_TO edge needs a real Subnet endpoint, so route
+        # prefixes ARE projected Subnet nodes.
         routes = [make_route(uuid4(), "172.16.0.0/16")]
         derived = derive_nodes([], [], routes)
-        assert derived.subnets == ()
+        assert derived.subnets == (SubnetNode(cidr="172.16.0.0/16"),)
+
+    def test_route_prefix_subnets_merge_with_interface_subnets(self) -> None:
+        device_id = uuid4()
+        ifaces = [make_interface(device_id, "Gi0/0", ip_address="10.10.0.1/24")]
+        routes = [
+            make_route(device_id, "10.10.0.0/24"),  # same network — deduped
+            make_route(device_id, "0.0.0.0/0"),
+        ]
+        derived = derive_nodes([], ifaces, routes)
+        assert derived.subnets == (
+            SubnetNode(cidr="0.0.0.0/0"),
+            SubnetNode(cidr="10.10.0.0/24"),
+        )
 
     def test_shared_network_deduped(self) -> None:
         device_id = uuid4()

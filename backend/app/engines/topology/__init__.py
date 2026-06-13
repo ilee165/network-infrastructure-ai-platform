@@ -7,10 +7,16 @@ and projection plumbing) from inventory rows.
 
 from app.engines.topology.edges import (
     ConnectedToEdge,
+    DerivedL3Edges,
     EdgeEndpoint,
+    HasInterfaceEdge,
+    InSubnetEdge,
     L2BuildReport,
     L2BuildResult,
+    L3AdjacentEdge,
+    RoutesToEdge,
     build_l2_edges,
+    build_l3_edges,
 )
 from app.engines.topology.nodes import (
     DerivedNodes,
@@ -27,18 +33,24 @@ from app.engines.topology.nodes import (
 
 __all__ = [
     "ConnectedToEdge",
+    "DerivedL3Edges",
     "DerivedNodes",
     "DeviceNode",
     "EdgeEndpoint",
     "GraphNode",
+    "HasInterfaceEdge",
     "IPAddressNode",
+    "InSubnetEdge",
     "InterfaceNode",
     "L2BuildReport",
     "L2BuildResult",
+    "L3AdjacentEdge",
+    "RoutesToEdge",
     "SiteNode",
     "SubnetNode",
     "VlanNode",
     "VrfNode",
     "build_l2_edges",
+    "build_l3_edges",
     "derive_nodes",
 ]
