@@ -137,6 +137,21 @@ def _int_or_none(value: str) -> int | None:
         return None
 
 
+def _parse_as_number(value: str) -> int:
+    """Convert a BGP AS number field to a plain integer.
+
+    IOS supports ``bgp asnotation dot`` which renders 4-byte AS numbers in
+    asdot notation, e.g. ``1.1000`` meaning AS 66536 (1*65536 + 1000).  A
+    plain number like ``65002`` is returned as-is.  The field value comes
+    directly from an ntc-templates TextFSM row and may have surrounding
+    whitespace.
+    """
+    parts = value.strip().split(".")
+    if len(parts) == 2:
+        return int(parts[0]) * 65536 + int(parts[1])
+    return int(parts[0])
+
+
 def _address_or_none(value: str) -> IPv4Address | IPv6Address | None:
     """Coerce a TextFSM field to an IP address; empty/garbage become ``None``."""
     value = value.strip()
@@ -447,7 +462,7 @@ def parse_bgp_peers(
                     collected_at=collected_at,
                     source_vendor=PLATFORM,
                     peer_address=ip_address(row["bgp_neighbor"]),
-                    remote_as=int(row["neighbor_as"].split(".")[0]),
+                    remote_as=_parse_as_number(row["neighbor_as"]),
                     local_as=_int_or_none(row.get("local_as", "")),
                     state=state,
                     prefixes_received=prefixes,

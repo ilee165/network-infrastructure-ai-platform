@@ -133,6 +133,23 @@ class TestBgp:
         )
         assert result == []
 
+    @pytest.mark.parametrize(
+        ("neighbor_as", "expected_remote_as"),
+        [
+            ("65002", 65002),  # plain AS (asplain notation)
+            ("1.1000", 66536),  # asdot notation: 1*65536 + 1000
+            ("0.65002", 65002),  # asdot notation where high-order word is 0
+            ("2.0", 131072),  # asdot notation: 2*65536 + 0
+        ],
+    )
+    def test_parse_as_number_handles_asdot_and_asplain(
+        self, neighbor_as: str, expected_remote_as: int
+    ) -> None:
+        """_parse_as_number must correctly decode both asplain and asdot AS notation."""
+        from app.plugins.vendors.cisco_ios.parsers import _parse_as_number  # noqa: PLC2701
+
+        assert _parse_as_number(neighbor_as) == expected_remote_as
+
     def test_parse_failure_raises_plugin_error(
         self, transport: FakeTransport, device_id: UUID, monkeypatch: pytest.MonkeyPatch
     ) -> None:
