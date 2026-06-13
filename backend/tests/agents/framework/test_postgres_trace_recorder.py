@@ -216,6 +216,47 @@ class TestPostgresTraceRecorder:
         recorder = PostgresTraceRecorder(sessionmaker, session_id=uuid.uuid4())
         assert isinstance(recorder, TraceRecorder)
 
+    async def test_concurrent_record_step_yields_distinct_ordinals(
+        self, sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Two concurrent record_step calls on the same trace must both persist
+        with distinct ordinals and raise no exception — regression guard for the
+        SELECT FOR UPDATE fix (finding M3-02 #1)."""
+        import asyncio
+
+        session_id = await _agent_session(sessionmaker)
+        recorder = PostgresTraceRecorder(sessionmaker, session_id=session_id)
+        trace = await recorder.start("troubleshooting")
+
+        step_a = TraceStep(kind=TraceStepKind.PLAN, summary="concurrent-step-a")
+        step_b = TraceStep(kind=TraceStepKind.PLAN, summary="concurrent-step-b")
+
+        # Fire both record_step calls concurrently; neither should raise.
+        results = await asyncio.gather(
+            recorder.record_step(trace.trace_id, step_a),
+            recorder.record_step(trace.trace_id, step_b),
+        )
+        assert len(results) == 2
+
+        reloaded = await recorder.get(trace.trace_id)
+        assert len(reloaded.steps) == 2
+        ordinals_in_db: list[int]
+        async with sessionmaker() as session:
+            from sqlalchemy import select as sa_select
+
+            ordinals_in_db = list(
+                (
+                    await session.execute(
+                        sa_select(ReasoningTraceStep.ordinal)
+                        .where(ReasoningTraceStep.trace_id == uuid.UUID(trace.trace_id))
+                        .order_by(ReasoningTraceStep.ordinal)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert ordinals_in_db == [0, 1], f"expected distinct ordinals [0, 1], got {ordinals_in_db}"
+
 
 class TestBuildTraceRecorder:
     def test_in_memory_selection_returns_in_memory_recorder(self) -> None:

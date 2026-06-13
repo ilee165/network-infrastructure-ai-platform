@@ -10,6 +10,7 @@ persists to the ``reasoning_traces`` table and links entries from
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -218,6 +219,11 @@ class PostgresTraceRecorder:
     ) -> None:
         self._sessionmaker = sessionmaker
         self._session_id = session_id
+        # Per-trace asyncio locks guard the COUNT-then-INSERT ordinal assignment
+        # against in-process concurrent callers (asyncio.gather across specialist
+        # subgraphs).  Combined with SELECT … FOR UPDATE these cover both
+        # in-process and cross-process (multi-worker) concurrency.
+        self._ordinal_locks: dict[str, asyncio.Lock] = {}
 
     async def start(self, agent_name: str) -> ReasoningTrace:
         """Open and persist a new trace for *agent_name*."""
@@ -235,10 +241,32 @@ class PostgresTraceRecorder:
         return trace
 
     async def record_step(self, trace_id: str, step: TraceStep) -> ReasoningTrace:
-        """Append *step* to the persisted trace and return the reloaded trace."""
+        """Append *step* to the persisted trace and return the reloaded trace.
+
+        Ordinal assignment is made safe against concurrent callers in two layers:
+
+        1. An ``asyncio.Lock`` per trace_id serialises in-process callers
+           (e.g. concurrent specialist subgraphs joined via ``asyncio.gather``).
+        2. ``SELECT … FOR UPDATE`` on the parent trace row serialises
+           cross-process callers on Postgres (multiple uvicorn workers / Celery
+           tasks sharing the same DB).  SQLite ignores the hint, which is fine
+           because layer 1 covers all in-process concurrency.
+        """
         row_id = _trace_uuid(trace_id)
-        async with self._sessionmaker() as session:
-            await self._require_trace(session, trace_id, row_id)
+        if trace_id not in self._ordinal_locks:
+            self._ordinal_locks[trace_id] = asyncio.Lock()
+        async with self._ordinal_locks[trace_id], self._sessionmaker() as session:
+            # Cross-process lock: hold the parent row until commit so that
+            # another DB connection cannot race past the COUNT query.
+            row = (
+                await session.execute(
+                    select(ReasoningTraceRow)
+                    .where(ReasoningTraceRow.id == row_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                raise NotFoundError(f"reasoning trace '{trace_id}' does not exist")
             next_ordinal = (
                 await session.execute(
                     select(func.count())
@@ -287,13 +315,16 @@ class PostgresTraceRecorder:
                 .scalars()
                 .all()
             )
-        return ReasoningTrace(
-            trace_id=row.id.hex,
-            agent_name=row.agent_name,
-            started_at=row.started_at,
-            completed_at=row.completed_at,
-            steps=[_step_from_row(step) for step in step_rows],
-        )
+            # Construct the Pydantic model while the session is still open so
+            # that ORM attribute access never raises DetachedInstanceError on a
+            # sessionmaker that does not set expire_on_commit=False.
+            return ReasoningTrace(
+                trace_id=row.id.hex,
+                agent_name=row.agent_name,
+                started_at=row.started_at,
+                completed_at=row.completed_at,
+                steps=[_step_from_row(step) for step in step_rows],
+            )
 
     async def _require_trace(
         self, session: AsyncSession, trace_id: str, row_id: uuid.UUID
