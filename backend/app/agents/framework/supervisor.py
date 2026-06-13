@@ -94,6 +94,12 @@ class SupervisorState(MessagesState):
     specialist: str
     #: Reasoning trace for this run; attached by the supervisor nodes.
     trace: ReasoningTrace | None
+    #: The supervisor's OWN trace id, set by ``route`` and read by ``synthesize``.
+    #: Held separately from ``trace`` because a specialist subgraph (e.g. the
+    #: Troubleshooting Agent) also writes the shared ``trace`` channel with *its*
+    #: trace; ``synthesize`` must complete the supervisor's trace regardless, so
+    #: it reads this dedicated id rather than the possibly-clobbered ``trace``.
+    supervisor_trace_id: str
 
 
 def _message_text(content: str | list[str | dict[str, Any]]) -> str:
@@ -216,16 +222,27 @@ def build_supervisor_graph(
                 detail=decision.rationale or None,
             ),
         )
-        return {"specialist": target, "trace": trace}
+        return {
+            "specialist": target,
+            "trace": trace,
+            "supervisor_trace_id": trace.trace_id,
+        }
 
     async def synthesize(state: SupervisorState) -> dict[str, Any]:
-        """Compose the final answer and complete the trace (Master Architect synthesize)."""
-        trace = state["trace"]
-        if trace is None:  # pragma: no cover - route always sets the trace
-            raise SupervisorRoutingError("supervisor state lost its reasoning trace")
+        """Compose the final answer and complete the trace (Master Architect synthesize).
+
+        Completes the *supervisor's own* trace, identified by
+        ``supervisor_trace_id`` (set by ``route``). The shared ``trace`` channel
+        may have been overwritten by a specialist subgraph that records into a
+        different recorder, so it cannot be trusted here — the supervisor always
+        records its observation/conclusion against its own trace id.
+        """
+        trace_id = state.get("supervisor_trace_id")
+        if not trace_id:  # pragma: no cover - route always sets the id
+            raise SupervisorRoutingError("supervisor state lost its reasoning trace id")
         specialist = state["specialist"]
         await recorder.record_step(
-            trace.trace_id,
+            trace_id,
             TraceStep(
                 kind=TraceStepKind.OBSERVATION,
                 summary=f"specialist '{specialist}' completed its subgraph run",
@@ -233,13 +250,13 @@ def build_supervisor_graph(
         )
         answer = _message_text(state["messages"][-1].content) if state["messages"] else ""
         await recorder.record_step(
-            trace.trace_id,
+            trace_id,
             TraceStep(
                 kind=TraceStepKind.CONCLUSION,
                 summary=answer or "specialist produced no final message",
             ),
         )
-        completed = await recorder.complete(trace.trace_id)
+        completed = await recorder.complete(trace_id)
         return {"trace": completed}
 
     graph: StateGraph[SupervisorState, None, SupervisorState, SupervisorState] = StateGraph(
