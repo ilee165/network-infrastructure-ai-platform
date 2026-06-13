@@ -22,6 +22,7 @@ from app import db
 from app.core.config import Settings
 from app.core.errors import AuthError, ForbiddenError
 from app.core.security import decode_access_token
+from app.knowledge import Neo4jClient, get_client
 from app.models import User
 
 #: ADR-0010 RBAC rank order. Unknown role names rank below everything (deny).
@@ -53,6 +54,15 @@ def get_app_settings(request: Request) -> Settings:
     """The :class:`Settings` bound to the app at ``create_app`` time."""
     settings: Settings = request.app.state.settings
     return settings
+
+
+def get_knowledge_client() -> Neo4jClient:
+    """The process-wide Neo4j access wrapper (ADR-0005 read path).
+
+    Routes depend on this (not on ``app.knowledge`` directly) so tests can
+    override a single dependency to swap in a fake graph client.
+    """
+    return get_client()
 
 
 async def get_current_user(

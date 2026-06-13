@@ -11,5 +11,13 @@ from app.knowledge.neo4j_client import (
     dispose_client,
     get_client,
 )
+from app.knowledge.topology_read import GraphData, fetch_graph
 
-__all__ = ["Neo4jClient", "create_client", "dispose_client", "get_client"]
+__all__ = [
+    "GraphData",
+    "Neo4jClient",
+    "create_client",
+    "dispose_client",
+    "fetch_graph",
+    "get_client",
+]
