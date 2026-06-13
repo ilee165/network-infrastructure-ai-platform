@@ -277,11 +277,11 @@ def derive_nodes(
         for vlan_id in sorted({row.vlan_id for row in interfaces if row.vlan_id is not None})
     )
 
-    vrf_nodes = tuple(VrfNode(name=name) for name in sorted({row.vrf for row in routes if row.vrf}))
+    _vrf_names: set[str] = {row.vrf.strip() for row in routes if row.vrf.strip()}
+    vrf_nodes = tuple(VrfNode(name=name) for name in sorted(_vrf_names))
 
-    site_nodes = tuple(
-        SiteNode(name=name) for name in sorted({device.site for device in devices if device.site})
-    )
+    _site_names: set[str] = {s for device in devices if (s := (device.site or "").strip())}
+    site_nodes = tuple(SiteNode(name=name) for name in sorted(_site_names))
 
     # Route prefixes deliberately create no Subnet nodes (M2-05: ROUTES_TO
     # edges attach only to subnets derived from interface addressing).
