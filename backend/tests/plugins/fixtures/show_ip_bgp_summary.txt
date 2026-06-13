@@ -1,0 +1,16 @@
+BGP router identifier 10.0.0.1, local AS number 65001
+BGP table version is 27, main routing table version 27
+13 network entries using 1872 bytes of memory
+13 path entries using 1040 bytes of memory
+4/2 BGP path/bestpath attribute entries using 640 bytes of memory
+2 BGP AS-PATH entries using 48 bytes of memory
+0 BGP route-map cache entries using 0 bytes of memory
+0 BGP filter-list cache entries using 0 bytes of memory
+BGP using 3600 total bytes of memory
+BGP activity 13/0 prefixes, 13/0 paths, scan interval 60 secs
+
+Neighbor        V           AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd
+10.0.0.2        4        65002    1820    1825       27    0    0 1w2d            12
+10.0.0.3        4        65003     903     908       27    0    0 00:05:12         5
+192.0.2.9       4        65010       0       0        1    0    0 never    Idle
+192.0.2.13      4        65020      44      46        1    0    0 00:00:21 Active

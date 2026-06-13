@@ -85,6 +85,9 @@ class TestPluginDeclaration:
                 Capability.ROUTES,
                 Capability.NEIGHBORS_LLDP,
                 Capability.NEIGHBORS_CDP,
+                Capability.BGP,
+                Capability.OSPF,
+                Capability.ACL,
                 Capability.CONFIG_BACKUP,
             }
         )
@@ -97,7 +100,7 @@ class TestPluginDeclaration:
     def test_undeclared_capability_fails_fast(self) -> None:
         plugin = CiscoIosPlugin()
         with pytest.raises(PluginError, match="does not implement"):
-            plugin.get_capability(Capability.BGP)
+            plugin.get_capability(Capability.FIREWALL_POLICY)
 
     def test_fake_transport_satisfies_the_command_transport_protocol(
         self, transport: FakeTransport

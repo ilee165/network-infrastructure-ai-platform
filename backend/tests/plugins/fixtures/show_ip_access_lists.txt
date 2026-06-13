@@ -1,0 +1,7 @@
+Standard IP access list 10
+    10 permit 10.1.1.0, wildcard bits 0.0.0.255 (120 matches)
+    20 deny   any
+Extended IP access list BLOCK-TELNET
+    10 deny tcp any host 10.0.0.5 eq telnet (5 matches)
+    20 permit tcp 192.0.2.0 0.0.0.255 any eq www (38 matches)
+    30 permit ip any any

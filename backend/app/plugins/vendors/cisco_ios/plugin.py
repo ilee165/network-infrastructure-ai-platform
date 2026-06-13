@@ -21,6 +21,8 @@ from uuid import UUID
 
 from app.core.errors import PluginError
 from app.plugins.base import (
+    AclCapability,
+    BgpCapability,
     Capability,
     CommandTransport,
     ConfigBackupCapability,
@@ -28,6 +30,7 @@ from app.plugins.base import (
     DiscoverySshCapability,
     InterfacesCapability,
     NeighborsCapability,
+    OspfCapability,
     PluginCapability,
     RoutesCapability,
     SnmpReadTransport,
@@ -40,17 +43,27 @@ from app.plugins.vendors.cisco_ios.parsers import (
     SNMP_OID_SYSOBJECTID,
 )
 from app.schemas.discovery import DeviceFacts
-from app.schemas.normalized import NormalizedInterface, NormalizedNeighbor, NormalizedRoute
+from app.schemas.normalized import (
+    NormalizedAclEntry,
+    NormalizedBgpPeer,
+    NormalizedInterface,
+    NormalizedNeighbor,
+    NormalizedOspfNeighbor,
+    NormalizedRoute,
+)
 
 __all__ = [
     "SNMP_OID_SYSDESCR",
     "SNMP_OID_SYSNAME",
     "SNMP_OID_SYSOBJECTID",
+    "CiscoIosAcl",
+    "CiscoIosBgp",
     "CiscoIosConfigBackup",
     "CiscoIosDiscoverySnmp",
     "CiscoIosDiscoverySsh",
     "CiscoIosInterfaces",
     "CiscoIosNeighbors",
+    "CiscoIosOspf",
     "CiscoIosPlugin",
     "CiscoIosRoutes",
 ]
@@ -64,6 +77,9 @@ SHOW_IP_ROUTE = "show ip route"
 SHOW_CDP_NEIGHBORS_DETAIL = "show cdp neighbors detail"
 SHOW_LLDP_NEIGHBORS_DETAIL = "show lldp neighbors detail"
 SHOW_RUNNING_CONFIG = "show running-config"
+SHOW_IP_BGP_SUMMARY = "show ip bgp summary"
+SHOW_IP_OSPF_NEIGHBOR = "show ip ospf neighbor"
+SHOW_IP_ACCESS_LISTS = "show ip access-lists"
 
 #: System-MIB OIDs collected by SNMP discovery, in request order.
 _SNMP_DISCOVERY_OIDS = (SNMP_OID_SYSDESCR, SNMP_OID_SYSOBJECTID, SNMP_OID_SYSNAME)
@@ -161,6 +177,35 @@ class CiscoIosNeighbors(_CiscoIosCommandCapability, NeighborsCapability):
         )
 
 
+class CiscoIosBgp(_CiscoIosCommandCapability, BgpCapability):
+    """``BGP``: ``show ip bgp summary`` → :class:`NormalizedBgpPeer`."""
+
+    def get_bgp_peers(self) -> list[NormalizedBgpPeer]:
+        """Collect and normalize the IPv4-unicast BGP peering sessions."""
+        output = self._run(SHOW_IP_BGP_SUMMARY)
+        return parsers.parse_bgp_peers(output, device_id=self._device_id, collected_at=self._now())
+
+
+class CiscoIosOspf(_CiscoIosCommandCapability, OspfCapability):
+    """``OSPF``: ``show ip ospf neighbor`` → :class:`NormalizedOspfNeighbor`."""
+
+    def get_ospf_neighbors(self) -> list[NormalizedOspfNeighbor]:
+        """Collect and normalize the OSPF neighbor adjacencies."""
+        output = self._run(SHOW_IP_OSPF_NEIGHBOR)
+        return parsers.parse_ospf_neighbors(
+            output, device_id=self._device_id, collected_at=self._now()
+        )
+
+
+class CiscoIosAcl(_CiscoIosCommandCapability, AclCapability):
+    """``ACL``: ``show ip access-lists`` → :class:`NormalizedAclEntry`."""
+
+    def get_acls(self) -> list[NormalizedAclEntry]:
+        """Collect and normalize the configured IP access-list entries."""
+        output = self._run(SHOW_IP_ACCESS_LISTS)
+        return parsers.parse_acls(output, device_id=self._device_id, collected_at=self._now())
+
+
 class CiscoIosConfigBackup(_CiscoIosCommandCapability, ConfigBackupCapability):
     """``CONFIG_BACKUP``: ``show running-config`` returned verbatim."""
 
@@ -180,7 +225,8 @@ class CiscoIosPlugin(VendorPlugin):
 
     Declares only what is implemented (REPO-STRUCTURE §6 step 4): the full
     M1 capability set — SSH/SNMP discovery, interface inventory, route
-    collection, LLDP/CDP neighbors — plus config backup.
+    collection, LLDP/CDP neighbors — plus config backup and the M3
+    troubleshooting trio (BGP/OSPF/ACL).
     """
 
     vendor_id: ClassVar[str] = VENDOR_ID
@@ -193,6 +239,9 @@ class CiscoIosPlugin(VendorPlugin):
             Capability.ROUTES,
             Capability.NEIGHBORS_LLDP,
             Capability.NEIGHBORS_CDP,
+            Capability.BGP,
+            Capability.OSPF,
+            Capability.ACL,
             Capability.CONFIG_BACKUP,
         }
     )
@@ -205,5 +254,8 @@ class CiscoIosPlugin(VendorPlugin):
             Capability.ROUTES: CiscoIosRoutes,
             Capability.NEIGHBORS_LLDP: CiscoIosNeighbors,
             Capability.NEIGHBORS_CDP: CiscoIosNeighbors,
+            Capability.BGP: CiscoIosBgp,
+            Capability.OSPF: CiscoIosOspf,
+            Capability.ACL: CiscoIosAcl,
             Capability.CONFIG_BACKUP: CiscoIosConfigBackup,
         }
