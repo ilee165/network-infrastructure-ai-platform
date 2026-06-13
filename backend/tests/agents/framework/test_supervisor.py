@@ -1,14 +1,26 @@
 """Tests for the Master Architect supervisor graph
-(app/agents/framework/supervisor.py), driven by a scripted fake chat model."""
+(app/agents/framework/supervisor.py), driven by a scripted fake chat model.
+
+M3-06 upgrades routing from M0 text parsing to structured-output routing
+(``llm.with_structured_output(RoutingDecision)``) plus the full
+plan -> route -> specialist -> synthesize loop and Consultant escalation for
+ambiguous / unroutable intent. The scripted model replays a structured routing
+decision as an ``AIMessage`` carrying a ``RoutingDecision`` tool call, which is
+exactly what ``with_structured_output`` parses against ``ScriptedChatModel``.
+"""
 
 from __future__ import annotations
+
+from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agents.framework.registry import AgentRegistry
 from app.agents.framework.supervisor import (
+    CONSULTANT_NAME,
     SUPERVISOR_NAME,
+    RoutingDecision,
     SupervisorRoutingError,
     build_supervisor_graph,
     run_supervisor,
@@ -22,6 +34,26 @@ from app.agents.framework.tools import (
 from app.agents.framework.traces import InMemoryTraceRecorder, ReasoningTrace, TraceStepKind
 from app.core.security import Role
 from tests.agents.conftest import RecordingAuditSink, SpecialistFactory, scripted_model
+
+
+def _routing_reply(
+    *, specialist: str | None, ambiguous: bool = False, rationale: str = "best fit"
+) -> AIMessage:
+    """A scripted structured-routing reply (a ``RoutingDecision`` tool call).
+
+    ``with_structured_output(RoutingDecision)`` binds ``RoutingDecision`` as a
+    tool and parses the chosen call's args into the model, so a deterministic
+    routing decision is expressed as a tool call rather than free text.
+    """
+    args: dict[str, Any] = {
+        "specialist": specialist,
+        "ambiguous": ambiguous,
+        "rationale": rationale,
+    }
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": "RoutingDecision", "args": args, "id": "route-1"}],
+    )
 
 
 def _bgp_tool(sink: RecordingAuditSink) -> NetOpsTool:
@@ -46,7 +78,31 @@ def _engineer_bgp_tool(sink: RecordingAuditSink) -> NetOpsTool:
     return get_bgp_peers
 
 
-def _two_specialist_registry(
+def _registry_with_consultant(
+    specialist_factory: SpecialistFactory, sink: RecordingAuditSink
+) -> AgentRegistry:
+    """A registry with discovery, troubleshooting, and the consultant escalation target."""
+    registry = AgentRegistry()
+    registry.register(
+        specialist_factory("discovery", description="Discovers devices, interfaces, and neighbors.")
+    )
+    registry.register(
+        specialist_factory(
+            "troubleshooting",
+            description="Diagnoses routing, BGP, OSPF, DNS, and DHCP problems.",
+            tools=[_bgp_tool(sink)],
+        )
+    )
+    registry.register(
+        specialist_factory(
+            CONSULTANT_NAME,
+            description="Asks clarifying questions when the request is ambiguous.",
+        )
+    )
+    return registry
+
+
+def _registry_without_consultant(
     specialist_factory: SpecialistFactory, sink: RecordingAuditSink
 ) -> AgentRegistry:
     registry = AgentRegistry()
@@ -63,31 +119,45 @@ def _two_specialist_registry(
     return registry
 
 
+class TestRoutingDecision:
+    def test_routing_decision_is_a_structured_schema(self) -> None:
+        decision = RoutingDecision(specialist="discovery", ambiguous=False, rationale="scan ask")
+        assert decision.specialist == "discovery"
+        assert decision.ambiguous is False
+        assert decision.rationale == "scan ask"
+
+    def test_routing_decision_allows_no_specialist_when_ambiguous(self) -> None:
+        decision = RoutingDecision(specialist=None, ambiguous=True, rationale="unclear intent")
+        assert decision.specialist is None
+        assert decision.ambiguous is True
+
+
 class TestBuildSupervisorGraph:
     def test_empty_registry_fails_at_build_time(self) -> None:
         llm = scripted_model([])
         with pytest.raises(SupervisorRoutingError, match="no specialist"):
             build_supervisor_graph(llm, AgentRegistry())
 
-    def test_graph_compiles_with_registered_specialists(
+    def test_graph_has_route_synthesize_and_specialist_nodes(
         self, specialist_factory: SpecialistFactory, audit_sink: RecordingAuditSink
     ) -> None:
-        registry = _two_specialist_registry(specialist_factory, audit_sink)
+        registry = _registry_with_consultant(specialist_factory, audit_sink)
         graph = build_supervisor_graph(scripted_model([]), registry)
         node_names = set(graph.get_graph().nodes)
-        assert {"route", "discovery", "troubleshooting", "finalize"} <= node_names
+        expected = {"route", "synthesize", "discovery", "troubleshooting", CONSULTANT_NAME}
+        assert expected <= node_names
 
 
-class TestRouting:
-    async def test_supervisor_routes_and_attaches_trace(
+class TestStructuredRouting:
+    async def test_structured_route_selects_the_named_specialist(
         self, specialist_factory: SpecialistFactory, audit_sink: RecordingAuditSink
     ) -> None:
-        registry = _two_specialist_registry(specialist_factory, audit_sink)
+        registry = _registry_with_consultant(specialist_factory, audit_sink)
         recorder = InMemoryTraceRecorder()
         llm = scripted_model(
             [
-                # 1. routing decision
-                AIMessage(content="troubleshooting"),
+                # 1. structured routing decision -> troubleshooting
+                _routing_reply(specialist="troubleshooting", rationale="BGP fault question"),
                 # 2. specialist requests its tool
                 AIMessage(
                     content="",
@@ -105,63 +175,143 @@ class TestRouting:
         )
 
         assert result["specialist"] == "troubleshooting"
-        assert result["messages"][-1].content == "BGP peer 10.0.0.2 on edge-1 is down (Idle)."
-
-        trace = result["trace"]
-        assert isinstance(trace, ReasoningTrace)
-        assert trace.agent_name == SUPERVISOR_NAME
-        assert trace.is_complete is True
-        assert [step.kind for step in trace.steps] == [
-            TraceStepKind.PLAN,
-            TraceStepKind.OBSERVATION,
-            TraceStepKind.CONCLUSION,
-        ]
-        assert "troubleshooting" in trace.steps[0].summary
-        assert trace.steps[-1].summary == "BGP peer 10.0.0.2 on edge-1 is down (Idle)."
-        # The recorder retains the same trace for later retrieval (M3: DB).
-        assert recorder.get(trace.trace_id).is_complete is True
+        assert "BGP peer 10.0.0.2 on edge-1 is down (Idle)." in result["messages"][-1].content
         # The specialist's classified tool was audited during the run.
         assert audit_sink.events[-1].tool_name == "get_bgp_peers"
         assert audit_sink.events[-1].outcome == "success"
 
-    async def test_routing_reply_with_surrounding_text_still_routes(
+    async def test_structured_route_to_discovery(
         self, specialist_factory: SpecialistFactory, audit_sink: RecordingAuditSink
     ) -> None:
-        registry = _two_specialist_registry(specialist_factory, audit_sink)
+        registry = _registry_with_consultant(specialist_factory, audit_sink)
         llm = scripted_model(
             [
-                AIMessage(content="I choose discovery."),
+                _routing_reply(specialist="discovery", rationale="network scan request"),
                 AIMessage(content="Found 3 new switches."),
             ]
         )
         graph = build_supervisor_graph(llm, registry)
         result = await graph.ainvoke({"messages": [HumanMessage(content="scan the network")]})
         assert result["specialist"] == "discovery"
-        assert result["messages"][-1].content == "Found 3 new switches."
+        assert "Found 3 new switches." in result["messages"][-1].content
 
-    async def test_unroutable_reply_raises_and_completes_the_trace(
+
+class TestConsultantEscalation:
+    async def test_ambiguous_intent_routes_to_consultant_not_exception(
         self, specialist_factory: SpecialistFactory, audit_sink: RecordingAuditSink
     ) -> None:
-        registry = _two_specialist_registry(specialist_factory, audit_sink)
+        registry = _registry_with_consultant(specialist_factory, audit_sink)
+        llm = scripted_model(
+            [
+                # routing says ambiguous, no specialist named
+                _routing_reply(specialist=None, ambiguous=True, rationale="goal is unclear"),
+                # the consultant specialist asks a clarifying question
+                AIMessage(content="Which device or service is failing, and how?"),
+            ]
+        )
+        graph = build_supervisor_graph(llm, registry)
+        result = await graph.ainvoke({"messages": [HumanMessage(content="fix the network")]})
+        assert result["specialist"] == CONSULTANT_NAME
+        assert "Which device or service is failing" in result["messages"][-1].content
+
+    async def test_unknown_specialist_routes_to_consultant(
+        self, specialist_factory: SpecialistFactory, audit_sink: RecordingAuditSink
+    ) -> None:
+        registry = _registry_with_consultant(specialist_factory, audit_sink)
+        llm = scripted_model(
+            [
+                # names a specialist that is not registered
+                _routing_reply(specialist="weather_bot", ambiguous=False, rationale="???"),
+                AIMessage(content="I can help with network operations — what is the problem?"),
+            ]
+        )
+        graph = build_supervisor_graph(llm, registry)
+        result = await graph.ainvoke({"messages": [HumanMessage(content="make me a sandwich")]})
+        assert result["specialist"] == CONSULTANT_NAME
+
+    async def test_ambiguous_without_consultant_raises_routing_error(
+        self, specialist_factory: SpecialistFactory, audit_sink: RecordingAuditSink
+    ) -> None:
+        registry = _registry_without_consultant(specialist_factory, audit_sink)
         recorder = InMemoryTraceRecorder()
-        llm = scripted_model([AIMessage(content="make me a sandwich")])
+        llm = scripted_model([_routing_reply(specialist=None, ambiguous=True, rationale="unclear")])
         graph = build_supervisor_graph(llm, registry, trace_recorder=recorder)
-        with pytest.raises(SupervisorRoutingError, match="does not name exactly one"):
+        with pytest.raises(SupervisorRoutingError, match="consultant"):
             await graph.ainvoke({"messages": [HumanMessage(content="hello")]})
+        # The trace is still completed so the failed run remains explainable.
         traces = recorder.list_traces()
         assert len(traces) == 1
         assert traces[0].is_complete is True
-        assert traces[0].steps[0].kind is TraceStepKind.PLAN
-        assert "routing failed" in traces[0].steps[0].summary
 
-    async def test_ambiguous_reply_naming_two_specialists_raises(
+
+class TestTrace:
+    async def test_completed_run_trace_has_plan_route_observation_conclusion(
         self, specialist_factory: SpecialistFactory, audit_sink: RecordingAuditSink
     ) -> None:
-        registry = _two_specialist_registry(specialist_factory, audit_sink)
-        llm = scripted_model([AIMessage(content="either discovery or troubleshooting")])
-        graph = build_supervisor_graph(llm, registry)
-        with pytest.raises(SupervisorRoutingError):
-            await graph.ainvoke({"messages": [HumanMessage(content="help")]})
+        registry = _registry_with_consultant(specialist_factory, audit_sink)
+        recorder = InMemoryTraceRecorder()
+        llm = scripted_model(
+            [
+                _routing_reply(specialist="troubleshooting", rationale="BGP fault question"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "get_bgp_peers", "args": {"device": "edge-1"}, "id": "call-1"}
+                    ],
+                ),
+                AIMessage(content="BGP peer 10.0.0.2 on edge-1 is down (Idle)."),
+            ]
+        )
+        graph = build_supervisor_graph(llm, registry, trace_recorder=recorder)
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content="why is BGP down on edge-1?")]}
+        )
+
+        trace = result["trace"]
+        assert isinstance(trace, ReasoningTrace)
+        assert trace.agent_name == SUPERVISOR_NAME
+        assert trace.is_complete is True
+
+        kinds = [step.kind for step in trace.steps]
+        # The full Master Architect loop: a plan step, the routing decision
+        # (also a PLAN-kind step), the specialist observation, and the
+        # synthesized conclusion — in that order.
+        assert kinds[0] is TraceStepKind.PLAN
+        assert TraceStepKind.PLAN in kinds
+        assert kinds[-2] is TraceStepKind.OBSERVATION
+        assert kinds[-1] is TraceStepKind.CONCLUSION
+        assert kinds.count(TraceStepKind.PLAN) >= 2  # plan + route are distinct steps
+
+        # A distinct "route" PLAN step names the chosen specialist.
+        route_steps = [
+            s
+            for s in trace.steps
+            if s.kind is TraceStepKind.PLAN and "troubleshooting" in s.summary
+        ]
+        assert route_steps, "expected a route step naming the chosen specialist"
+        # The conclusion is the synthesized, user-facing answer.
+        assert "BGP peer 10.0.0.2 on edge-1 is down (Idle)." in trace.steps[-1].summary
+        # The recorder retains the same completed trace for later retrieval (M3: DB).
+        assert recorder.get(trace.trace_id).is_complete is True
+
+    async def test_consultant_run_trace_is_complete(
+        self, specialist_factory: SpecialistFactory, audit_sink: RecordingAuditSink
+    ) -> None:
+        registry = _registry_with_consultant(specialist_factory, audit_sink)
+        recorder = InMemoryTraceRecorder()
+        llm = scripted_model(
+            [
+                _routing_reply(specialist=None, ambiguous=True, rationale="ambiguous"),
+                AIMessage(content="Could you clarify which device is affected?"),
+            ]
+        )
+        graph = build_supervisor_graph(llm, registry, trace_recorder=recorder)
+        result = await graph.ainvoke({"messages": [HumanMessage(content="help")]})
+        trace = result["trace"]
+        assert trace.is_complete is True
+        assert trace.steps[-1].kind is TraceStepKind.CONCLUSION
+        # The route step records that escalation went to the consultant.
+        assert any(CONSULTANT_NAME in s.summary for s in trace.steps)
 
 
 def _engineer_tool_registry(
@@ -179,13 +329,19 @@ def _engineer_tool_registry(
             tools=[_engineer_bgp_tool(sink)],
         )
     )
+    registry.register(
+        specialist_factory(
+            CONSULTANT_NAME,
+            description="Asks clarifying questions when the request is ambiguous.",
+        )
+    )
     return registry
 
 
 def _engineer_run_script() -> list[AIMessage]:
     return [
-        # 1. routing decision
-        AIMessage(content="troubleshooting"),
+        # 1. structured routing decision
+        _routing_reply(specialist="troubleshooting", rationale="engineer-tier BGP read"),
         # 2. specialist requests its engineer-tier tool
         AIMessage(
             content="",
@@ -218,7 +374,7 @@ class TestRunSupervisorBindsRole:
 
         # The engineer-tier tool actually executed inside the supervised run.
         assert result["specialist"] == "troubleshooting"
-        assert result["messages"][-1].content == "BGP peer 10.0.0.2 on edge-1 is down (Idle)."
+        assert "BGP peer 10.0.0.2 on edge-1 is down (Idle)." in result["messages"][-1].content
         assert audit_sink.events[-1].tool_name == "get_bgp_peers"
         assert audit_sink.events[-1].outcome == "success"
 

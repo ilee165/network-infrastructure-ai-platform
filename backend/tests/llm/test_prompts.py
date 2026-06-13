@@ -20,9 +20,17 @@ from app.llm.prompts import (
 
 
 class TestSupervisorRoutingPrompt:
-    def test_registered_as_first_entry_version_one(self) -> None:
-        prompt = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)
+    def test_version_one_text_parse_prompt_still_registered(self) -> None:
+        # The M0 text-parse prompt is frozen at version 1 (reproducibility).
+        prompt = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, version=1)
         assert prompt.version == 1
+        assert "{specialists}" in prompt.text
+
+    def test_latest_version_is_the_structured_output_prompt(self) -> None:
+        # M3-06 registered version 2 for structured-output routing; it is the
+        # default (latest) version the supervisor now consumes.
+        prompt = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)
+        assert prompt.version >= 2
         assert "{specialists}" in prompt.text
 
     def test_text_formats_with_a_specialist_roster(self) -> None:

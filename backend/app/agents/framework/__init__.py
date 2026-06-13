@@ -22,6 +22,9 @@ from app.agents.framework.approval import (
 from app.agents.framework.base import AgentDefinitionError, BaseSpecialistAgent
 from app.agents.framework.registry import AgentRegistry
 from app.agents.framework.supervisor import (
+    CONSULTANT_NAME,
+    SUPERVISOR_NAME,
+    RoutingDecision,
     SupervisorRoutingError,
     build_supervisor_graph,
     run_supervisor,
@@ -47,6 +50,8 @@ from app.agents.framework.traces import (
 )
 
 __all__ = [
+    "CONSULTANT_NAME",
+    "SUPERVISOR_NAME",
     "AgentDefinitionError",
     "AgentRegistry",
     "ApprovalDecision",
@@ -62,6 +67,7 @@ __all__ = [
     "LoggingAuditSink",
     "NetOpsTool",
     "ReasoningTrace",
+    "RoutingDecision",
     "SupervisorRoutingError",
     "ToolAuditEvent",
     "ToolClassification",
