@@ -6,7 +6,7 @@
  * framework-free functions stay independently unit-testable.
  */
 
-import type { TopologyGraph, TopologyNode } from "../api/topology";
+import type { TopologyDiff, TopologyGraph, TopologyNode } from "../api/topology";
 
 // ── Styling tokens ─────────────────────────────────────────────────────────────
 
@@ -132,4 +132,133 @@ export function detailFields(node: TopologyNode): { label: string; value: string
     default:
       return [{ label: "Key", value: node.key }];
   }
+}
+
+// ── Diff overlay (M2-14) ────────────────────────────────────────────────────
+
+/**
+ * Marker classes the stylesheet keys diff highlighting on. ``diff-added`` is
+ * green, ``diff-removed`` is red; both apply to nodes and edges. They are
+ * appended to an element's existing label/type class so the base label color
+ * still drives un-highlighted elements.
+ */
+export const DIFF_ADDED_CLASS = "diff-added";
+export const DIFF_REMOVED_CLASS = "diff-removed";
+
+/** Stable lookup key for a diff edge triple ``[rel_type, src, dst]``. */
+function edgeKey(type: string, source: string, target: string): string {
+  return `${type} ${source} ${target}`;
+}
+
+/**
+ * Pre-indexed added/removed sets derived from a {@link TopologyDiff}.
+ *
+ * Node membership is keyed by node ``key`` (the diff carries ``[label, key]``);
+ * edge membership by the ``rel_type``/``source``/``target`` triple. Removed
+ * elements may be absent from the current graph (they no longer exist), so the
+ * sets are also surfaced directly for the list panel.
+ */
+export interface DiffIndex {
+  addedNodeKeys: Set<string>;
+  removedNodeKeys: Set<string>;
+  addedEdgeKeys: Set<string>;
+  removedEdgeKeys: Set<string>;
+}
+
+/** Key of a diff node element ``[label, key]`` (the ``key`` column). */
+function nodeElementKey(element: string[]): string {
+  return element[1] ?? "";
+}
+
+/** Key of a diff edge element ``[rel_type, src_key, dst_key]``. */
+function edgeElementKey(element: string[]): string {
+  return edgeKey(element[0] ?? "", element[1] ?? "", element[2] ?? "");
+}
+
+/** Build a {@link DiffIndex} from a diff result (pure, no DOM). */
+export function indexDiff(diff: TopologyDiff): DiffIndex {
+  return {
+    // Diff node elements are ``[label, key]``; index by the key (column 1).
+    addedNodeKeys: new Set(diff.nodes_added.map(nodeElementKey)),
+    removedNodeKeys: new Set(diff.nodes_removed.map(nodeElementKey)),
+    // Diff edge elements are ``[rel_type, src_key, dst_key]``.
+    addedEdgeKeys: new Set(diff.edges_added.map(edgeElementKey)),
+    removedEdgeKeys: new Set(diff.edges_removed.map(edgeElementKey)),
+  };
+}
+
+/**
+ * Return a copy of ``elements`` with ``diff-added`` / ``diff-removed`` appended
+ * to the ``classes`` of any element the diff touches.
+ *
+ * Only elements *present in the current graph* can be highlighted; a removed
+ * node/edge that is no longer projected simply has no element to style (it is
+ * still listed in the diff panel). Pure: returns new descriptors, never mutates.
+ */
+export function applyDiffClasses(
+  elements: CytoscapeElement[],
+  diff: TopologyDiff,
+): CytoscapeElement[] {
+  const index = indexDiff(diff);
+  return elements.map((el) => {
+    const isEdge = el.data.source !== undefined && el.data.target !== undefined;
+    let marker: string | null = null;
+    if (isEdge) {
+      const key = edgeKey(el.data.label, el.data.source!, el.data.target!);
+      if (index.addedEdgeKeys.has(key)) marker = DIFF_ADDED_CLASS;
+      else if (index.removedEdgeKeys.has(key)) marker = DIFF_REMOVED_CLASS;
+    } else {
+      if (index.addedNodeKeys.has(el.data.id)) marker = DIFF_ADDED_CLASS;
+      else if (index.removedNodeKeys.has(el.data.id)) marker = DIFF_REMOVED_CLASS;
+    }
+    return marker ? { ...el, classes: `${el.classes} ${marker}` } : el;
+  });
+}
+
+/** One human-readable row in the diff list panel. */
+export interface DiffListItem {
+  /** ``added`` | ``removed`` — drives the row color. */
+  change: "added" | "removed";
+  /** ``node`` | ``edge`` — the element kind. */
+  kind: "node" | "edge";
+  /** ``Device``/``Subnet``… for nodes; ``CONNECTED_TO``… for edges. */
+  category: string;
+  /** Display string: node key for nodes, ``src → dst`` for edges. */
+  label: string;
+}
+
+/**
+ * Flatten a diff into a stable, display-ordered list of rows for the panel.
+ * Order: removed before added, edges before nodes within each (so a link
+ * removal — the headline §4 criterion — surfaces first), then lexicographic.
+ */
+export function diffListItems(diff: TopologyDiff): DiffListItem[] {
+  const items: DiffListItem[] = [];
+  const edgeRow = (change: "added" | "removed", element: string[]): DiffListItem => ({
+    change,
+    kind: "edge",
+    category: element[0] ?? "",
+    label: `${element[1] ?? ""} → ${element[2] ?? ""}`,
+  });
+  const nodeRow = (change: "added" | "removed", element: string[]): DiffListItem => ({
+    change,
+    kind: "node",
+    category: element[0] ?? "",
+    label: element[1] ?? "",
+  });
+  for (const element of diff.edges_removed) items.push(edgeRow("removed", element));
+  for (const element of diff.nodes_removed) items.push(nodeRow("removed", element));
+  for (const element of diff.edges_added) items.push(edgeRow("added", element));
+  for (const element of diff.nodes_added) items.push(nodeRow("added", element));
+  return items;
+}
+
+/** Total number of changed elements across a diff (0 ⇒ identical snapshots). */
+export function diffChangeCount(diff: TopologyDiff): number {
+  return (
+    diff.nodes_added.length +
+    diff.nodes_removed.length +
+    diff.edges_added.length +
+    diff.edges_removed.length
+  );
 }

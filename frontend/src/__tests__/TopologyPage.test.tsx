@@ -7,9 +7,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TopologyGraph } from "../api/topology";
+import type { RunListResponse } from "../api/discovery";
+import type { TopologyDiffResponse, TopologyGraph } from "../api/topology";
 import { TopologyPage } from "../pages/TopologyPage";
-import { toCytoscapeElements } from "../pages/topology-graph";
+import { DIFF_REMOVED_CLASS, toCytoscapeElements } from "../pages/topology-graph";
 
 // ── cytoscape mock ──────────────────────────────────────────────────────────
 //
@@ -367,5 +368,180 @@ describe("TopologyPage — node detail panel", () => {
     // Tap background — detail panel must revert to the empty hint.
     tapBackground();
     expect(await screen.findByTestId("topology-detail-empty")).toBeInTheDocument();
+  });
+});
+
+// ── Run-to-run diff view (M2-14) ─────────────────────────────────────────────
+
+const RUN_FROM = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const RUN_TO = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+const RUNS: RunListResponse = {
+  items: [
+    {
+      id: RUN_FROM,
+      status: "succeeded",
+      seeds: ["10.0.0.1"],
+      hop_limit: 1,
+      allowlist: ["10.0.0.0/24"],
+      credential_names: [],
+      stats: {},
+      error: null,
+      created_at: "2026-06-12T10:00:00Z",
+      started_at: "2026-06-12T10:00:01Z",
+      finished_at: "2026-06-12T10:01:00Z",
+    },
+    {
+      id: RUN_TO,
+      status: "succeeded",
+      seeds: ["10.0.0.1"],
+      hop_limit: 1,
+      allowlist: ["10.0.0.0/24"],
+      credential_names: [],
+      stats: {},
+      error: null,
+      created_at: "2026-06-13T10:00:00Z",
+      started_at: "2026-06-13T10:00:01Z",
+      finished_at: "2026-06-13T10:01:00Z",
+    },
+  ],
+  total: 2,
+  limit: 50,
+  offset: 0,
+};
+
+// The diff removes the HAS_INTERFACE edge that GRAPH still contains, so the
+// canvas overlay can highlight it and the panel can list it.
+const DIFF: TopologyDiffResponse = {
+  from_run: RUN_FROM,
+  to_run: RUN_TO,
+  diff: {
+    nodes_added: [],
+    nodes_removed: [],
+    edges_added: [],
+    edges_removed: [["HAS_INTERFACE", DEVICE_KEY, IFACE_KEY]],
+  },
+};
+
+/**
+ * Fetch mock that routes by URL: the runs list, the topology graph, and the
+ * diff endpoint each return their own body. Records the requested diff URL so a
+ * test can assert the run ids were passed through.
+ */
+function routingFetch(diff: TopologyDiffResponse = DIFF) {
+  return vi.fn((input: RequestInfo | URL): Promise<Response> => {
+    const url = String(input);
+    let body: unknown = GRAPH;
+    if (url.includes("/discovery/runs")) body = RUNS;
+    else if (url.includes("/topology/diff")) body = diff;
+    else if (url.includes("/topology/graph")) body = GRAPH;
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  });
+}
+
+async function selectRunsAndCompare(): Promise<void> {
+  // The runs list populates the two selects; wait for the options to arrive.
+  await waitFor(() =>
+    expect(screen.getByTestId("diff-from-run").querySelectorAll("option").length).toBeGreaterThan(
+      1,
+    ),
+  );
+  fireEvent.change(screen.getByTestId("diff-from-run"), { target: { value: RUN_FROM } });
+  fireEvent.change(screen.getByTestId("diff-to-run"), { target: { value: RUN_TO } });
+  fireEvent.click(screen.getByTestId("diff-compare-btn"));
+}
+
+describe("TopologyPage — run-to-run diff view", () => {
+  it("renders the run-pair selector from the discovery runs list", async () => {
+    vi.stubGlobal("fetch", routingFetch());
+    renderPage();
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("diff-from-run").querySelectorAll("option").length,
+      ).toBeGreaterThan(1),
+    );
+    // Both runs offered in each select (plus the placeholder option).
+    expect(screen.getByTestId("diff-from-run")).toBeInTheDocument();
+    expect(screen.getByTestId("diff-to-run")).toBeInTheDocument();
+  });
+
+  it("requests the diff endpoint with the two selected run ids on Compare", async () => {
+    const mock = routingFetch();
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await selectRunsAndCompare();
+
+    await waitFor(() => {
+      const diffCall = mock.mock.calls.find((c) => String(c[0]).includes("/topology/diff"));
+      expect(diffCall).toBeDefined();
+      expect(String(diffCall![0])).toContain(`from_run=${RUN_FROM}`);
+      expect(String(diffCall![0])).toContain(`to_run=${RUN_TO}`);
+    });
+  });
+
+  it("shows the changed elements in the diff list panel", async () => {
+    vi.stubGlobal("fetch", routingFetch());
+    renderPage();
+
+    await selectRunsAndCompare();
+
+    const panel = await screen.findByTestId("topology-diff-panel");
+    expect(panel).toHaveTextContent("Changes (1)");
+    const removed = await screen.findByTestId("diff-item-removed");
+    expect(removed).toHaveTextContent("HAS_INTERFACE");
+    expect(removed).toHaveTextContent(`${DEVICE_KEY} → ${IFACE_KEY}`);
+  });
+
+  it("highlights the removed edge on the canvas with the diff-removed class", async () => {
+    vi.stubGlobal("fetch", routingFetch());
+    renderPage();
+
+    await selectRunsAndCompare();
+
+    // The canvas is rebuilt with the overlay classes applied to the elements.
+    await waitFor(() => {
+      const edge = lastElements().find(
+        (e) => e.data.id === `${DEVICE_KEY}:${IFACE_KEY}:HAS_INTERFACE`,
+      );
+      expect(edge).toBeDefined();
+      expect(edge!.classes).toContain(DIFF_REMOVED_CLASS);
+    });
+  });
+
+  it("clears the diff and restores the selection panel on Clear diff", async () => {
+    vi.stubGlobal("fetch", routingFetch());
+    renderPage();
+
+    await selectRunsAndCompare();
+    expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("diff-clear-btn"));
+
+    // Diff panel gone; the node-selection hint is back.
+    await waitFor(() =>
+      expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("topology-detail-empty")).toBeInTheDocument();
+  });
+
+  it("shows a no-changes message when the diff is empty", async () => {
+    const emptyDiff: TopologyDiffResponse = {
+      from_run: RUN_FROM,
+      to_run: RUN_TO,
+      diff: { nodes_added: [], nodes_removed: [], edges_added: [], edges_removed: [] },
+    };
+    vi.stubGlobal("fetch", routingFetch(emptyDiff));
+    renderPage();
+
+    await selectRunsAndCompare();
+
+    expect(await screen.findByTestId("diff-no-changes")).toBeInTheDocument();
   });
 });
