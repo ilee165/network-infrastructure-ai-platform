@@ -1,6 +1,9 @@
 """Append-only audit trail writer (brief §7, ADR-0004, ADR-0011)."""
 
 from app.services.audit.service import (
+    AGENT_SESSION_COMPLETED,
+    AGENT_SESSION_STARTED,
+    AGENT_TRACE_RECORDED,
     AUTH_LOGIN,
     AUTH_REFRESH,
     CREDENTIAL_CREATED,
@@ -15,6 +18,9 @@ from app.services.audit.service import (
 )
 
 __all__ = [
+    "AGENT_SESSION_COMPLETED",
+    "AGENT_SESSION_STARTED",
+    "AGENT_TRACE_RECORDED",
     "AUTH_LOGIN",
     "AUTH_REFRESH",
     "CREDENTIAL_CREATED",

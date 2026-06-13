@@ -33,6 +33,12 @@ DISCOVERY_RUN_STARTED: Final = "discovery.run_started"
 DISCOVERY_RUN_FINISHED: Final = "discovery.run_finished"
 AUTH_LOGIN: Final = "auth.login"
 AUTH_REFRESH: Final = "auth.refresh"
+# M3 agent-session audit vocabulary (brief §5/§7): every session start and
+# completion is audited, and each reasoning trace produced by the run is linked
+# back to the session via a dedicated trace entry (``reasoning_trace_id`` set).
+AGENT_SESSION_STARTED: Final = "agent.session_started"
+AGENT_SESSION_COMPLETED: Final = "agent.session_completed"
+AGENT_TRACE_RECORDED: Final = "agent.trace_recorded"
 
 
 async def record(

@@ -16,7 +16,7 @@ from typing import Annotated, Any, Final
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import db
 from app.core.config import Settings
@@ -56,6 +56,18 @@ def get_app_settings(request: Request) -> Settings:
     """The :class:`Settings` bound to the app at ``create_app`` time."""
     settings: Settings = request.app.state.settings
     return settings
+
+
+def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """The process-wide :class:`async_sessionmaker` (lifecycle-owning callers).
+
+    Most routes take a request-scoped :func:`get_db` session, but services that
+    own their own commit boundary across several short transactions — the agent
+    session lifecycle + trace recorder (M3) — need the factory, not one session.
+    Routes depend on this (not on ``app.db`` directly) so tests can override a
+    single dependency to bind an isolated engine.
+    """
+    return db.get_sessionmaker()
 
 
 def get_knowledge_client() -> Neo4jClient:
