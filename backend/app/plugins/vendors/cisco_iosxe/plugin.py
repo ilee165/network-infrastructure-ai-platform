@@ -21,6 +21,8 @@ from uuid import UUID
 
 from app.core.errors import PluginError
 from app.plugins.base import (
+    AclCapability,
+    BgpCapability,
     Capability,
     CommandTransport,
     ConfigBackupCapability,
@@ -28,6 +30,7 @@ from app.plugins.base import (
     DiscoverySshCapability,
     InterfacesCapability,
     NeighborsCapability,
+    OspfCapability,
     PluginCapability,
     RoutesCapability,
     SnmpReadTransport,
@@ -43,17 +46,27 @@ from app.plugins.vendors.cisco_ios.parsers import (
     SNMP_OID_SYSOBJECTID,
 )
 from app.schemas.discovery import DeviceFacts
-from app.schemas.normalized import NormalizedInterface, NormalizedNeighbor, NormalizedRoute
+from app.schemas.normalized import (
+    NormalizedAclEntry,
+    NormalizedBgpPeer,
+    NormalizedInterface,
+    NormalizedNeighbor,
+    NormalizedOspfNeighbor,
+    NormalizedRoute,
+)
 
 __all__ = [
     "SNMP_OID_SYSDESCR",
     "SNMP_OID_SYSNAME",
     "SNMP_OID_SYSOBJECTID",
+    "CiscoIosXeAcl",
+    "CiscoIosXeBgp",
     "CiscoIosXeConfigBackup",
     "CiscoIosXeDiscoverySnmp",
     "CiscoIosXeDiscoverySsh",
     "CiscoIosXeInterfaces",
     "CiscoIosXeNeighbors",
+    "CiscoIosXeOspf",
     "CiscoIosXePlugin",
     "CiscoIosXeRoutes",
 ]
@@ -67,6 +80,9 @@ SHOW_IP_ROUTE = "show ip route"
 SHOW_CDP_NEIGHBORS_DETAIL = "show cdp neighbors detail"
 SHOW_LLDP_NEIGHBORS_DETAIL = "show lldp neighbors detail"
 SHOW_RUNNING_CONFIG = "show running-config"
+SHOW_IP_BGP_SUMMARY = "show ip bgp summary"
+SHOW_IP_OSPF_NEIGHBOR = "show ip ospf neighbor"
+SHOW_IP_ACCESS_LISTS = "show ip access-lists"
 
 #: System-MIB OIDs collected by SNMP discovery, in request order.
 _SNMP_DISCOVERY_OIDS = (SNMP_OID_SYSDESCR, SNMP_OID_SYSOBJECTID, SNMP_OID_SYSNAME)
@@ -190,14 +206,63 @@ class CiscoIosXeConfigBackup(_CiscoIosXeCommandCapability, ConfigBackupCapabilit
         return output
 
 
+class CiscoIosXeBgp(_CiscoIosXeCommandCapability, BgpCapability):
+    """``BGP``: ``show ip bgp summary`` → :class:`NormalizedBgpPeer`.
+
+    Delegates parsing to the shared cisco_ios parser (same ntc-templates
+    platform key); stamps ``source_vendor = cisco_iosxe`` on every record.
+    """
+
+    def get_bgp_peers(self) -> list[NormalizedBgpPeer]:
+        """Collect and normalize the IPv4-unicast BGP peering sessions."""
+        output = self._run(SHOW_IP_BGP_SUMMARY)
+        records = _ios_parsers.parse_bgp_peers(
+            output, device_id=self._device_id, collected_at=self._now()
+        )
+        return [r.model_copy(update={"source_vendor": VENDOR_ID}) for r in records]
+
+
+class CiscoIosXeOspf(_CiscoIosXeCommandCapability, OspfCapability):
+    """``OSPF``: ``show ip ospf neighbor`` → :class:`NormalizedOspfNeighbor`.
+
+    Delegates parsing to the shared cisco_ios parser (same ntc-templates
+    platform key); stamps ``source_vendor = cisco_iosxe`` on every record.
+    """
+
+    def get_ospf_neighbors(self) -> list[NormalizedOspfNeighbor]:
+        """Collect and normalize the OSPF neighbor adjacencies."""
+        output = self._run(SHOW_IP_OSPF_NEIGHBOR)
+        records = _ios_parsers.parse_ospf_neighbors(
+            output, device_id=self._device_id, collected_at=self._now()
+        )
+        return [r.model_copy(update={"source_vendor": VENDOR_ID}) for r in records]
+
+
+class CiscoIosXeAcl(_CiscoIosXeCommandCapability, AclCapability):
+    """``ACL``: ``show ip access-lists`` → :class:`NormalizedAclEntry`.
+
+    Delegates parsing to the shared cisco_ios parser (same ntc-templates
+    platform key); stamps ``source_vendor = cisco_iosxe`` on every record.
+    """
+
+    def get_acls(self) -> list[NormalizedAclEntry]:
+        """Collect and normalize the configured IP access-list entries."""
+        output = self._run(SHOW_IP_ACCESS_LISTS)
+        records = _ios_parsers.parse_acls(
+            output, device_id=self._device_id, collected_at=self._now()
+        )
+        return [r.model_copy(update={"source_vendor": VENDOR_ID}) for r in records]
+
+
 class CiscoIosXePlugin(VendorPlugin):
     """Cisco IOS-XE (``vendor_id="cisco_iosxe"``) — Cat9k/CSR/ISR plugin.
 
-    Declares the full M1 capability set — SSH/SNMP discovery, interface
-    inventory, route collection, LLDP/CDP neighbors, and config backup.
-    Parsing is delegated to the ``cisco_ios`` parser module because
-    IOS-XE ``show`` output is handled by the same ntc-templates templates
-    (platform key ``cisco_ios``; ADR-0007).
+    Declares the full M1 capability set plus the M3 troubleshooting trio
+    (BGP/OSPF/ACL): SSH/SNMP discovery, interface inventory, route
+    collection, LLDP/CDP neighbors, config backup, BGP peers, OSPF
+    neighbors, and IP access-lists.  Parsing is delegated to the
+    ``cisco_ios`` parser module because IOS-XE ``show`` output is handled
+    by the same ntc-templates templates (platform key ``cisco_ios``; ADR-0007).
     """
 
     vendor_id: ClassVar[str] = VENDOR_ID
@@ -210,6 +275,9 @@ class CiscoIosXePlugin(VendorPlugin):
             Capability.ROUTES,
             Capability.NEIGHBORS_LLDP,
             Capability.NEIGHBORS_CDP,
+            Capability.BGP,
+            Capability.OSPF,
+            Capability.ACL,
             Capability.CONFIG_BACKUP,
         }
     )
@@ -222,5 +290,8 @@ class CiscoIosXePlugin(VendorPlugin):
             Capability.ROUTES: CiscoIosXeRoutes,
             Capability.NEIGHBORS_LLDP: CiscoIosXeNeighbors,
             Capability.NEIGHBORS_CDP: CiscoIosXeNeighbors,
+            Capability.BGP: CiscoIosXeBgp,
+            Capability.OSPF: CiscoIosXeOspf,
+            Capability.ACL: CiscoIosXeAcl,
             Capability.CONFIG_BACKUP: CiscoIosXeConfigBackup,
         }
