@@ -62,6 +62,7 @@ REDACTION_TOKENS: Final[dict[str, str]] = {
     "interface_auth_key": "<<REDACTED:interface_auth_key>>",
     "aaa_shared_key": "<<REDACTED:aaa_shared_key>>",
     "ipsec_psk": "<<REDACTED:ipsec_psk>>",
+    "plaintext_password": "<<REDACTED:plaintext_password>>",
 }
 
 # A redacted value sentinel; used in patterns to avoid re-matching an
@@ -137,20 +138,35 @@ _PATTERNS: Final[list[tuple[str, re.Pattern[str]]]] = [
             re.IGNORECASE,
         ),
     ),
-    # IPsec / ISAKMP pre-shared key: `crypto isakmp key <secret> address ...`
-    # or `pre-shared-key <secret>`. Stop the value before a trailing `address`
-    # clause so peer addressing context is preserved.
+    # IPsec / ISAKMP pre-shared key: `crypto isakmp key [<enc>] <secret> address ...`
+    # or `pre-shared-key [<enc>] <secret>`. Real configs prefix the PSK with an
+    # encoding indicator (`0` plaintext, `6` type-6 reversible blob) that must be
+    # consumed *before* the value so the digit is not mistaken for the secret and
+    # the actual key left behind. The value stops before a trailing
+    # `address`/`hostname` clause so peer context is preserved.
     (
         "ipsec_psk",
         re.compile(
-            rf"\b(crypto\s+isakmp\s+key)\s+(?!{_TOKEN})\S+",
+            rf"\b(crypto\s+isakmp\s+key)\s+(?:\d+\s+)?(?!{_TOKEN})\S+"
+            rf"(?=\s+(?:address|hostname)\b|\s*$)",
             re.IGNORECASE,
         ),
     ),
     (
         "ipsec_psk",
         re.compile(
-            rf"\b(pre-shared-key(?:\s+(?:local|remote))?)\s+{_VALUE}",
+            rf"\b(crypto\s+isakmp\s+key)\s+(?:\d+\s+)?{_VALUE}",
+            re.IGNORECASE,
+        ),
+    ),
+    # Juniper / multi-vendor pre-shared-key with an optional encoding keyword or
+    # digit (`ascii-text`, `hexadecimal`, `0`) between the directive and value.
+    (
+        "ipsec_psk",
+        re.compile(
+            rf"\b(pre-shared-key(?:\s+(?:local|remote))?)"
+            rf"\s+(?:(?:ascii-text|hexadecimal|\d+)\s+)?"
+            rf"(?!(?:local|remote|ascii-text|hexadecimal|\d+)\b)(?!{_TOKEN})\S+",
             re.IGNORECASE,
         ),
     ),
@@ -173,10 +189,16 @@ _PATTERNS: Final[list[tuple[str, re.Pattern[str]]]] = [
             re.IGNORECASE,
         ),
     ),
+    # `... authentication-key [<key-id>] [<md5|encoding>] <secret>`. Several
+    # vendors prefix the secret with a numeric key-id and/or an encoding keyword
+    # (`md5`, a type number such as `7`). Those indicators are part of the
+    # directive context (captured in group 1 and preserved) — only the trailing
+    # secret value is tokenized. Without consuming them the redactor would strip
+    # the key-id and leave `md5 <secret>` / the type-7 hex in cleartext.
     (
         "routing_auth_key",
         re.compile(
-            rf"\b(authentication-key)\s+{_VALUE}",
+            rf"\b(authentication-key(?:\s+\d+)?(?:\s+md5)?)\s+(?!(?:md5|\d+)\b)(?!{_TOKEN})\S+",
             re.IGNORECASE,
         ),
     ),
@@ -195,6 +217,21 @@ _PATTERNS: Final[list[tuple[str, re.Pattern[str]]]] = [
         "enable_secret",
         re.compile(
             rf"\b(enable\s+(?:secret|password))\s+{_VALUE}",
+            re.IGNORECASE,
+        ),
+    ),
+    # Plaintext local credentials and line/vty passwords:
+    #   `username <u> password <plaintext>` / `username <u> secret <plaintext>`
+    #   `password <plaintext>` (line con/vty) / explicit type-0 `password 0 <pw>`
+    # These are the most common cleartext credentials in discovery / config-backup
+    # output. Placed last so every typed/encoded form (type 7/8/9, enable secret,
+    # routing/aaa/ipsec keys) is classified first; the optional `0` encoding digit
+    # is consumed before the value, and the `(?!_TOKEN)` guard keeps it from
+    # re-matching an already-redacted value (idempotent).
+    (
+        "plaintext_password",
+        re.compile(
+            rf"\b((?:username\s+\S+\s+)?(?:password|secret))\s+(?:0\s+)?(?!{_TOKEN})\S+",
             re.IGNORECASE,
         ),
     ),

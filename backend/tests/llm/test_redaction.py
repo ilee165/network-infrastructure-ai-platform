@@ -104,6 +104,66 @@ SECRET_CASES: list[tuple[str, str, str, str]] = [
         "ipsec_psk",
         "crypto isakmp key",
     ),
+    (
+        "ipsec_psk_type0",
+        "crypto isakmp key 0 MyKey address 10.0.0.2",
+        "ipsec_psk",
+        "crypto isakmp key",
+    ),
+    (
+        "ipsec_psk_type6",
+        "crypto isakmp key 6 _Td3nc!Encrypted6Blob address 10.0.0.2",
+        "ipsec_psk",
+        "crypto isakmp key",
+    ),
+    (
+        "pre_shared_key_ascii",
+        "pre-shared-key ascii-text MySecretPsk",
+        "ipsec_psk",
+        "pre-shared-key",
+    ),
+    (
+        "pre_shared_key_type0",
+        "pre-shared-key 0 PlaintextPSK",
+        "ipsec_psk",
+        "pre-shared-key",
+    ),
+    (
+        "ntp_auth_key_md5",
+        "ntp authentication-key 1 md5 NtpSecret",
+        "routing_auth_key",
+        "ntp authentication-key 1 md5",
+    ),
+    (
+        "ospf_auth_key_type7",
+        "ip ospf authentication-key 7 070C285F4D06",
+        "routing_auth_key",
+        "ip ospf authentication-key",
+    ),
+    (
+        "username_password_plain",
+        "username admin password Sup3rPlainPass",
+        "plaintext_password",
+        "username admin password",
+    ),
+    (
+        "username_secret_plain",
+        "username admin secret AnotherPlainSecret",
+        "plaintext_password",
+        "username admin secret",
+    ),
+    (
+        "line_password_plain",
+        " password VtyPlainPass",
+        "plaintext_password",
+        "password",
+    ),
+    (
+        "password_type0_plain",
+        "password 0 ExplicitType0Pass",
+        "plaintext_password",
+        "password",
+    ),
 ]
 
 
