@@ -21,6 +21,7 @@ without those layers being loaded (or faked where needed).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Annotated
 from uuid import UUID
@@ -93,7 +94,28 @@ async def trigger_discovery_run(
         run_id = str(run.id)
         status = run.status.value
 
-    celery_app.send_task("discovery.run", args=[run_id], queue=QUEUE_DISCOVERY)
+    # Celery's send_task performs synchronous broker I/O (TCP round-trip).
+    # Wrapping it in run_in_executor keeps the asyncio event loop unblocked
+    # (D2: async-first platform contract).
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: celery_app.send_task("discovery.run", args=[run_id], queue=QUEUE_DISCOVERY),
+        )
+    except Exception as exc:
+        # Broker unreachable / serialization error: mark the already-committed
+        # run row as FAILED so the UI never shows a permanently-pending orphan.
+        from app.models import DiscoveryRunStatus
+
+        async with _db.get_sessionmaker()() as _fail_session:
+            fail_run = await _fail_session.get(DiscoveryRun, run_id)
+            if fail_run is not None:
+                fail_run.status = DiscoveryRunStatus.FAILED
+                fail_run.error = str(exc)
+                await _fail_session.commit()
+        raise
+
     return json.dumps({"run_id": run_id, "status": status})
 
 

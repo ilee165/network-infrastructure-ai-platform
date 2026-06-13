@@ -14,13 +14,40 @@ Three mandatory behaviours:
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, HumanMessage
+import json
+from typing import Annotated
+
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from pydantic import Field
 
 from app.agents.discovery import DiscoveryAgent, discovery_agent, registry
 from app.agents.discovery.agent import DiscoveryAgent as _AgentImpl
 from app.agents.framework.registry import AgentRegistry
-from app.agents.framework.tools import ToolClassification
+from app.agents.framework.tools import ToolClassification, netops_tool
 from tests.agents.conftest import scripted_model
+
+# ---------------------------------------------------------------------------
+# Module-level stub tool for tool-dispatch test (Finding 3)
+# ---------------------------------------------------------------------------
+# Defined at module scope so Pydantic's annotation resolution (which uses
+# eval() against the function's module globals) can see ``Annotated`` and
+# ``Field`` without NameError.
+
+_STUB_LIST_DEVICES_PAYLOAD = json.dumps(
+    {"total": 1, "limit": 50, "offset": 0, "items": [{"id": "abc", "hostname": "sw1"}]}
+)
+
+
+@netops_tool(classification=ToolClassification.READ_ONLY, name="list_devices")
+async def _stub_list_devices(
+    status_filter: Annotated[str | None, Field(default=None)] = None,
+    vendor_id: Annotated[str | None, Field(default=None)] = None,
+    limit: Annotated[int, Field(ge=1, le=500)] = 50,
+    offset: Annotated[int, Field(ge=0)] = 0,
+) -> str:
+    """List inventory devices (stub for offline graph-execution test)."""
+    return _STUB_LIST_DEVICES_PAYLOAD
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -170,6 +197,64 @@ class TestDiscoveryAgentGraph:
         graph = agent.build_graph(llm)
         # CompiledStateGraph.name is set from the name argument of graph.compile()
         assert graph.name == "discovery"
+
+    async def test_tool_node_executes_on_tool_call(self) -> None:
+        """ToolNode branch fires when the model emits a tool_calls AIMessage.
+
+        The test:
+        1. Replaces ``list_devices`` in DISCOVERY_TOOLS with the module-level
+           ``_stub_list_devices`` that returns a canned JSON payload without
+           touching the DB or Celery.
+        2. Scripts the model to emit one tool-call turn followed by a plain-
+           text final reply.
+        3. Asserts that a ToolMessage (produced by ToolNode) is present in
+           the result, confirming the conditional-edge ToolNode branch executed.
+        """
+        import app.agents.discovery.tools as _tools_mod
+
+        # Patch the module-level DISCOVERY_TOOLS list used by the agent so that
+        # the ToolNode resolves the stub coroutine instead of the real DB-hitting
+        # list_devices implementation.
+        original_tools = _tools_mod.DISCOVERY_TOOLS[:]
+        patched_tools = [
+            _stub_list_devices if t.name == "list_devices" else t for t in original_tools
+        ]
+        _tools_mod.DISCOVERY_TOOLS[:] = patched_tools
+
+        try:
+            agent = _make_agent()
+
+            # Script: first reply carries a tool call, second is a plain-text finish.
+            tool_call_msg = AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-001",
+                        "name": "list_devices",
+                        "args": {"limit": 50},
+                        "type": "tool_call",
+                    }
+                ],
+            )
+            final_msg = AIMessage(content="There is 1 device: sw1.")
+            llm = scripted_model([tool_call_msg, final_msg])
+
+            graph = agent.build_graph(llm)
+            result = await graph.ainvoke({"messages": [HumanMessage(content="List all devices.")]})
+        finally:
+            # Restore original tools list regardless of test outcome.
+            _tools_mod.DISCOVERY_TOOLS[:] = original_tools
+
+        messages = result["messages"]
+        tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+        assert tool_messages, (
+            "Expected at least one ToolMessage from ToolNode; got: "
+            f"{[type(m).__name__ for m in messages]}"
+        )
+        # Confirm the stub payload reached the ToolMessage content.
+        assert any("sw1" in str(m.content) for m in tool_messages), (
+            f"Expected stub payload in ToolMessage content; tool messages: {tool_messages}"
+        )
 
 
 # ---------------------------------------------------------------------------
