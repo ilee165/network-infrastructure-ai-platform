@@ -1,13 +1,17 @@
-"""Security primitives: JWT access tokens (HS256) and password hashing (bcrypt).
+"""Security primitives: JWT access tokens (HS256), password hashing (bcrypt),
+and the canonical RBAC :class:`Role` enum (D10).
 
-Functions only at M0 — the auth ROUTES (login/refresh/logout), the user store,
-and the RBAC dependencies (viewer | operator | engineer | admin, D10) land in
-M1. Credential-vault envelope encryption (D11) lands in ``core/crypto.py`` (M1).
+The auth ROUTES (login/refresh/logout) and the FastAPI RBAC dependencies live
+in ``api/`` (M1); :class:`Role` is the single source of truth for the
+``viewer < operator < engineer < admin`` rank order so the API auth deps and
+the agent tool wrappers enforce the same ordering. Credential-vault envelope
+encryption (D11) lands in ``core/crypto.py`` (M1).
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
 import bcrypt
@@ -15,6 +19,48 @@ import jwt
 
 from app.core.config import Settings
 from app.core.errors import AuthError
+
+
+class Role(StrEnum):
+    """The four RBAC roles (D10, ADR-0010), ordered ``VIEWER < ADMIN``.
+
+    The string values are the wire/database form (``Role.name`` column,
+    JWT-resolved ``User.role.name``); :meth:`rank` gives the comparison order
+    so callers never duplicate the ranking. This is the single source of truth
+    for the rank order — both the API auth deps and the agent tool wrappers
+    import it, so "an agent can never do what its user cannot" (brief §7) is
+    enforced against one definition, not two.
+    """
+
+    VIEWER = "viewer"
+    OPERATOR = "operator"
+    ENGINEER = "engineer"
+    ADMIN = "admin"
+
+    @property
+    def rank(self) -> int:
+        """Position in the ``viewer < operator < engineer < admin`` order."""
+        return _ROLE_ORDER.index(self)
+
+    def can_act_as(self, required: Role) -> bool:
+        """Whether this role satisfies a *required* minimum role (rank >= required)."""
+        return self.rank >= required.rank
+
+    @classmethod
+    def from_name(cls, name: str) -> Role | None:
+        """Resolve a wire role *name* to a :class:`Role`, or ``None`` if unknown.
+
+        Unknown names resolve to ``None`` so callers can treat them as ranking
+        below every real role (deny by default), never as a privilege.
+        """
+        try:
+            return cls(name)
+        except ValueError:
+            return None
+
+
+#: Fixed rank order; index position is the rank consumed by :attr:`Role.rank`.
+_ROLE_ORDER: tuple[Role, ...] = (Role.VIEWER, Role.OPERATOR, Role.ENGINEER, Role.ADMIN)
 
 #: Canonical JWT signing algorithm (D10: short-lived HS256 access tokens).
 ALGORITHM = "HS256"

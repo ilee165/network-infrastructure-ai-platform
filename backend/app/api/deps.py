@@ -21,12 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import db
 from app.core.config import Settings
 from app.core.errors import AuthError, ForbiddenError
-from app.core.security import decode_access_token
+from app.core.security import Role, decode_access_token
 from app.knowledge import Neo4jClient, get_client
 from app.models import User
 
-#: ADR-0010 RBAC rank order. Unknown role names rank below everything (deny).
-ROLE_RANKS: Final[dict[str, int]] = {"viewer": 0, "operator": 1, "engineer": 2, "admin": 3}
+#: ADR-0010 RBAC rank order, derived from the canonical :class:`Role` enum so
+#: the API layer and the agent tool wrappers share one source of truth. Unknown
+#: role names rank below everything (deny).
+ROLE_RANKS: Final[dict[str, int]] = {role.value: role.rank for role in Role}
 
 #: ``type`` claim values separating short-lived API tokens from refresh tokens.
 TOKEN_TYPE_ACCESS: Final = "access"
