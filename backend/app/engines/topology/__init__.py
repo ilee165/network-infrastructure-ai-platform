@@ -38,6 +38,11 @@ from app.engines.topology.projector import (
     full_rebuild,
     project,
 )
+from app.engines.topology.snapshots import (
+    SnapshotData,
+    build_snapshot,
+    upsert_snapshot,
+)
 
 __all__ = [
     "DEFAULT_BATCH_SIZE",
@@ -59,12 +64,15 @@ __all__ = [
     "L3AdjacentEdge",
     "RoutesToEdge",
     "SiteNode",
+    "SnapshotData",
     "SubnetNode",
     "VlanNode",
     "VrfNode",
     "build_l2_edges",
     "build_l3_edges",
+    "build_snapshot",
     "derive_nodes",
     "full_rebuild",
     "project",
+    "upsert_snapshot",
 ]

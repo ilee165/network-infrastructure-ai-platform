@@ -21,6 +21,7 @@ from app.models.inventory import (
     RawArtifact,
 )
 from app.models.mixins import TimestampMixin, UuidPkMixin
+from app.models.topology import TopologySnapshot
 
 __all__ = [
     "AuditLog",
@@ -37,6 +38,7 @@ __all__ = [
     "RawArtifact",
     "Role",
     "TimestampMixin",
+    "TopologySnapshot",
     "User",
     "UuidPkMixin",
 ]
