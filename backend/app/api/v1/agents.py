@@ -26,6 +26,8 @@ produces is linked back to the session by a dedicated audit entry whose
 from __future__ import annotations
 
 import asyncio
+import secrets
+import time
 import uuid
 from typing import Annotated
 
@@ -56,6 +58,7 @@ from app.schemas.agents_api import (
     AgentTraceStepRead,
     StartSessionRequest,
     StartSessionResponse,
+    StreamTicketResponse,
 )
 from app.services import audit
 from app.services.agent_session import AgentSessionService
@@ -79,6 +82,26 @@ _STREAM_POLL_SECONDS = 0.02
 #: Upper bound on stream poll iterations so a stuck run can never wedge the
 #: socket open forever (defence in depth — runs complete synchronously today).
 _STREAM_MAX_POLLS = 1500
+
+#: Lifetime of a single-use stream ticket in seconds.  The client must open
+#: the WebSocket within this window after calling ``stream-ticket``; the ticket
+#: is destroyed on first use so it cannot be replayed.
+_TICKET_TTL_SECONDS = 30
+
+# ---------------------------------------------------------------------------
+# In-process single-use stream-ticket store.
+#
+# Maps opaque ticket string -> (user_id, session_id, expiry_epoch_float).
+# Tickets are created by ``POST /agents/{id}/stream-ticket`` (authenticated
+# via the normal Authorization header) and consumed once by the WebSocket
+# upgrade handler, so the bearer JWT never appears in a URL.
+#
+# This implementation is intentionally process-local and therefore correct for
+# single-replica deployments; a multi-replica deployment should replace this
+# dict with a shared Redis SET EX / GETDEL pair without changing any of the
+# API contracts.
+# ---------------------------------------------------------------------------
+_ticket_store: dict[str, tuple[uuid.UUID, uuid.UUID, float]] = {}
 
 
 SupervisorGraph = CompiledStateGraph[SupervisorState, None, SupervisorState, SupervisorState]
@@ -173,6 +196,65 @@ def _answer_of(state: SupervisorState) -> str:
         return ""
     content = messages[-1].content
     return content if isinstance(content, str) else str(content)
+
+
+def _issue_ticket(user_id: uuid.UUID, session_id: uuid.UUID) -> str:
+    """Mint an opaque single-use ticket and store it with a TTL.
+
+    Purges expired entries on each call so the dict cannot grow unboundedly in
+    long-running processes — the bounded rate of ticket issuance keeps this O(n)
+    purge cheap in practice.
+    """
+    now = time.monotonic()
+    expired = [k for k, (_, _, exp) in _ticket_store.items() if exp <= now]
+    for k in expired:
+        del _ticket_store[k]
+
+    ticket = secrets.token_urlsafe(32)
+    _ticket_store[ticket] = (user_id, session_id, now + _TICKET_TTL_SECONDS)
+    return ticket
+
+
+def _consume_ticket(ticket: str, session_id: uuid.UUID) -> uuid.UUID | None:
+    """Exchange *ticket* for the issuing user_id, or return ``None``.
+
+    The ticket is removed on first call (single-use); expired tickets are also
+    rejected.  Returns ``None`` for unknown, expired, or session-mismatched
+    tickets — callers must not distinguish these cases to the client.
+    """
+    entry = _ticket_store.pop(ticket, None)
+    if entry is None:
+        return None
+    user_id, stored_session_id, expiry = entry
+    if time.monotonic() > expiry:
+        return None
+    if stored_session_id != session_id:
+        return None
+    return user_id
+
+
+@router.post("/{session_id}/stream-ticket", response_model=StreamTicketResponse, status_code=201)
+async def create_stream_ticket(
+    session_id: uuid.UUID,
+    user: Viewer,
+    sessionmaker: SessionMaker,
+) -> StreamTicketResponse:
+    """Issue a short-lived single-use ticket for the trace-stream WebSocket.
+
+    The WebSocket handshake cannot carry an ``Authorization`` header, so the
+    client would otherwise have to embed the JWT in the URL — leaking it into
+    server access logs, browser history, and ``Referer`` headers.  This
+    endpoint issues an opaque 30-second ticket instead; the WebSocket upgrade
+    handler calls :func:`_consume_ticket` to redeem it (single use, TTL-bound)
+    and the JWT never appears in a URL.
+
+    Returns 404 when the session does not exist (consistent with the REST
+    ``GET`` surface) so the caller cannot probe for session ids via ticket
+    issuance.
+    """
+    await _load_session_or_404(sessionmaker, session_id)
+    ticket = _issue_ticket(user.id, session_id)
+    return StreamTicketResponse(ticket=ticket)
 
 
 @router.post("", response_model=StartSessionResponse, status_code=201)
@@ -320,12 +402,43 @@ async def _authenticate_socket(
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: Settings,
 ) -> User | None:
-    """Resolve the ``token`` query param to a ``viewer+`` user, or close the socket.
+    """Resolve either a ``ticket`` or ``token`` query param to a ``viewer+`` user.
 
-    Returns the authenticated :class:`User` on success. On any failure the
-    socket is closed with :data:`_WS_POLICY_VIOLATION` and ``None`` is returned;
-    the caller must not proceed.
+    Preferred path — ``ticket``: the client obtained a short-lived single-use
+    opaque ticket via ``POST /agents/{id}/stream-ticket`` (authenticated with
+    the normal ``Authorization`` header).  :func:`_consume_ticket` redeems the
+    ticket (single-use, TTL-enforced) so the bearer JWT never appears in a URL.
+
+    Fallback path — ``token``: a raw JWT access token passed directly.  This
+    path exists so internal tooling and existing tests can reach the stream
+    without the ticket round-trip; the fallback is not used by the browser SPA.
+
+    On any failure the socket is closed with :data:`_WS_POLICY_VIOLATION` and
+    ``None`` is returned; the caller must not proceed.
     """
+    session_id_str = websocket.path_params.get("session_id", "")
+
+    ticket = websocket.query_params.get("ticket")
+    if ticket is not None:
+        try:
+            session_id = uuid.UUID(str(session_id_str))
+        except ValueError:
+            await websocket.close(code=_WS_POLICY_VIOLATION)
+            return None
+        user_id = _consume_ticket(ticket, session_id)
+        if user_id is None:
+            await websocket.close(code=_WS_POLICY_VIOLATION)
+            return None
+        async with sessionmaker() as session:
+            user = (
+                await session.execute(select(User).where(User.id == user_id))
+            ).scalar_one_or_none()
+        if user is None or not user.is_active:
+            await websocket.close(code=_WS_POLICY_VIOLATION)
+            return None
+        return user
+
+    # Fallback: raw JWT token query param (internal tooling / test path).
     token = websocket.query_params.get("token")
     if not token:
         await websocket.close(code=_WS_POLICY_VIOLATION)

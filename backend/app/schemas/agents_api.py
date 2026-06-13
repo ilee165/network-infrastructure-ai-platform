@@ -30,6 +30,7 @@ __all__ = [
     "AgentTraceStepRead",
     "StartSessionRequest",
     "StartSessionResponse",
+    "StreamTicketResponse",
 ]
 
 
@@ -104,6 +105,17 @@ class StartSessionResponse(BaseModel):
     session: AgentSessionRead
     answer: str
     traces: list[AgentTraceRead] = Field(default_factory=list)
+
+
+class StreamTicketResponse(BaseModel):
+    """Response body of ``POST /agents/{id}/stream-ticket``.
+
+    ``ticket`` is a short-lived (30-second TTL) opaque single-use token.
+    The WebSocket upgrade handler exchanges it for the session and discards it;
+    the bearer JWT therefore never appears in a WebSocket URL.
+    """
+
+    ticket: str
 
 
 class AgentStreamEnd(BaseModel):

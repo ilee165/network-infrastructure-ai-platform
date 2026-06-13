@@ -221,7 +221,7 @@ export function ChatPage() {
 
     try {
       const response = await startSession({ intent: trimmed });
-      socketRef.current = openSessionStream(response.session.id, {
+      socketRef.current = await openSessionStream(response.session.id, {
         onStep: appendStep,
         onEnd: finishStream,
         onError: failStream,

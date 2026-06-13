@@ -6,9 +6,10 @@
  *  - ``POST /api/v1/agents``            — start a session, drive it to completion.
  *  - ``GET  /api/v1/agents/{id}``       — reload a persisted session + its traces.
  *  - ``WS   /api/v1/agents/{id}/stream``— stream reasoning steps, then a terminal
- *    ``end`` frame. The socket authenticates with the SAME JWT as REST, passed as
- *    a ``token`` query parameter (a WebSocket cannot carry an Authorization
- *    header), so a peer who could not read the trace over REST never receives it.
+ *    ``end`` frame. The socket authenticates with a short-lived single-use ticket
+ *    obtained via ``POST /agents/{id}/stream-ticket`` (the JWT is exchanged
+ *    server-side and never embedded in the URL), so a peer who could not read
+ *    the trace over REST never receives it.
  */
 
 import { API_BASE, apiFetch } from "./client";
@@ -113,9 +114,9 @@ export function getSession(sessionId: string): Promise<StartSessionResponse> {
 // ── WebSocket streaming ───────────────────────────────────────────────────────
 
 /**
- * Storage key for the access token (set by the login flow). The WebSocket
- * handshake cannot carry an Authorization header, so the token is read here and
- * appended as the ``token`` query parameter the backend's socket auth expects.
+ * Storage key for the access token (set by the login flow).  Read here to
+ * attach a ``Bearer`` header to the ``stream-ticket`` REST call; the JWT is
+ * never embedded directly in a WebSocket URL.
  */
 const ACCESS_TOKEN_KEY = "netops.access_token";
 
@@ -129,17 +130,37 @@ export function getAccessToken(): string | null {
 }
 
 /**
+ * Exchange the caller's JWT (via the normal Authorization header) for a
+ * short-lived, single-use opaque stream ticket from the backend.
+ *
+ * The ticket is good for 30 seconds and is consumed on first use, so the
+ * bearer JWT never appears in a WebSocket URL (and therefore never in server
+ * access logs, browser history, or Referer headers).
+ */
+export function requestStreamTicket(sessionId: string): Promise<string> {
+  const token = getAccessToken();
+  const headers: Record<string, string> = token
+    ? { Authorization: `Bearer ${token}` }
+    : {};
+  return apiFetch<{ ticket: string }>(`/agents/${sessionId}/stream-ticket`, {
+    method: "POST",
+    headers,
+  }).then((r) => r.ticket);
+}
+
+/**
  * Build the absolute ``ws[s]://`` URL for a session's trace stream.
  *
  * Same-origin as the SPA (dev proxies ``/api`` to the backend; prod uses nginx),
  * with the scheme upgraded to ``ws``/``wss`` from the page's ``http``/``https``.
- * The access token is appended as the ``token`` query parameter.
+ * An opaque one-time ticket is appended as the ``ticket`` query parameter;
+ * the JWT itself never appears in a URL.
  */
-export function streamUrl(sessionId: string, token: string | null): string {
+export function streamUrl(sessionId: string, ticket: string): string {
   const { protocol, host } = globalThis.location;
   const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
   const base = `${wsProtocol}//${host}${API_BASE}/agents/${sessionId}/stream`;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  return `${base}?ticket=${encodeURIComponent(ticket)}`;
 }
 
 /** Callbacks for {@link openSessionStream}. */
@@ -155,12 +176,30 @@ export interface StreamHandlers {
 /**
  * Open a trace stream for *sessionId* and dispatch each decoded frame.
  *
- * Returns the underlying {@link WebSocket} so the caller can close it on unmount.
- * Frames are validated defensively: a malformed payload routes to ``onError``
- * rather than corrupting the trace view.
+ * Obtains a short-lived one-time ticket from ``POST /agents/{id}/stream-ticket``
+ * (authenticated via the normal Authorization header) and opens the WebSocket
+ * with that ticket as a query parameter.  This ensures the bearer JWT never
+ * appears in a URL.
+ *
+ * Returns a Promise that resolves to the underlying {@link WebSocket} so the
+ * caller can close it on unmount.  Frames are validated defensively: a
+ * malformed payload routes to ``onError`` rather than corrupting the trace view.
  */
-export function openSessionStream(sessionId: string, handlers: StreamHandlers): WebSocket {
-  const socket = new WebSocket(streamUrl(sessionId, getAccessToken()));
+export async function openSessionStream(
+  sessionId: string,
+  handlers: StreamHandlers,
+): Promise<WebSocket> {
+  let ticket: string;
+  try {
+    ticket = await requestStreamTicket(sessionId);
+  } catch {
+    handlers.onError("Failed to obtain a stream ticket.");
+    // Return a dummy closed socket so callers always get a WebSocket back.
+    const dummy = new WebSocket("ws://localhost");
+    dummy.close();
+    return dummy;
+  }
+  const socket = new WebSocket(streamUrl(sessionId, ticket));
 
   socket.onmessage = (event: MessageEvent) => {
     let frame: AgentStreamFrame;
@@ -179,6 +218,12 @@ export function openSessionStream(sessionId: string, handlers: StreamHandlers): 
 
   socket.onerror = () => {
     handlers.onError("The trace stream connection failed.");
+  };
+
+  socket.onclose = (ev: CloseEvent) => {
+    if (!ev.wasClean || ev.code !== 1000) {
+      handlers.onError("The trace stream closed unexpectedly.");
+    }
   };
 
   return socket;

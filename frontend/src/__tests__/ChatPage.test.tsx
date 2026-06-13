@@ -18,6 +18,11 @@ import { ChatPage } from "../pages/ChatPage";
 
 type Listener = (event: { data: string }) => void;
 
+interface MockCloseEvent {
+  wasClean: boolean;
+  code: number;
+}
+
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
   static readonly CONNECTING = 0;
@@ -30,7 +35,7 @@ class MockWebSocket {
   onmessage: Listener | null = null;
   onerror: ((event: unknown) => void) | null = null;
   onopen: ((event: unknown) => void) | null = null;
-  onclose: ((event: unknown) => void) | null = null;
+  onclose: ((event: MockCloseEvent) => void) | null = null;
   closed = false;
 
   constructor(url: string) {
@@ -52,6 +57,11 @@ class MockWebSocket {
   /** Test helper: trigger the socket error path. */
   fail(): void {
     this.onerror?.({});
+  }
+
+  /** Test helper: trigger an abnormal close (e.g. network drop). */
+  closeAbnormally(code = 1006): void {
+    this.onclose?.({ wasClean: false, code });
   }
 
   close(): void {
@@ -127,8 +137,18 @@ const END_FRAME = {
 // ── Harness ───────────────────────────────────────────────────────────────────
 
 function mockStartFetch(response: StartSessionResponse = START_RESPONSE) {
-  return vi.fn((_url: string, init?: RequestInit): Promise<Response> => {
+  return vi.fn((url: string, init?: RequestInit): Promise<Response> => {
     if ((init as RequestInit | undefined)?.method === "POST") {
+      // stream-ticket endpoint returns a one-time opaque ticket.
+      if (String(url).includes("stream-ticket")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "test-stream-ticket" }), {
+            status: 201,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      // POST /agents — start a session.
       return Promise.resolve(
         new Response(JSON.stringify(response), {
           status: 201,
@@ -192,7 +212,8 @@ describe("ChatPage — session start", () => {
 
     const socket = latestSocket();
     expect(socket.url).toContain(`/api/v1/agents/${START_RESPONSE.session.id}/stream`);
-    expect(socket.url).toContain("token=test-jwt");
+    expect(socket.url).toContain("ticket=test-stream-ticket");
+    expect(socket.url).not.toContain("token=");
   });
 
   it("echoes the user's message into the transcript", async () => {
@@ -322,5 +343,18 @@ describe("ChatPage — error states", () => {
     act(() => socket.emitRaw("not-json"));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/malformed/i);
+  });
+
+  it("surfaces an error when the socket closes abnormally without an end frame", async () => {
+    renderPage();
+    await startConversation();
+    const socket = latestSocket();
+
+    act(() => socket.closeAbnormally(1006));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/stream/i);
+    // Chat input must be re-enabled (busy cleared) so the user can retry.
+    expect(screen.getByLabelText("Chat message")).not.toBeDisabled();
   });
 });
