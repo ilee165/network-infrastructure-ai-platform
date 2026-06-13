@@ -25,6 +25,7 @@ from langchain_core.language_models import BaseChatModel
 from app.core.config import Settings, get_settings
 from app.core.errors import NetOpsError
 from app.core.logging import get_logger
+from app.llm.redaction import wrap_with_redaction
 
 _logger = get_logger(__name__)
 
@@ -78,6 +79,14 @@ def get_chat_model(
     LLMProfileError
         For an unknown profile, or when the provider rejects its
         configuration (e.g. a missing API key for an external profile).
+
+    Notes
+    -----
+    The returned model is always wrapped in a
+    :class:`~app.llm.redaction.RedactingChatModel` (A9): every prompt is
+    stripped of vendor secrets *before* it reaches the provider, on every
+    profile — including ``local`` — so callers cannot leak credentials by
+    forgetting to redact manually.
     """
     resolved_settings = settings if settings is not None else get_settings()
     selected = profile if profile is not None else resolved_settings.llm_profile
@@ -90,6 +99,18 @@ def get_chat_model(
         # ADR-0009 Decision 3: external egress is an auditable event. M3
         # escalates this structlog record to an append-only audit_log entry.
         _logger.info("external_llm_profile_selected", profile=selected, model=model_name)
+    provider_model = _build_provider_model(selected, model_name, resolved_settings, temperature)
+    # A9: central, bypass-proof redaction wraps every model the factory returns.
+    return wrap_with_redaction(provider_model)
+
+
+def _build_provider_model(
+    selected: str,
+    model_name: str,
+    resolved_settings: Settings,
+    temperature: float,
+) -> BaseChatModel:
+    """Construct the concrete provider client for *selected* (pre-redaction)."""
     try:
         if selected == "local":
             from langchain_ollama import ChatOllama

@@ -14,6 +14,7 @@ from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 from app.core.config import Settings
 from app.llm.providers import DEFAULT_MODELS, KNOWN_PROFILES, LLMProfileError, get_chat_model
+from app.llm.redaction import RedactingChatModel
 
 _EXTERNAL_ENV_VARS = (
     "ANTHROPIC_API_KEY",
@@ -32,41 +33,47 @@ def _clean_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+def _inner(model: BaseChatModel) -> BaseChatModel:
+    """Return the concrete provider model behind the mandatory redaction wrapper.
+
+    ``get_chat_model`` always wraps its result in a ``RedactingChatModel`` (A9);
+    these provider-identity assertions inspect the wrapped ``inner`` model.
+    """
+    assert isinstance(model, RedactingChatModel)
+    return model.inner
+
+
 class TestProfileSelection:
     def test_local_profile_returns_chat_ollama_pointed_at_settings(
         self, settings: Settings
     ) -> None:
-        model = get_chat_model("local", settings)
-        assert isinstance(model, ChatOllama)
-        assert model.base_url == settings.ollama_base_url
-        assert model.model == DEFAULT_MODELS["local"]
+        inner = _inner(get_chat_model("local", settings))
+        assert isinstance(inner, ChatOllama)
+        assert inner.base_url == settings.ollama_base_url
+        assert inner.model == DEFAULT_MODELS["local"]
 
     def test_profile_defaults_to_settings_llm_profile(self, settings: Settings) -> None:
         assert settings.llm_profile == "local"
-        model = get_chat_model(settings=settings)
-        assert isinstance(model, ChatOllama)
+        assert isinstance(_inner(get_chat_model(settings=settings)), ChatOllama)
 
     def test_model_name_override(self, settings: Settings) -> None:
-        model = get_chat_model("local", settings, model="qwen2.5:7b")
-        assert isinstance(model, ChatOllama)
-        assert model.model == "qwen2.5:7b"
+        inner = _inner(get_chat_model("local", settings, model="qwen2.5:7b"))
+        assert isinstance(inner, ChatOllama)
+        assert inner.model == "qwen2.5:7b"
 
     def test_anthropic_profile(self, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-        model = get_chat_model("anthropic", settings)
-        assert isinstance(model, ChatAnthropic)
+        assert isinstance(_inner(get_chat_model("anthropic", settings)), ChatAnthropic)
 
     def test_openai_profile(self, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-        model = get_chat_model("openai", settings)
-        assert isinstance(model, ChatOpenAI)
+        assert isinstance(_inner(get_chat_model("openai", settings)), ChatOpenAI)
 
     def test_azure_profile(self, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
         monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://unit-test.openai.azure.example")
         monkeypatch.setenv("OPENAI_API_VERSION", "2024-06-01")
-        model = get_chat_model("azure", settings)
-        assert isinstance(model, AzureChatOpenAI)
+        assert isinstance(_inner(get_chat_model("azure", settings)), AzureChatOpenAI)
 
     def test_every_known_profile_yields_a_base_chat_model(
         self, settings: Settings, monkeypatch: pytest.MonkeyPatch
