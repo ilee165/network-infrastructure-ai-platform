@@ -364,7 +364,7 @@ class TestNeo4jProperties:
         expectations = [
             (DeviceNode, "Device", "pg_id"),
             (InterfaceNode, "Interface", "pg_id"),
-            (IPAddressNode, "IPAddress", "address"),
+            (IPAddressNode, "IPAddress", "pg_id"),
             (SubnetNode, "Subnet", "cidr"),
             (VlanNode, "Vlan", "vlan_id"),
             (VrfNode, "VRF", "name"),
@@ -377,6 +377,18 @@ class TestNeo4jProperties:
     def test_key_returns_key_property_value(self) -> None:
         assert VlanNode(vlan_id=10).key == 10
         assert SubnetNode(cidr="10.0.0.0/24").key == "10.0.0.0/24"
+
+    def test_ip_address_key_is_pg_id(self) -> None:
+        """IPAddressNode.key must return the pg_id UUID (as UUID, not address string).
+
+        This aligns node.key with NODE_KEY_PROPERTY['IPAddress'] = 'pg_id' so that
+        edge builders producing EdgeEndpoint(label='IPAddress', key=node.key) emit
+        the same value that _edge_upsert_cypher() resolves in its MATCH clause.
+        """
+        iface_id = UUID("00000000-0000-0000-0000-000000000042")
+        node = IPAddressNode(pg_id=iface_id, address="10.0.0.1")
+        assert node.key == iface_id
+        assert node.key != "10.0.0.1"
 
     def test_records_are_frozen(self) -> None:
         node = SiteNode(name="hq")

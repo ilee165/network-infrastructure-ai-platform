@@ -132,14 +132,20 @@ class InterfaceNode(GraphNode):
 
 
 class IPAddressNode(GraphNode):
-    """A host address from an interface ``ip_address``; keyed by address.
+    """A host address from an interface ``ip_address``; keyed by ``pg_id``.
 
     ``pg_id`` is the ``normalized_interfaces`` row the address was derived
     from (lowest row UUID when several interfaces share the address).
+
+    ``key_property`` is ``'pg_id'`` — matching ``NODE_KEY_PROPERTY['IPAddress']``
+    and the Neo4j uniqueness constraint — so that ``node.key`` (used by edge
+    builders to produce ``EdgeEndpoint.key``) agrees with the MERGE/MATCH key
+    in the generated Cypher.  Address-based deduplication in :func:`derive_nodes`
+    is performed explicitly on ``node.address``, not via ``node.key``.
     """
 
     label: ClassVar[str] = "IPAddress"
-    key_property: ClassVar[str] = "address"
+    key_property: ClassVar[str] = "pg_id"
 
     pg_id: UUID
     address: str
@@ -275,12 +281,22 @@ def derive_nodes(
 
     addressed = [(ip_interface(row.ip_address), row) for row in interfaces if row.ip_address]
 
-    ip_nodes = _dedupe_sorted(
-        sorted(
-            (IPAddressNode(pg_id=row.id, address=str(iface.ip)) for iface, row in addressed),
-            key=lambda node: (*_addr_sort_key(ip_address(node.address)), str(node.pg_id)),
-        )
+    # Deduplicate by address explicitly: key_property is now 'pg_id' (always
+    # unique per row) so _dedupe_sorted would no longer collapse same-address
+    # duplicates.  Sort by (address numeric, pg_id) first so the lowest pg_id
+    # wins deterministically, then drop address-duplicates by hand.
+    _ip_sorted = sorted(
+        (IPAddressNode(pg_id=row.id, address=str(iface.ip)) for iface, row in addressed),
+        key=lambda node: (*_addr_sort_key(ip_address(node.address)), str(node.pg_id)),
     )
+    _ip_seen_addresses: set[str] = set()
+    _ip_deduped: list[IPAddressNode] = []
+    for _node in _ip_sorted:
+        if _node.address in _ip_seen_addresses:
+            continue
+        _ip_seen_addresses.add(_node.address)
+        _ip_deduped.append(_node)
+    ip_nodes = tuple(_ip_deduped)
 
     # Route prefixes are projected Subnet nodes too (M2-05): every ROUTES_TO
     # edge must land on a real endpoint.
