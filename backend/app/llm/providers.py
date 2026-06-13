@@ -10,17 +10,29 @@ Secure-by-default egress (ADR-0009 Decision 3): external providers activate
 only when their credentials are explicitly present in the environment
 (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``, ``AZURE_OPENAI_API_KEY`` +
 ``AZURE_OPENAI_ENDPOINT``); with no configuration the platform runs purely
-local. Selecting an external profile is logged — M3 escalates this to an
-``audit_log`` entry (ADR-0011), and M3 also adds role indirection
-(``reasoning``/``fast``) and the mandatory prompt-redaction pipeline.
+local. Selecting an external profile emits an :class:`LLMAuditEvent` through a
+pluggable :class:`LLMAuditSink` (M3 default: a structlog line; M5 injects the
+append-only ``audit_log`` writer of ADR-0011).
+
+Role indirection (ADR-0009 Decision 2): :func:`get_chat_model_for_role` resolves
+the ``reasoning`` / ``fast`` roles to profiles via settings, so operators route
+heavy planning and cheap summarization to different models without code changes.
+Structured output (Decision 5): :func:`structured_output` wraps any model with
+a JSON-output parser and ONE bounded retry, for models lacking native JSON
+mode. Every model the factory returns is also wrapped in the mandatory
+:class:`~app.llm.redaction.RedactingChatModel` prompt-redaction pipeline.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
-from typing import Final
+from typing import Final, Protocol, TypeVar, runtime_checkable
 
-from langchain_core.language_models import BaseChatModel
+from langchain_core.language_models import BaseChatModel, LanguageModelInput
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
+from pydantic import BaseModel, ValidationError
 
 from app.core.config import Settings, get_settings
 from app.core.errors import NetOpsError
@@ -31,6 +43,11 @@ _logger = get_logger(__name__)
 
 #: The four profiles fixed by ADR-0009 / D9.
 KNOWN_PROFILES: Final[tuple[str, ...]] = ("local", "anthropic", "openai", "azure")
+
+#: Role indirection (ADR-0009 D2): agents request a model by role, settings map
+#: each role to a profile. ``reasoning`` is the heavy planning path; ``fast`` is
+#: cheap tool-output summarization.
+KNOWN_ROLES: Final[tuple[str, ...]] = ("reasoning", "fast")
 
 #: Default model per profile when the caller does not name one. PROPOSED
 #: defaults (ADR-0009 names profiles, not models); operators override via the
@@ -51,12 +68,61 @@ class LLMProfileError(NetOpsError):
     slug = "llm-profile"
 
 
+class LLMAuditEvent(BaseModel):
+    """One audited LLM-egress decision: an *external* profile was selected.
+
+    Selecting any non-``local`` profile means prompt data may leave the
+    deployment (ADR-0009 D3); the platform records that as an auditable event.
+    M5 links these to the append-only ``audit_log`` (ADR-0011); at M3 the
+    default sink emits a structlog line. Only non-secret metadata is recorded —
+    never an API key or prompt body.
+    """
+
+    model_config = {"frozen": True}
+
+    #: The selected external profile (never ``local``).
+    profile: str
+    #: Resolved model / deployment name.
+    model: str
+    #: Always ``True`` — every recorded event is an egress decision.
+    egress: bool = True
+    #: Role that resolved to this profile, when selection went through role
+    #: indirection; ``None`` for a directly named profile.
+    role: str | None = None
+
+
+@runtime_checkable
+class LLMAuditSink(Protocol):
+    """Destination for LLM-egress audit events (pluggable seam).
+
+    Mirrors :class:`app.agents.framework.tools.AuditSink` but lives in
+    ``app/llm/`` so the provider factory never imports the agent framework
+    (import-linter: only ``app/llm/`` touches provider classes; the LLM layer
+    stays a leaf). M5 swaps in the ``audit_log`` writer; M3 ships the logging
+    default below.
+    """
+
+    def record(self, event: LLMAuditEvent) -> None:
+        """Record *event*; raise on failure (audit-everything, never swallow)."""
+        ...
+
+
+class LoggingLLMAuditSink:
+    """Default sink: emit each egress decision as one structlog line."""
+
+    def record(self, event: LLMAuditEvent) -> None:
+        """Log *event* as a structured ``external_llm_profile_selected`` record."""
+        _logger.info("external_llm_profile_selected", **event.model_dump())
+
+
 def get_chat_model(
     profile: str | None = None,
     settings: Settings | None = None,
     *,
     model: str | None = None,
     temperature: float = 0.0,
+    audit_sink: LLMAuditSink | None = None,
+    _role: str | None = None,
 ) -> BaseChatModel:
     """Return a configured chat model for *profile*.
 
@@ -96,9 +162,11 @@ def get_chat_model(
         )
     model_name = model if model is not None else DEFAULT_MODELS[selected]
     if selected != "local":
-        # ADR-0009 Decision 3: external egress is an auditable event. M3
-        # escalates this structlog record to an append-only audit_log entry.
-        _logger.info("external_llm_profile_selected", profile=selected, model=model_name)
+        # ADR-0009 Decision 3: selecting an external profile means data may
+        # leave the deployment, so it is an auditable event. The sink defaults
+        # to a structlog line; M5 injects the append-only ``audit_log`` writer.
+        sink = audit_sink if audit_sink is not None else LoggingLLMAuditSink()
+        sink.record(LLMAuditEvent(profile=selected, model=model_name, role=_role))
     provider_model = _build_provider_model(selected, model_name, resolved_settings, temperature)
     # A9: central, bypass-proof redaction wraps every model the factory returns.
     return wrap_with_redaction(provider_model)
@@ -143,3 +211,159 @@ def _build_provider_model(
         raise LLMProfileError(
             f"failed to construct chat model for profile '{selected}': {exc}"
         ) from exc
+
+
+def get_chat_model_for_role(
+    role: str,
+    settings: Settings | None = None,
+    *,
+    model: str | None = None,
+    temperature: float = 0.0,
+    audit_sink: LLMAuditSink | None = None,
+) -> BaseChatModel:
+    """Return a chat model for *role*, routed to a profile via settings.
+
+    Role indirection (ADR-0009 D2): agents ask for ``"reasoning"`` (heavy
+    planning) or ``"fast"`` (cheap summarization); the operator maps each role
+    to a profile in settings (defaulting to ``llm_profile``). Routing a role to
+    an external profile is audited exactly like a direct selection — the
+    resolved ``role`` is recorded on the event.
+
+    Raises
+    ------
+    LLMProfileError
+        For an unknown role, or when the resolved profile cannot be configured.
+    """
+    if role not in KNOWN_ROLES:
+        raise LLMProfileError(f"unknown LLM role {role!r}; known roles: {', '.join(KNOWN_ROLES)}")
+    resolved_settings = settings if settings is not None else get_settings()
+    profile = resolved_settings.llm_profile_for_role(role)
+    return get_chat_model(
+        profile,
+        resolved_settings,
+        model=model,
+        temperature=temperature,
+        audit_sink=audit_sink,
+        _role=role,
+    )
+
+
+_SchemaT = TypeVar("_SchemaT", bound=BaseModel)
+
+#: Appended to the prompt when asking a model that lacks native JSON mode to
+#: emit structured output. Kept terse: the schema fields are described by the
+#: caller's prompt; this only constrains the *envelope*.
+_JSON_DIRECTIVE: Final[str] = (
+    "Respond with ONLY a single JSON object matching this schema, no prose, no "
+    "markdown fences:\n{schema}"
+)
+
+#: Appended on the single bounded retry, carrying the prior failure back to the
+#: model so it can self-correct (ADR-0009 D5: one bounded retry).
+_RETRY_DIRECTIVE: Final[str] = (
+    "Your previous response was not valid JSON for the schema "
+    "({error}). Respond again with ONLY the corrected JSON object."
+)
+
+
+def _parse_schema(schema: type[_SchemaT], message: BaseMessage) -> _SchemaT:
+    """Parse *message* content into *schema*, raising ``ValidationError`` on failure."""
+    content = message.content if isinstance(message.content, str) else str(message.content)
+    return schema.model_validate_json(content.strip())
+
+
+def _structured_messages(prompt: LanguageModelInput, schema: type[BaseModel]) -> list[BaseMessage]:
+    """Build the message list for a JSON-mode request from *prompt*."""
+    directive = _JSON_DIRECTIVE.format(schema=json.dumps(schema.model_json_schema()))
+    if isinstance(prompt, str):
+        return [HumanMessage(content=f"{prompt}\n\n{directive}")]
+    messages: list[BaseMessage] = []
+    if isinstance(prompt, BaseMessage):
+        messages.append(prompt)
+    else:
+        for item in prompt:
+            msg = item if isinstance(item, BaseMessage) else HumanMessage(content=str(item))
+            messages.append(msg)
+    return [*messages, HumanMessage(content=directive)]
+
+
+def structured_output(
+    model: BaseChatModel, schema: type[_SchemaT]
+) -> Runnable[LanguageModelInput, _SchemaT]:
+    """Wrap *model* so it returns a validated *schema* instance (ADR-0009 D5).
+
+    For models without native tool/JSON mode (some Ollama models), this asks
+    for a bare JSON object, parses it into *schema*, and on a validation
+    failure performs exactly ONE bounded retry that feeds the error back to the
+    model. After the retry still fails, a typed :class:`LLMProfileError` is
+    raised (the prior raw output is never echoed, so no prompt content leaks).
+
+    The returned runnable supports both ``invoke`` and ``ainvoke``.
+    """
+
+    def _run(prompt: LanguageModelInput, config: RunnableConfig | None = None) -> _SchemaT:
+        messages = _structured_messages(prompt, schema)
+        first = model.invoke(messages, config=config)
+        try:
+            return _parse_schema(schema, first)
+        except ValidationError as exc:
+            retry = [
+                *messages,
+                AIMessage(content=str(first.content)),
+                HumanMessage(content=_RETRY_DIRECTIVE.format(error=_summarize(exc))),
+            ]
+            second = model.invoke(retry, config=config)
+            return _parse_retry(schema, second)
+
+    async def _arun(prompt: LanguageModelInput, config: RunnableConfig | None = None) -> _SchemaT:
+        messages = _structured_messages(prompt, schema)
+        first = await model.ainvoke(messages, config=config)
+        try:
+            return _parse_schema(schema, first)
+        except ValidationError as exc:
+            retry = [
+                *messages,
+                AIMessage(content=str(first.content)),
+                HumanMessage(content=_RETRY_DIRECTIVE.format(error=_summarize(exc))),
+            ]
+            second = await model.ainvoke(retry, config=config)
+            return _parse_retry(schema, second)
+
+    return RunnableLambda(_run, afunc=_arun)
+
+
+def _parse_retry(schema: type[_SchemaT], message: BaseMessage) -> _SchemaT:
+    """Parse the retry response; the second failure is terminal (one bounded retry)."""
+    try:
+        return _parse_schema(schema, message)
+    except ValidationError as exc:
+        raise LLMProfileError(
+            f"model did not return valid structured output for "
+            f"{schema.__name__} after one retry: {_summarize(exc)}"
+        ) from exc
+
+
+def _summarize(exc: ValidationError) -> str:
+    """Render a validation error compactly (field locations + messages, no values).
+
+    The model's raw output is deliberately *not* included, so no prompt or
+    response content can leak into logs or error responses.
+    """
+    parts = [
+        f"{'.'.join(str(loc) for loc in e['loc']) or '<root>'}: {e['type']}" for e in exc.errors()
+    ]
+    return "; ".join(parts) or "validation failed"
+
+
+__all__ = [
+    "DEFAULT_MODELS",
+    "KNOWN_PROFILES",
+    "KNOWN_ROLES",
+    "LLMAuditEvent",
+    "LLMAuditSink",
+    "LLMProfileError",
+    "LoggingLLMAuditSink",
+    "get_chat_model",
+    "get_chat_model_for_role",
+    "structured_output",
+]

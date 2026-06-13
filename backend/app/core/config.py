@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     #: LLM provider profile (ADR-0009): local (Ollama, default) | anthropic | openai | azure.
     llm_profile: str = "local"
 
+    #: Role -> profile indirection (ADR-0009 D2). Agents request a model by
+    #: *role*; operators route the heavy "reasoning" path and the cheap "fast"
+    #: summarization path to different profiles without code changes. Both
+    #: default to ``llm_profile`` so a stock deployment stays fully local.
+    llm_role_reasoning: str | None = None
+    llm_role_fast: str | None = None
+
     #: Ollama endpoint — compose service ``ollama`` under the "local-llm" profile.
     ollama_base_url: str = "http://ollama:11434"
 
@@ -67,6 +74,20 @@ class Settings(BaseSettings):
 
     #: Version label stored with every wrapped DEK; bump together with KEK rotation.
     kek_version: str = "v1"
+
+    def llm_profile_for_role(self, role: str) -> str:
+        """Resolve an LLM *role* (``reasoning``/``fast``) to a configured profile.
+
+        Each role maps to its own ``llm_role_<role>`` setting, falling back to
+        the base :attr:`llm_profile` when unset — so a stock deployment runs
+        every role on the local model. Raises :class:`KeyError` for an unknown
+        role; callers translate that into a typed platform error.
+        """
+        role_overrides = {
+            "reasoning": self.llm_role_reasoning,
+            "fast": self.llm_role_fast,
+        }
+        return role_overrides[role] or self.llm_profile
 
     @model_validator(mode="after")
     def _forbid_default_secret_in_prod(self) -> Settings:
