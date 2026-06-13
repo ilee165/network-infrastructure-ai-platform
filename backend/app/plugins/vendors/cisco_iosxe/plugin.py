@@ -56,6 +56,9 @@ from app.schemas.normalized import (
 )
 
 __all__ = [
+    "SHOW_IP_ACCESS_LISTS",
+    "SHOW_IP_BGP_SUMMARY",
+    "SHOW_IP_OSPF_NEIGHBOR",
     "SNMP_OID_SYSDESCR",
     "SNMP_OID_SYSNAME",
     "SNMP_OID_SYSOBJECTID",
