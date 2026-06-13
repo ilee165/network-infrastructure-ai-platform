@@ -42,7 +42,7 @@ from app.core.config import get_settings
 from app.engines.topology.projector import project
 from app.engines.topology.snapshots import upsert_snapshot
 from app.engines.topology.sync import derive_topology, snapshot_lists
-from app.knowledge.neo4j_client import Neo4jClient, get_client
+from app.knowledge.neo4j_client import Neo4jClient, create_client
 from app.knowledge.schema import ensure_constraints
 from app.models import DiscoveryRun
 from app.models.inventory import (
@@ -70,8 +70,8 @@ def _make_engine() -> AsyncEngine:
 
 
 def _neo4j_client() -> Neo4jClient:
-    """The process-wide Neo4j client used for the projection writes."""
-    return get_client()
+    """Create a fresh Neo4j client for one task invocation (loop-scoped)."""
+    return create_client(get_settings())
 
 
 @asynccontextmanager
@@ -130,22 +130,25 @@ async def _project_run(run_id: UUID) -> dict[str, Any]:
     the discovery run's status.
     """
     projected_at = utcnow()
-    async with _session() as session:
-        inventory = await _load_inventory(session)
-        derived = derive_topology(
-            inventory.devices,
-            inventory.interfaces,
-            inventory.routes,
-            inventory.neighbors,
-        )
-        node_list, edge_list = snapshot_lists(derived.nodes, derived.edges)
+    client = _neo4j_client()
+    try:
+        async with _session() as session:
+            inventory = await _load_inventory(session)
+            derived = derive_topology(
+                inventory.devices,
+                inventory.interfaces,
+                inventory.routes,
+                inventory.neighbors,
+            )
+            node_list, edge_list = snapshot_lists(derived.nodes, derived.edges)
 
-        client = _neo4j_client()
-        await ensure_constraints(client)
-        await project(client, derived.nodes, derived.edges, projected_at)
+            await ensure_constraints(client)
+            await project(client, derived.nodes, derived.edges, projected_at)
 
-        await upsert_snapshot(session, run_id=run_id, nodes=node_list, edges=edge_list)
-        await session.commit()
+            await upsert_snapshot(session, run_id=run_id, nodes=node_list, edges=edge_list)
+            await session.commit()
+    finally:
+        await client.close()
 
     return {
         "ok": True,

@@ -473,3 +473,71 @@ def test_rebuild_cli_main_parses_run_id(monkeypatch: pytest.MonkeyPatch) -> None
     captured.clear()
     assert rebuild_mod.main([]) == 0
     assert captured["run_id"] is None
+
+
+def test_rebuild_cli_main_returns_nonzero_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 1: main() must return 1 when rebuild() raises, not 0."""
+
+    async def _failing_rebuild(run_id: UUID | None = None) -> dict[str, Any]:
+        raise RuntimeError("neo4j down")
+
+    monkeypatch.setattr(rebuild_mod, "rebuild", _failing_rebuild)
+
+    assert rebuild_mod.main([]) == 1
+
+
+# ===========================================================================
+# Neo4j client lifecycle — per-invocation fresh client (Finding 2)
+# ===========================================================================
+
+
+def test_sync_after_run_closes_client_after_successful_projection(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each sync_after_run call must close the client it creates."""
+    run_id = _seed_inventory(db_url)
+    client = FakeClient()
+    monkeypatch.setattr(tasks, "_neo4j_client", lambda: client)
+
+    tasks.sync_after_run(str(run_id))
+
+    assert client.closed is True
+
+
+def test_sync_after_run_closes_client_after_projection_failure(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Client must be closed even when the projection raises."""
+    run_id = _seed_inventory(db_url)
+    client = FakeClient(fail=True)
+    monkeypatch.setattr(tasks, "_neo4j_client", lambda: client)
+
+    result = tasks.sync_after_run(str(run_id))
+
+    assert result["ok"] is False
+    assert client.closed is True
+
+
+def test_sync_after_run_creates_fresh_client_each_invocation(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second task invocation must receive a new client, not a reused one."""
+    run_id = _seed_inventory(db_url)
+    clients: list[FakeClient] = []
+
+    def _fresh_client() -> FakeClient:
+        c = FakeClient()
+        clients.append(c)
+        return c
+
+    monkeypatch.setattr(tasks, "_neo4j_client", _fresh_client)
+
+    tasks.sync_after_run(str(run_id))
+    tasks.sync_after_run(str(run_id))
+
+    assert len(clients) == 2
+    assert clients[0] is not clients[1]
+    assert clients[0].closed is True
+    assert clients[1].closed is True

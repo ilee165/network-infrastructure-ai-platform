@@ -125,7 +125,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry: parse args, run the rebuild, return a process exit code."""
     args = _parse_args(argv)
-    asyncio.run(rebuild(args.run_id))
+    try:
+        asyncio.run(rebuild(args.run_id))
+    except Exception as exc:
+        logger.error("topology.rebuild_failed", error=str(exc))
+        return 1
     return 0
 
 
