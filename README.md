@@ -2,7 +2,7 @@
 
 A self-hosted, AI-powered Network Operations Platform for enterprise infrastructure teams. It functions as an AI Network Engineer: discovery, troubleshooting, packet analysis, configuration management, DDI management, documentation generation, and automation execution across multi-vendor environments — local-first, secure by default, with a human approving every change and every AI decision explained and audited.
 
-> **Status:** Milestone **M1** (inventory, credential vault, discovery engine, first three vendor plugins) complete on `release/m1`; see the [MVP roadmap](docs/roadmap/MVP.md). Not yet feature-complete — M2 (topology) is next.
+> **Status:** Milestone **M1** (inventory, credential vault, discovery engine, first three vendor plugins) complete on `release/m1`. Milestone **M2** (topology engine: Postgres→Neo4j projection with incremental sync + full rebuild, L2/L3 builders, topology API, and the Cytoscape.js topology UI with L2/L3 layer toggle and run-to-run diff view) is **build-complete on `feature/m2-topology-engine`, pending lab validation + merge approval**; see the [MVP roadmap](docs/roadmap/MVP.md). Not yet feature-complete — M3 (agent framework + troubleshooting) is next.
 
 ## Architecture at a glance
 
