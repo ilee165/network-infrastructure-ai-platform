@@ -221,7 +221,9 @@ class TestRunLifecycle:
         service = AgentSessionService(sessionmaker)
         registry = _engineer_tool_registry(specialist_factory, audit_sink)
 
-        # The run starts the session; build the graph with a recorder bound to it.
+        # Pre-start the session, bind its id to the trace recorder, and pass
+        # session_id into run() so a single session row owns both lifecycle and
+        # traces (the invariant asserted below).
         run_session = await service.start(
             user_id=user_id, role=Role.ENGINEER, intent="why is BGP down on edge-1?"
         )
@@ -235,16 +237,18 @@ class TestRunLifecycle:
             "why is BGP down on edge-1?",
             user_id=user_id,
             role=Role.ENGINEER,
+            session_id=run_session.id,
         )
 
         assert result["specialist"] == "troubleshooting"
         assert audit_sink.events[-1].tool_name == "get_bgp_peers"
         assert audit_sink.events[-1].outcome == "success"
-        # The run opened a *second* session (service.run starts its own); both
-        # are COMPLETED and the recorder-bound one carries a linked trace.
+        # Exactly one session exists, it is COMPLETED, and every trace links to it.
         async with sessionmaker() as db:
             sessions = (await db.execute(select(AgentSession))).scalars().all()
-            assert all(s.status is AgentSessionStatus.COMPLETED for s in sessions)
+            assert len(sessions) == 1, "run() must not open a second session row"
+            assert sessions[0].status is AgentSessionStatus.COMPLETED
+            assert sessions[0].id == run_session.id
             traces = (await db.execute(select(ReasoningTraceRow))).scalars().all()
             assert traces, "the run must persist at least one reasoning trace"
             assert all(t.session_id == run_session.id for t in traces)

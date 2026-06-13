@@ -98,30 +98,52 @@ class AgentSessionService:
         user_id: uuid.UUID,
         role: Role,
         messages: Sequence[BaseMessage] | None = None,
+        session_id: uuid.UUID | None = None,
     ) -> SupervisorState:
         """Run *graph* inside a lifecycle-managed, role-bound session.
 
-        Starts a ``RUNNING`` session, drives the supervisor as *role* (so every
+        When *session_id* is ``None`` (default), a fresh ``RUNNING`` session is
+        started internally and its id is used for the entire lifecycle.
+
+        When *session_id* is supplied the caller is responsible for having already
+        opened that session via :meth:`start` (and typically for having built
+        *graph* with a trace recorder bound to the same id via
+        :meth:`recorder_for`).  In that case :meth:`run` skips the internal
+        :meth:`start` call and manages only the terminal transition
+        (``COMPLETED`` / ``FAILED``) on the caller-supplied session.  This is the
+        pattern that keeps a single session row owning both its lifecycle and all
+        of its reasoning traces:
+
+        .. code-block:: python
+
+            session = await service.start(user_id=uid, role=role, intent=intent)
+            recorder = service.recorder_for(session.id)
+            graph = build_supervisor_graph(model, registry, trace_recorder=recorder)
+            result = await service.run(graph, intent, user_id=uid, role=role,
+                                       session_id=session.id)
+
+        Drives the supervisor as *role* (so every
         :class:`~app.agents.framework.tools.NetOpsTool` inside the run sees the
         real caller role), then marks the session ``COMPLETED`` — or ``FAILED``
         and re-raises if the run raises (e.g. an RBAC denial when *role* is below
         a tool's ``min_role``). *messages* defaults to a single user turn carrying
         *intent*.
-
-        The graph passed here must already carry a trace recorder bound to the
-        session id (see :meth:`recorder_for`) so the run's reasoning traces link
-        to this session.
         """
-        run_session = await self.start(user_id=user_id, role=role, intent=intent)
+        if session_id is None:
+            run_session = await self.start(user_id=user_id, role=role, intent=intent)
+            active_session_id = run_session.id
+        else:
+            active_session_id = session_id
+
         conversation: Sequence[BaseMessage] = (
             messages if messages is not None else [HumanMessage(content=intent)]
         )
         try:
             result = await run_supervisor(graph, conversation, role=role)
         except Exception:
-            await self.fail(run_session.id)
+            await self.fail(active_session_id)
             raise
-        await self.complete(run_session.id)
+        await self.complete(active_session_id)
         return result
 
     def recorder_for(self, session_id: uuid.UUID) -> PostgresTraceRecorder:
