@@ -209,6 +209,18 @@ class TestOspf:
         )
         assert result == []
 
+    def test_parse_failure_raises_plugin_error(
+        self, transport: FakeTransport, device_id: UUID, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ntc_templates.parse import ParsingException
+
+        def _boom(**kwargs: object) -> None:
+            raise ParsingException("template error")
+
+        monkeypatch.setattr(parsers, "parse_output", _boom)
+        with pytest.raises(PluginError, match="failed to parse"):
+            EosOspf(transport, device_id).get_ospf_neighbors()
+
 
 class TestAcl:
     def test_get_acls_returns_all_ace_rows(self, transport: FakeTransport, device_id: UUID) -> None:
@@ -263,3 +275,15 @@ class TestAcl:
     def test_empty_output_returns_no_entries(self, device_id: UUID) -> None:
         result = parsers.parse_acls("\n", device_id=device_id, collected_at=datetime.now(UTC))
         assert result == []
+
+    def test_parse_failure_raises_plugin_error(
+        self, transport: FakeTransport, device_id: UUID, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ntc_templates.parse import ParsingException
+
+        def _boom(**kwargs: object) -> None:
+            raise ParsingException("template error")
+
+        monkeypatch.setattr(parsers, "parse_output", _boom)
+        with pytest.raises(PluginError, match="failed to parse"):
+            EosAcl(transport, device_id).get_acls()
