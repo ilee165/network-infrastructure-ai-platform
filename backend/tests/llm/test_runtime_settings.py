@@ -90,7 +90,7 @@ async def test_db_base_profile_overrides_env(session: AsyncSession) -> None:
     assert await effective_profile_for_role(session, "fast", settings) == "anthropic"
 
 
-async def test_db_role_override_beats_env_and_db_base(session: AsyncSession) -> None:
+async def test_db_role_override_beats_env_role_override(session: AsyncSession) -> None:
     session.add(
         SystemSetting(
             llm_profile="local",
@@ -99,17 +99,18 @@ async def test_db_role_override_beats_env_and_db_base(session: AsyncSession) -> 
         )
     )
     await session.flush()
-    settings = _settings(llm_profile="local", llm_role_reasoning="openai", llm_role_fast="openai")
-    # DB reasoning override wins over env.
+    settings = _settings(llm_profile="local", llm_role_reasoning="openai", llm_role_fast="azure")
+    # DB reasoning override wins over the env reasoning override.
     assert await effective_profile_for_role(session, "reasoning", settings) == "anthropic"
-    # DB fast override is null -> falls back to the DB base profile (not env).
-    assert await effective_profile_for_role(session, "fast", settings) == "local"
+    # DB fast override is null -> per-field env fallback reaches the env fast
+    # role override (the locked "field is null -> env" contract).
+    assert await effective_profile_for_role(session, "fast", settings) == "azure"
 
 
-async def test_db_null_base_unreachable_but_null_role_falls_to_db_base(
+async def test_db_base_overrides_env_base_when_no_role_override_anywhere(
     session: AsyncSession,
 ) -> None:
-    """A null role override falls back to the DB base profile, env ignored."""
+    """A null DB role with no env role override falls to the DB base over env base."""
     session.add(SystemSetting(llm_profile="openai", llm_role_reasoning=None, llm_role_fast=None))
     await session.flush()
     settings = _settings(llm_profile="local")

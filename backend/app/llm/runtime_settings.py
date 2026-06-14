@@ -4,12 +4,15 @@ ADR-0009 fixes the role-indirection model: agents ask for a model by *role*
 (``reasoning`` / ``fast``) and an operator maps each role to a profile. Env
 ``Settings`` supplies the defaults, but the Auth & Account UI lets an admin
 persist overrides in the single ``system_settings`` row. This module is the
-seam that consults that row **at runtime**, layering DB over env:
+seam that consults that row **at runtime**, layering DB over env *per field*:
 
-    role override (DB)  ->  base profile (DB)  ->  role override (env)  ->  base profile (env)
+    role override (DB)  ->  role override (env)  ->  base profile (DB)  ->  base profile (env)
 
-with each layer skipped when its value is null/absent. A deployment with no
-row therefore resolves exactly as it does from env alone today.
+with each layer skipped when its value is null/absent. DB takes precedence over
+env field-by-field, so a null DB role override falls through to the env role
+override (the locked "field is null -> env fallback" contract) rather than
+stopping at the DB base. A deployment with no row resolves exactly as it does
+from env alone today.
 
 Only the *profile choice* (``llm_profile`` and the role map) is DB-backed.
 Provider API keys and the Ollama endpoint stay in env/``Settings`` and are
@@ -84,7 +87,16 @@ async def effective_profile_for_role(
         # No DB row: behave exactly as env-only resolution does today.
         return settings.llm_profile_for_role(role)
 
+    # Per-field, DB-over-env resolution (each layer skipped when its value is
+    # null), honouring the locked "field is null -> env fallback" contract:
+    #   1. DB role override   (row.llm_role_<role>)
+    #   2. env role override  (settings.llm_role_<role>)
+    #   3. DB base profile    (row.llm_profile)
+    #   4. env base profile   (settings.llm_profile)
     db_role_override = getattr(row, _ROLE_COLUMNS[role])
-    # DB role override wins; else the DB base profile. Env is consulted only
-    # when the DB has nothing to say (no row at all, handled above).
-    return db_role_override or row.llm_profile
+    if db_role_override is not None:
+        return db_role_override
+    env_role_override = getattr(settings, _ROLE_COLUMNS[role])
+    if env_role_override is not None:
+        return env_role_override
+    return row.llm_profile or settings.llm_profile
