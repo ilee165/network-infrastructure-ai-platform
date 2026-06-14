@@ -22,8 +22,15 @@ Server-side session model (Auth & Account UI): refresh JWTs are **stateful**.
 Each carries a ``sid`` claim naming a ``refresh_sessions`` row; ``refresh`` only
 rotates while that row is live (``revoked_at IS NULL``) and the user is active.
 Logout / admin revoke flips ``revoked_at`` — the row is never deleted — so a
-rotated-out, logged-out, or admin-revoked refresh token is rejected immediately
+logged-out, admin-revoked, or deactivated session's refresh token is rejected
 on its next use rather than staying verifiable until its natural 8 h expiry.
+
+Revocation is per-session (``sid``), not per-token (``jti``): rotation reuses
+the same ``sid`` with a fresh ``jti`` and the ``jti`` is never persisted or
+compared. A rotated-out (superseded) refresh token therefore still names the
+same live ``sid`` and remains valid — replayable — until that session is logged
+out / revoked or the token reaches its 8 h expiry. Rotation does not, by itself,
+invalidate the previous refresh token.
 """
 
 from __future__ import annotations
