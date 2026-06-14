@@ -136,7 +136,7 @@ jobs:
       # Images are built but never pushed from CI (push: false, load: true);
       # registry publishing is a release-workflow concern (ADR-0016).
       - name: Build backend image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/backend.Dockerfile
@@ -147,7 +147,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=backend
 
       - name: Build frontend image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/frontend.Dockerfile
