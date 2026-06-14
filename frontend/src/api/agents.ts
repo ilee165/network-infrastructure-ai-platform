@@ -114,37 +114,19 @@ export function getSession(sessionId: string): Promise<StartSessionResponse> {
 // ── WebSocket streaming ───────────────────────────────────────────────────────
 
 /**
- * Storage key for the access token (set by the login flow).  Read here to
- * attach a ``Bearer`` header to the ``stream-ticket`` REST call; the JWT is
- * never embedded directly in a WebSocket URL.
- */
-const ACCESS_TOKEN_KEY = "netops.access_token";
-
-/** Read the current access token, or ``null`` when unauthenticated. */
-export function getAccessToken(): string | null {
-  try {
-    return globalThis.localStorage?.getItem(ACCESS_TOKEN_KEY) ?? null;
-  } catch {
-    return null; // Storage can throw in locked-down/private-mode contexts.
-  }
-}
-
-/**
- * Exchange the caller's JWT (via the normal Authorization header) for a
- * short-lived, single-use opaque stream ticket from the backend.
+ * Exchange the caller's JWT for a short-lived, single-use opaque stream ticket
+ * from the backend.
  *
- * The ticket is good for 30 seconds and is consumed on first use, so the
- * bearer JWT never appears in a WebSocket URL (and therefore never in server
- * access logs, browser history, or Referer headers).
+ * The access token is attached by {@link apiFetch} as an in-memory
+ * `Authorization: Bearer` header (Auth & Account UI, F1) — the JWT lives only
+ * in the auth store, never in localStorage. The ticket is good for 30 seconds
+ * and is consumed on first use, so the bearer JWT never appears in a WebSocket
+ * URL (and therefore never in server access logs, browser history, or Referer
+ * headers).
  */
 export function requestStreamTicket(sessionId: string): Promise<string> {
-  const token = getAccessToken();
-  const headers: Record<string, string> = token
-    ? { Authorization: `Bearer ${token}` }
-    : {};
   return apiFetch<{ ticket: string }>(`/agents/${sessionId}/stream-ticket`, {
     method: "POST",
-    headers,
   }).then((r) => r.ticket);
 }
 

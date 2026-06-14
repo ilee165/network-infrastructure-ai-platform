@@ -13,6 +13,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StartSessionResponse } from "../api/agents";
 import { ChatPage } from "../pages/ChatPage";
+import { useAuthStore } from "../stores/auth";
 
 // ── WebSocket double ──────────────────────────────────────────────────────────
 
@@ -185,11 +186,14 @@ beforeEach(() => {
   MockWebSocket.instances = [];
   vi.stubGlobal("WebSocket", MockWebSocket);
   vi.stubGlobal("fetch", mockStartFetch());
-  globalThis.localStorage.setItem("netops.access_token", "test-jwt");
+  // The access token lives in the in-memory auth store now (Auth & Account UI,
+  // F1); apiFetch attaches it as the Bearer header on the stream-ticket call.
+  useAuthStore.getState().setToken("test-jwt");
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  useAuthStore.getState().setAnon();
   globalThis.localStorage.clear();
 });
 
