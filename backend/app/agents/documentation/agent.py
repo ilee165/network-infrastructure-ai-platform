@@ -7,7 +7,8 @@ generates three artifact types on the ``docs`` Celery queue:
    tables.  No LLM: pure deterministic rendering, so the M4 exit criterion
    "generated inventory matches normalized-table content exactly" is satisfied
    by construction (ADR-0019 §2).
-2. **Diagrams** (T11, future) — Mermaid source from the Neo4j projection.
+2. **Diagrams** (T11) — Mermaid source generated deterministically from the
+   Neo4j topology projection; PNG is rendered client-side (ADR-0019 §3).
 3. **Runbooks** (T12, future) — template + LLM narrative grounded in
    inventory/topology (requires A9 redaction at the LLM boundary — ADR-0019 §4).
 
@@ -85,8 +86,9 @@ class DocumentationAgent(BaseSpecialistAgent):
             "- **Network inventories**: Markdown or CSV tables of devices, interfaces, "
             "  neighbors, and routes — rendered deterministically from normalized tables, "
             "  scoped by site or vendor if requested.\n"
-            "- **Topology diagrams**: Mermaid source generated from the Neo4j "
-            "  projection (available in a future task).\n"
+            "- **Topology diagrams**: Mermaid source generated deterministically "
+            "  from the Neo4j projection (nodes/edges); PNG is rendered "
+            "  client-side.\n"
             "- **Runbooks**: per-device or per-site Markdown grounded in the inventory "
             "  and topology (available in a future task).\n\n"
             "Guidelines:\n"

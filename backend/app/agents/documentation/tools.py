@@ -6,8 +6,9 @@ or diagram generation (ADR-0019 §2: "deterministic render of normalized tables
 to Markdown + CSV; exit criterion is a round-trip equality test against
 normalized-table content, so generation is pure/templated, not model-narrated").
 
-This module owns the ``generate_inventory`` tool (T10). The ``generate_diagram``
-and ``generate_runbook`` tools are added in the next two tasks (T11, T12).
+This module owns the ``generate_inventory`` tool (T10) and the
+``generate_diagram`` tool (T11). The ``generate_runbook`` tool is added in the
+next task (T12).
 
 Module boundary: these wrappers are the *only* point where the documentation
 agent touches data. No code outside this module may import ``app.engines`` or
@@ -363,16 +364,172 @@ async def generate_inventory(
 
 
 # ---------------------------------------------------------------------------
+# generate_diagram — Mermaid from the Neo4j projection (T11, ADR-0019 §3)
+# ---------------------------------------------------------------------------
+#
+# ADR-0019 §3: "Diagrams — Mermaid source generated deterministically from the
+# Neo4j projection (nodes/edges -> Mermaid `graph` syntax). Mermaid is the
+# stored, diffable, embeddable diagram-of-record; it satisfies the exit
+# criterion (diagram node/edge set matches the projection) by construction.
+# PNG is rendered client-side". No server-side render dependency is added.
+#
+# The tool accepts the projection in the exact JSON-safe shape that
+# ``app.knowledge.topology_read.fetch_graph`` returns — ``{"nodes": [...],
+# "edges": [...], "projected_at": <iso|None>}`` where each node carries
+# ``label``/``key``/``properties`` and each edge carries
+# ``type``/``source``/``target``/``properties``. The caller (a ``docs``-queue
+# worker or API handler) performs the audited Neo4j read via the ``knowledge/``
+# client and passes the result in; this tool holds no driver and does no I/O,
+# respecting the module boundary (REPO-STRUCTURE §3.2 — agents touch data only
+# through these typed wrappers, never importing the Neo4j driver directly).
+
+
+#: Mermaid edge direction header (top-down). Deterministic, stable across runs.
+_MERMAID_HEADER = "graph TD"
+
+#: How each projected node label is shown in the diagram. Devices are far more
+#: legible by hostname than by their ``pg_id`` UUID; everything else uses its
+#: natural key (cidr / vlan_id / name) which is already human-readable.
+_LABEL_DISPLAY_PROPERTY = {"Device": "hostname"}
+
+
+def _mermaid_node_id(index: int) -> str:
+    """Stable, syntactically-safe Mermaid node id for the *index*-th node.
+
+    Projection keys are UUIDs / CIDRs / arbitrary strings that are not valid
+    Mermaid identifiers, so we assign deterministic synthetic ids (``n0``,
+    ``n1`` …) in projection order. Order is fixed by the caller's node list, so
+    the same projection always yields byte-identical output.
+    """
+    return f"n{index}"
+
+
+def _node_display_text(node: dict[str, Any]) -> str:
+    """Human-readable label text for *node* (hostname for devices, else key)."""
+    label = node.get("label")
+    properties = node.get("properties") or {}
+    display_prop = _LABEL_DISPLAY_PROPERTY.get(str(label))
+    text: Any = None
+    if display_prop is not None:
+        text = properties.get(display_prop)
+    if text is None:
+        text = node.get("key")
+    if text is None:
+        text = label
+    return str(text)
+
+
+def _escape_mermaid_label(text: str) -> str:
+    r"""Make *text* safe inside a Mermaid ``["..."]`` quoted label.
+
+    Double quotes and square brackets would otherwise terminate the node label
+    and corrupt the graph. Mermaid has no backslash escape inside a quoted
+    string, so we substitute HTML entities (``#quot;`` / ``#91;`` / ``#93;``),
+    which Mermaid renders as the literal characters. This keeps every node
+    declaration well-formed regardless of hostname content.
+    """
+    return text.replace('"', "#quot;").replace("[", "#91;").replace("]", "#93;")
+
+
+def _render_mermaid(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> str:
+    """Render the projection *nodes*/*edges* to deterministic Mermaid source.
+
+    Each node becomes one ``n<i>["<label> <display>"]`` declaration in
+    projection order; each edge becomes one ``n<src> -->|"<type>"| n<dst>`` link
+    resolved through the same ``(label, key) -> n<i>`` map. The node/edge *set*
+    of the output therefore equals the projection's by construction (the T11
+    exit criterion). Edges whose endpoints are not in the node set are skipped
+    (a self-consistent projection has none).
+    """
+    # Map each projected node's identity (label, key) to its synthetic id.
+    id_by_identity: dict[tuple[Any, Any], str] = {}
+    lines: list[str] = [_MERMAID_HEADER]
+
+    for index, node in enumerate(nodes):
+        node_id = _mermaid_node_id(index)
+        id_by_identity[(node.get("label"), node.get("key"))] = node_id
+        display = _escape_mermaid_label(f"{node.get('label')}: {_node_display_text(node)}")
+        lines.append(f'    {node_id}["{display}"]')
+
+    # Edges reference endpoints by the node *key* (topology_read emits
+    # source/target as the endpoint key values). Resolve against any node that
+    # carries that key, regardless of label.
+    id_by_key: dict[Any, str] = {
+        node.get("key"): id_by_identity[(node.get("label"), node.get("key"))] for node in nodes
+    }
+    for edge in edges:
+        source_id = id_by_key.get(edge.get("source"))
+        target_id = id_by_key.get(edge.get("target"))
+        if source_id is None or target_id is None:
+            continue
+        rel_type = _escape_mermaid_label(str(edge.get("type", "")))
+        lines.append(f'    {source_id} -->|"{rel_type}"| {target_id}')
+
+    return "\n".join(lines)
+
+
+@netops_tool(classification=ToolClassification.READ_ONLY)
+async def generate_diagram(
+    projection: Annotated[
+        dict[str, Any],
+        Field(
+            description=(
+                "The Neo4j topology projection in the shape returned by the "
+                "``knowledge/`` topology reader (``fetch_graph``): a dict with "
+                "``nodes`` (each ``{label, key, properties}``), ``edges`` (each "
+                "``{type, source, target, properties}`` where source/target are "
+                "node ``key`` values), and an optional ``projected_at`` "
+                "watermark. The caller performs the audited Neo4j read and "
+                "passes the result in; this tool does no transport I/O."
+            )
+        ),
+    ],
+) -> str:
+    """Render the Neo4j topology projection to deterministic Mermaid source.
+
+    ADR-0019 §3: diagrams are emitted as **Mermaid source** generated
+    deterministically from the projection (nodes/edges -> Mermaid ``graph``
+    syntax). Mermaid is the stored, diffable, embeddable diagram-of-record;
+    **PNG is rendered client-side** (no server-side render dependency). The
+    generated node/edge set equals the projection's node/edge set by
+    construction, satisfying the T11 exit criterion. **No LLM is used.**
+
+    Returns a JSON string with the fields of the ``Document`` model
+    (ADR-0019 §1), ready for the caller to persist as a ``documents`` row:
+
+    - ``kind``: always ``"diagram"``
+    - ``format``: always ``"mermaid"``
+    - ``title``: a human-readable title
+    - ``content``: the Mermaid graph source
+
+    Read-only — no device, DB, or graph write occurs inside this tool.
+    """
+    nodes = list(projection.get("nodes") or [])
+    edges = list(projection.get("edges") or [])
+    content = _render_mermaid(nodes, edges)
+    return json.dumps(
+        {
+            "kind": "diagram",
+            "format": "mermaid",
+            "title": "Network Topology Diagram",
+            "content": content,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public surface for the agent package
 # ---------------------------------------------------------------------------
 
-#: All Documentation Agent tools registered for M4 T10.
-#: T11 (generate_diagram) and T12 (generate_runbook) extend this list.
+#: All Documentation Agent tools registered for M4 (T10 inventory, T11 diagram).
+#: T12 (generate_runbook) extends this list.
 DOCUMENTATION_TOOLS = [
     generate_inventory,
+    generate_diagram,
 ]
 
 __all__ = [
     "DOCUMENTATION_TOOLS",
+    "generate_diagram",
     "generate_inventory",
 ]

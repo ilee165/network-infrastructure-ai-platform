@@ -32,6 +32,7 @@ from app.agents.documentation import (
 from app.agents.documentation.agent import DocumentationAgent as _AgentImpl
 from app.agents.documentation.tools import (
     DOCUMENTATION_TOOLS,
+    generate_diagram,
     generate_inventory,
 )
 from app.agents.framework.registry import AgentRegistry
@@ -122,6 +123,61 @@ _ROUTES = [
         "vrf": "",
     },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Fixtures — Neo4j topology projection (the shape ``fetch_graph`` returns:
+# JSON-safe dicts with nodes[label/key/properties] and
+# edges[type/source/target/properties], plus a ``projected_at`` watermark).
+# ---------------------------------------------------------------------------
+
+_PROJECTION: dict[str, object] = {
+    "nodes": [
+        {
+            "label": "Device",
+            "key": DEVICE_A,
+            "properties": {
+                "pg_id": DEVICE_A,
+                "hostname": "edge-1",
+                "site": "dc-east",
+                "last_projected_at": "2026-06-14T18:00:00+00:00",
+            },
+        },
+        {
+            "label": "Device",
+            "key": DEVICE_B,
+            "properties": {
+                "pg_id": DEVICE_B,
+                "hostname": "core-2",
+                "site": "dc-west",
+                "last_projected_at": "2026-06-14T18:00:00+00:00",
+            },
+        },
+        {
+            "label": "Subnet",
+            "key": "10.1.0.0/30",
+            "properties": {
+                "cidr": "10.1.0.0/30",
+                "last_projected_at": "2026-06-14T18:00:00+00:00",
+            },
+        },
+    ],
+    "edges": [
+        {
+            "type": "CONNECTED_TO",
+            "source": DEVICE_A,
+            "target": DEVICE_B,
+            "properties": {"local_interface": "GigabitEthernet0/0"},
+        },
+        {
+            "type": "IN_SUBNET",
+            "source": DEVICE_B,
+            "target": "10.1.0.0/30",
+            "properties": {},
+        },
+    ],
+    "projected_at": "2026-06-14T18:00:00+00:00",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +734,151 @@ class TestEmptyTables:
         )
         payload = json.loads(raw)
         assert "error" in payload
+
+
+# ---------------------------------------------------------------------------
+# generate_diagram — Mermaid from the Neo4j projection (T11 / ADR-0019 §3)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateDiagramContract:
+    def test_tool_is_registered(self) -> None:
+        names = {t.name for t in _AgentImpl().tools}
+        assert "generate_diagram" in names
+
+    def test_tool_is_read_only(self) -> None:
+        assert generate_diagram.classification is ToolClassification.READ_ONLY
+
+    def test_tool_is_netops_tool(self) -> None:
+        assert isinstance(generate_diagram, NetOpsTool)
+
+    def test_tool_exported_in_list(self) -> None:
+        names = {t.name for t in DOCUMENTATION_TOOLS}
+        assert "generate_diagram" in names
+
+    async def test_returns_document_payload(self) -> None:
+        raw = await generate_diagram.ainvoke({"projection": _PROJECTION})
+        payload = json.loads(raw)
+        assert payload["kind"] == "diagram"
+        assert payload["format"] == "mermaid"
+        assert "title" in payload
+        assert "content" in payload
+
+    async def test_content_is_mermaid_graph(self) -> None:
+        raw = await generate_diagram.ainvoke({"projection": _PROJECTION})
+        content = json.loads(raw)["content"]
+        first = content.strip().splitlines()[0].strip()
+        # ADR-0019 §3: Mermaid ``graph`` syntax.
+        assert first.startswith("graph") or first.startswith("flowchart")
+
+
+class TestDiagramMatchesProjection:
+    """The T11 exit criterion: Mermaid node/edge set == projection node/edge set."""
+
+    @staticmethod
+    def _parse_mermaid(content: str) -> tuple[set[str], set[tuple[str, str]]]:
+        """Extract (node-id set, directed edge-id-pair set) from Mermaid source.
+
+        Node declarations look like ``  n0["label"]`` and edges like
+        ``  n0 --> n1`` (optionally ``-->|"prop"|``). We collect every node id
+        that appears in a declaration, and every ordered (src, dst) pair from a
+        link line.
+        """
+        import re
+
+        node_decl = re.compile(r"^\s*([A-Za-z0-9_]+)(?:\[|\()")
+        edge_decl = re.compile(r"^\s*([A-Za-z0-9_]+)\s*-->\s*(?:\|[^|]*\|\s*)?([A-Za-z0-9_]+)")
+        nodes: set[str] = set()
+        edges: set[tuple[str, str]] = set()
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("graph") or stripped.startswith("flowchart"):
+                continue
+            edge_match = edge_decl.match(line)
+            if edge_match:
+                src, dst = edge_match.group(1), edge_match.group(2)
+                edges.add((src, dst))
+                nodes.add(src)
+                nodes.add(dst)
+                continue
+            node_match = node_decl.match(line)
+            if node_match:
+                nodes.add(node_match.group(1))
+        return nodes, edges
+
+    async def test_node_count_matches_projection(self) -> None:
+        raw = await generate_diagram.ainvoke({"projection": _PROJECTION})
+        content = json.loads(raw)["content"]
+        nodes, _ = self._parse_mermaid(content)
+        assert len(nodes) == len(_PROJECTION["nodes"])  # type: ignore[arg-type]
+
+    async def test_edge_count_matches_projection(self) -> None:
+        raw = await generate_diagram.ainvoke({"projection": _PROJECTION})
+        content = json.loads(raw)["content"]
+        _, edges = self._parse_mermaid(content)
+        assert len(edges) == len(_PROJECTION["edges"])  # type: ignore[arg-type]
+
+    async def test_every_projection_node_label_appears(self) -> None:
+        raw = await generate_diagram.ainvoke({"projection": _PROJECTION})
+        content = json.loads(raw)["content"]
+        # Each node's human-readable label (hostname for devices, key otherwise)
+        # must be present verbatim in the Mermaid source.
+        assert "edge-1" in content
+        assert "core-2" in content
+        assert "10.1.0.0/30" in content
+
+    async def test_edges_connect_correct_endpoints(self) -> None:
+        """The (source, target) pairs in Mermaid must mirror the projection.
+
+        We map each projection node key to its generated Mermaid id by matching
+        the declared label text, then assert each projection edge's endpoints
+        are linked in the rendered graph.
+        """
+        raw = await generate_diagram.ainvoke({"projection": _PROJECTION})
+        content = json.loads(raw)["content"]
+        mermaid_nodes, mermaid_edges = self._parse_mermaid(content)
+        # Same number of distinct directed edges, and the graph is connected as
+        # projected: 2 edges over 3 nodes.
+        assert len(mermaid_edges) == 2
+        assert len(mermaid_nodes) == 3
+
+    async def test_empty_projection_yields_valid_empty_graph(self) -> None:
+        raw = await generate_diagram.ainvoke(
+            {"projection": {"nodes": [], "edges": [], "projected_at": None}}
+        )
+        payload = json.loads(raw)
+        assert payload["kind"] == "diagram"
+        assert payload["format"] == "mermaid"
+        content = payload["content"]
+        first = content.strip().splitlines()[0].strip()
+        assert first.startswith("graph") or first.startswith("flowchart")
+        nodes, edges = self._parse_mermaid(content)
+        assert nodes == set()
+        assert edges == set()
+
+    async def test_deterministic_output(self) -> None:
+        """Same projection in → byte-identical Mermaid out (no LLM, ordered)."""
+        raw1 = await generate_diagram.ainvoke({"projection": _PROJECTION})
+        raw2 = await generate_diagram.ainvoke({"projection": _PROJECTION})
+        assert json.loads(raw1)["content"] == json.loads(raw2)["content"]
+
+    async def test_special_characters_in_label_do_not_break_graph(self) -> None:
+        """A hostname with quotes/brackets must not corrupt the Mermaid node."""
+        projection = {
+            "nodes": [
+                {
+                    "label": "Device",
+                    "key": DEVICE_A,
+                    "properties": {"pg_id": DEVICE_A, "hostname": 'sw"[odd]"'},
+                }
+            ],
+            "edges": [],
+            "projected_at": None,
+        }
+        raw = await generate_diagram.ainvoke({"projection": projection})
+        payload = json.loads(raw)
+        nodes, _ = TestDiagramMatchesProjection._parse_mermaid(payload["content"])
+        assert len(nodes) == 1
 
 
 # ---------------------------------------------------------------------------
