@@ -80,6 +80,58 @@ class TestDiscoveryAgentIdentity:
             f"description does not mention discovery context: {agent.description!r}"
         )
 
+    def test_description_states_diagnosis_boundary(self) -> None:
+        """Discovery must disclaim fault diagnosis so the router does not grab it
+        for troubleshooting questions (regression: routed 'read the routing table
+        to find why X is broken' to discovery instead of troubleshooting)."""
+        desc = _make_agent().description.lower()
+        # Still owns enumeration:
+        assert "inventory" in desc
+        assert "neighbor" in desc
+        # Now explicitly NOT diagnosis:
+        assert "diagnos" in desc  # "not for diagnosing ..."
+        assert "troubleshooting" in desc  # points the router at the right specialist
+
+    def test_description_uses_enumerate_keyword(self) -> None:
+        """The description must use the 'enumerate'/'enumerates' keyword that
+        distinguishes discovery (inventory enumeration) from troubleshooting
+        (fault diagnosis) — this exact word appears in the v3 routing prompt's
+        decision rule for discovery."""
+        desc = _make_agent().description.lower()
+        assert "enumerat" in desc, (
+            "description must contain 'enumerate'/'enumerates' to mirror "
+            "the routing prompt's enumeration-vs-diagnosis rule"
+        )
+
+    def test_description_says_not_for_routing_state_diagnosis(self) -> None:
+        """Discovery must explicitly disclaim reading routing/BGP/OSPF/ACL state
+        to diagnose faults — the exact gap that caused the regression."""
+        desc = _make_agent().description.lower()
+        # The description must name the device-state types discovery does NOT own:
+        assert "routing" in desc
+        assert "bgp" in desc or "ospf" in desc or "acl" in desc
+
+    def test_description_cross_references_troubleshooting_specialist_by_name(
+        self,
+    ) -> None:
+        """The description must name the 'troubleshooting' specialist so the
+        router can redirect fault-diagnosis requests correctly."""
+        desc = _make_agent().description.lower()
+        # Exact word, not just 'trouble' — the specialist name is 'troubleshooting'
+        assert "troubleshooting" in desc
+
+    def test_description_does_not_claim_fault_diagnosis(self) -> None:
+        """Discovery must not claim ownership of fault/why-is-it-broken analysis.
+
+        Regression guard: if the boundary disclaimer is accidentally removed,
+        the router may route 'why is X broken — read the device state' to
+        discovery instead of troubleshooting.
+        """
+        desc = _make_agent().description.lower()
+        # The description should say NOT / negation around diagnosing/fault:
+        # The new text: "it is NOT for diagnosing why something is broken"
+        assert "not" in desc  # "NOT for diagnosing"
+
     def test_system_prompt_is_non_empty(self) -> None:
         agent = _make_agent()
         assert agent.system_prompt.strip(), "system_prompt must not be empty"

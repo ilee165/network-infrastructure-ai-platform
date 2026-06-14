@@ -146,6 +146,61 @@ class TestTroubleshootingIdentity:
         assert desc.strip()
         assert any(w in desc for w in ("bgp", "ospf", "acl", "routing", "diagnos"))
 
+    def test_description_claims_reading_state_to_diagnose(self) -> None:
+        """The description must say that READING routing/BGP/OSPF/ACL state to
+        diagnose a fault is troubleshooting, so the router does not mistake
+        'read the routing table to find why' for discovery/enumeration."""
+        desc = _make_agent().description.lower()
+        assert "routing table" in desc
+        assert "diagnos" in desc
+        # Keep the existing on-topic keywords (already asserted elsewhere):
+        assert any(w in desc for w in ("bgp", "ospf", "acl", "routing"))
+
+    def test_description_contrasts_with_inventory_discovery(self) -> None:
+        """The description must explicitly state that reading device state for
+        diagnosis is troubleshooting, NOT inventory discovery — the exact
+        boundary the v3 routing prompt tests on."""
+        desc = _make_agent().description.lower()
+        # New text: "Reading a device's state to explain a problem is
+        # troubleshooting, not inventory discovery."
+        assert "inventory" in desc, (
+            "description must mention 'inventory' to draw the boundary "
+            "against the discovery specialist"
+        )
+        assert "discovery" in desc, (
+            "description must mention 'discovery' so the router understands "
+            "reading device state is NOT discovery work"
+        )
+
+    def test_description_uses_including_qualifier_for_state_reading(self) -> None:
+        """The 'INCLUDING' qualifier must be present to make it explicit that
+        reading routing/BGP/OSPF/ACL state in order to diagnose a fault is
+        troubleshooting — even though it 'inspects' a device."""
+        desc = _make_agent().description
+        # The new text: "INCLUDING when answering requires reading a device's
+        # routing table, BGP/OSPF state, or ACLs to diagnose the fault."
+        assert "including" in desc.lower(), (
+            "description must include the 'INCLUDING' qualifier to make the "
+            "reading-state-for-diagnosis boundary explicit"
+        )
+
+    def test_description_covers_all_four_analysis_domains_in_context(self) -> None:
+        """All four analysis domains must appear in the description so the
+        router recognises routing/BGP/OSPF/ACL questions as troubleshooting."""
+        desc = _make_agent().description.lower()
+        assert "bgp" in desc
+        assert "ospf" in desc
+        assert "acl" in desc
+        assert "routing" in desc
+
+    def test_description_mentions_reading_device_state_phrase(self) -> None:
+        """The description must use the phrase 'reading a device' or
+        'device's ... state' to directly address the regression case where
+        the router saw 'read the routing table' and chose discovery."""
+        desc = _make_agent().description.lower()
+        # Either "reading a device's" or "device's routing/bgp/ospf state"
+        assert "device" in desc and ("routing table" in desc or "bgp/ospf" in desc)
+
     def test_system_prompt_non_empty(self) -> None:
         assert _make_agent().system_prompt.strip()
 
