@@ -27,6 +27,13 @@ RUN npm run build
 # ---- runtime: nginx, non-root ------------------------------------------------
 FROM nginx:alpine AS runtime
 
+# Patch base-image OS packages to the latest Alpine security revisions before
+# dropping to the non-root user. The CI Trivy gate fails on FIXABLE CRITICAL/
+# HIGH CVEs (unfixed base-image CVEs are ignored via ignore-unfixed); this keeps
+# the shipped image current on patched packages (e.g. openssl, libxml2). Runs as
+# root — the default for nginx:alpine until the USER directive below.
+RUN apk upgrade --no-cache
+
 # Full nginx configuration (replaces the stock root-oriented config): SPA on
 # 8080, /api/ reverse proxy, pid + temp paths under /tmp so the non-root
 # `nginx` user (uid 101, built into the image) can run the master process.
