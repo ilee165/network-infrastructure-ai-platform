@@ -19,7 +19,9 @@ from app.plugins.vendors.eos.plugin import (
     SHOW_INTERFACES,
     SHOW_IP_ROUTE,
     SHOW_LLDP_NEIGHBORS_DETAIL,
+    SHOW_RUNNING_CONFIG,
     SHOW_VERSION,
+    EosConfigBackup,
     EosInterfaces,
     EosNeighbors,
     EosPlugin,
@@ -86,6 +88,7 @@ class TestPluginDeclaration:
                 Capability.BGP,
                 Capability.OSPF,
                 Capability.ACL,
+                Capability.CONFIG_BACKUP,
             }
         )
 
@@ -292,3 +295,33 @@ class TestLldpNeighbors:
         first = EosNeighbors(transport, device_id).get_lldp_neighbors()[0]
         assert first.device_id == device_id
         assert first.source_vendor == "eos"
+
+
+class TestConfigBackup:
+    def test_fetch_running_config_returns_verbatim_text(
+        self, transport: FakeTransport, device_id: UUID
+    ) -> None:
+        full_transport = FakeTransport(
+            {
+                SHOW_VERSION: _fixture("show_version.txt"),
+                SHOW_INTERFACES: _fixture("show_interfaces.txt"),
+                SHOW_IP_ROUTE: _fixture("show_ip_route.txt"),
+                SHOW_LLDP_NEIGHBORS_DETAIL: _fixture("show_lldp_neighbors_detail.txt"),
+                SHOW_RUNNING_CONFIG: _fixture("show_running_config.txt"),
+            }
+        )
+        capability = EosConfigBackup(full_transport, device_id)
+        config = capability.fetch_running_config()
+        assert config == _fixture("show_running_config.txt")
+        assert "hostname leaf01" in config
+        assert capability.raw_outputs[0].command == SHOW_RUNNING_CONFIG
+        assert capability.raw_outputs[0].output == config
+
+    def test_fetch_running_config_raises_on_empty_output(self, device_id: UUID) -> None:
+        empty = FakeTransport({"show running-config": "   \n"})
+        with pytest.raises(PluginError, match="empty output"):
+            EosConfigBackup(empty, device_id).fetch_running_config()
+
+    def test_config_backup_resolves_via_plugin(self, device_id: UUID) -> None:
+        plugin = EosPlugin()
+        assert plugin.get_capability(Capability.CONFIG_BACKUP) is EosConfigBackup

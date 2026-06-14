@@ -22,11 +22,13 @@ from datetime import UTC, datetime
 from typing import ClassVar
 from uuid import UUID
 
+from app.core.errors import PluginError
 from app.plugins.base import (
     AclCapability,
     BgpCapability,
     Capability,
     CommandTransport,
+    ConfigBackupCapability,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
     InterfacesCapability,
@@ -59,6 +61,7 @@ __all__ = [
     "SNMP_OID_SYSOBJECTID",
     "EosAcl",
     "EosBgp",
+    "EosConfigBackup",
     "EosDiscoverySnmp",
     "EosDiscoverySsh",
     "EosInterfaces",
@@ -75,6 +78,7 @@ SHOW_VERSION = "show version"
 SHOW_INTERFACES = "show interfaces"
 SHOW_IP_ROUTE = "show ip route"
 SHOW_LLDP_NEIGHBORS_DETAIL = "show lldp neighbors detail"
+SHOW_RUNNING_CONFIG = "show running-config"
 SHOW_IP_BGP_SUMMARY = "show ip bgp summary"
 SHOW_IP_OSPF_NEIGHBOR = "show ip ospf neighbor"
 SHOW_IP_ACCESS_LISTS = "show ip access-lists"
@@ -240,6 +244,26 @@ class EosAcl(_EosCommandCapability, AclCapability):
         return [r.model_copy(update={"source_vendor": VENDOR_ID}) for r in records]
 
 
+class EosConfigBackup(_EosCommandCapability, ConfigBackupCapability):
+    """``CONFIG_BACKUP``: ``show running-config`` returned verbatim.
+
+    EOS ``show running-config`` emits the full running configuration as plain
+    text over SSH (``arista_eos`` netmiko device_type).  The output is
+    returned unchanged — no trimming, no redaction — per ADR-0017 verbatim
+    storage requirement.  Redaction happens only at the LLM boundary
+    (``llm/redaction.py``, ADR-0017 §5).
+    """
+
+    def fetch_running_config(self) -> str:
+        """Return the running configuration exactly as the device emitted it."""
+        output = self._run(SHOW_RUNNING_CONFIG)
+        if not output.strip():
+            raise PluginError(
+                f"eos: {SHOW_RUNNING_CONFIG!r} returned empty output for device {self._device_id}"
+            )
+        return output
+
+
 class EosPlugin(VendorPlugin):
     """Arista EOS (``vendor_id="eos"``) — leaf/spine switching plugin.
 
@@ -260,6 +284,7 @@ class EosPlugin(VendorPlugin):
             Capability.BGP,
             Capability.OSPF,
             Capability.ACL,
+            Capability.CONFIG_BACKUP,
         }
     )
 
@@ -273,4 +298,5 @@ class EosPlugin(VendorPlugin):
             Capability.BGP: EosBgp,
             Capability.OSPF: EosOspf,
             Capability.ACL: EosAcl,
+            Capability.CONFIG_BACKUP: EosConfigBackup,
         }
