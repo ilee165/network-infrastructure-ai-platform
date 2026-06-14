@@ -154,13 +154,13 @@ def test_migration_0006_creates_m4_schema_real_postgres() -> None:
         pytest.skip("PostgreSQL unreachable at NETOPS_DATABASE_URL; skipping integration test")
 
     cfg = _alembic_config()
-    command.downgrade(cfg, "base")
+    command.downgrade(cfg, "0005")
     command.upgrade(cfg, "head")
     try:
         tables = asyncio.run(_table_names(url))
         indexes = asyncio.run(_index_names(url))
     finally:
-        command.downgrade(cfg, "base")
+        command.downgrade(cfg, "0005")
 
     assert set(NEW_TABLES) <= tables
     assert "ix_embeddings_embedding_hnsw" in indexes, "missing HNSW index on real Postgres"
