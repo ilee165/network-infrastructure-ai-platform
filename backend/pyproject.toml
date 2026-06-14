@@ -140,6 +140,7 @@ markers = [
     "lab: requires real network devices; never runs in CI",
     "eval: M3 agent eval suite — deterministic exit-criteria tests (run in CI)",
     "parity: real-provider (Ollama/Anthropic) parity run — manual pre-release gate, skipped in CI",
+    "routing: real-LLM supervisor routing eval; opt-in, skipped in CI (manual gate).",
 ]
 
 # ---------------------------------------------------------------------------
