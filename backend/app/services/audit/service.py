@@ -51,6 +51,10 @@ USER_UPDATED: Final = "user.updated"
 USER_ROLE_CHANGED: Final = "user.role_changed"
 USER_PASSWORD_RESET: Final = "user.password_reset"
 SETTINGS_UPDATED: Final = "settings.updated"
+# M4 config-management audit vocabulary (ADR-0017 §4): approving a snapshot as a
+# device's drift baseline is an explicit, audited action. ``detail`` references
+# the snapshot by id/hash only — never the (secret-bearing) config content.
+CONFIG_BASELINE_APPROVED: Final = "config.baseline_approved"
 
 
 async def record(
