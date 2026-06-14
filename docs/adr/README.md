@@ -21,5 +21,8 @@
 | [0014](0014-packet-analysis-pipeline.md) | Packet Analysis Pipeline | Accepted | D14 |
 | [0015](0015-observability-logging-metrics-tracing.md) | Observability — Structured Logging, Metrics, Tracing, Health Endpoints | Accepted | D15 |
 | [0016](0016-testing-and-ci-cd.md) | Testing and CI/CD | Accepted | D16 |
+| [0017](0017-config-snapshot-storage-and-drift.md) | Configuration Snapshot Storage and Drift Detection | Accepted | M4 |
+| [0018](0018-compliance-policy-rule-format.md) | Compliance Policy Rule Format | Accepted | M4 |
+| [0019](0019-document-generation-and-rag.md) | Document Generation and RAG | Accepted | M4 |
 
 **Conventions:** every binding decision D1–D16 has a current ADR; any deviation requires a superseding ADR (no silent drift — see `PRODUCTION.md` gate G-MNT). New capabilities, normalized models, agents, or vendors beyond the CLAUDE.md lists require an ADR *before* implementation (`REPO-STRUCTURE.md` §6–§7).
