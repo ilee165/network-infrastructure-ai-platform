@@ -8,9 +8,11 @@
  *    outside ``ProtectedRoute`` (``ProtectedRoute`` itself redirects a flagged
  *    user *to* it).
  *  - Everything else sits under ``ProtectedRoute`` (auth + forced-change gate)
- *    and then the ``Layout`` shell. Admin-only surfaces — ``/users`` — are
- *    additionally wrapped in ``RoleRoute("admin")`` as defense-in-depth; the
- *    backend ``require_role`` remains the source of truth.
+ *    and then the ``Layout`` shell. Admin-only surfaces — ``/users`` and the LLM
+ *    section of ``/settings`` (``/settings/llm``) — are additionally wrapped in
+ *    ``RoleRoute("admin")`` as defense-in-depth; the backend ``require_role``
+ *    remains the source of truth. The Appearance section of ``/settings`` stays
+ *    reachable by any authenticated user.
  *
  * The existing M0 pages keep their paths; unknown paths redirect to the
  * dashboard.
@@ -28,7 +30,7 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { DevicesPage } from "./pages/DevicesPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ProfilePage } from "./pages/ProfilePage";
-import { SettingsPage } from "./pages/SettingsPage";
+import { SettingsLlmSection, SettingsPage } from "./pages/SettingsPage";
 import { TopologyPage } from "./pages/TopologyPage";
 import { UsersPage } from "./pages/UsersPage";
 
@@ -50,7 +52,14 @@ export function App() {
           <Route path="changes" element={<ChangesPage />} />
           <Route path="audit" element={<AuditPage />} />
           <Route path="profile" element={<ProfilePage />} />
-          <Route path="settings" element={<SettingsPage />} />
+
+          {/* /settings: Appearance is open to any authed user; the LLM section
+              is admin-only (defense-in-depth over the backend RBAC). */}
+          <Route path="settings" element={<SettingsPage />}>
+            <Route element={<RoleRoute minimum="admin" />}>
+              <Route path="llm" element={<SettingsLlmSection />} />
+            </Route>
+          </Route>
 
           {/* Admin-only surfaces (defense-in-depth over the backend RBAC). */}
           <Route element={<RoleRoute minimum="admin" />}>
