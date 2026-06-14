@@ -292,6 +292,28 @@ class TestBgpPeerDownDiagnosis:
         final = result["messages"][-1]
         assert isinstance(final, AIMessage)
         assert "could not ground" in str(final.content).lower()
+
+    async def test_unclassifiable_symptom_degrades_without_crashing(self) -> None:
+        """A weak model whose structured output fails to parse (-> None) must not crash.
+
+        Regression for the AttributeError ('NoneType' has no attribute 'domain')
+        seen when a small local model returns no SymptomClassification tool call,
+        so with_structured_output(...).ainvoke(...) yields None. The agent must
+        degrade to an honest 'could not classify' answer and complete the trace.
+        """
+        recorder = InMemoryTraceRecorder()
+        agent = _make_agent(trace_recorder=recorder)
+        # Plain text, no SymptomClassification tool call -> structured output None.
+        llm = scripted_model([AIMessage(content="I am not sure how to classify this.")])
+        result = await agent.build_graph(llm).ainvoke(
+            {"messages": [HumanMessage(content="something seems off on the network")]}
+        )
+        final = result["messages"][-1]
+        assert isinstance(final, AIMessage)
+        assert "classify" in str(final.content).lower()
+        traces = recorder.list_traces()
+        assert len(traces) == 1
+        assert traces[0].is_complete
         # No fabricated evidence.
         all_evidence = [ref for step in recorder.list_traces()[0].steps for ref in step.evidence]
         assert not all_evidence

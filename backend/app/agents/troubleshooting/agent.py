@@ -116,8 +116,9 @@ _TOOL_RECORD_KEY: dict[str, tuple[str, str]] = {
 class TroubleshootingState(MessagesState):
     """Graph state: the conversation plus the symptom/evidence/trace channels."""
 
-    #: The symptom classification produced by the ``symptom`` node.
-    classification: SymptomClassification
+    #: The symptom classification produced by the ``symptom`` node; ``None`` when
+    #: the model failed to produce a parseable classification.
+    classification: SymptomClassification | None
     #: Evidence refs gathered by the ``hypothesis`` node.
     evidence: list[EvidenceRef]
     #: This run's reasoning trace.
@@ -260,10 +261,23 @@ class TroubleshootingAgent(BaseSpecialistAgent):
         async def symptom(state: TroubleshootingState) -> dict[str, Any]:
             """Classify the reported symptom and open the reasoning trace."""
             trace = await recorder.start(self.name)
-            classification = cast(
-                SymptomClassification,
-                await classifier.ainvoke([system_message, *state["messages"]]),
-            )
+            raw = await classifier.ainvoke([system_message, *state["messages"]])
+            # A weak model can fail to emit a parseable SymptomClassification, in
+            # which case structured output yields None. Degrade to an honest
+            # "could not classify" outcome instead of dereferencing None.
+            classification = raw if isinstance(raw, SymptomClassification) else None
+            if classification is None:
+                await recorder.record_step(
+                    trace.trace_id,
+                    TraceStep(
+                        kind=TraceStepKind.PLAN,
+                        summary=(
+                            "could not classify the reported symptom into a known "
+                            "analysis domain (bgp, ospf, acl, or routing)"
+                        ),
+                    ),
+                )
+                return {"classification": None, "trace": trace, "evidence": []}
             await recorder.record_step(
                 trace.trace_id,
                 TraceStep(
@@ -286,6 +300,15 @@ class TroubleshootingAgent(BaseSpecialistAgent):
             classification = state["classification"]
             trace = state["trace"]
             assert trace is not None  # noqa: S101 - symptom always sets the trace
+            if classification is None:
+                await recorder.record_step(
+                    trace.trace_id,
+                    TraceStep(
+                        kind=TraceStepKind.OBSERVATION,
+                        summary="could not gather evidence: the symptom was not classified",
+                    ),
+                )
+                return {"evidence": []}
             tool_name = _DOMAIN_TOOL[classification.domain]
             tool = _resolve_tool(tool_name)
             evidence: list[EvidenceRef] = []
@@ -444,13 +467,21 @@ def _record_id(record: dict[str, Any]) -> str:
     return "0"
 
 
-def _compose_answer(classification: SymptomClassification, evidence: list[EvidenceRef]) -> str:
+def _compose_answer(
+    classification: SymptomClassification | None, evidence: list[EvidenceRef]
+) -> str:
     """Compose a grounded answer that cites the gathered evidence.
 
     The answer is built *from* the evidence refs — it never asserts a cause the
-    evidence does not show. When no evidence was gathered, it says so and names
-    the gap, rather than guessing.
+    evidence does not show. When the symptom could not be classified, or when no
+    evidence was gathered, it says so and names the gap, rather than guessing.
     """
+    if classification is None:
+        return (
+            "I could not classify the reported symptom into a known analysis domain "
+            "(bgp, ospf, acl, or routing). Please rephrase the problem and name the "
+            "device and the specific peer, prefix, or ACL involved."
+        )
     domain = classification.domain.value
     if not evidence:
         return f"I could not ground a {domain} diagnosis: no matching state was collected" + (
