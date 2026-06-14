@@ -34,11 +34,14 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 from typing import Annotated, Any
 
 from pydantic import Field
 
 from app.agents.framework.tools import ToolClassification, netops_tool
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Internal rendering helpers (pure functions, no I/O)
@@ -452,14 +455,37 @@ def _render_mermaid(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) ->
         lines.append(f'    {node_id}["{display}"]')
 
     # Edges reference endpoints by the node *key* (topology_read emits
-    # source/target as the endpoint key values). Resolve against any node that
-    # carries that key, regardless of label.
-    id_by_key: dict[Any, str] = {
-        node.get("key"): id_by_identity[(node.get("label"), node.get("key"))] for node in nodes
-    }
+    # source/target as the endpoint key values). Build a key -> mermaid_id map,
+    # but flag keys that appear under more than one label (cross-label collision)
+    # — those are ambiguous and any edge targeting them is skipped with a warning
+    # so we never silently mis-route an edge to the wrong node.
+    id_by_key: dict[Any, str] = {}
+    ambiguous_keys: set[Any] = set()
+    for node in nodes:
+        k = node.get("key")
+        mermaid_id = id_by_identity[(node.get("label"), k)]
+        if k in id_by_key and id_by_key[k] != mermaid_id:
+            # Two distinct nodes share the same key value — mark ambiguous.
+            ambiguous_keys.add(k)
+            _log.warning(
+                "_render_mermaid: key %r is shared by multiple node labels; "
+                "edges referencing this key will be omitted to avoid mis-routing.",
+                k,
+            )
+        else:
+            id_by_key[k] = mermaid_id
     for edge in edges:
-        source_id = id_by_key.get(edge.get("source"))
-        target_id = id_by_key.get(edge.get("target"))
+        src_key = edge.get("source")
+        dst_key = edge.get("target")
+        if src_key in ambiguous_keys or dst_key in ambiguous_keys:
+            _log.warning(
+                "_render_mermaid: skipping edge %r->%r — endpoint key is ambiguous.",
+                src_key,
+                dst_key,
+            )
+            continue
+        source_id = id_by_key.get(src_key)
+        target_id = id_by_key.get(dst_key)
         if source_id is None or target_id is None:
             continue
         rel_type = _escape_mermaid_label(str(edge.get("type", "")))

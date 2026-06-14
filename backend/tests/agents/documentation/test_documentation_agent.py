@@ -776,19 +776,27 @@ class TestDiagramMatchesProjection:
     """The T11 exit criterion: Mermaid node/edge set == projection node/edge set."""
 
     @staticmethod
-    def _parse_mermaid(content: str) -> tuple[set[str], set[tuple[str, str]]]:
-        """Extract (node-id set, directed edge-id-pair set) from Mermaid source.
+    def _parse_mermaid(
+        content: str,
+    ) -> tuple[set[str], set[str], set[tuple[str, str]]]:
+        """Extract (declared_nodes, edge_endpoint_nodes, directed edge-id-pair set).
 
-        Node declarations look like ``  n0["label"]`` and edges like
-        ``  n0 --> n1`` (optionally ``-->|"prop"|``). We collect every node id
-        that appears in a declaration, and every ordered (src, dst) pair from a
-        link line.
+        ``declared_nodes`` contains only IDs that appear in explicit node
+        declaration lines (``  n0["label"]`` or ``  n0(label)``).
+        ``edge_endpoint_nodes`` contains IDs seen as edge endpoints but NOT in a
+        declaration line.  Keeping the two sets separate lets callers assert on
+        *declarations* specifically, which is the T11 exit criterion: every
+        projected node must be declared in the diagram, not merely referenced as
+        an edge endpoint.
+
+        Edges look like ``  n0 -->|"type"| n1`` (label optional).
         """
         import re
 
         node_decl = re.compile(r"^\s*([A-Za-z0-9_]+)(?:\[|\()")
         edge_decl = re.compile(r"^\s*([A-Za-z0-9_]+)\s*-->\s*(?:\|[^|]*\|\s*)?([A-Za-z0-9_]+)")
-        nodes: set[str] = set()
+        declared_nodes: set[str] = set()
+        edge_endpoint_nodes: set[str] = set()
         edges: set[tuple[str, str]] = set()
         for line in content.splitlines():
             stripped = line.strip()
@@ -798,24 +806,27 @@ class TestDiagramMatchesProjection:
             if edge_match:
                 src, dst = edge_match.group(1), edge_match.group(2)
                 edges.add((src, dst))
-                nodes.add(src)
-                nodes.add(dst)
+                edge_endpoint_nodes.add(src)
+                edge_endpoint_nodes.add(dst)
                 continue
             node_match = node_decl.match(line)
             if node_match:
-                nodes.add(node_match.group(1))
-        return nodes, edges
+                declared_nodes.add(node_match.group(1))
+        return declared_nodes, edge_endpoint_nodes, edges
 
     async def test_node_count_matches_projection(self) -> None:
         raw = await generate_diagram.ainvoke({"projection": _PROJECTION})
         content = json.loads(raw)["content"]
-        nodes, _ = self._parse_mermaid(content)
-        assert len(nodes) == len(_PROJECTION["nodes"])  # type: ignore[arg-type]
+        # Only count IDs that appear as explicit node declaration lines —
+        # edge-endpoint-only IDs are excluded so a bug that suppresses
+        # declarations is not masked by the edge scan.
+        declared_nodes, _, _ = self._parse_mermaid(content)
+        assert len(declared_nodes) == len(_PROJECTION["nodes"])  # type: ignore[arg-type]
 
     async def test_edge_count_matches_projection(self) -> None:
         raw = await generate_diagram.ainvoke({"projection": _PROJECTION})
         content = json.loads(raw)["content"]
-        _, edges = self._parse_mermaid(content)
+        _, _, edges = self._parse_mermaid(content)
         assert len(edges) == len(_PROJECTION["edges"])  # type: ignore[arg-type]
 
     async def test_every_projection_node_label_appears(self) -> None:
@@ -836,11 +847,11 @@ class TestDiagramMatchesProjection:
         """
         raw = await generate_diagram.ainvoke({"projection": _PROJECTION})
         content = json.loads(raw)["content"]
-        mermaid_nodes, mermaid_edges = self._parse_mermaid(content)
+        declared_nodes, _, mermaid_edges = self._parse_mermaid(content)
         # Same number of distinct directed edges, and the graph is connected as
         # projected: 2 edges over 3 nodes.
         assert len(mermaid_edges) == 2
-        assert len(mermaid_nodes) == 3
+        assert len(declared_nodes) == 3
 
     async def test_empty_projection_yields_valid_empty_graph(self) -> None:
         raw = await generate_diagram.ainvoke(
@@ -852,8 +863,8 @@ class TestDiagramMatchesProjection:
         content = payload["content"]
         first = content.strip().splitlines()[0].strip()
         assert first.startswith("graph") or first.startswith("flowchart")
-        nodes, edges = self._parse_mermaid(content)
-        assert nodes == set()
+        declared_nodes, _, edges = self._parse_mermaid(content)
+        assert declared_nodes == set()
         assert edges == set()
 
     async def test_deterministic_output(self) -> None:
@@ -877,8 +888,56 @@ class TestDiagramMatchesProjection:
         }
         raw = await generate_diagram.ainvoke({"projection": projection})
         payload = json.loads(raw)
-        nodes, _ = TestDiagramMatchesProjection._parse_mermaid(payload["content"])
-        assert len(nodes) == 1
+        declared_nodes, _, _ = TestDiagramMatchesProjection._parse_mermaid(payload["content"])
+        assert len(declared_nodes) == 1
+
+    async def test_cross_label_key_collision_skips_ambiguous_edges(self) -> None:
+        """Two nodes sharing the same key but with different labels must both be
+        declared in the diagram.  Any edge referencing the ambiguous key must be
+        silently dropped (with a warning) rather than mis-routed to the wrong node.
+
+        This guards the fix for the id_by_key dict-comprehension overwrite bug:
+        the old code silently overwrote the first (label, key) mapping with the
+        second, so edges aimed at the dropped node were rendered with the wrong
+        Mermaid id.
+        """
+        shared_key = "default"
+        projection = {
+            "nodes": [
+                {
+                    "label": "VRF",
+                    "key": shared_key,
+                    "properties": {},
+                },
+                {
+                    "label": "Site",
+                    "key": shared_key,
+                    "properties": {},
+                },
+                {
+                    "label": "Device",
+                    "key": DEVICE_A,
+                    "properties": {"pg_id": DEVICE_A, "hostname": "edge-1"},
+                },
+            ],
+            # Edge targets the ambiguous key — must be dropped, not mis-routed.
+            "edges": [
+                {
+                    "type": "IN_SITE",
+                    "source": DEVICE_A,
+                    "target": shared_key,
+                    "properties": {},
+                },
+            ],
+            "projected_at": None,
+        }
+        raw = await generate_diagram.ainvoke({"projection": projection})
+        content = json.loads(raw)["content"]
+        declared_nodes, _, edges = self._parse_mermaid(content)
+        # All three nodes must be declared (no node may be silently dropped).
+        assert len(declared_nodes) == 3
+        # The ambiguous edge must be omitted rather than mis-routed.
+        assert len(edges) == 0
 
 
 # ---------------------------------------------------------------------------
