@@ -146,7 +146,7 @@ async def test_no_baseline_raises(session: AsyncSession) -> None:
     await session.commit()
 
     with pytest.raises(NoBaselineError):
-        await detect_drift(session, device_id=device_id)
+        await detect_drift(session, device_id=device_id, actor="engineer-1")
 
 
 async def test_clean_device_has_no_drift(session: AsyncSession) -> None:
@@ -155,7 +155,7 @@ async def test_clean_device_has_no_drift(session: AsyncSession) -> None:
     await approve_baseline(session, snapshot=snap, actor="engineer-1")
     await session.commit()
 
-    result = await detect_drift(session, device_id=device_id)
+    result = await detect_drift(session, device_id=device_id, actor="engineer-1")
 
     assert result.has_drift is False
     assert result.diff == ""
@@ -175,7 +175,7 @@ async def test_out_of_band_change_flags_exactly_that_hunk(session: AsyncSession)
     current = await _capture(session, device_id=device_id, config=changed)
     await session.commit()
 
-    result = await detect_drift(session, device_id=device_id)
+    result = await detect_drift(session, device_id=device_id, actor="engineer-1")
 
     assert result.has_drift is True
     assert result.baseline_hash == baseline.content_hash
@@ -203,11 +203,74 @@ async def test_diff_runs_over_raw_unredacted_text(session: AsyncSession) -> None
     await _capture(session, device_id=device_id, config=changed)
     await session.commit()
 
-    result = await detect_drift(session, device_id=device_id)
+    result = await detect_drift(session, device_id=device_id, actor="engineer-1")
 
     assert result.has_drift is True
     assert "-snmp-server community public RO" in result.diff
     assert "+snmp-server community s3cr3t RW" in result.diff
+
+
+async def test_detect_drift_records_audit_entry(session: AsyncSession) -> None:
+    """detect_drift must write a CONFIG_SNAPSHOT_DRIFT_CHECKED audit row (ADR-0017 §2)."""
+    from app.services.audit.service import CONFIG_SNAPSHOT_DRIFT_CHECKED
+
+    device_id = uuid.uuid4()
+    snap = await _capture(session, device_id=device_id, config=RUNNING_CONFIG)
+    await approve_baseline(session, snapshot=snap, actor="engineer-1")
+    await session.commit()
+
+    result = await detect_drift(session, device_id=device_id, actor="engineer-2")
+    await session.commit()
+
+    assert await _audit_count(session, CONFIG_SNAPSHOT_DRIFT_CHECKED) == 1
+    entry = (
+        await session.execute(
+            select(AuditLog).where(AuditLog.action == CONFIG_SNAPSHOT_DRIFT_CHECKED)
+        )
+    ).scalar_one()
+    assert entry.actor == "engineer-2"
+    assert entry.target_type == "config_snapshot"
+    assert entry.target_id == str(snap.id)
+    detail = entry.detail
+    assert detail is not None
+    assert detail["device_id"] == str(device_id)
+    assert detail["baseline_hash"] == result.baseline_hash
+    assert detail["current_hash"] == result.current_hash
+    assert detail["has_drift"] is False
+    assert detail["hunk_count"] == 0
+    # config content must never enter the audit detail
+    assert "snmp-server" not in str(detail)
+
+
+async def test_detect_drift_audit_detail_never_carries_config_content(
+    session: AsyncSession,
+) -> None:
+    """Audit detail for drift check must not include raw config text (ADR-0017 §2)."""
+    from app.services.audit.service import CONFIG_SNAPSHOT_DRIFT_CHECKED
+
+    device_id = uuid.uuid4()
+    baseline_snap = await _capture(session, device_id=device_id, config=RUNNING_CONFIG)
+    await approve_baseline(session, snapshot=baseline_snap, actor="engineer-1")
+    await session.commit()
+
+    changed = RUNNING_CONFIG.replace(
+        "snmp-server community public RO", "snmp-server community s3cr3t RW"
+    )
+    await _capture(session, device_id=device_id, config=changed)
+    await session.commit()
+
+    await detect_drift(session, device_id=device_id, actor="engineer-2")
+    await session.commit()
+
+    entry = (
+        await session.execute(
+            select(AuditLog).where(AuditLog.action == CONFIG_SNAPSHOT_DRIFT_CHECKED)
+        )
+    ).scalar_one()
+    serialized = str(entry.detail)
+    assert "s3cr3t" not in serialized
+    assert "public RO" not in serialized
+    assert entry.detail is not None and entry.detail["has_drift"] is True
 
 
 async def test_current_is_latest_non_baseline_snapshot(session: AsyncSession) -> None:
@@ -222,7 +285,7 @@ async def test_current_is_latest_non_baseline_snapshot(session: AsyncSession) ->
     latest = await _capture(session, device_id=device_id, config=second_change)
     await session.commit()
 
-    result = await detect_drift(session, device_id=device_id)
+    result = await detect_drift(session, device_id=device_id, actor="engineer-1")
 
     assert result.current_hash == latest.content_hash
     assert "+ description two" in result.diff

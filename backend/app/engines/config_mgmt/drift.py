@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ConfigSnapshot
 from app.services.audit import service as audit
+from app.services.audit.service import CONFIG_SNAPSHOT_DRIFT_CHECKED
 
 __all__ = [
     "DriftResult",
@@ -183,7 +184,12 @@ def _split_hunks(unified_diff: str) -> list[str]:
     return hunks
 
 
-async def detect_drift(session: AsyncSession, *, device_id: UUID) -> DriftResult:
+async def detect_drift(
+    session: AsyncSession,
+    *,
+    device_id: UUID,
+    actor: str,
+) -> DriftResult:
     """Diff a device's latest snapshot against its approved baseline.
 
     Computes a unified ``difflib`` diff of the baseline ``content`` against the
@@ -191,6 +197,15 @@ async def detect_drift(session: AsyncSession, *, device_id: UUID) -> DriftResult
     secrecy at the storage boundary). A non-empty diff is drift; the changed
     hunks are returned for recording/explanation.
 
+    Because this operation reads the raw, secret-bearing ``content`` fields of
+    both snapshots, ADR-0017 §2 classifies it as a read/decrypt-equivalent
+    access.  An ``config.snapshot_drift_checked`` :class:`~app.models.audit.AuditLog`
+    row is therefore appended after the diff is computed.  The audit ``detail``
+    references snapshots by id/hash only — config content never enters the
+    detail payload.
+
+    :param actor: Identity of the requesting user; forwarded to the audit row
+        (mirrors :func:`approve_baseline`'s signature).
     :raises NoBaselineError: if the device has no approved baseline to diff
         against — distinct from "no drift".
     """
@@ -214,6 +229,21 @@ async def detect_drift(session: AsyncSession, *, device_id: UUID) -> DriftResult
     diff = "\n".join(diff_lines)
     hunks = _split_hunks(diff)
     has_drift = bool(hunks)
+
+    await audit.record(
+        session,
+        actor=actor,
+        action=CONFIG_SNAPSHOT_DRIFT_CHECKED,
+        target_type="config_snapshot",
+        target_id=str(baseline.id),
+        detail={
+            "device_id": str(device_id),
+            "baseline_hash": baseline.content_hash,
+            "current_hash": current.content_hash,
+            "has_drift": has_drift,
+            "hunk_count": len(hunks),
+        },
+    )
 
     logger.info(
         "config.drift_checked",

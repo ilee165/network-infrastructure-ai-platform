@@ -54,7 +54,11 @@ SETTINGS_UPDATED: Final = "settings.updated"
 # M4 config-management audit vocabulary (ADR-0017 §4): approving a snapshot as a
 # device's drift baseline is an explicit, audited action. ``detail`` references
 # the snapshot by id/hash only — never the (secret-bearing) config content.
+# Reading raw (unredacted) snapshot content for a drift check is a
+# read/decrypt-equivalent access and must also appear in the persistent audit
+# trail (ADR-0017 §2).
 CONFIG_BASELINE_APPROVED: Final = "config.baseline_approved"
+CONFIG_SNAPSHOT_DRIFT_CHECKED: Final = "config.snapshot_drift_checked"
 
 
 async def record(
