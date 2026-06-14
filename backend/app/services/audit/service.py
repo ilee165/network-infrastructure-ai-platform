@@ -39,6 +39,18 @@ AUTH_REFRESH: Final = "auth.refresh"
 AGENT_SESSION_STARTED: Final = "agent.session_started"
 AGENT_SESSION_COMPLETED: Final = "agent.session_completed"
 AGENT_TRACE_RECORDED: Final = "agent.trace_recorded"
+# Auth & Account UI audit vocabulary (B1): authentication lifecycle, server-side
+# session revocation, admin user management, and settings changes. As with every
+# other constant here, ``detail`` must never carry a password hash or secret.
+AUTH_LOGOUT: Final = "auth.logout"
+AUTH_LOGIN_FAILED: Final = "auth.login_failed"
+AUTH_PASSWORD_CHANGED: Final = "auth.password_changed"
+AUTH_SESSION_REVOKED: Final = "auth.session_revoked"
+USER_CREATED: Final = "user.created"
+USER_UPDATED: Final = "user.updated"
+USER_ROLE_CHANGED: Final = "user.role_changed"
+USER_PASSWORD_RESET: Final = "user.password_reset"
+SETTINGS_UPDATED: Final = "settings.updated"
 
 
 async def record(

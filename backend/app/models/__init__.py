@@ -14,7 +14,7 @@ from app.models.agents import (
 )
 from app.models.audit import AuditLog
 from app.models.base import Base
-from app.models.identity import Role, User
+from app.models.identity import RefreshSession, Role, SystemSetting, User
 from app.models.inventory import (
     CredentialKind,
     Device,
@@ -47,7 +47,9 @@ __all__ = [
     "RawArtifact",
     "ReasoningTraceRow",
     "ReasoningTraceStep",
+    "RefreshSession",
     "Role",
+    "SystemSetting",
     "TimestampMixin",
     "TopologySnapshot",
     "TraceStepKind",
