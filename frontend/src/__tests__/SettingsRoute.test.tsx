@@ -12,14 +12,25 @@
  * isolated-subtree style of ProtectedRoute / RoleRoute tests.
  */
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RoleRoute } from "../components/RoleRoute";
 import { SettingsLlmSection } from "../pages/SettingsPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import type { UserMe } from "../stores/auth";
 import { useAuthStore } from "../stores/auth";
+
+// SettingsLlmSection now fetches GET /auth/settings; mock so no real network calls.
+vi.mock("../api/auth", () => ({
+  getSettings: vi.fn().mockResolvedValue({
+    llm_profile: "local",
+    llm_role_reasoning: null,
+    llm_role_fast: null,
+  }),
+  updateSettings: vi.fn(),
+}));
 
 function userWithRole(role: string): UserMe {
   return {
@@ -40,19 +51,28 @@ function resetStore(): void {
 beforeEach(resetStore);
 afterEach(resetStore);
 
+function makeQueryClient() {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+}
+
 /** Mount the /settings subtree exactly as App wires it. */
 function renderSettings(path: string, role: string) {
   useAuthStore.setState({ status: "authed", accessToken: "tok", user: userWithRole(role) });
+  const qc = makeQueryClient();
   return render(
-    <MemoryRouter initialEntries={[path]}>
-      <Routes>
-        <Route path="/settings" element={<SettingsPage />}>
-          <Route element={<RoleRoute minimum="admin" />}>
-            <Route path="llm" element={<SettingsLlmSection />} />
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route path="/settings" element={<SettingsPage />}>
+            <Route element={<RoleRoute minimum="admin" />}>
+              <Route path="llm" element={<SettingsLlmSection />} />
+            </Route>
           </Route>
-        </Route>
-      </Routes>
-    </MemoryRouter>,
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
