@@ -20,6 +20,15 @@ from sqlalchemy.ext.asyncio import (
 
 from app.models import Base
 
+# The agent-session lifecycle tests (test_agent_session_service.py) live in this
+# services subtree but exercise the agent framework, so they reuse its test
+# doubles. Re-export the two fixtures from tests/agents/conftest.py (out of this
+# subtree's fixture scope) so pytest can resolve them here.
+from tests.agents.conftest import (  # noqa: F401  (re-exported as pytest fixtures)
+    audit_sink,
+    specialist_factory,
+)
+
 
 @pytest.fixture()
 async def engine() -> AsyncIterator[AsyncEngine]:

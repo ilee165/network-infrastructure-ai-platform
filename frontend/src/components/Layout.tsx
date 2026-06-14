@@ -3,7 +3,10 @@
  * environment / LLM-profile badges. Pages render through the router outlet.
  */
 
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { logout } from "../api/auth";
+import { useAuthStore } from "../stores/auth";
+import { hasMinimumRole } from "../stores/roles";
 import { useUiStore } from "../stores/ui";
 
 interface NavItem {
@@ -12,6 +15,8 @@ interface NavItem {
   /** Two-letter glyph shown when the sidebar is collapsed. */
   abbr: string;
   end?: boolean;
+  /** Shown only to admins (defense-in-depth; the backend RBAC is canonical). */
+  adminOnly?: boolean;
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -21,6 +26,9 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/chat", label: "Chat", abbr: "CH" },
   { to: "/changes", label: "Changes", abbr: "CR" },
   { to: "/audit", label: "Audit", abbr: "AU" },
+  { to: "/users", label: "Users", abbr: "US", adminOnly: true },
+  { to: "/profile", label: "Profile", abbr: "PR" },
+  { to: "/settings", label: "Settings", abbr: "ST" },
 ];
 
 /** Map Vite's build mode onto the short env label used by the badge. */
@@ -41,6 +49,31 @@ export function Layout() {
   const theme = useUiStore((state) => state.theme);
   const llmProfile = import.meta.env.VITE_LLM_PROFILE ?? "local";
 
+  const user = useAuthStore((state) => state.user);
+  const setAnon = useAuthStore((state) => state.setAnon);
+  const navigate = useNavigate();
+
+  const isAdmin = hasMinimumRole(user?.role, "admin");
+  const navItems = NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin);
+  // Prefer the human-friendly name, fall back to the login username.
+  const displayName = user?.display_name ?? user?.username ?? "";
+
+  /**
+   * Log out: revoke the server-side session + clear the refresh cookie, drop
+   * the in-memory auth state, then route to /login. The server call is
+   * best-effort — even if it fails we still clear local state and redirect so a
+   * user is never stranded "logged in" in the SPA.
+   */
+  async function handleLogout(): Promise<void> {
+    try {
+      await logout();
+    } catch {
+      // Ignore — local sign-out + redirect proceed regardless.
+    }
+    setAnon();
+    navigate("/login", { replace: true });
+  }
+
   return (
     <div
       data-theme={theme}
@@ -60,7 +93,7 @@ export function Layout() {
           )}
         </div>
         <nav aria-label="Primary" className="flex flex-col gap-1 p-2">
-          {NAV_ITEMS.map((item) => (
+          {navItems.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
@@ -108,6 +141,26 @@ export function Layout() {
             <span className="badge" data-testid="llm-profile-badge">
               llm: {llmProfile}
             </span>
+            {user && (
+              <div
+                data-testid="user-menu"
+                className="flex items-center gap-3 border-l border-carbon-700 pl-3"
+              >
+                <span className="flex flex-col items-end leading-tight">
+                  <span className="truncate text-xs font-medium text-zinc-200">{displayName}</span>
+                  <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+                    {user.role}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="rounded border border-carbon-700 px-2 py-1 text-xs text-zinc-400 transition-colors hover:border-carbon-600 hover:text-zinc-100"
+                >
+                  Log out
+                </button>
+              </div>
+            )}
           </div>
         </header>
         <main className="min-h-0 flex-1 overflow-y-auto p-6">

@@ -58,6 +58,19 @@ class NetOpsError(Exception):
         return problem
 
 
+class BadRequestError(NetOpsError):
+    """The request is well-formed but semantically invalid (e.g. wrong secret).
+
+    Used where the failure must not leak which input was wrong — the generic
+    400 detail carries no oracle (e.g. a wrong current password on a self-service
+    change).
+    """
+
+    status_code = 400
+    title = "Bad Request"
+    slug = "bad-request"
+
+
 class NotFoundError(NetOpsError):
     """A requested resource does not exist."""
 
@@ -96,6 +109,60 @@ class PluginError(NetOpsError):
     status_code = 502
     title = "Vendor Plugin Failure"
     slug = "plugin-failure"
+
+
+class LLMUpstreamError(NetOpsError):
+    """An upstream LLM provider rejected the request or was unavailable.
+
+    Raised when a model call fails at the provider/transport layer (e.g. an
+    out-of-credits / rate-limit rejection, an authentication failure, a refused
+    Ollama connection, or an unparseable structured response). It is a *gateway*
+    failure, not a bug in our code, so it surfaces as a 502 with a generic,
+    non-leaking detail rather than an opaque 500.
+    """
+
+    status_code = 502
+    title = "AI Provider Failure"
+    slug = "llm-upstream"
+
+
+#: Top-level modules of the LLM provider/transport SDKs whose exceptions mean an
+#: upstream failure (not a platform bug). Matched on the exception's root module
+#: so the error layer never has to import the provider SDKs.
+_LLM_PROVIDER_MODULES: frozenset[str] = frozenset(
+    {
+        "anthropic",
+        "openai",
+        "ollama",
+        "httpx",
+        "langchain_anthropic",
+        "langchain_openai",
+        "langchain_ollama",
+        "langchain_google_genai",
+    }
+)
+
+
+def translate_llm_error(exc: Exception) -> NetOpsError | None:
+    """Map a provider/transport exception to :class:`LLMUpstreamError`, else ``None``.
+
+    Returns ``None`` for exceptions that are already a :class:`NetOpsError`
+    (they keep their own status — e.g. an RBAC :class:`ForbiddenError`) and for
+    genuine code bugs (e.g. an ``AttributeError``), so real defects still surface
+    as a 500 instead of being masked as a provider failure. The provider's own
+    message is deliberately discarded — the detail is generic so nothing the
+    provider echoes back can leak to clients.
+    """
+    if isinstance(exc, NetOpsError):
+        return None
+    root_module = type(exc).__module__.split(".", 1)[0]
+    name = type(exc).__name__
+    if root_module in _LLM_PROVIDER_MODULES or "OutputParser" in name:
+        return LLMUpstreamError(
+            "The AI model provider could not process the request; it may be "
+            "unavailable, rate-limited, or misconfigured."
+        )
+    return None
 
 
 def _problem_response(error: NetOpsError, request: Request) -> JSONResponse:

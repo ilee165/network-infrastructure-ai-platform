@@ -124,8 +124,13 @@ async def test_login_failures_return_401_problem_without_cookie(
     assert resp.headers.get("set-cookie") is None
     assert "access_token" not in resp.text
 
+    # B2: a failed attempt writes exactly one generic ``auth.login_failed`` row
+    # (no ``auth.login``) and creates no refresh session — the only audited
+    # action on the failure path, revealing nothing about which mode failed.
     rows = (await session.execute(select(AuditLog))).scalars().all()
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0].action == "auth.login_failed"
+    assert rows[0].actor == f"user:{username}"
 
 
 # ---------------------------------------------------------------------------

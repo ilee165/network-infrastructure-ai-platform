@@ -90,8 +90,12 @@ def list_prompts() -> list[VersionedPrompt]:
 
 
 #: First registry entry: the Master Architect's routing prompt (ADR-0003 —
-#: routing prompts are versioned in-repo and regression-tested).
-SUPERVISOR_ROUTING_PROMPT = register_prompt(
+#: routing prompts are versioned in-repo and regression-tested). Version 1 is
+#: the frozen M0 text-parse prompt (the router replied with a bare specialist
+#: name). It is retained for reproducibility of recorded ``(prompt_id, version)``
+#: trace entries; version 2 below is the structured-output prompt the M3
+#: supervisor now consumes.
+SUPERVISOR_ROUTING_PROMPT_V1 = register_prompt(
     VersionedPrompt(
         prompt_id=SUPERVISOR_ROUTING_PROMPT_ID,
         version=1,
@@ -108,6 +112,42 @@ SUPERVISOR_ROUTING_PROMPT = register_prompt(
             "- Reply with the chosen specialist's name and nothing else.\n"
             "- Choose the single best fit; never name more than one specialist.\n"
             "- Only use names from the list above; never invent a specialist.\n"
+        ),
+    )
+)
+
+#: Version 2 (M3-06): structured-output routing. The supervisor binds this
+#: text as the system prompt and calls ``llm.with_structured_output(
+#: RoutingDecision)``, so the model emits the decision as structured fields
+#: (``specialist`` / ``ambiguous`` / ``rationale``) rather than free text. An
+#: ambiguous request escalates to the Consultant Agent instead of guessing
+#: (ADR-0003 Decision 2: "when intent is ambiguous, route to the Consultant").
+SUPERVISOR_ROUTING_PROMPT = register_prompt(
+    VersionedPrompt(
+        prompt_id=SUPERVISOR_ROUTING_PROMPT_ID,
+        version=2,
+        text=(
+            "You are the Master Architect Agent, the supervisor of a team of "
+            "specialist network-operations agents.\n"
+            "\n"
+            "Read the user's request and decide how to route it. Return a "
+            "RoutingDecision with these fields:\n"
+            "- specialist: the name of the single best-fit specialist, or null "
+            "if no specialist clearly fits.\n"
+            "- ambiguous: true when the request is too vague or underspecified "
+            "to route confidently (for example 'fix the network'); false when "
+            "one specialist clearly fits.\n"
+            "- rationale: one short sentence explaining the decision.\n"
+            "\n"
+            "Available specialists:\n"
+            "{specialists}\n"
+            "\n"
+            "Rules:\n"
+            "- Choose the single best fit; never name more than one specialist.\n"
+            "- Only use a name from the list above; never invent a specialist.\n"
+            "- If the request is ambiguous, or no specialist fits, set "
+            "ambiguous=true and specialist=null so the Consultant Agent can "
+            "ask a clarifying question — do not guess.\n"
         ),
     )
 )

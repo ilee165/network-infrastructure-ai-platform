@@ -38,6 +38,9 @@ _FIXTURE_FILES = {
     "show cdp neighbors detail": "show_cdp_neighbors_detail.txt",
     "show lldp neighbors detail": "show_lldp_neighbors_detail.txt",
     "show running-config": "show_running_config.txt",
+    "show ip bgp summary": "show_ip_bgp_summary.txt",
+    "show ip ospf neighbor": "show_ip_ospf_neighbor.txt",
+    "show ip access-lists": "show_ip_access_lists.txt",
 }
 
 #: Recorded system-MIB values for SNMP discovery (same lab switch).

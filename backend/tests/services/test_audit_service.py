@@ -119,3 +119,31 @@ def test_m1_action_name_constants() -> None:
     assert audit_service.DISCOVERY_RUN_FINISHED == "discovery.run_finished"
     assert audit_service.AUTH_LOGIN == "auth.login"
     assert audit_service.AUTH_REFRESH == "auth.refresh"
+
+
+def test_auth_account_action_name_constants() -> None:
+    """The Auth & Account UI action vocabulary (B1) is fixed and importable."""
+    assert audit_service.AUTH_LOGOUT == "auth.logout"
+    assert audit_service.AUTH_LOGIN_FAILED == "auth.login_failed"
+    assert audit_service.AUTH_PASSWORD_CHANGED == "auth.password_changed"
+    assert audit_service.AUTH_SESSION_REVOKED == "auth.session_revoked"
+    assert audit_service.USER_CREATED == "user.created"
+    assert audit_service.USER_UPDATED == "user.updated"
+    assert audit_service.USER_ROLE_CHANGED == "user.role_changed"
+    assert audit_service.USER_PASSWORD_RESET == "user.password_reset"
+    assert audit_service.SETTINGS_UPDATED == "settings.updated"
+
+
+def test_auth_account_constants_reexported_from_package() -> None:
+    """The B1 constants are also re-exported from the audit package root."""
+    from app.services import audit
+
+    assert audit.AUTH_LOGOUT == "auth.logout"
+    assert audit.AUTH_LOGIN_FAILED == "auth.login_failed"
+    assert audit.AUTH_PASSWORD_CHANGED == "auth.password_changed"
+    assert audit.AUTH_SESSION_REVOKED == "auth.session_revoked"
+    assert audit.USER_CREATED == "user.created"
+    assert audit.USER_UPDATED == "user.updated"
+    assert audit.USER_ROLE_CHANGED == "user.role_changed"
+    assert audit.USER_PASSWORD_RESET == "user.password_reset"
+    assert audit.SETTINGS_UPDATED == "settings.updated"

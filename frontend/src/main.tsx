@@ -10,8 +10,15 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
+import { initAuth } from "./api/auth";
 import { App } from "./App";
 import "./index.css";
+
+// Boot the auth session once at startup: POST /auth/refresh → GET /auth/me →
+// status "authed", or status "anon" on failure. The store starts in "loading"
+// and ProtectedRoute renders a loader until this resolves. Fire-and-forget — the
+// store transition re-renders the gate; a failed boot is the expected anon path.
+void initAuth();
 
 const queryClient = new QueryClient({
   defaultOptions: {

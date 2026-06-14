@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal, Protocol, cast, runtime_checkable
@@ -43,11 +45,44 @@ from app.agents.framework.approval import (
 )
 from app.core.errors import NetOpsError
 from app.core.logging import get_logger
+from app.core.security import Role
 
 _logger = get_logger(__name__)
 
 #: Outcome of one tool invocation, as recorded in the audit event.
 ToolOutcome = Literal["success", "denied", "error"]
+
+#: The invoking user's role for the current agent run. ``None`` means no run
+#: context is bound; RBAC then falls back to the least-privileged
+#: :attr:`~app.core.security.Role.VIEWER`, so an unbound run can never exceed
+#: viewer rights ("an agent can never do what its user cannot" still holds —
+#: the supervisor binds the authenticated user's real role before driving the
+#: graph via :func:`agent_run_context`).
+_invoking_role: ContextVar[Role | None] = ContextVar("netops_invoking_role", default=None)
+
+
+@contextmanager
+def agent_run_context(*, role: Role) -> Iterator[None]:
+    """Bind the invoking user's *role* for the duration of an agent run.
+
+    Brief §7 — "an agent can never do what its user cannot": the supervisor
+    enters this context with the authenticated user's role before driving the
+    graph, so every :class:`NetOpsTool` executed inside the run (including
+    LangGraph's prebuilt ``ToolNode``, which we cannot pass kwargs to) sees the
+    same caller role via the :data:`_invoking_role` contextvar. The token is
+    restored on exit, so nested/concurrent runs do not leak roles into one
+    another.
+    """
+    token = _invoking_role.set(role)
+    try:
+        yield
+    finally:
+        _invoking_role.reset(token)
+
+
+def current_invoking_role() -> Role | None:
+    """Return the role bound by the active :func:`agent_run_context`, if any."""
+    return _invoking_role.get()
 
 
 class ToolDefinitionError(NetOpsError):
@@ -56,6 +91,20 @@ class ToolDefinitionError(NetOpsError):
     status_code = 500
     title = "Tool Definition Error"
     slug = "tool-definition"
+
+
+class RbacForbiddenError(NetOpsError):
+    """A tool was invoked by a caller whose role is below the tool's minimum.
+
+    Mirrors :class:`~app.agents.framework.approval.ApprovalRequiredError`: it
+    extends :class:`~app.core.errors.NetOpsError` so the FastAPI handlers render
+    it as a 403 RFC 7807 problem (the caller is authenticated but not authorized
+    for this tool — brief §7, "an agent can never do what its user cannot").
+    """
+
+    status_code = 403
+    title = "Forbidden"
+    slug = "rbac-forbidden"
 
 
 class ToolExecutionError(NetOpsError):
@@ -183,6 +232,9 @@ class NetOpsTool(StructuredTool):
     approval_gate: ApprovalGate | None = None
     #: Mandatory bounds for ``diagnostic`` tools; ``None`` for other tiers.
     bounded_execution: BoundedExecution | None = None
+    #: Minimum invoking-user role required to run this tool (D10/brief §7).
+    #: Defaults to the least-privileged :attr:`~app.core.security.Role.VIEWER`.
+    min_role: Role = Role.VIEWER
 
     async def _emit(
         self,
@@ -205,6 +257,25 @@ class NetOpsTool(StructuredTool):
             )
         )
 
+    async def _check_rbac(self, arguments: dict[str, Any]) -> None:
+        """Enforce "an agent can never do what its user cannot" (brief §7).
+
+        Reads the invoking user's role from the active :func:`agent_run_context`,
+        falling back to the least-privileged ``viewer`` when no run context is
+        bound. If the effective caller role ranks below :attr:`min_role`, the
+        call is denied *before execution*: a ``denied`` audit event is recorded
+        (carrying required vs actual role) and a 403 :class:`RbacForbiddenError`
+        is raised.
+        """
+        caller = _invoking_role.get() or Role.VIEWER
+        if not caller.can_act_as(self.min_role):
+            detail = (
+                f"tool '{self.name}' requires role '{self.min_role.value}' or higher; "
+                f"invoking user role is '{caller.value}'"
+            )
+            await self._emit(outcome="denied", arguments=arguments, detail=detail)
+            raise RbacForbiddenError(detail)
+
     async def _authorize(self, arguments: dict[str, Any]) -> ApprovalDecision:
         """Gate a ``state_changing`` call; raise unless a human approved it."""
         gate: ApprovalGate = self.approval_gate if self.approval_gate is not None else DenyAllGate()
@@ -225,8 +296,11 @@ class NetOpsTool(StructuredTool):
         run_manager: AsyncCallbackManagerForToolRun | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Execute the tool through the gate/bounds/audit pipeline."""
+        """Execute the tool through the rbac/gate/bounds/audit pipeline."""
         arguments = dict(kwargs)
+        # RBAC first: a caller who may not run this tool never reaches the
+        # approval gate or the tool body (brief §7).
+        await self._check_rbac(arguments)
         approval: ApprovalDecision | None = None
         if self.classification is ToolClassification.STATE_CHANGING:
             approval = await self._authorize(arguments)
@@ -276,6 +350,7 @@ def netops_tool(
     audit_sink: AuditSink | None = None,
     approval_gate: ApprovalGate | None = None,
     bounded_execution: BoundedExecution | None = None,
+    min_role: Role | str = Role.VIEWER,
 ) -> Callable[[Callable[..., Awaitable[Any]]], NetOpsTool]:
     """Declare an async callable as a classified NetOps tool.
 
@@ -294,12 +369,28 @@ def netops_tool(
     - ``diagnostic`` tools must declare :class:`BoundedExecution` (ADR-0014);
     - only ``diagnostic`` tools may declare bounds;
     - only ``state_changing`` tools may carry an approval gate (a gate on a
-      read-only tool indicates misclassification).
+      read-only tool indicates misclassification);
+    - ``min_role`` (a :class:`~app.core.security.Role` or its wire name) must
+      name a known role — an unknown name is rejected at definition time.
+
+    ``min_role`` is the minimum invoking-user role allowed to run the tool
+    (brief §7), defaulting to the least-privileged ``viewer`` for read-only
+    convenience while remaining explicit-capable. RBAC is enforced in
+    :meth:`NetOpsTool._arun` against the role bound by :func:`agent_run_context`.
 
     ``state_changing`` tools default to the secure
     :class:`~app.agents.framework.approval.DenyAllGate`; the ChangeRequest
     gate replaces it in M5.
     """
+    if isinstance(min_role, Role):
+        resolved_min_role = min_role
+    else:
+        candidate = Role.from_name(min_role)
+        if candidate is None:
+            raise ToolDefinitionError(
+                f"unknown min_role {min_role!r}; expected one of {[r.value for r in Role]}"
+            )
+        resolved_min_role = candidate
 
     def decorate(func: Callable[..., Awaitable[Any]]) -> NetOpsTool:
         if not inspect.iscoroutinefunction(func):
@@ -343,6 +434,7 @@ def netops_tool(
                 audit_sink=audit_sink if audit_sink is not None else LoggingAuditSink(),
                 approval_gate=gate,
                 bounded_execution=bounded_execution,
+                min_role=resolved_min_role,
             ),
         )
 

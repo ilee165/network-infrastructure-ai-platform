@@ -9,6 +9,9 @@ import type { Config } from "tailwindcss";
  */
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  // Auth & Account UI: the theme store toggles a `dark` class on <html>, so
+  // dark variants must be class-driven (not the default media-query mode).
+  darkMode: "class",
   theme: {
     extend: {
       colors: {

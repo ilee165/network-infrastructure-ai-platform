@@ -34,6 +34,9 @@ _FIXTURE_FILES = {
     "show interfaces": "show_interfaces.txt",
     "show ip route": "show_ip_route.txt",
     "show lldp neighbors detail": "show_lldp_neighbors_detail.txt",
+    "show ip bgp summary": "show_ip_bgp_summary.txt",
+    "show ip ospf neighbor": "show_ip_ospf_neighbor.txt",
+    "show ip access-lists": "show_ip_access_lists.txt",
 }
 
 #: Recorded system-MIB values for SNMP discovery (same lab leaf switch).

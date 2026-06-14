@@ -9,13 +9,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from ipaddress import IPv4Network
+from ipaddress import IPv4Address, IPv4Network
 from typing import Any, ClassVar
 from uuid import uuid4
 
 import pytest
 
 from app.plugins.base import (
+    AclCapability,
+    BgpCapability,
     Capability,
     CommandTransport,
     ConfigBackupCapability,
@@ -23,18 +25,25 @@ from app.plugins.base import (
     DiscoverySshCapability,
     InterfacesCapability,
     NeighborsCapability,
+    OspfCapability,
     PluginCapability,
     RoutesCapability,
     VendorPlugin,
 )
 from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
+    AclAction,
+    BgpPeerState,
     InterfaceAdminStatus,
     InterfaceOperStatus,
     NeighborProtocol,
+    NormalizedAclEntry,
+    NormalizedBgpPeer,
     NormalizedInterface,
     NormalizedNeighbor,
+    NormalizedOspfNeighbor,
     NormalizedRoute,
+    OspfNeighborState,
     RouteProtocol,
 )
 from tests.plugins.conformance import (
@@ -354,3 +363,222 @@ class TestFixtureReplayTransport:
         transport = FixtureReplayTransport({"show version": "IOS output"})
         with pytest.raises(AssertionError, match="show version"):
             transport.send_command("show ip route")
+
+
+# ---------------------------------------------------------------------------
+# Helpers for BGP / OSPF / ACL conformance tests (M3-07)
+# ---------------------------------------------------------------------------
+
+
+def _bgp_peer() -> NormalizedBgpPeer:
+    return NormalizedBgpPeer(
+        device_id=uuid4(),
+        collected_at=datetime.now(UTC),
+        source_vendor=VENDOR_ID,
+        peer_address=IPv4Address("192.0.2.1"),
+        remote_as=65001,
+        state=BgpPeerState.ESTABLISHED,
+    )
+
+
+def _ospf_neighbor() -> NormalizedOspfNeighbor:
+    return NormalizedOspfNeighbor(
+        device_id=uuid4(),
+        collected_at=datetime.now(UTC),
+        source_vendor=VENDOR_ID,
+        neighbor_id=IPv4Address("10.0.0.1"),
+        interface="GigabitEthernet0/0",
+        state=OspfNeighborState.FULL,
+    )
+
+
+def _acl_entry() -> NormalizedAclEntry:
+    return NormalizedAclEntry(
+        device_id=uuid4(),
+        collected_at=datetime.now(UTC),
+        source_vendor=VENDOR_ID,
+        acl_name="PERMIT_ANY",
+        action=AclAction.PERMIT,
+    )
+
+
+class _GoodBgp(BgpCapability):
+    def get_bgp_peers(self) -> list[NormalizedBgpPeer]:
+        return [_bgp_peer()]
+
+
+class _GoodOspf(OspfCapability):
+    def get_ospf_neighbors(self) -> list[NormalizedOspfNeighbor]:
+        return [_ospf_neighbor()]
+
+
+class _GoodAcl(AclCapability):
+    def get_acls(self) -> list[NormalizedAclEntry]:
+        return [_acl_entry()]
+
+
+class TestBgpConformance:
+    """Conformance suite recognizes and exercises BgpCapability (M3-07)."""
+
+    def test_generates_implementation_and_fixture_cases_for_bgp(self) -> None:
+        plugin = _plugin(frozenset({Capability.BGP}), {Capability.BGP: _GoodBgp})
+        ids = [case.id for case in _cases(plugin)]
+        assert "implementation:bgp" in ids
+        assert "fixtures:bgp" in ids
+
+    def test_well_formed_bgp_plugin_passes_all_cases(self) -> None:
+        plugin = _plugin(frozenset({Capability.BGP}), {Capability.BGP: _GoodBgp})
+        for case in _cases(plugin):
+            case.run()
+
+    def test_bgp_implementation_outside_typed_interface_is_reported(self) -> None:
+        class _Untyped(PluginCapability):
+            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.BGP})
+
+            def get_bgp_peers(self) -> list[NormalizedBgpPeer]:
+                return [_bgp_peer()]
+
+        plugin = _plugin(frozenset({Capability.BGP}), {Capability.BGP: _Untyped})
+        case = _case(_cases(plugin), "implementation:bgp")
+        with pytest.raises(AssertionError, match="BgpCapability"):
+            case.run()
+
+    def test_empty_bgp_peers_list_is_reported(self) -> None:
+        class _EmptyBgp(BgpCapability):
+            def get_bgp_peers(self) -> list[NormalizedBgpPeer]:
+                return []
+
+        plugin = _plugin(frozenset({Capability.BGP}), {Capability.BGP: _EmptyBgp})
+        case = _case(_cases(plugin), "fixtures:bgp")
+        with pytest.raises(AssertionError, match="no records"):
+            case.run()
+
+    def test_bgp_source_vendor_mismatch_is_reported(self) -> None:
+        class _ForeignBgp(BgpCapability):
+            def get_bgp_peers(self) -> list[NormalizedBgpPeer]:
+                return [
+                    NormalizedBgpPeer(
+                        device_id=uuid4(),
+                        collected_at=datetime.now(UTC),
+                        source_vendor="other_vendor",
+                        peer_address=IPv4Address("192.0.2.1"),
+                        remote_as=65001,
+                        state=BgpPeerState.ESTABLISHED,
+                    )
+                ]
+
+        plugin = _plugin(frozenset({Capability.BGP}), {Capability.BGP: _ForeignBgp})
+        case = _case(_cases(plugin), "fixtures:bgp")
+        with pytest.raises(AssertionError, match="source_vendor"):
+            case.run()
+
+
+class TestOspfConformance:
+    """Conformance suite recognizes and exercises OspfCapability (M3-07)."""
+
+    def test_generates_implementation_and_fixture_cases_for_ospf(self) -> None:
+        plugin = _plugin(frozenset({Capability.OSPF}), {Capability.OSPF: _GoodOspf})
+        ids = [case.id for case in _cases(plugin)]
+        assert "implementation:ospf" in ids
+        assert "fixtures:ospf" in ids
+
+    def test_well_formed_ospf_plugin_passes_all_cases(self) -> None:
+        plugin = _plugin(frozenset({Capability.OSPF}), {Capability.OSPF: _GoodOspf})
+        for case in _cases(plugin):
+            case.run()
+
+    def test_ospf_implementation_outside_typed_interface_is_reported(self) -> None:
+        class _Untyped(PluginCapability):
+            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.OSPF})
+
+            def get_ospf_neighbors(self) -> list[NormalizedOspfNeighbor]:
+                return [_ospf_neighbor()]
+
+        plugin = _plugin(frozenset({Capability.OSPF}), {Capability.OSPF: _Untyped})
+        case = _case(_cases(plugin), "implementation:ospf")
+        with pytest.raises(AssertionError, match="OspfCapability"):
+            case.run()
+
+    def test_empty_ospf_neighbors_list_is_reported(self) -> None:
+        class _EmptyOspf(OspfCapability):
+            def get_ospf_neighbors(self) -> list[NormalizedOspfNeighbor]:
+                return []
+
+        plugin = _plugin(frozenset({Capability.OSPF}), {Capability.OSPF: _EmptyOspf})
+        case = _case(_cases(plugin), "fixtures:ospf")
+        with pytest.raises(AssertionError, match="no records"):
+            case.run()
+
+    def test_ospf_source_vendor_mismatch_is_reported(self) -> None:
+        class _ForeignOspf(OspfCapability):
+            def get_ospf_neighbors(self) -> list[NormalizedOspfNeighbor]:
+                return [
+                    NormalizedOspfNeighbor(
+                        device_id=uuid4(),
+                        collected_at=datetime.now(UTC),
+                        source_vendor="other_vendor",
+                        neighbor_id=IPv4Address("10.0.0.1"),
+                        interface="GigabitEthernet0/0",
+                        state=OspfNeighborState.FULL,
+                    )
+                ]
+
+        plugin = _plugin(frozenset({Capability.OSPF}), {Capability.OSPF: _ForeignOspf})
+        case = _case(_cases(plugin), "fixtures:ospf")
+        with pytest.raises(AssertionError, match="source_vendor"):
+            case.run()
+
+
+class TestAclConformance:
+    """Conformance suite recognizes and exercises AclCapability (M3-07)."""
+
+    def test_generates_implementation_and_fixture_cases_for_acl(self) -> None:
+        plugin = _plugin(frozenset({Capability.ACL}), {Capability.ACL: _GoodAcl})
+        ids = [case.id for case in _cases(plugin)]
+        assert "implementation:acl" in ids
+        assert "fixtures:acl" in ids
+
+    def test_well_formed_acl_plugin_passes_all_cases(self) -> None:
+        plugin = _plugin(frozenset({Capability.ACL}), {Capability.ACL: _GoodAcl})
+        for case in _cases(plugin):
+            case.run()
+
+    def test_acl_implementation_outside_typed_interface_is_reported(self) -> None:
+        class _Untyped(PluginCapability):
+            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.ACL})
+
+            def get_acls(self) -> list[NormalizedAclEntry]:
+                return [_acl_entry()]
+
+        plugin = _plugin(frozenset({Capability.ACL}), {Capability.ACL: _Untyped})
+        case = _case(_cases(plugin), "implementation:acl")
+        with pytest.raises(AssertionError, match="AclCapability"):
+            case.run()
+
+    def test_empty_acl_list_is_reported(self) -> None:
+        class _EmptyAcl(AclCapability):
+            def get_acls(self) -> list[NormalizedAclEntry]:
+                return []
+
+        plugin = _plugin(frozenset({Capability.ACL}), {Capability.ACL: _EmptyAcl})
+        case = _case(_cases(plugin), "fixtures:acl")
+        with pytest.raises(AssertionError, match="no records"):
+            case.run()
+
+    def test_acl_source_vendor_mismatch_is_reported(self) -> None:
+        class _ForeignAcl(AclCapability):
+            def get_acls(self) -> list[NormalizedAclEntry]:
+                return [
+                    NormalizedAclEntry(
+                        device_id=uuid4(),
+                        collected_at=datetime.now(UTC),
+                        source_vendor="other_vendor",
+                        acl_name="PERMIT_ANY",
+                        action=AclAction.PERMIT,
+                    )
+                ]
+
+        plugin = _plugin(frozenset({Capability.ACL}), {Capability.ACL: _ForeignAcl})
+        case = _case(_cases(plugin), "fixtures:acl")
+        with pytest.raises(AssertionError, match="source_vendor"):
+            case.run()

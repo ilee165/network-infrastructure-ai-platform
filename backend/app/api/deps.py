@@ -16,17 +16,19 @@ from typing import Annotated, Any, Final
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import db
 from app.core.config import Settings
 from app.core.errors import AuthError, ForbiddenError
-from app.core.security import decode_access_token
+from app.core.security import Role, decode_access_token
 from app.knowledge import Neo4jClient, get_client
 from app.models import User
 
-#: ADR-0010 RBAC rank order. Unknown role names rank below everything (deny).
-ROLE_RANKS: Final[dict[str, int]] = {"viewer": 0, "operator": 1, "engineer": 2, "admin": 3}
+#: ADR-0010 RBAC rank order, derived from the canonical :class:`Role` enum so
+#: the API layer and the agent tool wrappers share one source of truth. Unknown
+#: role names rank below everything (deny).
+ROLE_RANKS: Final[dict[str, int]] = {role.value: role.rank for role in Role}
 
 #: ``type`` claim values separating short-lived API tokens from refresh tokens.
 TOKEN_TYPE_ACCESS: Final = "access"
@@ -54,6 +56,18 @@ def get_app_settings(request: Request) -> Settings:
     """The :class:`Settings` bound to the app at ``create_app`` time."""
     settings: Settings = request.app.state.settings
     return settings
+
+
+def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """The process-wide :class:`async_sessionmaker` (lifecycle-owning callers).
+
+    Most routes take a request-scoped :func:`get_db` session, but services that
+    own their own commit boundary across several short transactions — the agent
+    session lifecycle + trace recorder (M3) — need the factory, not one session.
+    Routes depend on this (not on ``app.db`` directly) so tests can override a
+    single dependency to bind an isolated engine.
+    """
+    return db.get_sessionmaker()
 
 
 def get_knowledge_client() -> Neo4jClient:
@@ -90,6 +104,42 @@ async def get_current_user(
     if user is None or not user.is_active:
         raise AuthError(_INVALID_TOKEN_DETAIL)
     return user
+
+
+#: Distinct 403 detail used as a sentinel code: an authenticated, active user
+#: whose ``must_change_password`` flag is still set. The frontend keys off this
+#: exact string to force the change-password flow before anything else.
+PASSWORD_CHANGE_REQUIRED: Final = "password_change_required"
+
+
+def _require_password_current(user: User) -> User:
+    """Raise :class:`ForbiddenError` if *user* still owes a password change.
+
+    Pure (no I/O) so the rule is unit-testable in isolation; the
+    :func:`get_active_user` dependency wraps :func:`get_current_user` around it.
+    """
+    if user.must_change_password:
+        raise ForbiddenError(PASSWORD_CHANGE_REQUIRED)
+    return user
+
+
+async def get_active_user(
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Like :func:`get_current_user`, but also blocks a forced password change.
+
+    Gate the rest of the app with this (not bare :func:`get_current_user`): a
+    user with ``must_change_password`` set is authenticated but may not act
+    until they clear the flag. The self-service escape hatches — ``GET /me``,
+    ``POST /me/password`` and ``POST /logout`` — deliberately keep
+    :func:`get_current_user` so the user can still read their profile, change
+    the password, and log out while flagged.
+
+    Raises:
+        ForbiddenError: (403, detail :data:`PASSWORD_CHANGE_REQUIRED`) when the
+            caller must change their password before proceeding.
+    """
+    return _require_password_current(user)
 
 
 def require_role(minimum: str) -> Callable[..., Coroutine[Any, Any, User]]:

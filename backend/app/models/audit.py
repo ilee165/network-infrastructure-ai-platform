@@ -20,7 +20,15 @@ from app.models.mixins import JSON_VARIANT, UtcDateTime, utcnow
 
 
 class AuditLog(Base):
-    """One audited action: who (`actor`) did what (`action`) to which target."""
+    """One audited action: who (`actor`) did what (`action`) to which target.
+
+    ``reasoning_trace_id`` links an audited action back to the reasoning trace
+    that produced it (brief §6). It is a plain indexed UUID with NO DB-level FK:
+    ``reasoning_traces`` is range-partitioned, and PostgreSQL FKs to a
+    partitioned table must include the partition key — the same design used for
+    ``raw_artifact_id`` (see ``app.models.inventory``). Linkage integrity is
+    enforced by tests, and the column is nullable for non-agent audit entries.
+    """
 
     __tablename__ = "audit_log"
     __table_args__ = {"postgresql_partition_by": "RANGE (created_at)"}
@@ -32,3 +40,4 @@ class AuditLog(Base):
     target_type: Mapped[str] = mapped_column(String(128), nullable=False)
     target_id: Mapped[str | None] = mapped_column(String(255))
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSON_VARIANT)
+    reasoning_trace_id: Mapped[uuid.UUID | None] = mapped_column(index=True)

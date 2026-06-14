@@ -17,6 +17,14 @@ EOS-specific field notes
   means no gateway.
 - ``show lldp neighbors detail``: LOCAL_INTERFACE / NEIGHBOR_NAME /
   NEIGHBOR_INTERFACE / MGMT_ADDRESS / NEIGHBOR_DESCRIPTION.
+- ``show ip bgp summary``: EOS template exposes separate ``state`` and
+  ``state_pfxrcd`` columns (unlike IOS where the column is overloaded).
+  ``state_pfxrcd`` is populated only for ESTABLISHED sessions.
+- ``show ip ospf neighbor``: EOS ``state`` column has no ``/DR``-role suffix;
+  state token may be uppercase (``FULL``, ``2WAY``, …).
+- ``show ip access-lists``: EOS uses CIDR notation (``10.1.1.0/24``) for
+  network prefixes; ``host <ip>`` for host entries; the ``modifier`` field
+  carries the destination port match (e.g. ``eq telnet``).
 """
 
 from __future__ import annotations
@@ -24,7 +32,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from datetime import datetime
-from ipaddress import IPv4Address, IPv6Address, ip_address, ip_interface, ip_network
+from ipaddress import IPv4Address, IPv4Network, IPv6Address, ip_address, ip_interface, ip_network
 from typing import cast
 from uuid import UUID
 
@@ -35,12 +43,18 @@ from textfsm.parser import TextFSMError
 from app.core.errors import PluginError
 from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
+    AclAction,
+    BgpPeerState,
     InterfaceAdminStatus,
     InterfaceOperStatus,
     NeighborProtocol,
+    NormalizedAclEntry,
+    NormalizedBgpPeer,
     NormalizedInterface,
     NormalizedNeighbor,
+    NormalizedOspfNeighbor,
     NormalizedRoute,
+    OspfNeighborState,
     RouteProtocol,
 )
 
@@ -49,9 +63,12 @@ __all__ = [
     "SNMP_OID_SYSDESCR",
     "SNMP_OID_SYSNAME",
     "SNMP_OID_SYSOBJECTID",
+    "parse_acls",
+    "parse_bgp_peers",
     "parse_device_facts",
     "parse_interfaces",
     "parse_lldp_neighbors",
+    "parse_ospf_neighbors",
     "parse_routes",
     "parse_snmp_device_facts",
 ]
@@ -82,6 +99,32 @@ _ROUTE_PROTOCOLS: dict[str, RouteProtocol] = {
     "R": RouteProtocol.RIP,
     "I L1": RouteProtocol.ISIS,
     "I L2": RouteProtocol.ISIS,
+}
+
+#: EOS ``show ip bgp summary`` ``state`` column → BGP FSM state.
+#: Unlike IOS, EOS uses separate ``state`` and ``state_pfxrcd`` columns;
+#: ``state_pfxrcd`` is populated (non-empty) only when the session is
+#: ESTABLISHED.  We detect ESTABLISHED by checking ``state_pfxrcd`` first.
+_BGP_STATES: dict[str, BgpPeerState] = {
+    "idle": BgpPeerState.IDLE,
+    "connect": BgpPeerState.CONNECT,
+    "active": BgpPeerState.ACTIVE,
+    "opensent": BgpPeerState.OPEN_SENT,
+    "openconfirm": BgpPeerState.OPEN_CONFIRM,
+    "established": BgpPeerState.ESTABLISHED,
+}
+
+#: EOS ``show ip ospf neighbor`` ``state`` column → OSPF FSM state.
+#: EOS emits plain state tokens in uppercase without a ``/DR``-role suffix.
+_OSPF_STATES: dict[str, OspfNeighborState] = {
+    "down": OspfNeighborState.DOWN,
+    "attempt": OspfNeighborState.ATTEMPT,
+    "init": OspfNeighborState.INIT,
+    "2way": OspfNeighborState.TWO_WAY,
+    "exstart": OspfNeighborState.EXSTART,
+    "exchange": OspfNeighborState.EXCHANGE,
+    "loading": OspfNeighborState.LOADING,
+    "full": OspfNeighborState.FULL,
 }
 
 
@@ -305,6 +348,41 @@ def parse_routes(
         raise PluginError(f"eos: invalid 'show ip route' row: {exc}") from exc
 
 
+def _hms_to_seconds(value: str) -> int | None:
+    """Convert an EOS ``HH:MM:SS`` dead-time field to whole seconds."""
+    value = value.strip()
+    parts = value.split(":")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        return None
+    hours, minutes, seconds = (int(part) for part in parts)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _eos_acl_endpoint(source: str) -> IPv4Network | None:
+    """Resolve an EOS ACE source/destination to a network.
+
+    EOS ``show ip access-lists`` emits three forms:
+    - ``any``           → ``None`` (matches everything)
+    - ``host <ip>``     → ``/32`` host network
+    - ``<ip>/<prefix>`` → CIDR network
+
+    EOS ACLs are IPv4-only at this capability tier, so we cast to IPv4Network.
+    """
+    src = source.strip()
+    if not src or src == "any":
+        return None
+    if src.startswith("host "):
+        host_ip = src[5:].strip()
+        try:
+            return cast("IPv4Network", ip_network(f"{host_ip}/32"))
+        except (ValueError, OSError):
+            return None
+    try:
+        return cast("IPv4Network", ip_network(src, strict=False))
+    except (ValueError, OSError):
+        return None
+
+
 def parse_lldp_neighbors(
     raw_output: str, *, device_id: UUID, collected_at: datetime
 ) -> list[NormalizedNeighbor]:
@@ -336,3 +414,114 @@ def parse_lldp_neighbors(
         ]
     except (KeyError, ValueError, ValidationError) as exc:
         raise PluginError(f"eos: invalid 'show lldp neighbors detail' row: {exc}") from exc
+
+
+def parse_bgp_peers(
+    raw_output: str, *, device_id: UUID, collected_at: datetime
+) -> list[NormalizedBgpPeer]:
+    """Parse ``show ip bgp summary`` output into :class:`NormalizedBgpPeer` records.
+
+    EOS-specific differences from IOS:
+    - The template provides separate ``state`` and ``state_pfxrcd`` columns.
+    - When ``state_pfxrcd`` is non-empty the session is ESTABLISHED and the
+      value is the accepted-prefix count.
+    - When ``state_pfxrcd`` is empty, ``state`` holds the FSM token
+      (``Idle``, ``Active``, …) — look up case-insensitively.
+    """
+    rows = _parse_with_template("show ip bgp summary", raw_output)
+    peers: list[NormalizedBgpPeer] = []
+    try:
+        for row in rows:
+            pfxrcd = str(row.get("state_pfxrcd", "")).strip()
+            prefixes = _int_or_none(pfxrcd)
+            if prefixes is not None:
+                state = BgpPeerState.ESTABLISHED
+            else:
+                state_token = str(row.get("state", "")).strip().lower()
+                state = _BGP_STATES.get(state_token, BgpPeerState.IDLE)
+            peers.append(
+                NormalizedBgpPeer(
+                    device_id=device_id,
+                    collected_at=collected_at,
+                    source_vendor=PLATFORM,
+                    peer_address=ip_address(str(row["bgp_neigh"])),
+                    remote_as=int(str(row["neigh_as"]).strip()),
+                    local_as=_int_or_none(row.get("local_as")),
+                    state=state,
+                    prefixes_received=prefixes,
+                )
+            )
+    except (KeyError, ValueError, ValidationError) as exc:
+        raise PluginError(f"eos: invalid 'show ip bgp summary' row: {exc}") from exc
+    return peers
+
+
+def parse_ospf_neighbors(
+    raw_output: str, *, device_id: UUID, collected_at: datetime
+) -> list[NormalizedOspfNeighbor]:
+    """Parse ``show ip ospf neighbor`` output into :class:`NormalizedOspfNeighbor` records.
+
+    EOS-specific: the ``state`` column is plain uppercase (``FULL``, ``2WAY``,
+    ``EXSTART``, …) with no ``/DR``-role suffix.  State tokens are matched
+    case-insensitively against ``_OSPF_STATES``.
+    """
+    rows = _parse_with_template("show ip ospf neighbor", raw_output)
+    try:
+        return [
+            NormalizedOspfNeighbor(
+                device_id=device_id,
+                collected_at=collected_at,
+                source_vendor=PLATFORM,
+                neighbor_id=IPv4Address(str(row["neighbor_id"]).strip()),
+                interface=str(row["interface"]),
+                state=_OSPF_STATES.get(str(row["state"]).strip().lower(), OspfNeighborState.DOWN),
+                neighbor_address=_address_or_none(row.get("ip_address")),
+                priority=_int_or_none(row.get("priority")),
+                dead_time_seconds=_hms_to_seconds(str(row.get("dead_time", ""))),
+            )
+            for row in rows
+        ]
+    except (KeyError, ValueError, ValidationError) as exc:
+        raise PluginError(f"eos: invalid 'show ip ospf neighbor' row: {exc}") from exc
+
+
+def parse_acls(
+    raw_output: str, *, device_id: UUID, collected_at: datetime
+) -> list[NormalizedAclEntry]:
+    """Parse ``show ip access-lists`` output into :class:`NormalizedAclEntry` records.
+
+    EOS-specific differences from IOS:
+    - Network prefixes are CIDR (``10.1.1.0/24``), not wildcard-mask pairs.
+    - Host entries are ``host <ip>`` (same as IOS extended ACLs).
+    - ``any`` source/destination → ``None`` (matches everything).
+    - The destination port match (e.g. ``eq telnet``) is in the ``modifier``
+      field (not split into ``port_modifier``/``port_range``).
+    - The template emits one row per ACE (no Filldown header-only rows);
+      rows without an ``action`` field are skipped defensively.
+    """
+    rows = _parse_with_template("show ip access-lists", raw_output)
+    entries: list[NormalizedAclEntry] = []
+    try:
+        for row in rows:
+            action_raw = str(row.get("action", "")).strip().lower()
+            if not action_raw:
+                continue  # defensive skip for any header-only rows
+            entries.append(
+                NormalizedAclEntry(
+                    device_id=device_id,
+                    collected_at=collected_at,
+                    source_vendor=PLATFORM,
+                    acl_name=str(row["name"]),
+                    action=AclAction(action_raw),
+                    protocol=str(row.get("protocol", "")).strip() or "ip",
+                    sequence=_int_or_none(row.get("sn")),
+                    source=_eos_acl_endpoint(str(row.get("source", ""))),
+                    source_port=None,  # EOS template does not expose source port separately
+                    destination=_eos_acl_endpoint(str(row.get("destination", ""))),
+                    destination_port=str(row.get("modifier", "")).strip() or None,
+                    hits=None,  # EOS template does not capture match counts
+                )
+            )
+    except (KeyError, ValueError, ValidationError) as exc:
+        raise PluginError(f"eos: invalid 'show ip access-lists' row: {exc}") from exc
+    return entries

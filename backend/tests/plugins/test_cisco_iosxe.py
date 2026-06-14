@@ -88,6 +88,9 @@ class TestPluginDeclaration:
                 Capability.ROUTES,
                 Capability.NEIGHBORS_LLDP,
                 Capability.NEIGHBORS_CDP,
+                Capability.BGP,
+                Capability.OSPF,
+                Capability.ACL,
                 Capability.CONFIG_BACKUP,
             }
         )
@@ -98,9 +101,13 @@ class TestPluginDeclaration:
         assert plugin.get_capability(Capability.NEIGHBORS_CDP) is CiscoIosXeNeighbors
 
     def test_undeclared_capability_fails_fast(self) -> None:
+        from app.plugins.base import Capability as Cap
+
         plugin = CiscoIosXePlugin()
+        # DISCOVERY_API is not implemented by any plugin yet — use it as the
+        # sentinel for an undeclared capability.
         with pytest.raises(PluginError, match="does not implement"):
-            plugin.get_capability(Capability.BGP)
+            plugin.get_capability(Cap.DISCOVERY_API)
 
     def test_fake_transport_satisfies_the_command_transport_protocol(
         self, transport: FakeTransport

@@ -11,9 +11,11 @@ from app.core.errors import (
     PROBLEM_CONTENT_TYPE,
     AuthError,
     ConflictError,
+    LLMUpstreamError,
     NetOpsError,
     NotFoundError,
     PluginError,
+    translate_llm_error,
     unhandled_error_handler,
 )
 from app.main import create_app
@@ -75,6 +77,51 @@ async def test_auth_error_sets_www_authenticate(settings: Settings) -> None:
 
     assert response.status_code == 401
     assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+class TestLLMErrorTranslation:
+    """translate_llm_error turns provider/transport failures into a clean 502."""
+
+    def test_llm_upstream_error_is_502(self) -> None:
+        problem = LLMUpstreamError("provider unavailable").to_problem()
+        assert problem["status"] == 502
+        assert problem["type"] == "urn:netops:error:llm-upstream"
+        assert issubclass(LLMUpstreamError, NetOpsError)
+
+    def test_translates_transport_error(self) -> None:
+        # httpx backs the Ollama transport; a refused connection must surface as
+        # a typed 502, not an opaque 500.
+        translated = translate_llm_error(httpx.ConnectError("connection refused"))
+        assert isinstance(translated, LLMUpstreamError)
+        assert translated.status_code == 502
+
+    def test_translates_provider_sdk_error_by_module(self) -> None:
+        # Simulate an anthropic.* / openai.* SDK exception without importing the
+        # SDK: recognition is by the exception's top-level module.
+        for module in ("anthropic._exceptions", "openai", "ollama._types"):
+            exc = type("BadRequestError", (Exception,), {"__module__": module})(
+                "credit balance is too low"
+            )
+            assert isinstance(translate_llm_error(exc), LLMUpstreamError), module
+
+    def test_translation_detail_does_not_leak_provider_message(self) -> None:
+        exc = type("BadRequestError", (Exception,), {"__module__": "anthropic"})(
+            "secret org id org-hunter2 over quota"
+        )
+        translated = translate_llm_error(exc)
+        assert translated is not None
+        assert "hunter2" not in translated.detail
+
+    def test_passes_through_netops_error(self) -> None:
+        # Already-typed platform errors (incl. RBAC denials) keep their own status.
+        assert translate_llm_error(NotFoundError("x")) is None
+
+    def test_passes_through_generic_bug(self) -> None:
+        # A genuine code bug must NOT be masked as a provider error — it stays a 500.
+        assert (
+            translate_llm_error(AttributeError("'NoneType' object has no attribute 'domain'"))
+            is None
+        )
 
 
 async def test_unhandled_handler_returns_opaque_500() -> None:

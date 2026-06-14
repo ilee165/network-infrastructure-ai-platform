@@ -83,6 +83,9 @@ class TestPluginDeclaration:
                 Capability.INTERFACES,
                 Capability.ROUTES,
                 Capability.NEIGHBORS_LLDP,
+                Capability.BGP,
+                Capability.OSPF,
+                Capability.ACL,
             }
         )
 

@@ -86,8 +86,11 @@ def test_offline_sql_creates_every_m1_table() -> None:
 @pytest.mark.usefixtures("_postgres_dialect_env")
 def test_offline_sql_partitions_audit_log_and_raw_artifacts() -> None:
     sql = _offline_upgrade_sql()
-    assert sql.count("PARTITION BY RANGE (created_at)") == len(PARTITIONED_TABLES)
+    assert "PARTITION BY RANGE (created_at)" in sql
     for parent in PARTITIONED_TABLES:
+        # Tie the partitions to this specific parent table so the assertion
+        # stays correct as later migrations add their own partitioned tables
+        # to the upgrade-head SQL (e.g. 0004 reasoning traces).
         assert f"CREATE TABLE {parent}_2026_06 PARTITION OF {parent}" in sql
         assert f"CREATE TABLE {parent}_2026_07 PARTITION OF {parent}" in sql
         assert f"CREATE TABLE {parent}_default PARTITION OF {parent} DEFAULT" in sql

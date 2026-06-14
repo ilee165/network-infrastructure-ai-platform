@@ -19,9 +19,17 @@ EXPECTED_TABLES = {
     "normalized_interfaces",
     "normalized_routes",
     "normalized_neighbors",
+    "agent_sessions",
+    "reasoning_traces",
+    "reasoning_trace_steps",
 }
 
-PARTITIONED_TABLES = ("audit_log", "raw_artifacts")
+PARTITIONED_TABLES = (
+    "audit_log",
+    "raw_artifacts",
+    "reasoning_traces",
+    "reasoning_trace_steps",
+)
 
 NORMALIZED_NATURAL_KEYS = {
     "normalized_interfaces": ("device_id", "name"),

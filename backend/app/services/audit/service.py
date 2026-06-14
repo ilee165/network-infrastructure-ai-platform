@@ -33,6 +33,24 @@ DISCOVERY_RUN_STARTED: Final = "discovery.run_started"
 DISCOVERY_RUN_FINISHED: Final = "discovery.run_finished"
 AUTH_LOGIN: Final = "auth.login"
 AUTH_REFRESH: Final = "auth.refresh"
+# M3 agent-session audit vocabulary (brief §5/§7): every session start and
+# completion is audited, and each reasoning trace produced by the run is linked
+# back to the session via a dedicated trace entry (``reasoning_trace_id`` set).
+AGENT_SESSION_STARTED: Final = "agent.session_started"
+AGENT_SESSION_COMPLETED: Final = "agent.session_completed"
+AGENT_TRACE_RECORDED: Final = "agent.trace_recorded"
+# Auth & Account UI audit vocabulary (B1): authentication lifecycle, server-side
+# session revocation, admin user management, and settings changes. As with every
+# other constant here, ``detail`` must never carry a password hash or secret.
+AUTH_LOGOUT: Final = "auth.logout"
+AUTH_LOGIN_FAILED: Final = "auth.login_failed"
+AUTH_PASSWORD_CHANGED: Final = "auth.password_changed"
+AUTH_SESSION_REVOKED: Final = "auth.session_revoked"
+USER_CREATED: Final = "user.created"
+USER_UPDATED: Final = "user.updated"
+USER_ROLE_CHANGED: Final = "user.role_changed"
+USER_PASSWORD_RESET: Final = "user.password_reset"
+SETTINGS_UPDATED: Final = "settings.updated"
 
 
 async def record(
