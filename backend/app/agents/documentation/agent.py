@@ -9,8 +9,10 @@ generates three artifact types on the ``docs`` Celery queue:
    by construction (ADR-0019 §2).
 2. **Diagrams** (T11) — Mermaid source generated deterministically from the
    Neo4j topology projection; PNG is rendered client-side (ADR-0019 §3).
-3. **Runbooks** (T12, future) — template + LLM narrative grounded in
-   inventory/topology (requires A9 redaction at the LLM boundary — ADR-0019 §4).
+3. **Runbooks** (T12) — per-device template + grounded LLM narrative: every
+   grounding fact is redacted (A9) at the LLM boundary before reaching the
+   provider (D9 ``local`` default), so no secret value is exposed (ADR-0019 §4,
+   ADR-0017 §3).
 
 All tools declared in M4 are READ_ONLY — no write tool may ever appear on this
 agent (enforced by
@@ -89,8 +91,9 @@ class DocumentationAgent(BaseSpecialistAgent):
             "- **Topology diagrams**: Mermaid source generated deterministically "
             "  from the Neo4j projection (nodes/edges); PNG is rendered "
             "  client-side.\n"
-            "- **Runbooks**: per-device or per-site Markdown grounded in the inventory "
-            "  and topology (available in a future task).\n\n"
+            "- **Runbooks**: per-device Markdown — deterministic fact tables plus a "
+            "  grounded, redacted LLM narrative (Overview, Operational Procedures). "
+            "  Every grounding fact is redacted (A9) before reaching the model.\n\n"
             "Guidelines:\n"
             "- Always use the inventory tool with the caller-supplied normalized-table "
             "  data; never guess or fabricate device details.\n"
@@ -104,5 +107,5 @@ class DocumentationAgent(BaseSpecialistAgent):
 
     @property
     def tools(self) -> Sequence[NetOpsTool]:
-        """READ_ONLY documentation generation tools for M4 T10."""
+        """READ_ONLY documentation tools (T10 inventory, T11 diagram, T12 runbook)."""
         return DOCUMENTATION_TOOLS

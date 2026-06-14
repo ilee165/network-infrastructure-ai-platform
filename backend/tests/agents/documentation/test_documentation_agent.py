@@ -22,8 +22,12 @@ from __future__ import annotations
 import csv
 import io
 import json
+from collections.abc import Sequence
+from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 
 from app.agents.documentation import (
     documentation_agent,
@@ -34,6 +38,8 @@ from app.agents.documentation.tools import (
     DOCUMENTATION_TOOLS,
     generate_diagram,
     generate_inventory,
+    generate_runbook,
+    render_runbook,
 )
 from app.agents.framework.registry import AgentRegistry
 from app.agents.framework.tools import NetOpsTool, ToolClassification
@@ -938,6 +944,333 @@ class TestDiagramMatchesProjection:
         assert len(declared_nodes) == 3
         # The ambiguous edge must be omitted rather than mis-routed.
         assert len(edges) == 0
+
+
+# ---------------------------------------------------------------------------
+# generate_runbook — template + grounded, redacted LLM narrative (T12 / §4)
+# ---------------------------------------------------------------------------
+
+
+from langchain_core.language_models import BaseChatModel  # noqa: E402
+
+
+class _RecordingChatModel(BaseChatModel):
+    """Offline fake chat model that records every message it is handed.
+
+    Stands in for the D9 provider so the runbook's narrative path is exercised
+    with no network and the test can assert exactly what text reached the model
+    (the secret-leak assertion). Each call returns a fixed narrative line that
+    quotes a grounded fact so the grounding assertion has something to check.
+    """
+
+    seen: list[str] = []  # noqa: RUF012 — populated per-instance below
+    reply: str = "The device edge-1 has interface GigabitEthernet0/0 up."
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        # Per-instance recording buffer (avoid the shared class attribute).
+        object.__setattr__(self, "seen", [])
+
+    @property
+    def _llm_type(self) -> str:
+        return "recording-fake"
+
+    def _record(self, messages: list[BaseMessage]) -> None:
+        for message in messages:
+            content = message.content
+            self.seen.append(content if isinstance(content, str) else str(content))
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        self._record(messages)
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.reply))])
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        self._record(messages)
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.reply))])
+
+
+#: A device whose interface description carries a secret-bearing config line.
+#: ``render_runbook`` must redact it before it reaches the model OR the output.
+_SECRET = "MyS3cretCommunity"
+_DEVICE_WITH_SECRET: dict[str, Any] = {
+    "id": DEVICE_A,
+    "hostname": "edge-1",
+    "mgmt_ip": "10.0.0.1",
+    "vendor_id": "cisco_ios",
+    "status": "reachable",
+    "site": "dc-east",
+}
+_INTERFACES_WITH_SECRET: list[dict[str, Any]] = [
+    {
+        "device_id": DEVICE_A,
+        "name": "GigabitEthernet0/0",
+        # A secret-bearing config fragment smuggled into a text field.
+        "description": f"snmp-server community {_SECRET} RO",
+        "admin_status": "up",
+        "oper_status": "up",
+    }
+]
+_NEIGHBORS_ONE: list[dict[str, Any]] = [
+    {
+        "device_id": DEVICE_A,
+        "protocol": "lldp",
+        "local_interface": "GigabitEthernet0/0",
+        "neighbor_name": "core-2",
+    }
+]
+_ROUTES_ONE: list[dict[str, Any]] = [
+    {"device_id": DEVICE_A, "prefix": "0.0.0.0/0", "protocol": "static"}
+]
+
+
+class TestGenerateRunbookContract:
+    def test_tool_is_registered(self) -> None:
+        names = {t.name for t in _AgentImpl().tools}
+        assert "generate_runbook" in names
+
+    def test_tool_is_read_only(self) -> None:
+        assert generate_runbook.classification is ToolClassification.READ_ONLY
+
+    def test_tool_is_netops_tool(self) -> None:
+        assert isinstance(generate_runbook, NetOpsTool)
+
+    def test_tool_exported_in_list(self) -> None:
+        names = {t.name for t in DOCUMENTATION_TOOLS}
+        assert "generate_runbook" in names
+
+    async def test_returns_runbook_document_payload(self) -> None:
+        payload = await render_runbook(
+            _DEVICE_WITH_SECRET,
+            _INTERFACES_WITH_SECRET,
+            _NEIGHBORS_ONE,
+            _ROUTES_ONE,
+            model=_RecordingChatModel(),
+        )
+        assert payload["kind"] == "runbook"
+        assert payload["format"] == "md"
+        assert payload["title"].startswith("Runbook:")
+        assert "content" in payload
+        assert payload["source_refs"] == {"device_id": DEVICE_A}
+
+
+class TestRunbookGrounding:
+    """The narrative is grounded in the provided facts (ADR-0019 §4)."""
+
+    async def test_model_receives_the_grounding_facts(self) -> None:
+        model = _RecordingChatModel()
+        await render_runbook(
+            _DEVICE_WITH_SECRET,
+            _INTERFACES_WITH_SECRET,
+            _NEIGHBORS_ONE,
+            _ROUTES_ONE,
+            model=model,
+        )
+        prompt_text = "\n".join(model.seen)
+        # The grounding facts (hostname, interface, neighbor) are placed in the
+        # prompt so the narrative is grounded, not free-form.
+        assert "edge-1" in prompt_text
+        assert "GigabitEthernet0/0" in prompt_text
+        assert "core-2" in prompt_text
+
+    async def test_narrative_appears_in_content(self) -> None:
+        model = _RecordingChatModel(reply="edge-1 is a Cisco IOS edge router.")
+        payload = await render_runbook(
+            _DEVICE_WITH_SECRET,
+            _INTERFACES_WITH_SECRET,
+            _NEIGHBORS_ONE,
+            _ROUTES_ONE,
+            model=model,
+        )
+        # The model-written narrative is woven into the runbook body, under the
+        # Overview / Operational Procedures sections.
+        assert "edge-1 is a Cisco IOS edge router." in payload["content"]
+        assert "## Overview" in payload["content"]
+        assert "## Operational Procedures" in payload["content"]
+
+    async def test_deterministic_facts_appear_verbatim_in_tables(self) -> None:
+        payload = await render_runbook(
+            _DEVICE_WITH_SECRET,
+            _INTERFACES_WITH_SECRET,
+            _NEIGHBORS_ONE,
+            _ROUTES_ONE,
+            model=_RecordingChatModel(),
+        )
+        content = payload["content"]
+        # The deterministic fact tables (source of truth) carry the facts exactly.
+        assert "edge-1" in content
+        assert "GigabitEthernet0/0" in content
+        assert "0.0.0.0/0" in content
+
+    async def test_topology_section_included_when_provided(self) -> None:
+        mermaid = 'graph TD\n    n0["Device: edge-1"]'
+        payload = await render_runbook(
+            _DEVICE_WITH_SECRET,
+            _INTERFACES_WITH_SECRET,
+            _NEIGHBORS_ONE,
+            _ROUTES_ONE,
+            model=_RecordingChatModel(),
+            topology=mermaid,
+        )
+        assert "## Topology" in payload["content"]
+        assert "```mermaid" in payload["content"]
+
+
+class TestRunbookSecretRedaction:
+    """SECURITY-CRITICAL: no secret pattern reaches the provider (A9 / §4)."""
+
+    async def test_secret_never_reaches_the_model(self) -> None:
+        model = _RecordingChatModel()
+        await render_runbook(
+            _DEVICE_WITH_SECRET,
+            _INTERFACES_WITH_SECRET,
+            _NEIGHBORS_ONE,
+            _ROUTES_ONE,
+            model=model,
+        )
+        # Everything the model was handed must be free of the secret value.
+        for text in model.seen:
+            assert _SECRET not in text, "secret value reached the model prompt"
+
+    async def test_secret_redacted_in_runbook_content(self) -> None:
+        payload = await render_runbook(
+            _DEVICE_WITH_SECRET,
+            _INTERFACES_WITH_SECRET,
+            _NEIGHBORS_ONE,
+            _ROUTES_ONE,
+            model=_RecordingChatModel(),
+        )
+        # The secret value is also absent from the stored document content, but
+        # the redaction token marks that a community string was present.
+        assert _SECRET not in payload["content"]
+        assert "<<REDACTED:snmp_community>>" in payload["content"]
+
+    async def test_tool_resolves_default_provider_and_redacts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``generate_runbook`` resolves the D9 provider and never leaks a secret.
+
+        The provider factory is monkeypatched to a recording fake so no network
+        is touched; the secret must be absent from what that model receives even
+        through the full tool entry point.
+        """
+        model = _RecordingChatModel()
+
+        def _fake_get_chat_model(*_args: Any, **_kwargs: Any) -> BaseChatModel:
+            return model
+
+        import app.agents.documentation.tools as tools_mod
+
+        monkeypatch.setattr(tools_mod, "get_chat_model", _fake_get_chat_model, raising=False)
+        # The lazy import inside the tool resolves from app.llm.providers; patch
+        # there too so the symbol the tool imports is the fake.
+        import app.llm.providers as providers_mod
+
+        monkeypatch.setattr(providers_mod, "get_chat_model", _fake_get_chat_model)
+
+        raw = await generate_runbook.ainvoke(
+            {
+                "device": _DEVICE_WITH_SECRET,
+                "interfaces": _INTERFACES_WITH_SECRET,
+                "neighbors": _NEIGHBORS_ONE,
+                "routes": _ROUTES_ONE,
+            }
+        )
+        payload = json.loads(raw)
+        assert payload["kind"] == "runbook"
+        for text in model.seen:
+            assert _SECRET not in text
+        assert _SECRET not in payload["content"]
+
+
+class TestRunbookEmbedding:
+    """A generated runbook is embeddable via the T8 pipeline (ADR-0019 §5)."""
+
+    async def test_generated_runbook_is_embedded(self) -> None:
+        # Lazily import the embedding stack + an offline fake embedder so this
+        # test stays in this module without a DB fixture dependency duplication.
+        import hashlib
+
+        from sqlalchemy import event, select
+        from sqlalchemy.ext.asyncio import (
+            async_sessionmaker,
+            create_async_engine,
+        )
+
+        from app.knowledge.embedding import embed_document
+        from app.models import Base, Document, DocumentFormat, DocumentKind, Embedding
+        from app.models.config_mgmt import EMBEDDING_DIM
+
+        class _FakeEmbedder:
+            async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+                out: list[list[float]] = []
+                for text in texts:
+                    digest = hashlib.sha256(text.encode("utf-8")).digest()
+                    vector = [0.0] * EMBEDDING_DIM
+                    for i in range(min(len(digest), EMBEDDING_DIM)):
+                        vector[i] = digest[i] / 255.0
+                    out.append(vector)
+                return out
+
+        engine = create_async_engine("sqlite+aiosqlite://")
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def _fk(dbapi_connection: Any, _record: Any) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        payload = await render_runbook(
+            _DEVICE_WITH_SECRET,
+            _INTERFACES_WITH_SECRET,
+            _NEIGHBORS_ONE,
+            _ROUTES_ONE,
+            model=_RecordingChatModel(),
+        )
+
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with maker() as session:
+                document = Document(
+                    kind=DocumentKind(payload["kind"]),
+                    title=payload["title"],
+                    format=DocumentFormat(payload["format"]),
+                    content=payload["content"],
+                )
+                session.add(document)
+                await session.flush()
+
+                rows = await embed_document(session, document, embedder=_FakeEmbedder())
+                assert rows, "the runbook produced no embedding rows"
+
+                persisted = (
+                    (
+                        await session.execute(
+                            select(Embedding).where(Embedding.document_id == document.id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                assert len(persisted) == len(rows)
+                # The redacted runbook embedded clean — no secret in any chunk.
+                assert all(_SECRET not in row.chunk_text for row in persisted)
+        finally:
+            await engine.dispose()
 
 
 # ---------------------------------------------------------------------------

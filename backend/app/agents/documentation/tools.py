@@ -1,14 +1,14 @@
-"""Documentation Agent typed tool wrappers (M4 task 10, read-only).
+"""Documentation Agent typed tool wrappers (M4, read-only).
 
-All tools are classified READ_ONLY. The Documentation Agent *generates*
-documentation artifacts deterministically — no LLM is involved in inventory
-or diagram generation (ADR-0019 §2: "deterministic render of normalized tables
-to Markdown + CSV; exit criterion is a round-trip equality test against
-normalized-table content, so generation is pure/templated, not model-narrated").
+All tools are classified READ_ONLY. Inventory and diagram generation use no LLM
+(ADR-0019 §2-3: "deterministic render of normalized tables / the Neo4j
+projection; the round-trip / set-equality exit criteria are satisfied by
+construction"). Runbook generation (T12) is the one LLM path: a deterministic
+fact template plus a grounded narrative the model writes — every grounding fact
+is redacted at the A9 LLM boundary first (ADR-0019 §4, ADR-0017 §3).
 
-This module owns the ``generate_inventory`` tool (T10) and the
-``generate_diagram`` tool (T11). The ``generate_runbook`` tool is added in the
-next task (T12).
+This module owns ``generate_inventory`` (T10), ``generate_diagram`` (T11), and
+``generate_runbook`` (T12).
 
 Module boundary: these wrappers are the *only* point where the documentation
 agent touches data. No code outside this module may import ``app.engines`` or
@@ -35,11 +35,15 @@ import csv
 import io
 import json
 import logging
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field
 
 from app.agents.framework.tools import ToolClassification, netops_tool
+from app.llm.redaction import redact_prompt
+
+if TYPE_CHECKING:
+    from langchain_core.language_models import BaseChatModel
 
 _log = logging.getLogger(__name__)
 
@@ -544,18 +548,307 @@ async def generate_diagram(
 
 
 # ---------------------------------------------------------------------------
+# generate_runbook — template + grounded, redacted LLM narrative (T12, §4)
+# ---------------------------------------------------------------------------
+#
+# ADR-0019 §4: "Runbooks — template + LLM narrative grounded in
+# inventory/topology. A per-device/per-site Markdown template is filled with
+# deterministic facts (from normalized tables + the projection); the LLM writes
+# only the narrative sections, grounded in those facts and instructed to cite
+# them. ALL grounding content passes through the A9 redaction layer before
+# reaching the model (configs/inventory can carry secret-bearing fields —
+# ADR-0017 §3). Provider via the D9 registry (``local`` default)."
+#
+# Security model (A9 — SECURITY-CRITICAL). Inventory/topology facts can carry
+# secret-bearing values (an interface description echoing a key, a banner, a
+# neighbor string). EVERY fact this tool emits — into the deterministic template
+# tables AND into the prompt handed to the model — is run through
+# :func:`~app.llm.redaction.redact_prompt` FIRST. The model the D9 registry
+# returns is itself wrapped in :class:`~app.llm.redaction.RedactingChatModel`
+# (a second, bypass-proof line of defence), but this tool does not rely on that:
+# the grounding text is already redacted before it leaves this module, so a
+# secret value never reaches the provider even through the narrative path.
+#
+# Grounding. The narrative sections are written by the model from ONLY the
+# redacted facts placed in the prompt; the model is instructed to ground every
+# statement in those facts and not to invent device details. The deterministic
+# fact tables remain the source of truth — a weak model degrades prose, never
+# correctness (ADR-0019 §4 consequence).
+
+
+#: System directive constraining the model to grounded, cited narrative only.
+_RUNBOOK_SYSTEM_PROMPT = (
+    "You are a senior network engineer writing the narrative sections of an "
+    "operational runbook. You are given a set of GROUNDING FACTS about one "
+    "device (already redacted of any secret values). Write clear, concise "
+    "operational prose for the requested section. You MUST ground every "
+    "statement strictly in the provided facts: never invent hostnames, "
+    "addresses, interfaces, neighbors, routes, or vendor details that are not "
+    "present in the facts. When you reference a fact, cite it by its value "
+    "(e.g. the hostname or interface name) so the reader can trace it. If the "
+    "facts do not support a statement, omit it. Do not output Markdown headings "
+    "— write only the body text for the section."
+)
+
+#: Narrative sections the LLM fills, in document order. Each is (heading, brief).
+_RUNBOOK_NARRATIVE_SECTIONS: list[tuple[str, str]] = [
+    (
+        "Overview",
+        "Summarize what this device is and its role, grounded in the facts.",
+    ),
+    (
+        "Operational Procedures",
+        "Describe how an operator would verify this device's health and its key "
+        "interfaces/neighbors/routes, grounded in the facts.",
+    ),
+]
+
+
+def _facts_block(
+    device: dict[str, Any],
+    interfaces: list[dict[str, Any]],
+    neighbors: list[dict[str, Any]],
+    routes: list[dict[str, Any]],
+) -> str:
+    """Render the (already-redacted) grounding facts as compact text for the LLM.
+
+    The facts are the same normalized-table rows the deterministic template
+    renders, so the narrative and the tables draw from one redacted source.
+    """
+    lines = ["Device:", json.dumps(device, sort_keys=True)]
+    lines += ["Interfaces:", json.dumps(interfaces, sort_keys=True)]
+    lines += ["Neighbors:", json.dumps(neighbors, sort_keys=True)]
+    lines += ["Routes:", json.dumps(routes, sort_keys=True)]
+    return "\n".join(lines)
+
+
+def _redact_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Redact every string value in each row at the LLM boundary (A9).
+
+    Non-string values (ints such as ``speed_mbps``) are passed through; only
+    text fields can carry a secret pattern.
+    """
+    redacted: list[dict[str, Any]] = []
+    for row in rows:
+        clean: dict[str, Any] = {}
+        for key, value in row.items():
+            clean[key] = redact_prompt(value) if isinstance(value, str) else value
+        redacted.append(clean)
+    return redacted
+
+
+def _render_runbook_markdown(
+    device: dict[str, Any],
+    interfaces: list[dict[str, Any]],
+    neighbors: list[dict[str, Any]],
+    routes: list[dict[str, Any]],
+    *,
+    title: str,
+    narratives: dict[str, str],
+    topology: str | None,
+) -> str:
+    """Assemble the runbook Markdown: narrative sections + deterministic tables.
+
+    The fact tables are rendered with the same verbatim helpers the inventory
+    tool uses (so they are exact), and the narrative sections carry the
+    model-written prose. All inputs here are already redacted.
+    """
+    parts: list[str] = [f"# {title}", ""]
+    parts += ["## Overview", "", narratives.get("Overview", "").strip(), ""]
+    parts += ["## Device Facts", "", _md_table(_DEVICE_COLS, [device]), ""]
+    parts += ["## Interfaces", "", _md_table(_IFACE_COLS, interfaces), ""]
+    parts += ["## Neighbors", "", _md_table(_NEIGHBOR_COLS, neighbors), ""]
+    parts += ["## Routes", "", _md_table(_ROUTE_COLS, routes), ""]
+    if topology:
+        parts += ["## Topology", "", "```mermaid", topology, "```", ""]
+    parts += [
+        "## Operational Procedures",
+        "",
+        narratives.get("Operational Procedures", "").strip(),
+        "",
+    ]
+    return "\n".join(parts)
+
+
+async def render_runbook(
+    device: dict[str, Any],
+    interfaces: list[dict[str, Any]],
+    neighbors: list[dict[str, Any]],
+    routes: list[dict[str, Any]],
+    *,
+    model: BaseChatModel,
+    topology: str | None = None,
+) -> dict[str, Any]:
+    """Build a grounded, redacted per-device runbook (ADR-0019 §4).
+
+    The implementation behind :func:`generate_runbook`, factored out with an
+    injectable *model* so it is fully testable offline with a fake chat model.
+
+    Steps:
+
+    1. **Redact every grounding fact (A9).** The device row, interface/neighbor/
+       route rows, and the topology source are all passed through
+       :func:`~app.llm.redaction.redact_prompt` BEFORE either the template or the
+       model sees them — secret-bearing fields never leave this function in the
+       clear (ADR-0017 §3).
+    2. **LLM narrative.** For each narrative section the (already-redacted) facts
+       are placed in the prompt and the model writes grounded prose. *model* is
+       the D9-registry chat model (``local`` default), itself redaction-wrapped
+       as a second line of defence.
+    3. **Template assembly.** The narrative is interleaved with deterministic,
+       verbatim fact tables (the source of truth) into a single Markdown body.
+
+    Returns a dict with the ``Document`` fields (ADR-0019 §1) — ``kind``
+    (``"runbook"``), ``format`` (``"md"``), ``title``, ``content``, and
+    ``source_refs`` recording the device id the runbook was generated from.
+    """
+    # 1. Redact all grounding facts at the LLM boundary (A9) before any use.
+    red_device = _redact_rows([device])[0]
+    red_interfaces = _redact_rows(interfaces)
+    red_neighbors = _redact_rows(neighbors)
+    red_routes = _redact_rows(routes)
+    red_topology = redact_prompt(topology) if topology else None
+
+    hostname = str(red_device.get("hostname") or red_device.get("id") or "device")
+    title = f"Runbook: {hostname}"
+
+    facts = _facts_block(red_device, red_interfaces, red_neighbors, red_routes)
+
+    # 2. LLM writes each narrative section from the redacted facts only.
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    narratives: dict[str, str] = {}
+    for heading, brief in _RUNBOOK_NARRATIVE_SECTIONS:
+        prompt = f"GROUNDING FACTS (redacted):\n{facts}\n\nWrite the '{heading}' section. {brief}"
+        response = await model.ainvoke(
+            [
+                SystemMessage(content=_RUNBOOK_SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ]
+        )
+        content = response.content
+        narratives[heading] = content if isinstance(content, str) else str(content)
+
+    # 3. Assemble the template with deterministic, verbatim (redacted) tables.
+    content = _render_runbook_markdown(
+        red_device,
+        red_interfaces,
+        red_neighbors,
+        red_routes,
+        title=title,
+        narratives=narratives,
+        topology=red_topology,
+    )
+
+    return {
+        "kind": "runbook",
+        "format": "md",
+        "title": title,
+        "content": content,
+        "source_refs": {"device_id": device.get("id")},
+    }
+
+
+@netops_tool(classification=ToolClassification.READ_ONLY)
+async def generate_runbook(
+    device: Annotated[
+        dict[str, Any],
+        Field(
+            description=(
+                "The device row from the ``devices`` normalized table the runbook is "
+                "for. Must contain at minimum: id, hostname, mgmt_ip, vendor_id, status. "
+                "Optional: model, os_version, serial, site."
+            )
+        ),
+    ],
+    interfaces: Annotated[
+        list[dict[str, Any]],
+        Field(
+            description=(
+                "Rows from ``normalized_interfaces`` for this device "
+                "(device_id, name, admin_status, oper_status, ...)."
+            )
+        ),
+    ],
+    neighbors: Annotated[
+        list[dict[str, Any]],
+        Field(
+            description=(
+                "Rows from ``normalized_neighbors`` for this device "
+                "(device_id, protocol, local_interface, neighbor_name, ...)."
+            )
+        ),
+    ],
+    routes: Annotated[
+        list[dict[str, Any]],
+        Field(
+            description=(
+                "Rows from ``normalized_routes`` for this device "
+                "(device_id, prefix, protocol, ...)."
+            )
+        ),
+    ],
+    topology: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional Mermaid topology source (from ``generate_diagram``) scoped to "
+                "this device's neighborhood, embedded in the runbook's Topology section."
+            ),
+        ),
+    ] = None,
+) -> str:
+    """Generate a per-device runbook: template + grounded, redacted LLM narrative.
+
+    ADR-0019 §4. A per-device Markdown template is filled with deterministic,
+    verbatim fact tables (devices/interfaces/neighbors/routes); the LLM writes
+    ONLY the narrative sections (Overview, Operational Procedures), grounded in
+    those facts and instructed to cite them.
+
+    **SECURITY-CRITICAL (A9 / ADR-0017 §3).** Every grounding fact — into the
+    template tables AND into the model prompt — is redacted via the A9 layer
+    (:func:`~app.llm.redaction.redact_prompt`) before use, so no secret value
+    (SNMP community, enable secret, key) reaches the provider. The provider is
+    resolved from the D9 registry (:func:`~app.llm.providers.get_chat_model`,
+    ``local`` default), itself wrapped in the redacting model as a second,
+    bypass-proof line of defence.
+
+    Returns a JSON string with the ``Document`` fields (ADR-0019 §1): ``kind``
+    (``"runbook"``), ``format`` (``"md"``), ``title``, ``content``, and
+    ``source_refs`` (the device id). The caller persists it as a ``documents``
+    row and embeds it via the T8 pipeline. Read-only — no device or DB write.
+    """
+    from app.llm.providers import get_chat_model
+
+    model = get_chat_model()
+    payload = await render_runbook(
+        device,
+        interfaces,
+        neighbors,
+        routes,
+        model=model,
+        topology=topology,
+    )
+    return json.dumps(payload)
+
+
+# ---------------------------------------------------------------------------
 # Public surface for the agent package
 # ---------------------------------------------------------------------------
 
-#: All Documentation Agent tools registered for M4 (T10 inventory, T11 diagram).
-#: T12 (generate_runbook) extends this list.
+#: All Documentation Agent tools registered for M4 (T10 inventory, T11 diagram,
+#: T12 runbook).
 DOCUMENTATION_TOOLS = [
     generate_inventory,
     generate_diagram,
+    generate_runbook,
 ]
 
 __all__ = [
     "DOCUMENTATION_TOOLS",
     "generate_diagram",
     "generate_inventory",
+    "generate_runbook",
+    "render_runbook",
 ]
