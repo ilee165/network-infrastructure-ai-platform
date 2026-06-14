@@ -26,6 +26,7 @@ produces is linked back to the session by a dedicated audit entry whose
 from __future__ import annotations
 
 import asyncio
+import inspect
 import secrets
 import time
 import uuid
@@ -37,6 +38,7 @@ from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app import db
 from app.agents import build_default_supervisor
 from app.agents.framework.supervisor import SupervisorState
 from app.agents.framework.traces import ReasoningTrace, TraceStep
@@ -49,7 +51,8 @@ from app.api.deps import (
 from app.core.config import Settings
 from app.core.errors import AuthError, NotFoundError
 from app.core.security import Role, decode_access_token
-from app.llm.providers import get_chat_model_for_role
+from app.llm.providers import get_chat_model
+from app.llm.runtime_settings import effective_profile_for_role
 from app.models import AgentSession, AgentSessionStatus, ReasoningTraceRow, User
 from app.schemas.agents_api import (
     AgentSessionRead,
@@ -107,7 +110,7 @@ _ticket_store: dict[str, tuple[uuid.UUID, uuid.UUID, float]] = {}
 SupervisorGraph = CompiledStateGraph[SupervisorState, None, SupervisorState, SupervisorState]
 
 
-def build_supervisor_for_role(
+async def build_supervisor_for_role(
     role: Role,
     settings: Settings,
     *,
@@ -116,11 +119,15 @@ def build_supervisor_for_role(
     """Compile the default supervisor graph for an invoking *role* (DI seam).
 
     Selects the reasoning-tier chat model via the multi-LLM provider registry
-    (ADR-0009 — never instantiates a provider class directly) and compiles the
-    Master Architect supervisor over the default routable specialist set. Tests
-    override :func:`get_supervisor_builder` to inject a scripted model instead.
+    (ADR-0009 — never instantiates a provider class directly). The reasoning
+    *profile* is resolved at runtime from the single ``system_settings`` row
+    (DB over env, env fallback when the row is absent or the field is null);
+    provider API keys and the Ollama endpoint stay env-only. Tests override
+    :func:`get_supervisor_builder` to inject a scripted model instead.
     """
-    llm: BaseChatModel = get_chat_model_for_role("reasoning", settings)
+    async with db.get_sessionmaker()() as session:
+        profile = await effective_profile_for_role(session, "reasoning", settings)
+    llm: BaseChatModel = get_chat_model(profile, settings, _role="reasoning")
     return build_default_supervisor(llm, trace_recorder=trace_recorder)  # type: ignore[arg-type]
 
 
@@ -287,6 +294,11 @@ async def start_session(
 
     recorder = service.recorder_for(run_session.id)
     graph = builder(role, settings, trace_recorder=recorder)  # type: ignore[operator]
+    # The production builder is async (it consults the DB-backed LLM settings at
+    # runtime); the test DI seam stays a plain sync function. Await only when the
+    # builder actually returned a coroutine so both shapes work unchanged.
+    if inspect.isawaitable(graph):
+        graph = await graph
     state = await service.run(
         graph,
         body.intent,
