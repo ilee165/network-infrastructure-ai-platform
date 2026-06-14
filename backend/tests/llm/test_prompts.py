@@ -44,6 +44,28 @@ class TestSupervisorRoutingPrompt:
         assert SUPERVISOR_ROUTING_PROMPT_ID in ids
 
 
+class TestRoutingPromptV3:
+    def test_v3_is_the_latest_routing_prompt(self) -> None:
+        latest = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)
+        assert latest.version == 3
+
+    def test_v3_keeps_specialists_placeholder(self) -> None:
+        # The supervisor fills {specialists}; losing it would break routing.
+        assert "{specialists}" in get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text
+
+    def test_v3_disambiguates_diagnosis_from_enumeration(self) -> None:
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text.lower()
+        assert "troubleshooting" in text
+        assert "discovery" in text
+        assert "why" in text  # symptom/"wants to know why" rule
+        assert "enumerat" in text  # discovery = enumeration rule
+        assert "routing table" in text  # the exact phrase that mis-routed
+
+    def test_v1_and_v2_still_registered_immutable(self) -> None:
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 1).version == 1
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 2).version == 2
+
+
 class TestRegistryBehavior:
     def test_get_unknown_prompt_id_raises_not_found(self) -> None:
         with pytest.raises(NotFoundError):
