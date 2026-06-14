@@ -47,7 +47,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 from uuid import UUID
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm.redaction import redact_prompt
@@ -83,7 +83,7 @@ class Embedder(Protocol):
     provider call; tests inject a deterministic fake.
     """
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         """Return one embedding vector per text in *texts*, order-preserved."""
         ...
 
@@ -105,16 +105,21 @@ class OllamaEmbedder:
         self._model = model
         self._base_url = base_url
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """Embed *texts* via Ollama after A9 redaction of each string."""
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        """Embed *texts* via Ollama after A9 redaction of each string.
+
+        Uses ``aembed_documents`` (the async Ollama client method) so the
+        HTTP round-trip is never blocking on the event loop — fixing the
+        sync-in-async stall that would occur with ``embed_documents``.
+        """
         from langchain_ollama import OllamaEmbeddings
 
         from app.core.config import get_settings
 
         base_url = self._base_url if self._base_url is not None else get_settings().ollama_base_url
         client = OllamaEmbeddings(model=self._model, base_url=base_url)
-        redacted = [redact_prompt(text) for text in texts]
-        return client.embed_documents(list(redacted))
+        redacted = [redact_prompt(t) for t in texts]
+        return await client.aembed_documents(list(redacted))
 
 
 def get_default_embedder() -> Embedder:
@@ -191,15 +196,81 @@ def _split_rows(content: str) -> list[str]:
     return [f"{header}\n{row}" for row in rows]
 
 
-def _split_mermaid(content: str) -> list[str]:
-    """Split Mermaid source into one chunk per non-empty statement line.
+_MERMAID_DIRECTIVE_PREFIXES = (
+    "graph ",
+    "graph\t",
+    "flowchart ",
+    "flowchart\t",
+    "sequenceDiagram",
+    "classDiagram",
+    "stateDiagram",
+    "erDiagram",
+    "journey",
+    "gantt",
+    "pie",
+    "gitGraph",
+    "mindmap",
+    "timeline",
+    "xychart",
+    "block-beta",
+    "quadrantChart",
+    "requirementDiagram",
+    "c4Context",
+    "c4Container",
+    "c4Component",
+    "c4Dynamic",
+    "c4Deployment",
+    "sankey-beta",
+    "packet-beta",
+)
 
-    Each node/edge statement is its own chunk so a topology query can retrieve
-    the exact relationship line; blank lines and the bare ``graph``/``flowchart``
-    directive header are kept with the first statement chunk for context.
+
+def _split_mermaid(content: str) -> list[str]:
+    """Split Mermaid source into one self-describing chunk per statement line.
+
+    The graph directive header (e.g. ``graph TD``, ``flowchart LR``,
+    ``sequenceDiagram``) is parsed out and then **prepended to every
+    subsequent statement chunk** so each retrieved chunk carries enough
+    context to be interpreted independently without the rest of the diagram.
+    Blank lines are skipped.
+
+    Example::
+
+        graph TD
+          A --> B
+          B --> C
+
+    yields two chunks::
+
+        graph TD
+        A --> B
+
+        graph TD
+        B --> C
     """
     lines = [line.rstrip() for line in content.splitlines() if line.strip()]
-    return lines
+    if not lines:
+        return []
+
+    # Identify the directive header (first line starting with a known keyword).
+    header: str | None = None
+    statement_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if header is None and any(stripped.startswith(p) for p in _MERMAID_DIRECTIVE_PREFIXES):
+            header = stripped
+        else:
+            statement_lines.append(stripped)
+
+    if header is None:
+        # No recognised directive; fall back to returning each non-blank line.
+        return lines
+
+    if not statement_lines:
+        # Only the directive line itself.
+        return [header]
+
+    return [f"{header}\n{stmt}" for stmt in statement_lines]
 
 
 def chunk_document(document: Document) -> list[Chunk]:
@@ -261,7 +332,7 @@ async def embed_document(
         )
         return []
 
-    vectors = used_embedder.embed([chunk.text for chunk in chunks])
+    vectors = await used_embedder.embed([chunk.text for chunk in chunks])
     if len(vectors) != len(chunks):
         raise ValueError(f"embedder returned {len(vectors)} vectors for {len(chunks)} chunks")
 
@@ -336,8 +407,49 @@ async def retrieve(
         raise ValueError(f"top_k must be positive, got {top_k}")
 
     used_embedder = embedder if embedder is not None else get_default_embedder()
-    query_vector = _to_vector(used_embedder.embed([query])[0])
+    query_vector = _to_vector((await used_embedder.embed([query]))[0])
 
+    # Determine the backend dialect to choose the retrieval strategy.
+    # On PostgreSQL: delegate ranking to the pgvector HNSW/cosine index using
+    # the ``<=>`` (cosine distance) operator and ORDER BY ... LIMIT top_k so
+    # the index is actually used (O(log N) via HNSW), fulfilling ADR-0019 §6.
+    # On SQLite (unit-test / dev fallback): full Python cosine ranking over all
+    # rows — acceptable because the table is small and pgvector is unavailable.
+    dialect_name: str = ""
+    if session.bind is not None:
+        dialect_name = session.bind.dialect.name
+
+    if dialect_name == "postgresql":
+        # Serialize query vector as a PostgreSQL ARRAY literal understood by the
+        # pgvector cast.  The ``<=>`` operator returns cosine *distance*
+        # (0 = identical, 2 = opposite), so we convert to similarity as
+        # ``1 - distance`` for a consistent score in [−1, 1].
+        qv_literal = "[" + ",".join(str(v) for v in query_vector) + "]"
+        stmt = text(
+            "SELECT e.id, e.document_id, e.chunk_index, e.chunk_text, e.embedding,"
+            "       d.id AS doc_id, d.title, d.kind,"
+            "       (1.0 - (e.embedding <=> CAST(:qv AS vector))) AS score"
+            " FROM embeddings e"
+            " JOIN documents d ON d.id = e.document_id"
+            " ORDER BY e.embedding <=> CAST(:qv AS vector)"
+            " LIMIT :limit"
+        )
+        raw_rows = (await session.execute(stmt, {"qv": qv_literal, "limit": top_k})).all()
+        return [
+            RetrievedChunk(
+                chunk_index=row.chunk_index,
+                chunk_text=row.chunk_text,
+                score=float(row.score),
+                citation=Citation(
+                    document_id=row.document_id,
+                    title=row.title,
+                    kind=DocumentKind(row.kind),
+                ),
+            )
+            for row in raw_rows
+        ]
+
+    # SQLite / fallback: Python cosine ranking (no pgvector operators).
     rows = (
         await session.execute(
             select(Embedding, Document).join(Document, Embedding.document_id == Document.id)

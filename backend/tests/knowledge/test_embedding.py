@@ -68,7 +68,7 @@ class FakeEmbedder:
     def __init__(self) -> None:
         self.seen: list[str] = []
 
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         self.seen.extend(texts)
         return [self._vector(text) for text in texts]
 
@@ -123,14 +123,33 @@ async def test_chunk_csv_carries_header_per_row(session: AsyncSession) -> None:
 
 
 async def test_chunk_mermaid_splits_per_statement(session: AsyncSession) -> None:
+    """Each statement chunk must independently carry the directive header.
+
+    Previously _split_mermaid emitted the bare directive line as its own orphan
+    chunk, leaving statement chunks without context.  Now every chunk must start
+    with the header so a retrieved chunk is self-describing (ADR-0019 §6).
+    """
     content = "graph TD\n  A --> B\n  B --> C\n"
     document = await _make_document(
         session, kind=DocumentKind.DIAGRAM, fmt=DocumentFormat.MERMAID, content=content
     )
     chunks = chunk_document(document)
     texts = [c.text for c in chunks]
-    assert "A --> B" in "\n".join(texts)
-    assert "B --> C" in "\n".join(texts)
+
+    # Two statement chunks, not three (no bare-directive orphan chunk).
+    assert len(chunks) == 2
+
+    # Each individual chunk must contain the directive and its statement.
+    assert all("graph TD" in t for t in texts), (
+        "Every Mermaid chunk must independently contain the directive header"
+    )
+    assert any("A --> B" in t for t in texts)
+    assert any("B --> C" in t for t in texts)
+
+    # The directive must not appear as a standalone chunk (no orphan).
+    assert not any(t.strip() == "graph TD" for t in texts), (
+        "Bare directive must not appear as its own chunk"
+    )
 
 
 async def test_chunk_empty_document_yields_no_chunks(session: AsyncSession) -> None:
@@ -263,7 +282,9 @@ async def test_default_embedder_redacts_before_provider_call(monkeypatch: Any) -
     """The default embedder routes every text through A9 redaction (ADR-0017 §3).
 
     A secret-bearing string must reach the provider already redacted; we stub the
-    Ollama client to capture exactly what it was handed.
+    Ollama client to capture exactly what it was handed.  The stub exposes
+    ``aembed_documents`` (async) because OllamaEmbedder.embed() now calls the
+    async method to avoid blocking the event loop (finding 1 fix).
     """
     captured: dict[str, list[str]] = {}
 
@@ -271,7 +292,7 @@ async def test_default_embedder_redacts_before_provider_call(monkeypatch: Any) -
         def __init__(self, **_: Any) -> None:
             pass
 
-        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
             captured["texts"] = texts
             return [[0.0] * EMBEDDING_DIM for _ in texts]
 
@@ -280,7 +301,7 @@ async def test_default_embedder_redacts_before_provider_call(monkeypatch: Any) -
     monkeypatch.setattr(langchain_ollama, "OllamaEmbeddings", _StubOllamaEmbeddings)
 
     secret_line = "username admin password Sup3rSecret!"
-    OllamaEmbedder(base_url="http://localhost:11434").embed([secret_line])
+    await OllamaEmbedder(base_url="http://localhost:11434").embed([secret_line])
 
     assert "texts" in captured
     sent = captured["texts"][0]
