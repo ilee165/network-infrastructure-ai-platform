@@ -78,10 +78,17 @@ _ROUTE_COLS = ["device_id", "prefix", "protocol", "next_hop", "interface", "vrf"
 
 
 def _cell(value: Any) -> str:
-    """Render a cell value as a non-None string (empty string for None/missing)."""
+    """Render a cell value as a non-None string (empty string for None/missing).
+
+    Pipe characters are escaped as ``\\|`` so that a GFM parser reconstructing
+    the table always sees the correct column count (ADR-0019 §2 round-trip
+    equality: a literal ``|`` in a field value — e.g. an interface description
+    like "WAN | core uplink" or a Cisco banner — must not produce an extra GFM
+    column). The CSV path is unaffected; stdlib ``DictWriter`` handles quoting.
+    """
     if value is None:
         return ""
-    return str(value)
+    return str(value).replace("|", r"\|")
 
 
 def _md_table(cols: list[str], rows: list[dict[str, Any]]) -> str:

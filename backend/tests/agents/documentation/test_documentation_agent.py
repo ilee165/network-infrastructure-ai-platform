@@ -451,6 +451,93 @@ class TestRoundTripEquality:
             assert device["hostname"] in content, f"hostname {device['hostname']!r} missing in CSV"
             assert device["mgmt_ip"] in content, f"mgmt_ip {device['mgmt_ip']!r} missing in CSV"
 
+    async def test_pipe_in_description_escaped_in_markdown(self) -> None:
+        """ADR-0019 §2 round-trip: pipe chars in field values must be escaped.
+
+        A description like 'WAN | core uplink' contains a literal '|' that
+        would otherwise break the GFM table structure. The renderer must escape
+        it as '\\|' so GFM parsers see the correct column count. The escaped
+        form '\\|' must appear in the Markdown output so the value is
+        recoverable (round-trip equality), and each non-header row must produce
+        exactly len(_DEVICE_COLS) + 2 pipe-delimited fields (the two border
+        pipes on either side of the row).
+        """
+        from app.agents.documentation.tools import _DEVICE_COLS
+
+        pipe_device = {
+            "id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "hostname": "pipe-test",
+            "mgmt_ip": "192.0.2.1",
+            "vendor_id": "cisco_ios",
+            "model": "ISR4331",
+            "os_version": "16.9.4",
+            "serial": "FDO2001X001",
+            "status": "reachable",
+            "site": "WAN | core uplink",  # pipe in a field value
+        }
+        raw = await generate_inventory.ainvoke(
+            {
+                "devices": [pipe_device],
+                "interfaces": [],
+                "neighbors": [],
+                "routes": [],
+                "fmt": "md",
+            }
+        )
+        content = json.loads(raw)["content"]
+
+        # (a) The escaped form must be present so the value is round-trippable.
+        assert r"WAN \| core uplink" in content, (
+            "pipe character in field value must be escaped as '\\|' in Markdown output"
+        )
+
+        # (b) Each non-header, non-separator row in the Devices section must
+        #     split on unescaped '|' into exactly len(_DEVICE_COLS) + 2 fields.
+        expected_field_count = len(_DEVICE_COLS) + 2
+        devices_section = content.split("## Devices")[1].split("##")[0]
+        md_rows = [
+            line
+            for line in devices_section.splitlines()
+            if line.startswith("|") and "---" not in line and line.strip() != "|"
+        ]
+        # Skip the header row (first); check data rows.
+        data_rows = md_rows[1:]
+        assert data_rows, "expected at least one data row in the Devices section"
+        for row in data_rows:
+            # Split on bare '|' (not preceded by backslash).
+            import re
+
+            fields = re.split(r"(?<!\\)\|", row)
+            assert len(fields) == expected_field_count, (
+                f"row has {len(fields)} pipe-fields, expected {expected_field_count}: {row!r}"
+            )
+
+    async def test_pipe_in_interface_description_escaped_in_markdown(self) -> None:
+        """A pipe in an interface description field must be escaped in GFM output."""
+        pipe_iface = {
+            "device_id": DEVICE_A,
+            "name": "GigabitEthernet0/1",
+            "description": "WAN | core uplink",
+            "admin_status": "up",
+            "oper_status": "up",
+            "ip_address": "198.51.100.1/30",
+            "mac_address": "00:aa:bb:cc:dd:ee",
+            "speed_mbps": 1000,
+        }
+        raw = await generate_inventory.ainvoke(
+            {
+                "devices": _DEVICES,
+                "interfaces": [pipe_iface],
+                "neighbors": [],
+                "routes": [],
+                "fmt": "md",
+            }
+        )
+        content = json.loads(raw)["content"]
+        assert r"WAN \| core uplink" in content, (
+            "pipe character in interface description must be escaped as '\\|' in Markdown"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Scope filters — site / vendor
