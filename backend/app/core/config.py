@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     #: Ollama endpoint — compose service ``ollama`` under the "local-llm" profile.
     ollama_base_url: str = "http://ollama:11434"
 
+    #: Ollama model tag for the ``local`` profile (``NETOPS_LLM_LOCAL_MODEL``).
+    #: Operators pick the pulled model without editing code; the default matches
+    #: the historical baked-in choice so unset deployments are unchanged.
+    llm_local_model: str = "llama3.1:8b"
+
     #: Allowed browser origins; set via a JSON list, e.g. ``["https://ops.example.com"]``.
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 

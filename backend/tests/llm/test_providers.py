@@ -50,7 +50,15 @@ class TestProfileSelection:
         inner = _inner(get_chat_model("local", settings))
         assert isinstance(inner, ChatOllama)
         assert inner.base_url == settings.ollama_base_url
-        assert inner.model == DEFAULT_MODELS["local"]
+        assert inner.model == settings.llm_local_model
+        # The default settings value matches the historical baked-in choice.
+        assert settings.llm_local_model == DEFAULT_MODELS["local"]
+
+    def test_local_model_honors_settings_override(self, settings: Settings) -> None:
+        overridden = settings.model_copy(update={"llm_local_model": "qwen3.5:2b"})
+        inner = _inner(get_chat_model("local", overridden))
+        assert isinstance(inner, ChatOllama)
+        assert inner.model == "qwen3.5:2b"
 
     def test_profile_defaults_to_settings_llm_profile(self, settings: Settings) -> None:
         assert settings.llm_profile == "local"

@@ -160,7 +160,14 @@ def get_chat_model(
         raise LLMProfileError(
             f"unknown LLM profile {selected!r}; known profiles: {', '.join(KNOWN_PROFILES)}"
         )
-    model_name = model if model is not None else DEFAULT_MODELS[selected]
+    if model is not None:
+        model_name = model
+    elif selected == "local":
+        # The local Ollama model is operator-configurable (NETOPS_LLM_LOCAL_MODEL)
+        # so picking a pulled model never requires a code change.
+        model_name = resolved_settings.llm_local_model
+    else:
+        model_name = DEFAULT_MODELS[selected]
     if selected != "local":
         # ADR-0009 Decision 3: selecting an external profile means data may
         # leave the deployment, so it is an auditable event. The sink defaults
