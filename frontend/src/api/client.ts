@@ -7,10 +7,33 @@
  * instances carrying that document; bodies that are not valid problem
  * documents (e.g. an HTML page from a proxy) are normalized into a synthetic
  * problem so callers always observe one error shape.
+ *
+ * Auth (Auth & Account UI, F1): every request injects the in-memory access
+ * token from the auth store as `Authorization: Bearer <token>`. On a 401 the
+ * client performs EXACTLY ONE silent `POST /auth/refresh` (the HttpOnly refresh
+ * cookie travels automatically; no Authorization header is sent), then retries
+ * the original request once with the freshly minted token. If the refresh fails
+ * the store is set anonymous and the browser is redirected to `/login`. The
+ * refresh call itself never triggers a nested refresh, and the original request
+ * is retried at most once — there is no refresh loop.
  */
+
+import { useAuthStore } from "../stores/auth";
 
 /** Versioned API prefix; the dev server proxies it to the FastAPI backend. */
 export const API_BASE = "/api/v1";
+
+/** Path (relative to {@link API_BASE}) of the silent token-refresh endpoint. */
+export const REFRESH_PATH = "/auth/refresh";
+
+/** Where an unrecoverable auth failure sends the browser. */
+const LOGIN_PATH = "/login";
+
+/** Shape of the backend `{ access_token, token_type }` token responses. */
+interface TokenResponse {
+  access_token: string;
+  token_type: string;
+}
 
 /** RFC 7807 problem-details document produced by the backend error handlers. */
 export interface ProblemDetails {
@@ -76,25 +99,95 @@ async function toApiError(response: Response, path: string): Promise<ApiError> {
 }
 
 /**
- * Perform a JSON request against the versioned API.
- *
- * @param path - Path relative to `/api/v1`, starting with `/` (e.g. `/health/ready`).
- * @param init - Standard `fetch` options; JSON headers are applied automatically.
- * @returns The parsed JSON body, typed as `T` (`undefined` for 204 responses).
- * @throws {ApiError} For any non-2xx response.
+ * Issue a single request — base headers + optional Bearer — and return the raw
+ * `Response`. No retry/refresh logic lives here; this is the one place the
+ * network is touched so the refresh path can reuse it without recursing.
  */
-export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function rawFetch(
+  path: string,
+  init: RequestInit,
+  options: { withAuth: boolean },
+): Promise<Response> {
   const headers: Record<string, string> = {
     Accept: "application/json, application/problem+json",
     ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}),
     ...(init.headers as Record<string, string> | undefined),
   };
-  const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
-  if (!response.ok) {
-    throw await toApiError(response, path);
+  if (options.withAuth) {
+    const token = useAuthStore.getState().accessToken;
+    if (token !== null) {
+      headers.Authorization = `Bearer ${token}`;
+    }
   }
+  return fetch(`${API_BASE}${path}`, { ...init, headers });
+}
+
+/** Parse a successful `Response` into `T` (`undefined` for 204). */
+async function parse<T>(response: Response): Promise<T> {
   if (response.status === 204) {
     return undefined as unknown as T;
   }
   return (await response.json()) as T;
+}
+
+/**
+ * Attempt exactly one silent token refresh. The HttpOnly refresh cookie is sent
+ * automatically by the browser; no Authorization header is attached and this
+ * call NEVER triggers another refresh on its own 401. Returns the new access
+ * token on success, or `null` when the refresh itself fails.
+ */
+async function attemptRefresh(): Promise<string | null> {
+  let response: Response;
+  try {
+    response = await rawFetch(REFRESH_PATH, { method: "POST" }, { withAuth: false });
+  } catch {
+    return null; // Network error — treat as a failed refresh.
+  }
+  if (!response.ok) {
+    return null;
+  }
+  try {
+    const body = (await response.json()) as TokenResponse;
+    useAuthStore.getState().setToken(body.access_token);
+    return body.access_token;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Perform a JSON request against the versioned API, with silent token refresh.
+ *
+ * @param path - Path relative to `/api/v1`, starting with `/` (e.g. `/health/ready`).
+ * @param init - Standard `fetch` options; JSON headers are applied automatically.
+ * @returns The parsed JSON body, typed as `T` (`undefined` for 204 responses).
+ * @throws {ApiError} For any non-2xx response (after the single refresh+retry).
+ */
+export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  // The refresh endpoint is exempt from the refresh-on-401 dance: refreshing a
+  // refresh would recurse, and its 401 simply means the session is dead.
+  const isRefreshCall = path === REFRESH_PATH;
+
+  const response = await rawFetch(path, init, { withAuth: true });
+  if (response.ok) {
+    return parse<T>(response);
+  }
+  if (response.status !== 401 || isRefreshCall) {
+    throw await toApiError(response, path);
+  }
+
+  // 401 on a normal request: try exactly one refresh, then retry once.
+  const token = await attemptRefresh();
+  if (token === null) {
+    useAuthStore.getState().setAnon();
+    globalThis.location.assign(LOGIN_PATH);
+    throw await toApiError(response, path);
+  }
+
+  const retried = await rawFetch(path, init, { withAuth: true });
+  if (retried.ok) {
+    return parse<T>(retried);
+  }
+  // Do NOT refresh again — a second 401 ends the attempt (no loop).
+  throw await toApiError(retried, path);
 }
