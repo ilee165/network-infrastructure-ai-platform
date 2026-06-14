@@ -155,8 +155,10 @@ describe("UsersPage — user table", () => {
     expect(screen.getByText("admin@example.com")).toBeInTheDocument();
     expect(screen.getByText("viewer@example.com")).toBeInTheDocument();
 
-    // viewer role appears in the viewer1 row's role select value
-    expect(screen.getByText("viewer@example.com")).toBeInTheDocument();
+    // viewer role appears as the value of the viewer1 row's role select (index 1)
+    expect(
+      (screen.getAllByLabelText(/change role/i)[1] as HTMLSelectElement).value,
+    ).toBe("viewer");
   });
 
   it("shows all required column headers", async () => {
@@ -249,6 +251,10 @@ describe("UsersPage — create user", () => {
 
     // Copy button is present
     expect(screen.getByRole("button", { name: /copy/i })).toBeInTheDocument();
+
+    // Clicking Done removes the password — proves "exactly once"
+    fireEvent.click(screen.getByRole("button", { name: /done/i }));
+    expect(screen.queryByText("TempPass-abc123XYZ")).not.toBeInTheDocument();
   });
 
   it("calls POST /auth/users with the correct payload", async () => {
