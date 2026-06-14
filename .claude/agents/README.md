@@ -14,6 +14,7 @@ Established 2026-06-11 during the M1 build (see the vault Decisions note,
 |------------------------|------------------|------------|---------|
 | `wf-implementer`       | inherit (strong) | all        | Core/novel implementation: crypto, auth, transports, engines, APIs |
 | `wf-implementer-light` | sonnet           | all        | Template-following work: a plugin mirroring a certified one, standard CRUD/UI |
+| `wf-eval-designer`     | inherit (strong) | all        | Evaluation for an AI-output deliverable: rubrics, reference datasets, deterministic CI evals + opt-in real-LLM manual gates (routing, RAG, grounded generation) |
 | `wf-spec-reviewer`     | sonnet           | read-only* | Spec-compliance review of one committed task |
 | `wf-quality-reviewer`  | sonnet           | read-only* | Correctness/security/convention review of one committed task |
 | `wf-fixer`             | sonnet           | all        | Applying enumerated must-fix review findings |
