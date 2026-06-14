@@ -209,3 +209,81 @@ async def test_service_never_reads_password_hash(session: AsyncSession, secret: 
     # No attribute on the session row exposes the hash.
     assert secret not in repr(created)
     assert not hasattr(created, "password_hash")
+
+
+# ---------------------------------------------------------------------------
+# B3 helpers: ownership-scoped listing + revocation
+# ---------------------------------------------------------------------------
+
+
+async def test_list_for_user_returns_only_owner_rows_newest_first(
+    session: AsyncSession,
+) -> None:
+    alice = await _make_user(session, username="alice")
+    bob = await _make_user(session, username="bob")
+    first = await auth_sessions.create_session(session, user=alice, user_agent=None, ip=None)
+    second = await auth_sessions.create_session(session, user=alice, user_agent=None, ip=None)
+    await auth_sessions.create_session(session, user=bob, user_agent=None, ip=None)
+    # Make the ordering deterministic regardless of clock resolution.
+    first.created_at = utcnow().replace(year=2000)
+
+    rows = await auth_sessions.list_for_user(session, user_id=alice.id)
+
+    assert {r.id for r in rows} == {first.id, second.id}  # bob excluded
+    assert rows[0].id == second.id  # newest first
+
+
+async def test_get_owned_session_ignores_revoked_state_but_enforces_owner(
+    session: AsyncSession,
+) -> None:
+    alice = await _make_user(session, username="alice")
+    bob = await _make_user(session, username="bob")
+    row = await auth_sessions.create_session(session, user=alice, user_agent=None, ip=None)
+    row.revoked_at = utcnow()  # owned but already revoked → still "owned"
+    await session.flush()
+
+    owned = await auth_sessions.get_owned_session(session, sid=row.id, user_id=alice.id)
+    assert owned is not None and owned.id == row.id
+
+    # Not bob's session → None (indistinguishable from "missing").
+    assert await auth_sessions.get_owned_session(session, sid=row.id, user_id=bob.id) is None
+    assert (
+        await auth_sessions.get_owned_session(session, sid=uuid.uuid4(), user_id=alice.id) is None
+    )
+
+
+async def test_revoke_other_sessions_keeps_one_and_counts_revoked(
+    session: AsyncSession,
+) -> None:
+    alice = await _make_user(session, username="alice")
+    keep = await auth_sessions.create_session(session, user=alice, user_agent=None, ip=None)
+    a = await auth_sessions.create_session(session, user=alice, user_agent=None, ip=None)
+    b = await auth_sessions.create_session(session, user=alice, user_agent=None, ip=None)
+
+    revoked = await auth_sessions.revoke_other_sessions_for_user(
+        session, user_id=alice.id, keep_sid=keep.id
+    )
+
+    assert revoked == 2
+    await session.refresh(keep)
+    assert keep.revoked_at is None
+    for row in (a, b):
+        await session.refresh(row)
+        assert row.revoked_at is not None
+
+
+async def test_revoke_other_sessions_with_none_keep_revokes_all(
+    session: AsyncSession,
+) -> None:
+    alice = await _make_user(session, username="alice")
+    a = await auth_sessions.create_session(session, user=alice, user_agent=None, ip=None)
+    b = await auth_sessions.create_session(session, user=alice, user_agent=None, ip=None)
+
+    revoked = await auth_sessions.revoke_other_sessions_for_user(
+        session, user_id=alice.id, keep_sid=None
+    )
+
+    assert revoked == 2
+    for row in (a, b):
+        await session.refresh(row)
+        assert row.revoked_at is not None

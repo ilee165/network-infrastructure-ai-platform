@@ -106,6 +106,42 @@ async def get_current_user(
     return user
 
 
+#: Distinct 403 detail used as a sentinel code: an authenticated, active user
+#: whose ``must_change_password`` flag is still set. The frontend keys off this
+#: exact string to force the change-password flow before anything else.
+PASSWORD_CHANGE_REQUIRED: Final = "password_change_required"
+
+
+def _require_password_current(user: User) -> User:
+    """Raise :class:`ForbiddenError` if *user* still owes a password change.
+
+    Pure (no I/O) so the rule is unit-testable in isolation; the
+    :func:`get_active_user` dependency wraps :func:`get_current_user` around it.
+    """
+    if user.must_change_password:
+        raise ForbiddenError(PASSWORD_CHANGE_REQUIRED)
+    return user
+
+
+async def get_active_user(
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Like :func:`get_current_user`, but also blocks a forced password change.
+
+    Gate the rest of the app with this (not bare :func:`get_current_user`): a
+    user with ``must_change_password`` set is authenticated but may not act
+    until they clear the flag. The self-service escape hatches — ``GET /me``,
+    ``POST /me/password`` and ``POST /logout`` — deliberately keep
+    :func:`get_current_user` so the user can still read their profile, change
+    the password, and log out while flagged.
+
+    Raises:
+        ForbiddenError: (403, detail :data:`PASSWORD_CHANGE_REQUIRED`) when the
+            caller must change their password before proceeding.
+    """
+    return _require_password_current(user)
+
+
 def require_role(minimum: str) -> Callable[..., Coroutine[Any, Any, User]]:
     """Build a dependency enforcing that the caller holds *minimum* rank or above.
 

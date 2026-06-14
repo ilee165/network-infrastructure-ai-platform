@@ -58,6 +58,19 @@ class NetOpsError(Exception):
         return problem
 
 
+class BadRequestError(NetOpsError):
+    """The request is well-formed but semantically invalid (e.g. wrong secret).
+
+    Used where the failure must not leak which input was wrong — the generic
+    400 detail carries no oracle (e.g. a wrong current password on a self-service
+    change).
+    """
+
+    status_code = 400
+    title = "Bad Request"
+    slug = "bad-request"
+
+
 class NotFoundError(NetOpsError):
     """A requested resource does not exist."""
 
