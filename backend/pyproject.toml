@@ -43,6 +43,8 @@ dependencies = [
     # Device transports (D7): SSH CLI + SNMP v2c/v3
     "netmiko",
     "pysnmp",
+    # Declarative compliance policies (M4, ADR-0018): YAML rule documents
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
@@ -125,6 +127,7 @@ module = [
     "pgvector.*",
     "pysnmp.*",
     "textfsm.*",
+    "yaml.*",
 ]
 ignore_missing_imports = true
 
