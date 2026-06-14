@@ -59,19 +59,41 @@ if not os.environ.get(_FLAG):
     )
 
 # (intent, expected specialist). Each must route correctly for the eval to pass.
+#
+# To measure GENERALIZATION rather than in-context echoing, every case below is
+# HELD OUT — a distinct protocol / device / subnet / wording from the few-shot
+# examples baked into ``SUPERVISOR_ROUTING_PROMPT_V3`` — EXCEPT the first, which
+# is intentionally the exact production regression query (it overlaps a few-shot
+# example by design, and asserts that the specific reported bug stays dead). If
+# a case were a verbatim copy of a prompt example, a model could pass it by
+# pattern-matching the demonstration instead of applying the diagnosis-vs-
+# enumeration rule and the sharpened specialist descriptions the route node
+# actually relies on.
 _CASES = [
+    # Exact regression anchor — overlaps a v3 few-shot example on purpose.
     (
         "Why can't guest users on 10.0.99.0/24 reach the internet? Read the routing "
         "table on the edge firewall edge-fw-01.",
         "troubleshooting",
     ),
-    ("Is BGP peer 10.0.0.2 down on edge-1, and why?", "troubleshooting"),
+    # Held-out troubleshooting (none of these appear in the v3 few-shot block):
+    (
+        "core-sw-02 stopped advertising 192.168.40.0/24 to its OSPF neighbor — read "
+        "its routing table and tell me why.",
+        "troubleshooting",
+    ),
     (
         "The OSPF adjacency to core-sw-01 is stuck in EXSTART — what is wrong?",
         "troubleshooting",
     ),
-    ("List all managed devices in the inventory.", "discovery"),
-    ("What devices did the last discovery run find?", "discovery"),
+    (
+        "Tenant VLAN 30 lost connectivity after last night's change; check the "
+        "firewall ACLs to find the cause.",
+        "troubleshooting",
+    ),
+    # Held-out discovery / enumeration (none appear in the v3 few-shot block):
+    ("Show me every Cisco device we currently manage.", "discovery"),
+    ("How many switches are in the inventory right now?", "discovery"),
     ("Show me the LLDP neighbors of core-sw-01.", "discovery"),
 ]
 
