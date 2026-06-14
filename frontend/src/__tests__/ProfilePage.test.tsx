@@ -26,12 +26,13 @@ import { useAuthStore } from "../stores/auth";
 vi.mock("../api/auth", () => ({
   getMe: vi.fn(),
   updateMe: vi.fn(),
+  changePassword: vi.fn(),
   listSessions: vi.fn(),
   revokeSession: vi.fn(),
   revokeAllSessions: vi.fn(),
 }));
 
-import { getMe, updateMe, listSessions, revokeSession, revokeAllSessions } from "../api/auth";
+import { changePassword, getMe, updateMe, listSessions, revokeSession, revokeAllSessions } from "../api/auth";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -92,6 +93,7 @@ beforeEach(() => {
   resetStore();
   vi.mocked(getMe).mockReset();
   vi.mocked(updateMe).mockReset();
+  vi.mocked(changePassword).mockReset();
   vi.mocked(listSessions).mockReset();
   vi.mocked(revokeSession).mockReset();
   vi.mocked(revokeAllSessions).mockReset();
@@ -213,6 +215,94 @@ describe("ProfilePage — sessions list", () => {
     await waitFor(() => {
       expect(revokeAllSessions).toHaveBeenCalled();
     });
+  });
+});
+
+// ── Change-password section ───────────────────────────────────────────────────
+
+describe("ProfilePage — ChangePasswordSection", () => {
+  it("calls changePassword with current/next and then refreshes the store via getMe on success", async () => {
+    vi.mocked(changePassword).mockResolvedValue({ changed: true });
+    const updatedUser: UserMe = { ...BASE_USER, must_change_password: false };
+    vi.mocked(getMe).mockResolvedValue(updatedUser);
+
+    renderPage();
+
+    const currentInput = await screen.findByLabelText(/current password/i);
+    const newInput = screen.getByLabelText(/^new password$/i);
+    const confirmInput = screen.getByLabelText(/confirm new password/i);
+
+    fireEvent.change(currentInput, { target: { value: "oldpass1" } });
+    fireEvent.change(newInput, { target: { value: "newpass123" } });
+    fireEvent.change(confirmInput, { target: { value: "newpass123" } });
+    fireEvent.click(screen.getByRole("button", { name: /change password/i }));
+
+    await waitFor(() => {
+      expect(changePassword).toHaveBeenCalledWith("oldpass1", "newpass123");
+    });
+    await waitFor(() => {
+      expect(getMe).toHaveBeenCalled();
+    });
+    expect(useAuthStore.getState().user).toEqual(updatedUser);
+  });
+
+  it("shows a validation error and does not call changePassword when new password is too short", async () => {
+    renderPage();
+
+    const currentInput = await screen.findByLabelText(/current password/i);
+    const newInput = screen.getByLabelText(/^new password$/i);
+    const confirmInput = screen.getByLabelText(/confirm new password/i);
+
+    fireEvent.change(currentInput, { target: { value: "oldpass1" } });
+    fireEvent.change(newInput, { target: { value: "short" } });
+    fireEvent.change(confirmInput, { target: { value: "short" } });
+    fireEvent.click(screen.getByRole("button", { name: /change password/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/at least 8 characters/i);
+    expect(changePassword).not.toHaveBeenCalled();
+  });
+
+  it("shows a validation error and does not call changePassword when new and confirm do not match", async () => {
+    renderPage();
+
+    const currentInput = await screen.findByLabelText(/current password/i);
+    const newInput = screen.getByLabelText(/^new password$/i);
+    const confirmInput = screen.getByLabelText(/confirm new password/i);
+
+    fireEvent.change(currentInput, { target: { value: "oldpass1" } });
+    fireEvent.change(newInput, { target: { value: "newpass123" } });
+    fireEvent.change(confirmInput, { target: { value: "differentpass" } });
+    fireEvent.click(screen.getByRole("button", { name: /change password/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/do not match/i);
+    expect(changePassword).not.toHaveBeenCalled();
+  });
+});
+
+// ── Current session revoke guard ──────────────────────────────────────────────
+
+describe("ProfilePage — current session revoke guard", () => {
+  it("does not render a Revoke button for the current session row", async () => {
+    vi.mocked(listSessions).mockResolvedValue([SESSION_CURRENT]);
+
+    renderPage();
+
+    // Wait for the session row to appear
+    expect(await screen.findByTestId("session-current")).toBeInTheDocument();
+
+    // No revoke button should be present for the current session
+    expect(screen.queryByRole("button", { name: /^revoke$/i })).not.toBeInTheDocument();
+
+    // The "Current session" label should appear in its place
+    expect(screen.getByText(/current session/i)).toBeInTheDocument();
+  });
+
+  it("renders a Revoke button for a non-current non-revoked session", async () => {
+    vi.mocked(listSessions).mockResolvedValue([SESSION_OTHER]);
+
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: /^revoke$/i })).toBeInTheDocument();
   });
 });
 

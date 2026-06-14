@@ -257,8 +257,10 @@ function SessionRow({
         {new Date(session.last_used_at).toLocaleString()}
       </td>
       <td className="px-4 py-2">
-        {session.revoked_at !== null ? (
-          <span className="text-xs text-zinc-600">Revoked</span>
+        {session.revoked_at !== null || session.is_current ? (
+          <span className="text-xs text-zinc-600">
+            {session.is_current ? "Current session" : "Revoked"}
+          </span>
         ) : (
           <button
             type="button"
