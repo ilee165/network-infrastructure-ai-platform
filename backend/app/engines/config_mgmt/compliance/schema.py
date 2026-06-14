@@ -25,7 +25,7 @@ import re
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 __all__ = [
     "WILDCARD",
@@ -136,6 +136,22 @@ class ModelAssert(_StrictModel):
         if not value.strip():
             raise ValueError("model_assert.model must be a non-empty model name")
         return value
+
+    @model_validator(mode="after")
+    def _count_predicates_require_value(self) -> ModelAssert:
+        """count_* predicates require a non-null integer value (ADR-0018 §2).
+
+        Enforced here so a malformed rule is rejected at policy-load time rather
+        than crashing with an unhandled exception inside the evaluation engine.
+        """
+        _count_predicates = {
+            ModelPredicate.COUNT_EQ,
+            ModelPredicate.COUNT_GTE,
+            ModelPredicate.COUNT_LTE,
+        }
+        if self.predicate in _count_predicates and self.value is None:
+            raise ValueError(f"{self.predicate} requires a non-null integer value, got None")
+        return self
 
 
 Assertion = Annotated[

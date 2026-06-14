@@ -381,3 +381,104 @@ def test_seeded_pack_reports_compliant_device_clean() -> None:
     }
     assert all(f.status is FindingStatus.PASS for f in findings)
     assert not any(f.status is FindingStatus.VIOLATION for f in findings)
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: _as_int double-negative guard (engine.py)
+# ---------------------------------------------------------------------------
+
+
+def test_count_predicate_double_negative_value_raises_structured_error() -> None:
+    """'--3' passes the old lstrip('-').isdigit() guard but int('--3') raises
+    ValueError uncaught. The fix must raise a descriptive ValueError instead
+    of propagating a bare int() error through evaluate_policy."""
+    from app.engines.config_mgmt.compliance.engine import _as_int
+
+    with pytest.raises(ValueError, match="integer"):
+        _as_int("--3")
+
+
+def test_count_predicate_double_negative_yaml_value_yields_violation_not_crash() -> None:
+    """An operator YAML rule with value: '--3' (legal YAML) must not crash the
+    entire policy run; instead it should raise a descriptive ValueError from
+    _as_int that the caller can surface, rather than a bare int() traceback."""
+    from app.engines.config_mgmt.compliance.engine import _as_int
+
+    # Verify valid negative integers still work correctly.
+    assert _as_int("-3") == -3
+    assert _as_int(-3) == -3
+
+    # Double-negative must be caught cleanly.
+    with pytest.raises(ValueError, match="integer"):
+        _as_int("--3")
+
+
+# ---------------------------------------------------------------------------
+# Finding 2: ModelAssert count_* value=None validation (schema.py)
+# ---------------------------------------------------------------------------
+
+
+def test_count_eq_with_null_value_rejected_at_schema_load() -> None:
+    """count_eq without a value must be rejected at load time (not crash at eval)."""
+    with pytest.raises(ValidationError, match="count_eq"):
+        load_policy_yaml(
+            """
+            id: p
+            version: 1
+            rules:
+              - id: bad-count
+                severity: violation
+                assert: { type: model_assert, model: ntp_servers, predicate: count_eq }
+            """
+        )
+
+
+def test_count_gte_with_null_value_rejected_at_schema_load() -> None:
+    """count_gte without a value must be rejected at load time."""
+    with pytest.raises(ValidationError, match="count_gte"):
+        load_policy_yaml(
+            """
+            id: p
+            version: 1
+            rules:
+              - id: bad-count
+                severity: violation
+                assert: { type: model_assert, model: ntp_servers, predicate: count_gte }
+            """
+        )
+
+
+def test_count_lte_with_null_value_rejected_at_schema_load() -> None:
+    """count_lte without a value must be rejected at load time."""
+    with pytest.raises(ValidationError, match="count_lte"):
+        load_policy_yaml(
+            """
+            id: p
+            version: 1
+            rules:
+              - id: bad-count
+                severity: violation
+                assert: { type: model_assert, model: ntp_servers, predicate: count_lte }
+            """
+        )
+
+
+def test_count_predicates_with_valid_value_still_parse() -> None:
+    """Ensure the new validator does not accidentally reject valid count rules."""
+    policy = load_policy_yaml(
+        """
+        id: p
+        version: 1
+        rules:
+          - id: ntp-count-eq
+            severity: info
+            assert: { type: model_assert, model: ntp_servers, predicate: count_eq, value: 1 }
+          - id: ntp-count-gte
+            severity: info
+            assert: { type: model_assert, model: ntp_servers, predicate: count_gte, value: 1 }
+          - id: ntp-count-lte
+            severity: info
+            assert: { type: model_assert, model: ntp_servers, predicate: count_lte, value: 5 }
+        """
+    )
+    assert len(policy.rules) == 3

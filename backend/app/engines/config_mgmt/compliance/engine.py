@@ -188,13 +188,21 @@ def _eval_model_assert(assertion: ModelAssert, device: DeviceContext) -> tuple[b
 
 
 def _as_int(value: int | str | None) -> int:
-    """Coerce a count predicate's ``value`` to ``int`` (schema guarantees set)."""
+    """Coerce a count predicate's ``value`` to ``int`` (schema guarantees set).
+
+    Uses ``try/except`` around ``int()`` directly rather than a string-inspection
+    guard: the old ``lstrip('-').isdigit()`` approach let inputs like ``'--3'``
+    pass the guard while ``int('--3')`` still raised a bare ``ValueError``.
+    """
     if isinstance(value, bool):  # pragma: no cover - bools are not valid counts
         raise TypeError("count predicate value must be an integer, not bool")
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            pass
     raise ValueError(f"count predicate requires an integer value, got {value!r}")
 
 
