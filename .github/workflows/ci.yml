@@ -163,6 +163,11 @@ jobs:
           image-ref: netops-backend:ci
           format: table
           severity: CRITICAL,HIGH
+          # Fail only on CVEs that have a fix available; base-image OS packages
+          # with no upstream patch (Debian fix_deferred/affected) are out of our
+          # control and would otherwise wedge the gate. See
+          # docs/security/2026-06-14-trivy-baseimage-cves.md.
+          ignore-unfixed: true
           exit-code: "1"
 
       - name: Trivy scan (frontend image)
@@ -171,4 +176,5 @@ jobs:
           image-ref: netops-frontend:ci
           format: table
           severity: CRITICAL,HIGH
+          ignore-unfixed: true
           exit-code: "1"
