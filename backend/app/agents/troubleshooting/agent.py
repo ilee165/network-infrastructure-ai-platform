@@ -191,7 +191,10 @@ class TroubleshootingAgent(BaseSpecialistAgent):
             "analysis, BGP peer/session analysis, OSPF adjacency analysis, and ACL "
             "analysis. Route here when the user reports a symptom such as a down BGP "
             "peer, a stuck OSPF adjacency, a missing route, or traffic being dropped, "
-            "and wants to know why. All operations are read-only — no device "
+            "and wants to know why — INCLUDING when answering requires reading a "
+            "device's routing table, BGP/OSPF state, or ACLs to diagnose the fault. "
+            "Reading a device's state to explain a problem is troubleshooting, not "
+            "inventory discovery. All operations are read-only — no device "
             "configuration is modified."
         )
 

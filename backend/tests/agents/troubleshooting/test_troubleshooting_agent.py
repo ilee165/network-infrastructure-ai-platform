@@ -146,6 +146,16 @@ class TestTroubleshootingIdentity:
         assert desc.strip()
         assert any(w in desc for w in ("bgp", "ospf", "acl", "routing", "diagnos"))
 
+    def test_description_claims_reading_state_to_diagnose(self) -> None:
+        """The description must say that READING routing/BGP/OSPF/ACL state to
+        diagnose a fault is troubleshooting, so the router does not mistake
+        'read the routing table to find why' for discovery/enumeration."""
+        desc = _make_agent().description.lower()
+        assert "routing table" in desc
+        assert "diagnos" in desc
+        # Keep the existing on-topic keywords (already asserted elsewhere):
+        assert any(w in desc for w in ("bgp", "ospf", "acl", "routing"))
+
     def test_system_prompt_non_empty(self) -> None:
         assert _make_agent().system_prompt.strip()
 
