@@ -99,12 +99,11 @@ _CASES = [
 
 
 def _routable_roster() -> str:
-    """Build the production routing roster (real specialist descriptions).
-
-    Mirrors ``build_supervisor_graph``: every registered agent except the
-    supervisor itself, formatted as the ``"- {name}: {description}"`` lines the
-    routing prompt's ``{specialists}`` placeholder is filled with. Built from the
-    real composition root so the descriptions under test are the production ones.
+    """
+    Build the roster string of specialists for the routing prompt.
+    
+    Each registered agent except the supervisor is formatted as "- {name}: {description}"
+    and joined with newlines.
     """
     registry = build_default_registry()
     agents = [agent for agent in registry.list() if agent.name != SUPERVISOR_NAME]
@@ -113,6 +112,13 @@ def _routable_roster() -> str:
 
 @pytest.mark.parametrize(("intent", "expected"), _CASES)
 async def test_routing_picks_expected_specialist(intent: str, expected: str) -> None:
+    """
+    Verify the supervisor routing node selects the expected specialist for a given intent.
+    
+    Parameters:
+        intent: A user query to evaluate for routing.
+        expected: The specialist name that should handle the intent.
+    """
     settings = Settings()  # reads NETOPS_LLM_LOCAL_MODEL / profile from env
     llm = get_chat_model("local", settings)
     prompt = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)  # latest registered (v3)

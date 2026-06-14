@@ -186,6 +186,12 @@ class TroubleshootingAgent(BaseSpecialistAgent):
 
     @property
     def description(self) -> str:
+        """
+        Provide the agent's external description of its purpose and scope.
+        
+        Returns:
+            str: A description of the troubleshooting agent's domains (routing, BGP, OSPF, ACL) and read-only nature.
+        """
         return (
             "Diagnoses network control-plane and data-plane problems: routing "
             "analysis, BGP peer/session analysis, OSPF adjacency analysis, and ACL "
