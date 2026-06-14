@@ -1,29 +1,64 @@
 /**
- * Route table: wires the Layout shell (sidebar + header) to the six M0 pages.
- * Paths mirror the sidebar entries in components/Layout.tsx; unknown paths
- * redirect to the dashboard.
+ * Route table (Auth & Account UI, F2): the auth gate, the Layout shell, and the
+ * pages.
+ *
+ * Structure:
+ *  - Public, ungated: ``/login`` and ``/change-password``. ``/change-password``
+ *    MUST stay reachable while ``must_change_password`` is set, so it lives
+ *    outside ``ProtectedRoute`` (``ProtectedRoute`` itself redirects a flagged
+ *    user *to* it).
+ *  - Everything else sits under ``ProtectedRoute`` (auth + forced-change gate)
+ *    and then the ``Layout`` shell. Admin-only surfaces — ``/users`` — are
+ *    additionally wrapped in ``RoleRoute("admin")`` as defense-in-depth; the
+ *    backend ``require_role`` remains the source of truth.
+ *
+ * The existing M0 pages keep their paths; unknown paths redirect to the
+ * dashboard.
  */
 
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Layout } from "./components/Layout";
+import { ProtectedRoute } from "./components/ProtectedRoute";
+import { RoleRoute } from "./components/RoleRoute";
 import { AuditPage } from "./pages/AuditPage";
+import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { ChangesPage } from "./pages/ChangesPage";
 import { ChatPage } from "./pages/ChatPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DevicesPage } from "./pages/DevicesPage";
+import { LoginPage } from "./pages/LoginPage";
+import { ProfilePage } from "./pages/ProfilePage";
+import { SettingsPage } from "./pages/SettingsPage";
 import { TopologyPage } from "./pages/TopologyPage";
+import { UsersPage } from "./pages/UsersPage";
 
 export function App() {
   return (
     <Routes>
-      <Route element={<Layout />}>
-        <Route index element={<DashboardPage />} />
-        <Route path="devices" element={<DevicesPage />} />
-        <Route path="topology" element={<TopologyPage />} />
-        <Route path="chat" element={<ChatPage />} />
-        <Route path="changes" element={<ChangesPage />} />
-        <Route path="audit" element={<AuditPage />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
+      {/* Public — reachable without auth. /change-password is also the forced
+          first-login destination, so it must live outside the gate. */}
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/change-password" element={<ChangePasswordPage />} />
+
+      {/* Everything else: auth + forced-change gate, then the app shell. */}
+      <Route element={<ProtectedRoute />}>
+        <Route element={<Layout />}>
+          <Route index element={<DashboardPage />} />
+          <Route path="devices" element={<DevicesPage />} />
+          <Route path="topology" element={<TopologyPage />} />
+          <Route path="chat" element={<ChatPage />} />
+          <Route path="changes" element={<ChangesPage />} />
+          <Route path="audit" element={<AuditPage />} />
+          <Route path="profile" element={<ProfilePage />} />
+          <Route path="settings" element={<SettingsPage />} />
+
+          {/* Admin-only surfaces (defense-in-depth over the backend RBAC). */}
+          <Route element={<RoleRoute minimum="admin" />}>
+            <Route path="users" element={<UsersPage />} />
+          </Route>
+
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Route>
       </Route>
     </Routes>
   );
