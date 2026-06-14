@@ -80,6 +80,44 @@ class TestDiscoveryAgentIdentity:
             f"description does not mention discovery context: {agent.description!r}"
         )
 
+    def test_description_states_diagnosis_boundary(self) -> None:
+        """Discovery must disclaim fault diagnosis so the router does not grab it
+        for troubleshooting questions (regression: routed 'read the routing table
+        to find why X is broken' to discovery instead of troubleshooting)."""
+        desc = _make_agent().description.lower()
+        # Still owns enumeration:
+        assert "inventory" in desc
+        assert "neighbor" in desc
+        # Now explicitly NOT diagnosis:
+        assert "diagnos" in desc  # "not for diagnosing ..."
+        assert "troubleshooting" in desc  # points the router at the right specialist
+
+    def test_description_uses_enumeration_framing(self) -> None:
+        """Description must frame the agent's role as enumeration so the v3
+        routing prompt's 'discovery = enumeration' rule maps cleanly."""
+        desc = _make_agent().description.lower()
+        assert "enumerat" in desc  # "ENUMERATES what exists"
+
+    def test_description_explicitly_not_for_reading_device_state(self) -> None:
+        """Description must explicitly disclaim reading routing/BGP/OSPF/ACL
+        state, since that is what caused the mis-routing regression."""
+        desc = _make_agent().description.lower()
+        # The new text names the specific domains that belong to troubleshooting
+        assert "routing" in desc
+        assert "bgp" in desc or "ospf" in desc or "acl" in desc
+
+    def test_description_redirects_router_to_troubleshooting_specialist(self) -> None:
+        """The description must explicitly name 'troubleshooting' as the right
+        specialist for diagnosis, so the router has a clear redirect target."""
+        desc = _make_agent().description
+        # Case-insensitive check — the actual text uses lowercase "troubleshooting"
+        assert "troubleshooting" in desc.lower()
+
+    def test_description_read_only_claim_present(self) -> None:
+        """Read-only claim must survive after the description update."""
+        desc = _make_agent().description.lower()
+        assert "read-only" in desc or "read only" in desc
+
     def test_system_prompt_is_non_empty(self) -> None:
         agent = _make_agent()
         assert agent.system_prompt.strip(), "system_prompt must not be empty"

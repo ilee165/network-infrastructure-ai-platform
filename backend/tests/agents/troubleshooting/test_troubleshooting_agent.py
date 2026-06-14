@@ -146,6 +146,51 @@ class TestTroubleshootingIdentity:
         assert desc.strip()
         assert any(w in desc for w in ("bgp", "ospf", "acl", "routing", "diagnos"))
 
+    def test_description_claims_reading_state_to_diagnose(self) -> None:
+        """The description must say that READING routing/BGP/OSPF/ACL state to
+        diagnose a fault is troubleshooting, so the router does not mistake
+        'read the routing table to find why' for discovery/enumeration."""
+        desc = _make_agent().description.lower()
+        assert "routing table" in desc
+        assert "diagnos" in desc
+        # Keep the existing on-topic keywords (already asserted elsewhere):
+        assert any(w in desc for w in ("bgp", "ospf", "acl", "routing"))
+
+    def test_description_contrasts_with_inventory_discovery(self) -> None:
+        """Description must explicitly contrast troubleshooting with inventory
+        discovery so the router doesn't mis-classify diagnosis as enumeration."""
+        desc = _make_agent().description.lower()
+        assert "inventory" in desc or "discovery" in desc
+
+    def test_description_claims_bgp_ospf_state_ownership(self) -> None:
+        """The new phrasing 'BGP/OSPF state' must be present — the router uses
+        this to decide that reading peer/adjacency state is troubleshooting."""
+        desc = _make_agent().description.lower()
+        assert "bgp" in desc
+        assert "ospf" in desc
+
+    def test_description_includes_keyword_when_answering_requires_reading(
+        self,
+    ) -> None:
+        """'INCLUDING when answering requires reading' is the key clarifier that
+        guards against the weak-model regression; it must survive."""
+        desc = _make_agent().description
+        assert "INCLUDING" in desc or "including" in desc.lower()
+
+    def test_description_states_reading_acls_to_diagnose_is_troubleshooting(
+        self,
+    ) -> None:
+        """ACLs are named in the new 'reading a device's routing table, BGP/OSPF
+        state, or ACLs to diagnose' phrase — verify the coverage."""
+        desc = _make_agent().description.lower()
+        assert "acl" in desc
+
+    def test_description_read_only_claim_present(self) -> None:
+        """The read-only constraint claim must survive after the description
+        update — removing it would silently violate the agent's contract."""
+        desc = _make_agent().description.lower()
+        assert "read-only" in desc or "read only" in desc
+
     def test_system_prompt_non_empty(self) -> None:
         assert _make_agent().system_prompt.strip()
 

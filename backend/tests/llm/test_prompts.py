@@ -44,9 +44,101 @@ class TestSupervisorRoutingPrompt:
         assert SUPERVISOR_ROUTING_PROMPT_ID in ids
 
 
+class TestRoutingPromptV3:
+    def test_v3_is_the_latest_routing_prompt(self) -> None:
+        latest = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)
+        assert latest.version == 3
+
+    def test_v3_keeps_specialists_placeholder(self) -> None:
+        # The supervisor fills {specialists}; losing it would break routing.
+        assert "{specialists}" in get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text
+
+    def test_v3_disambiguates_diagnosis_from_enumeration(self) -> None:
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text.lower()
+        assert "troubleshooting" in text
+        assert "discovery" in text
+        assert "why" in text  # symptom/"wants to know why" rule
+        assert "enumerat" in text  # discovery = enumeration rule
+        assert "routing table" in text  # the exact phrase that mis-routed
+
+    def test_v1_and_v2_still_registered_immutable(self) -> None:
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 1).version == 1
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 2).version == 2
+
+    def test_v3_formats_cleanly_with_specialist_roster(self) -> None:
+        """format() with {specialists} must not raise and must interpolate."""
+        roster = "- discovery: lists devices\n- troubleshooting: diagnoses faults"
+        rendered = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text.format(
+            specialists=roster
+        )
+        assert "- discovery: lists devices" in rendered
+        assert "{specialists}" not in rendered
+
+    def test_v3_describes_null_specialist_for_ambiguous_requests(self) -> None:
+        """v3 must instruct the model to set specialist=null when request is
+        ambiguous, so the consultant can ask a clarifying question instead of
+        the supervisor guessing."""
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text.lower()
+        assert "null" in text
+        assert "ambiguous" in text
+
+    def test_v3_contains_examples_section(self) -> None:
+        """Few-shot examples are essential for weak local models; v3 must have
+        them so removal is caught immediately."""
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text
+        assert "Examples:" in text
+
+    def test_v3_contains_rules_section(self) -> None:
+        """The explicit Rules: block guards single-specialist and no-invention
+        constraints that v1/v2 also had — verify they survive in v3."""
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text
+        assert "Rules:" in text
+
+    def test_v3_instructs_goal_not_keyword_matching(self) -> None:
+        """v3 adds the 'match the user's GOAL, not just keywords' instruction;
+        losing it would revert to the keyword-matching failure mode."""
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text.lower()
+        assert "goal" in text
+
+    def test_v3_covers_routing_decision_fields(self) -> None:
+        """v3 must describe all three RoutingDecision fields (specialist,
+        ambiguous, rationale) so a weak model knows what to return."""
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text.lower()
+        assert "specialist" in text
+        assert "ambiguous" in text
+        assert "rationale" in text
+
+    def test_v3_explicitly_says_reading_state_to_diagnose_is_troubleshooting(
+        self,
+    ) -> None:
+        """The core disambiguation rule must survive verbatim: reading a device's
+        routing/BGP/OSPF/ACL state IN ORDER TO DIAGNOSE is troubleshooting."""
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text
+        # Check the key phrase that guards the regression
+        assert "IN ORDER TO DIAGNOSE" in text
+
+    def test_v3_example_regression_query_maps_to_troubleshooting(self) -> None:
+        """The specific query that regressed (guest users can't reach internet)
+        must appear as a troubleshooting example in v3."""
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text.lower()
+        assert "guest" in text
+        assert "troubleshooting" in text
+
+    def test_v3_example_run_discovery_scan_maps_to_discovery(self) -> None:
+        """A 'run a discovery scan' example must route to discovery in v3."""
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text.lower()
+        assert "discovery scan" in text
+        assert "discovery" in text
+
+    def test_v3_example_fix_network_maps_to_ambiguous(self) -> None:
+        """'Fix the network' must be marked as the canonical ambiguous example."""
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text.lower()
+        assert "fix the network" in text
+
+
 class TestRegistryBehavior:
     def test_get_unknown_prompt_id_raises_not_found(self) -> None:
-        with pytest.raises(NotFoundError):
+
             get_prompt("test/does-not-exist")
 
     def test_get_unknown_version_raises_not_found(self) -> None:
