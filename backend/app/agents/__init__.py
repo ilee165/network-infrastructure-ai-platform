@@ -7,15 +7,16 @@ all ten core agents. Specialist packages (``master_architect/``,
 ``agents.framework`` plus ``core``/``schemas``/``llm`` (REPO-STRUCTURE
 section 3.2, row 11).
 
-Composition root (M3-14)
+Composition root (M3-14, extended in M4 T13)
     :func:`build_default_registry` assembles the process-wide
-    :class:`~app.agents.framework.registry.AgentRegistry` for the M3 core set —
-    the Master Architect supervisor plus the consultant, discovery, and
-    troubleshooting specialists. :func:`build_default_supervisor` compiles the
-    runnable supervisor graph over the *routable* subset of that registry
-    (everything except the Master Architect itself, which is the supervisor and
-    must never route to itself). Both take their inputs explicitly so a fresh,
-    isolated set can be built per process or per test.
+    :class:`~app.agents.framework.registry.AgentRegistry` for the core set — the
+    Master Architect supervisor plus the five routable specialists (consultant,
+    discovery, troubleshooting, configuration, documentation; the last two added
+    in M4 T13). :func:`build_default_supervisor` compiles the runnable supervisor
+    graph over the *routable* subset of that registry (everything except the
+    Master Architect itself, which is the supervisor and must never route to
+    itself). Both take their inputs explicitly so a fresh, isolated set can be
+    built per process or per test.
 """
 
 from __future__ import annotations
@@ -23,8 +24,10 @@ from __future__ import annotations
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
 
+from app.agents.configuration.agent import ConfigurationAgent
 from app.agents.consultant.agent import ConsultantAgent
 from app.agents.discovery.agent import DiscoveryAgent
+from app.agents.documentation.agent import DocumentationAgent
 from app.agents.framework.registry import AgentRegistry
 from app.agents.framework.supervisor import (
     SUPERVISOR_NAME,
@@ -42,13 +45,14 @@ __all__ = [
 
 
 def build_default_registry() -> AgentRegistry:
-    """Build the M3 default :class:`AgentRegistry` (the composition root).
+    """Build the default :class:`AgentRegistry` (the composition root).
 
-    Registers the four M3 core agents — the Master Architect supervisor
-    (CLAUDE.md Core Agent #1) and the consultant, discovery, and troubleshooting
-    specialists — each as a fresh instance so the registry owns no shared mutable
-    state across processes or tests. Registration validates every agent's
-    declaration (:meth:`~app.agents.framework.base.BaseSpecialistAgent.validate_definition`).
+    Registers the six core agents — the Master Architect supervisor (CLAUDE.md
+    Core Agent #1) and the consultant, discovery, troubleshooting, configuration,
+    and documentation specialists (the last two added in M4 T13) — each as a
+    fresh instance so the registry owns no shared mutable state across processes
+    or tests. Registration validates every agent's declaration
+    (:meth:`~app.agents.framework.base.BaseSpecialistAgent.validate_definition`).
 
     The Master Architect is included so the supervisor is a named, addressable
     citizen of the registry; :func:`build_default_supervisor` excludes it from
@@ -59,6 +63,8 @@ def build_default_registry() -> AgentRegistry:
     registry.register(ConsultantAgent())
     registry.register(DiscoveryAgent())
     registry.register(TroubleshootingAgent())
+    registry.register(ConfigurationAgent())
+    registry.register(DocumentationAgent())
     return registry
 
 
