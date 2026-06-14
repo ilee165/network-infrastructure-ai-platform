@@ -80,6 +80,18 @@ class TestDiscoveryAgentIdentity:
             f"description does not mention discovery context: {agent.description!r}"
         )
 
+    def test_description_states_diagnosis_boundary(self) -> None:
+        """Discovery must disclaim fault diagnosis so the router does not grab it
+        for troubleshooting questions (regression: routed 'read the routing table
+        to find why X is broken' to discovery instead of troubleshooting)."""
+        desc = _make_agent().description.lower()
+        # Still owns enumeration:
+        assert "inventory" in desc
+        assert "neighbor" in desc
+        # Now explicitly NOT diagnosis:
+        assert "diagnos" in desc  # "not for diagnosing ..."
+        assert "troubleshooting" in desc  # points the router at the right specialist
+
     def test_system_prompt_is_non_empty(self) -> None:
         agent = _make_agent()
         assert agent.system_prompt.strip(), "system_prompt must not be empty"

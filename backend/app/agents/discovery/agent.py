@@ -48,8 +48,12 @@ class DiscoveryAgent(BaseSpecialistAgent):
         return (
             "Handles discovery, inventory inspection, and neighbor queries. "
             "Route here when the user wants to trigger a network discovery run, "
-            "list or inspect managed devices, or query LLDP/CDP neighbor relationships. "
-            "All operations are read-only — no device configuration is modified."
+            "list or inspect the managed-device inventory, or query LLDP/CDP "
+            "neighbor relationships. This specialist only ENUMERATES what exists; "
+            "it is NOT for diagnosing why something is broken or for reading a "
+            "device's routing/BGP/OSPF/ACL state to explain a fault — that is the "
+            "troubleshooting specialist's job. All operations are read-only — no "
+            "device configuration is modified."
         )
 
     @property
