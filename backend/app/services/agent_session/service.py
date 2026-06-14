@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.framework.supervisor import SupervisorState, run_supervisor
 from app.agents.framework.traces import PostgresTraceRecorder
-from app.core.errors import NotFoundError
+from app.core.errors import NotFoundError, translate_llm_error
 from app.core.logging import get_logger
 from app.core.security import Role
 from app.models.agents import AgentSession, AgentSessionStatus
@@ -140,8 +140,19 @@ class AgentSessionService:
         )
         try:
             result = await run_supervisor(graph, conversation, role=role)
-        except Exception:
+        except Exception as exc:
             await self.fail(active_session_id)
+            # An upstream LLM/transport failure (provider rejected/unavailable)
+            # becomes a typed 502 so the API never returns an opaque 500; a real
+            # code bug is left untranslated and still surfaces as a 500.
+            translated = translate_llm_error(exc)
+            if translated is not None:
+                _logger.warning(
+                    "agent_session.run_failed_upstream",
+                    session_id=str(active_session_id),
+                    error_type=type(exc).__name__,
+                )
+                raise translated from exc
             raise
         await self.complete(active_session_id)
         return result

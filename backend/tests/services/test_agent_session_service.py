@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -35,7 +35,7 @@ from app.agents.framework.tools import (
     ToolClassification,
     netops_tool,
 )
-from app.core.errors import NotFoundError
+from app.core.errors import LLMUpstreamError, NotFoundError
 from app.core.security import Role
 from app.models import (
     AgentSession,
@@ -331,3 +331,69 @@ class TestRolePropagation:
             # No reasoning step records a successful tool call for the viewer.
             steps = (await db.execute(select(ReasoningTraceStep))).scalars().all()
             assert all(s.tool_name != "get_bgp_peers" or s.kind.value != "tool_call" for s in steps)
+
+
+class TestProviderErrorTranslation:
+    """A provider/transport failure during a run surfaces as a typed 502, and the
+    session is still marked FAILED (the raw SDK exception never reaches the API)."""
+
+    async def test_provider_error_is_translated_and_session_failed(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import app.services.agent_session.service as svc
+
+        # Simulate an anthropic/ollama SDK exception (recognized by its module)
+        # raised mid-run, without importing or depending on the provider SDK.
+        provider_exc = type("BadRequestError", (Exception,), {"__module__": "anthropic"})(
+            "credit balance is too low"
+        )
+
+        async def _boom(*_args: object, **_kwargs: object) -> None:
+            raise provider_exc
+
+        monkeypatch.setattr(svc, "run_supervisor", _boom)
+
+        user_id = await _seed_user(sessionmaker, role_name="viewer")
+        service = AgentSessionService(sessionmaker)
+        run_session = await service.start(user_id=user_id, role=Role.VIEWER, intent="x")
+
+        with pytest.raises(LLMUpstreamError):
+            await service.run(
+                cast(Any, None),  # graph is unused: run_supervisor is monkeypatched
+                "x",
+                user_id=user_id,
+                role=Role.VIEWER,
+                session_id=run_session.id,
+            )
+
+        async with sessionmaker() as db:
+            row = await db.get(AgentSession, run_session.id)
+            assert row is not None
+            assert row.status is AgentSessionStatus.FAILED
+
+    async def test_genuine_bug_is_not_masked_as_provider_error(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import app.services.agent_session.service as svc
+
+        async def _bug(*_args: object, **_kwargs: object) -> None:
+            raise AttributeError("'NoneType' object has no attribute 'domain'")
+
+        monkeypatch.setattr(svc, "run_supervisor", _bug)
+        user_id = await _seed_user(sessionmaker, role_name="viewer")
+        service = AgentSessionService(sessionmaker)
+        run_session = await service.start(user_id=user_id, role=Role.VIEWER, intent="x")
+
+        # A real code bug must still surface (as a 500), not be hidden as a 502.
+        with pytest.raises(AttributeError):
+            await service.run(
+                cast(Any, None),
+                "x",
+                user_id=user_id,
+                role=Role.VIEWER,
+                session_id=run_session.id,
+            )
