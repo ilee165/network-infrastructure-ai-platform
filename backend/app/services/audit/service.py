@@ -59,6 +59,9 @@ SETTINGS_UPDATED: Final = "settings.updated"
 # trail (ADR-0017 §2).
 CONFIG_BASELINE_APPROVED: Final = "config.baseline_approved"
 CONFIG_SNAPSHOT_DRIFT_CHECKED: Final = "config.snapshot_drift_checked"
+# An engineer explicitly fetching the raw (unredacted) snapshot content via the
+# API is audited as a distinct action from a drift check (ADR-0017 §2).
+CONFIG_SNAPSHOT_CONTENT_READ: Final = "config.snapshot_content_read"
 
 
 async def record(
