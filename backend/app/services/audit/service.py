@@ -51,6 +51,21 @@ USER_UPDATED: Final = "user.updated"
 USER_ROLE_CHANGED: Final = "user.role_changed"
 USER_PASSWORD_RESET: Final = "user.password_reset"
 SETTINGS_UPDATED: Final = "settings.updated"
+# M4 config-management audit vocabulary (ADR-0017 §4): approving a snapshot as a
+# device's drift baseline is an explicit, audited action. ``detail`` references
+# the snapshot by id/hash only — never the (secret-bearing) config content.
+# Reading raw (unredacted) snapshot content for a drift check is a
+# read/decrypt-equivalent access and must also appear in the persistent audit
+# trail (ADR-0017 §2).
+CONFIG_BASELINE_APPROVED: Final = "config.baseline_approved"
+CONFIG_SNAPSHOT_DRIFT_CHECKED: Final = "config.snapshot_drift_checked"
+# An engineer explicitly fetching the raw (unredacted) snapshot content via the
+# API is audited as a distinct action from a drift check (ADR-0017 §2).
+CONFIG_SNAPSHOT_CONTENT_READ: Final = "config.snapshot_content_read"
+# A capture attempt that could not produce a snapshot (transport failure, missing
+# credential, unsupported vendor) — the device is identified by id; no config
+# content or credential material appears in the audit detail.
+CONFIG_SNAPSHOT_FAILED: Final = "config.snapshot_failed"
 
 
 async def record(

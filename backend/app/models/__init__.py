@@ -14,6 +14,16 @@ from app.models.agents import (
 )
 from app.models.audit import AuditLog
 from app.models.base import Base
+from app.models.config_mgmt import (
+    EMBEDDING_DIM,
+    CompliancePolicy,
+    ConfigSnapshot,
+    ConfigSource,
+    Document,
+    DocumentFormat,
+    DocumentKind,
+    Embedding,
+)
 from app.models.identity import RefreshSession, Role, SystemSetting, User
 from app.models.inventory import (
     CredentialKind,
@@ -31,16 +41,24 @@ from app.models.mixins import TimestampMixin, UuidPkMixin
 from app.models.topology import TopologySnapshot
 
 __all__ = [
+    "EMBEDDING_DIM",
     "AgentSession",
     "AgentSessionStatus",
     "AuditLog",
     "Base",
+    "CompliancePolicy",
+    "ConfigSnapshot",
+    "ConfigSource",
     "CredentialKind",
     "Device",
     "DeviceCredential",
     "DeviceStatus",
     "DiscoveryRun",
     "DiscoveryRunStatus",
+    "Document",
+    "DocumentFormat",
+    "DocumentKind",
+    "Embedding",
     "NormalizedInterfaceRow",
     "NormalizedNeighborRow",
     "NormalizedRouteRow",

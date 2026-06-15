@@ -5,6 +5,17 @@ projection of the Postgres ``normalized_*`` tables — writes flow one way and a
 full rebuild (drop + re-project) must always work.
 """
 
+from app.knowledge.embedding import (
+    Chunk,
+    Citation,
+    Embedder,
+    OllamaEmbedder,
+    RetrievedChunk,
+    chunk_document,
+    embed_document,
+    get_default_embedder,
+    retrieve,
+)
 from app.knowledge.neo4j_client import (
     Neo4jClient,
     create_client,
@@ -14,10 +25,19 @@ from app.knowledge.neo4j_client import (
 from app.knowledge.topology_read import GraphData, fetch_graph
 
 __all__ = [
+    "Chunk",
+    "Citation",
+    "Embedder",
     "GraphData",
     "Neo4jClient",
+    "OllamaEmbedder",
+    "RetrievedChunk",
+    "chunk_document",
     "create_client",
     "dispose_client",
+    "embed_document",
     "fetch_graph",
     "get_client",
+    "get_default_embedder",
+    "retrieve",
 ]

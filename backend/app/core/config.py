@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     #: Version label stored with every wrapped DEK; bump together with KEK rotation.
     kek_version: str = "v1"
 
+    #: Nightly config-backup schedule (Celery beat, ADR-0017 §1). UTC hour/minute
+    #: the ``config.nightly_backup`` task fires at; operators retune cadence
+    #: without code changes. Default 02:00 UTC (a low-traffic window).
+    config_backup_hour: int = 2
+    config_backup_minute: int = 0
+
     def llm_profile_for_role(self, role: str) -> str:
         """Resolve an LLM *role* (``reasoning``/``fast``) to a configured profile.
 

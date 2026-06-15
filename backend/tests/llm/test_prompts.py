@@ -45,10 +45,6 @@ class TestSupervisorRoutingPrompt:
 
 
 class TestRoutingPromptV3:
-    def test_v3_is_the_latest_routing_prompt(self) -> None:
-        latest = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)
-        assert latest.version == 3
-
     def test_v3_keeps_specialists_placeholder(self) -> None:
         # The supervisor fills {specialists}; losing it would break routing.
         assert "{specialists}" in get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).text
@@ -61,9 +57,53 @@ class TestRoutingPromptV3:
         assert "enumerat" in text  # discovery = enumeration rule
         assert "routing table" in text  # the exact phrase that mis-routed
 
-    def test_v1_and_v2_still_registered_immutable(self) -> None:
+    def test_v1_v2_v3_still_registered_immutable(self) -> None:
         assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 1).version == 1
         assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 2).version == 2
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).version == 3
+
+
+class TestRoutingPromptV4:
+    def test_v4_is_the_latest_routing_prompt(self) -> None:
+        # The supervisor auto-selects the latest; v4 is the 5-way prompt (T13).
+        latest = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)
+        assert latest.version == 4
+
+    def test_v4_keeps_specialists_placeholder(self) -> None:
+        # The supervisor fills {specialists}; losing it would break routing.
+        assert "{specialists}" in get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 4).text
+
+    def test_v4_covers_all_five_specialists(self) -> None:
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 4).text.lower()
+        for specialist in (
+            "discovery",
+            "troubleshooting",
+            "consultant",
+            "configuration",
+            "documentation",
+        ):
+            assert specialist in text
+
+    def test_v4_adds_config_and_documentation_decision_rules(self) -> None:
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 4).text.lower()
+        # Configuration => drift/compliance narration.
+        assert "drift" in text
+        assert "complian" in text
+        # Documentation => generate inventory/diagram/runbook.
+        assert "inventory" in text
+        assert "diagram" in text
+        assert "runbook" in text
+
+    def test_v4_preserves_v3_diagnosis_vs_enumeration_rules(self) -> None:
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 4).text.lower()
+        assert "why" in text  # symptom/diagnosis rule retained
+        assert "enumerat" in text  # discovery = enumeration rule retained
+        assert "routing table" in text  # the exact phrase that mis-routed in v2
+
+    def test_v1_through_v3_still_registered_immutable(self) -> None:
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 1).version == 1
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 2).version == 2
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).version == 3
 
 
 class TestRegistryBehavior:

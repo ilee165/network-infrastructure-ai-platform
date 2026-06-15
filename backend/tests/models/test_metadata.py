@@ -22,6 +22,10 @@ EXPECTED_TABLES = {
     "agent_sessions",
     "reasoning_traces",
     "reasoning_trace_steps",
+    "config_snapshots",
+    "compliance_policies",
+    "documents",
+    "embeddings",
 }
 
 PARTITIONED_TABLES = (

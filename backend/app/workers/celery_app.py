@@ -12,6 +12,7 @@ must be idempotent), prefetch 1 for fair fan-out, JSON-only serialization.
 from __future__ import annotations
 
 from celery import Celery
+from celery.schedules import crontab
 from kombu import Queue
 
 from app.core.config import get_settings
@@ -46,8 +47,9 @@ def create_celery_app() -> Celery:
             "app.workers.tasks.system",
             "app.workers.tasks.discovery",
             "app.workers.tasks.topology",
+            "app.workers.tasks.config",
         ],
-        # M2+: "app.workers.tasks.config", ".packet", ".docs"
+        # M4+: ".packet", ".docs"
     )
     celery.conf.update(
         # JSON-only serialization (no pickle — secure by default).
@@ -77,6 +79,18 @@ def create_celery_app() -> Celery:
             "docs.*": {"queue": QUEUE_DOCS},
             "topology.*": {"queue": QUEUE_TOPOLOGY},
             "system.*": {"queue": QUEUE_SYSTEM},
+        },
+        # Celery-beat schedules (ADR-0017 §1): the nightly config backup fans out
+        # one capture per reachable device at a configurable UTC time. Beat is run
+        # as a dedicated process: ``celery -A app.workers.celery_app beat``.
+        beat_schedule={
+            "config-nightly-backup": {
+                "task": "config.nightly_backup",
+                "schedule": crontab(
+                    hour=str(settings.config_backup_hour),
+                    minute=str(settings.config_backup_minute),
+                ),
+            },
         },
     )
     return celery

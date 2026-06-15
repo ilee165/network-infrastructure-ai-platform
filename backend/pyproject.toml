@@ -43,6 +43,8 @@ dependencies = [
     # Device transports (D7): SSH CLI + SNMP v2c/v3
     "netmiko",
     "pysnmp",
+    # Declarative compliance policies (M4, ADR-0018): YAML rule documents
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
@@ -125,6 +127,7 @@ module = [
     "pgvector.*",
     "pysnmp.*",
     "textfsm.*",
+    "yaml.*",
 ]
 ignore_missing_imports = true
 
@@ -138,9 +141,10 @@ testpaths = ["tests"]
 markers = [
     "integration: requires compose-backed Postgres/Neo4j/Redis (excluded from the unit run)",
     "lab: requires real network devices; never runs in CI",
-    "eval: M3 agent eval suite — deterministic exit-criteria tests (run in CI)",
+    "eval: agent eval suite (M3 + M4) — deterministic exit-criteria tests (run in CI)",
     "parity: real-provider (Ollama/Anthropic) parity run — manual pre-release gate, skipped in CI",
     "routing: real-LLM supervisor routing eval; opt-in, skipped in CI (manual gate).",
+    "rag: real-embedder RAG retrieval relevance eval; opt-in, skipped in CI (manual gate).",
 ]
 
 # ---------------------------------------------------------------------------

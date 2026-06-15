@@ -26,7 +26,9 @@ import { AuditPage } from "./pages/AuditPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { ChangesPage } from "./pages/ChangesPage";
 import { ChatPage } from "./pages/ChatPage";
+import { ConfigPage } from "./pages/ConfigPage";
 import { DashboardPage } from "./pages/DashboardPage";
+import { DocumentsPage } from "./pages/DocumentsPage";
 import { DevicesPage } from "./pages/DevicesPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ProfilePage } from "./pages/ProfilePage";
@@ -47,6 +49,8 @@ export function App() {
         <Route element={<Layout />}>
           <Route index element={<DashboardPage />} />
           <Route path="devices" element={<DevicesPage />} />
+          <Route path="config" element={<ConfigPage />} />
+          <Route path="documents" element={<DocumentsPage />} />
           <Route path="topology" element={<TopologyPage />} />
           <Route path="chat" element={<ChatPage />} />
           <Route path="changes" element={<ChangesPage />} />

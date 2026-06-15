@@ -1,8 +1,10 @@
 """Composition-root tests (M3-14): the default registry + supervisor wiring.
 
 Offline and deterministic: a scripted fake chat model stands in for the LLM, so
-no network is touched. The default registry must hold exactly the four M3 core
-agents, and the supervisor compiled from it must route over the three
+no network is touched. After M4 T13 the default registry must hold exactly the
+six core agents — the Master Architect supervisor plus the five routable
+specialists (consultant, discovery, troubleshooting, configuration,
+documentation) — and the supervisor compiled from it must route over those five
 specialists without routing to the Master Architect itself.
 """
 
@@ -12,14 +14,21 @@ from app.agents import build_default_registry, build_default_supervisor
 from app.agents.framework.supervisor import SUPERVISOR_NAME
 from tests.agents.conftest import scripted_model
 
-EXPECTED_AGENTS = {SUPERVISOR_NAME, "consultant", "discovery", "troubleshooting"}
+ROUTABLE_SPECIALISTS = {
+    "consultant",
+    "discovery",
+    "troubleshooting",
+    "configuration",
+    "documentation",
+}
+EXPECTED_AGENTS = {SUPERVISOR_NAME, *ROUTABLE_SPECIALISTS}
 
 
 class TestDefaultRegistry:
-    def test_registry_contains_exactly_the_four_core_agents(self) -> None:
+    def test_registry_contains_exactly_the_six_core_agents(self) -> None:
         registry = build_default_registry()
         assert set(registry.names()) == EXPECTED_AGENTS
-        assert len(registry) == 4
+        assert len(registry) == 6
 
     def test_master_architect_is_registered(self) -> None:
         registry = build_default_registry()
@@ -43,9 +52,9 @@ class TestDefaultSupervisor:
     def test_supervisor_routes_over_specialists_not_itself(self) -> None:
         graph = build_default_supervisor(scripted_model([]))
         nodes = set(graph.get_graph().nodes)
-        # The three specialists are routable nodes; the supervisor is not a node
+        # The five specialists are routable nodes; the supervisor is not a node
         # it can route to (it IS the router).
-        assert {"consultant", "discovery", "troubleshooting"} <= nodes
+        assert nodes >= ROUTABLE_SPECIALISTS
         assert SUPERVISOR_NAME not in nodes
         assert {"route", "synthesize"} <= nodes
 

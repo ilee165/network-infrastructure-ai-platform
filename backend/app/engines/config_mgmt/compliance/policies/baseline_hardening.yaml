@@ -1,0 +1,34 @@
+# Baseline hardening compliance policy (M4; ADR-0018 §6).
+#
+# The seeded default policy pack: the minimum security posture every managed
+# device in scope must meet. Authored as data (this YAML) — adding a rule needs
+# no code, only a new entry within the closed assertion families. Loaded as a
+# default by app.engines.config_mgmt.compliance.loader.load_default_pack().
+id: baseline-hardening
+version: 1
+scope:
+  vendors: [cisco_ios, cisco_iosxe, eos]
+  roles: ["*"]
+  sites: ["*"]
+rules:
+  - id: ssh-v2-only
+    severity: violation
+    description: "Device must run SSH version 2 only."
+    assert:
+      type: regex_present
+      pattern: '^ip ssh version 2$'
+
+  - id: no-any-any-permit
+    severity: violation
+    description: "No 'permit ip any any' may appear in any ACL."
+    assert:
+      type: regex_absent
+      pattern: 'permit ip any any'
+
+  - id: ntp-configured
+    severity: warn
+    description: "At least one NTP server must be configured."
+    assert:
+      type: model_assert
+      model: ntp_servers
+      predicate: non_empty
