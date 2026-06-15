@@ -9,10 +9,12 @@ engine: REPO-STRUCTURE §3.2).
 """
 
 from app.engines.config_mgmt.capture import (
+    BackupPassResult,
     CaptureResult,
     capture_snapshot,
     hash_config,
     normalize_config,
+    run_backup_pass,
 )
 from app.engines.config_mgmt.drift import (
     DriftResult,
@@ -22,6 +24,7 @@ from app.engines.config_mgmt.drift import (
 )
 
 __all__ = [
+    "BackupPassResult",
     "CaptureResult",
     "DriftResult",
     "NoBaselineError",
@@ -30,4 +33,5 @@ __all__ = [
     "detect_drift",
     "hash_config",
     "normalize_config",
+    "run_backup_pass",
 ]

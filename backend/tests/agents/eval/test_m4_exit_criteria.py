@@ -63,7 +63,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.configuration.agent import ConfigurationAgent
 from app.agents.documentation.tools import generate_diagram, generate_inventory
-from app.engines.config_mgmt.capture import capture_snapshot
+from app.engines.config_mgmt.capture import capture_snapshot, run_backup_pass
 from app.engines.config_mgmt.compliance import (
     DeviceContext,
     FindingStatus,
@@ -86,6 +86,7 @@ from app.models import (
 from app.services.audit.service import (
     CONFIG_BASELINE_APPROVED,
     CONFIG_SNAPSHOT_DRIFT_CHECKED,
+    CONFIG_SNAPSHOT_FAILED,
 )
 from tests.agents.conftest import scripted_model
 from tests.knowledge.test_embedding import FakeEmbedder
@@ -168,39 +169,26 @@ class TestCriterion1NightlyBackupCoversAllReachableDevices:
         }
         unreachable = await _seed_device(sessionmaker, hostname="down-1")
 
-        captured: dict[uuid.UUID, str] = {}
-        failures: list[uuid.UUID] = []
+        # Drive the REAL production backup-pass path: run_backup_pass handles
+        # content-addressed capture for reachable devices and writes an audited
+        # failure row for the unreachable device. No test-local AuditLog.add()
+        # or manual exception swallowing — the audit row must originate from the
+        # production worker path (the finding's criterion).
+        transport_error = TimeoutError("ssh connect timed out")
         async with sessionmaker() as session:
-            for device_id, raw in reachable.items():
-                result = await capture_snapshot(
-                    session,
-                    device_id=device_id,
-                    raw_config=raw,
-                    source=ConfigSource.SCHEDULED,
-                )
-                captured[device_id] = result.content_hash
-            # The unreachable device's backup fails — the pass records the
-            # failure as an append-only audit row (job-status parity) instead of
-            # silently dropping the device.
-            try:
-                raise TimeoutError("ssh connect timed out")
-            except TimeoutError as exc:
-                failures.append(unreachable)
-                session.add(
-                    AuditLog(
-                        actor="worker:config",
-                        action="config.backup_failed",
-                        target_type="device",
-                        target_id=str(unreachable),
-                        detail={"error": str(exc)},
-                    )
-                )
+            pass_result = await run_backup_pass(
+                session,
+                device_configs=reachable,
+                device_errors={unreachable: transport_error},
+                source=ConfigSource.SCHEDULED,
+            )
             await session.commit()
 
-        # The pass captured a content hash for every reachable device and logged
-        # exactly the one unreachable device as a failure.
-        assert set(captured) == set(reachable)
-        assert failures == [unreachable]
+        # The pass captured a content hash for every reachable device and
+        # recorded exactly the one unreachable device as a failure.
+        assert set(pass_result.captured) == set(reachable)
+        assert set(pass_result.failed) == {unreachable}
+        assert isinstance(pass_result.failed[unreachable], TimeoutError)
 
         # 100% of REACHABLE devices have a stored snapshot (content-addressed).
         async with sessionmaker() as session:
@@ -211,11 +199,12 @@ class TestCriterion1NightlyBackupCoversAllReachableDevices:
         assert unreachable not in snapshotted, "the unreachable device has no snapshot"
 
         # The single failure is audited (failures alert via job status + audit).
+        # The audit row is written by run_backup_pass — not by this test.
         async with sessionmaker() as session:
             audit = (
                 (
                     await session.execute(
-                        select(AuditLog).where(AuditLog.action == "config.backup_failed")
+                        select(AuditLog).where(AuditLog.action == CONFIG_SNAPSHOT_FAILED)
                     )
                 )
                 .scalars()

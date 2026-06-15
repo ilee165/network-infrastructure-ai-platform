@@ -29,7 +29,7 @@ in-memory database with a fake plugin.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 import structlog
@@ -38,8 +38,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ConfigSnapshot, ConfigSource
 from app.models.mixins import utcnow
+from app.services.audit import service as _audit_svc
 
-__all__ = ["CaptureResult", "capture_snapshot", "hash_config", "normalize_config"]
+__all__ = [
+    "BackupPassResult",
+    "CaptureResult",
+    "capture_snapshot",
+    "hash_config",
+    "normalize_config",
+    "run_backup_pass",
+]
 
 logger = structlog.get_logger(__name__)
 
@@ -157,3 +165,80 @@ async def capture_snapshot(
         bytes=len(normalized),
     )
     return CaptureResult(snapshot=snapshot, created=True)
+
+
+# ---------------------------------------------------------------------------
+# Backup-pass orchestration — unit-testable boundary (no Celery coupling)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BackupPassResult:
+    """Outcome of one :func:`run_backup_pass` call.
+
+    ``captured`` maps each successfully snapshotted device id to its content
+    hash; ``failed`` maps each device id whose capture raised an exception to
+    that exception. Both dicts are disjoint — every input device id appears in
+    exactly one of them.
+    """
+
+    captured: dict[UUID, str] = field(default_factory=dict)
+    failed: dict[UUID, BaseException] = field(default_factory=dict)
+
+
+async def run_backup_pass(
+    session: AsyncSession,
+    *,
+    device_configs: dict[UUID, str],
+    device_errors: dict[UUID, BaseException],
+    source: ConfigSource = ConfigSource.SCHEDULED,
+    actor: str = "worker:config",
+) -> BackupPassResult:
+    """Orchestrate one backup pass: persist successes and audit failures.
+
+    This is the unit-testable production boundary that the nightly Celery beat
+    job and tests both target. Transport-layer concerns (SSH, plugin dispatch)
+    are resolved *before* calling this function; the caller supplies the
+    already-fetched config texts and the already-materialized exceptions.
+
+    For each device in *device_configs* the snapshot is content-addressed and
+    persisted (via :func:`capture_snapshot`). For each device in
+    *device_errors* an audit row is written with action
+    ``config.snapshot_failed``; no exception is re-raised so one dead device
+    degrades the pass to ``partial`` rather than aborting it.
+
+    The session is flushed after every operation but the caller owns the
+    transaction boundary — commit or roll back as needed after this returns.
+
+    :param device_configs: mapping of device_id → fetched running config text
+        for every device the transport layer reached successfully.
+    :param device_errors: mapping of device_id → exception for every device
+        the transport layer could not reach or whose capture failed permanently.
+    :param source: ``ConfigSource.SCHEDULED`` for the nightly beat job,
+        ``ConfigSource.ON_DEMAND`` for operator-triggered passes.
+    :param actor: the audit actor string (defaults to the config worker identity).
+    """
+    captured: dict[UUID, str] = {}
+    failed: dict[UUID, BaseException] = {}
+
+    for device_id, raw_config in device_configs.items():
+        result = await capture_snapshot(
+            session,
+            device_id=device_id,
+            raw_config=raw_config,
+            source=source,
+        )
+        captured[device_id] = result.content_hash
+
+    for device_id, exc in device_errors.items():
+        await _audit_svc.record(
+            session,
+            actor=actor,
+            action=_audit_svc.CONFIG_SNAPSHOT_FAILED,
+            target_type="device",
+            target_id=str(device_id),
+            detail={"error": str(exc), "source": source.value},
+        )
+        failed[device_id] = exc
+
+    return BackupPassResult(captured=captured, failed=failed)

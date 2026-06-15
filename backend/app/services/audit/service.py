@@ -62,6 +62,10 @@ CONFIG_SNAPSHOT_DRIFT_CHECKED: Final = "config.snapshot_drift_checked"
 # An engineer explicitly fetching the raw (unredacted) snapshot content via the
 # API is audited as a distinct action from a drift check (ADR-0017 §2).
 CONFIG_SNAPSHOT_CONTENT_READ: Final = "config.snapshot_content_read"
+# A capture attempt that could not produce a snapshot (transport failure, missing
+# credential, unsupported vendor) — the device is identified by id; no config
+# content or credential material appears in the audit detail.
+CONFIG_SNAPSHOT_FAILED: Final = "config.snapshot_failed"
 
 
 async def record(
