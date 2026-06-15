@@ -4,7 +4,7 @@
  *
  * Three sub-views (kind filter tabs): All | Inventory | Diagram | Runbook.
  * Clicking a row's "View" button opens an inline panel:
- *  - Mermaid format → raw source + PNG export button (client-side render)
+ *  - Mermaid format → raw source + PNG export button (disabled stub; requires mermaid npm integration, post-M4)
  *  - All other formats (md / csv) → plain pre-formatted content view
  *
  * Download uses the ``/docs/{id}/download`` endpoint and triggers a browser
@@ -87,22 +87,11 @@ function MermaidPanel({
   doc: DocumentRead;
   onClose: () => void;
 }) {
-  function handleExportPng() {
-    // Client-side PNG export: render Mermaid source into a canvas and export.
-    // In environments without canvas (jsdom / test), we fall back to a no-op.
-    // The SVG/canvas render path requires the mermaid library loaded in the
-    // browser; in M4 we render the raw source inline and rely on browser-native
-    // rendering. A full client-side render (with the `mermaid` npm package) is
-    // a production-hardening item.
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return; // graceful no-op in jsdom / headless environments
-    const dataUrl = canvas.toDataURL("image/png");
-    const a = document.createElement("a");
-    a.href = dataUrl;
-    a.download = `${doc.title.replace(/\s+/g, "-").toLowerCase()}.png`;
-    a.click();
-  }
+  // PNG export requires the `mermaid` npm package to be integrated for
+  // SVG→canvas rendering. That integration is a post-M4 hardening item
+  // (ADR-0019 §3). Until then the button is disabled so no blank/corrupt
+  // file is ever downloaded. Users can paste the source into mermaid.live.
+  const PNG_EXPORT_AVAILABLE = false as boolean;
 
   return (
     <div
@@ -117,8 +106,9 @@ function MermaidPanel({
           <button
             type="button"
             data-testid="mermaid-export-png"
-            onClick={handleExportPng}
-            className="rounded border border-carbon-600 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-zinc-400 transition-colors hover:border-carbon-500 hover:text-zinc-200"
+            disabled={!PNG_EXPORT_AVAILABLE}
+            title="PNG export requires the Mermaid renderer — paste source into mermaid.live to generate a PNG"
+            className="rounded border border-carbon-600 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-zinc-400 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
           >
             Export PNG
           </button>
@@ -248,6 +238,7 @@ type DocsTab = "all" | DocumentKind;
 export function DocumentsPage() {
   const [tab, setTab] = useState<DocsTab>("all");
   const [viewedDoc, setViewedDoc] = useState<DocumentRead | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const kindParam: DocumentKind | undefined =
     tab === "all" ? undefined : tab;
@@ -260,21 +251,30 @@ export function DocumentsPage() {
   // ── Download handler ────────────────────────────────────────────────────────
 
   async function handleDownload(doc: DocumentRead): Promise<void> {
-    const payload = await downloadDocument(doc.id);
-    const ext = payload.format === "csv" ? "csv" : payload.format === "mermaid" ? "mmd" : "md";
-    const mimeType =
-      payload.format === "csv"
-        ? "text/csv"
-        : payload.format === "mermaid"
-          ? "text/plain"
-          : "text/markdown";
-    const blob = new Blob([payload.content], { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${payload.title.replace(/\s+/g, "-").toLowerCase()}.${ext}`;
-    a.click();
-    URL.revokeObjectURL(url);
+    try {
+      setDownloadError(null);
+      const payload = await downloadDocument(doc.id);
+      const ext = payload.format === "csv" ? "csv" : payload.format === "mermaid" ? "mmd" : "md";
+      const mimeType =
+        payload.format === "csv"
+          ? "text/csv"
+          : payload.format === "mermaid"
+            ? "text/plain"
+            : "text/markdown";
+      const blob = new Blob([payload.content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${payload.title.replace(/\s+/g, "-").toLowerCase()}.${ext}`;
+      a.click();
+      // Defer revoke past the browser's async fetch-dispatch tick so the file
+      // is fully handed off before the object URL is invalidated (Firefox / older
+      // Chrome revoke the resource before the download starts if revoke is
+      // synchronous with the click).
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : "Download failed");
+    }
   }
 
   // ── Tab button factory ──────────────────────────────────────────────────────
@@ -343,6 +343,17 @@ export function DocumentsPage() {
             className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
           >
             Documents load failed: {error.message}
+          </div>
+        )}
+
+        {/* Download error */}
+        {downloadError !== null && (
+          <div
+            role="alert"
+            data-testid="docs-download-error"
+            className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
+          >
+            Download failed: {downloadError}
           </div>
         )}
 

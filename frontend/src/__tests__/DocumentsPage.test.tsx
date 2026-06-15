@@ -366,4 +366,112 @@ describe("DocumentsPage — download", () => {
       );
     });
   });
+
+  it("defers revokeObjectURL via setTimeout (not called synchronously with createObjectURL)", async () => {
+    // Use a spy that wraps the real setTimeout so testing-library's internal
+    // polling timers continue to work.  We capture only zero-delay callbacks
+    // and forward everything else to the real implementation.
+    const capturedZeroDelayCallbacks: Array<() => void> = [];
+    const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+    const setTimeoutSpy = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation(
+        (fn: TimerHandler, delay?: number, ...args: unknown[]): ReturnType<typeof setTimeout> => {
+          if (typeof fn === "function" && (delay === 0 || delay === undefined)) {
+            capturedZeroDelayCallbacks.push(fn as () => void);
+            // Still schedule it for real so nothing is blocked
+            return realSetTimeout(fn as TimerHandler, delay, ...args);
+          }
+          return realSetTimeout(fn as TimerHandler, delay, ...args);
+        },
+      );
+
+    try {
+      const mock = fetchRouted({});
+      vi.stubGlobal("fetch", mock);
+      const createURL = vi.fn(() => "blob:mock-url");
+      const revokeURL = vi.fn();
+      vi.stubGlobal("URL", { createObjectURL: createURL, revokeObjectURL: revokeURL });
+
+      renderPage();
+      await screen.findByTestId(`doc-row-${DOC_ID_INV}`);
+      fireEvent.click(screen.getByTestId(`doc-download-${DOC_ID_INV}`));
+
+      // Wait until createObjectURL is called (download blob was created)
+      await waitFor(() => expect(createURL).toHaveBeenCalled());
+
+      // At the synchronous level (before the next macro-task), revokeObjectURL
+      // must not have been called yet.  waitFor drains microtasks but the
+      // setTimeout(0) fires in the next macro-task, which happens after
+      // revokeURL is called by the real timer.  So: we inspect whether
+      // our spy captured a zero-delay callback containing the revoke.
+      const revokeCallback = capturedZeroDelayCallbacks.find(
+        (cb) => {
+          // Invoke a clone-check: call it and see if revokeURL gets called.
+          // Reset mock first so we can isolate this call.
+          revokeURL.mockClear();
+          cb();
+          return revokeURL.mock.calls.length > 0;
+        },
+      );
+      expect(revokeCallback).toBeDefined();
+      expect(revokeURL).toHaveBeenCalledWith("blob:mock-url");
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it("shows a download error alert when the fetch fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string): Promise<Response> => {
+        if (String(url).includes("/download")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ detail: "not found" }),
+              { status: 404, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify(ALL_DOCS), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
+    renderPage();
+    await screen.findByTestId(`doc-row-${DOC_ID_INV}`);
+    fireEvent.click(screen.getByTestId(`doc-download-${DOC_ID_INV}`));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/download failed/i);
+  });
+});
+
+// ── PNG export stub ───────────────────────────────────────────────────────────
+
+describe("DocumentsPage — PNG export stub", () => {
+  it("Export PNG button is disabled (stub — no mermaid renderer)", async () => {
+    vi.stubGlobal("fetch", fetchRouted({}));
+    renderPage();
+    await screen.findByTestId(`doc-row-${DOC_ID_DIAG}`);
+    fireEvent.click(screen.getByTestId(`doc-view-${DOC_ID_DIAG}`));
+    await screen.findByTestId("mermaid-panel");
+    const btn = screen.getByTestId("mermaid-export-png");
+    expect(btn).toBeDisabled();
+  });
+
+  it("clicking the disabled Export PNG button does not trigger a file download", async () => {
+    vi.stubGlobal("fetch", fetchRouted({}));
+    const createURL = vi.fn(() => "blob:mock-url");
+    vi.stubGlobal("URL", { createObjectURL: createURL, revokeObjectURL: vi.fn() });
+    renderPage();
+    await screen.findByTestId(`doc-row-${DOC_ID_DIAG}`);
+    fireEvent.click(screen.getByTestId(`doc-view-${DOC_ID_DIAG}`));
+    await screen.findByTestId("mermaid-panel");
+    // Attempt to click the disabled button
+    fireEvent.click(screen.getByTestId("mermaid-export-png"));
+    // createObjectURL must never be called — no canvas export attempted
+    expect(createURL).not.toHaveBeenCalled();
+  });
 });
