@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require_role
 from app.core.errors import NotFoundError
-from app.models import Document, DocumentKind
+from app.models import Document, DocumentKind, User
 from app.schemas.config_mgmt import (
     DocumentDownload,
     DocumentListResponse,
@@ -36,7 +36,7 @@ from app.schemas.config_mgmt import (
 router = APIRouter(prefix="/docs", tags=["documents"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
-Viewer = Annotated[object, Depends(require_role("viewer"))]
+Viewer = Annotated[User, Depends(require_role("viewer"))]
 
 
 @router.get("", response_model=DocumentListResponse)

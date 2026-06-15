@@ -35,7 +35,7 @@ from app.engines.config_mgmt.compliance.engine import (
     evaluate_policy,
 )
 from app.engines.config_mgmt.compliance.loader import load_default_pack
-from app.engines.config_mgmt.compliance.schema import Policy
+from app.engines.config_mgmt.compliance.schema import Policy, Severity
 from app.engines.config_mgmt.drift import DriftResult, NoBaselineError, detect_drift
 from app.models import CompliancePolicy, ConfigSnapshot, Device, User
 from app.schemas.config_mgmt import (
@@ -197,7 +197,6 @@ async def get_drift(
         raise NotFoundError(
             f"device {device_id} has no approved baseline; approve one before checking drift"
         ) from exc
-    await session.commit()
     return DriftResponse(
         device_id=result.device_id,
         has_drift=result.has_drift,
@@ -295,7 +294,9 @@ async def get_compliance(
         findings=findings,
         violation_count=sum(1 for f in raw_findings if f.status is FindingStatus.VIOLATION),
         warn_count=sum(
-            1 for f in raw_findings if f.status is FindingStatus.PASS and f.severity.value == "warn"
+            1
+            for f in raw_findings
+            if f.status is FindingStatus.VIOLATION and f.severity == Severity.WARN
         ),
         pass_count=sum(1 for f in raw_findings if f.status is FindingStatus.PASS),
         skipped_count=sum(1 for f in raw_findings if f.status is FindingStatus.SKIPPED),

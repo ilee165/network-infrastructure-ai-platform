@@ -200,9 +200,10 @@ async def detect_drift(
     Because this operation reads the raw, secret-bearing ``content`` fields of
     both snapshots, ADR-0017 §2 classifies it as a read/decrypt-equivalent
     access.  An ``config.snapshot_drift_checked`` :class:`~app.models.audit.AuditLog`
-    row is therefore appended after the diff is computed.  The audit ``detail``
-    references snapshots by id/hash only — config content never enters the
-    detail payload.
+    row is therefore appended and committed after the diff is computed.  The
+    audit ``detail`` references snapshots by id/hash only — config content never
+    enters the detail payload.  The engine owns and commits its audit row; the
+    caller does not need to commit after this function returns.
 
     :param actor: Identity of the requesting user; forwarded to the audit row
         (mirrors :func:`approve_baseline`'s signature).
@@ -244,6 +245,7 @@ async def detect_drift(
             "hunk_count": len(hunks),
         },
     )
+    await session.commit()
 
     logger.info(
         "config.drift_checked",
