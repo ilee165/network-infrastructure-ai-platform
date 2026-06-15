@@ -1,9 +1,18 @@
-"""Real-LLM supervisor routing eval (manual gate).
+"""Real-LLM supervisor routing eval (manual gate) — FIVE-way roster (M4 T17).
 
-Validates that the Master Architect routes fault/diagnosis questions to the
-``troubleshooting`` specialist and enumeration questions to ``discovery``, using
-a REAL local model (not the ``ScriptedChatModel`` the deterministic suite uses,
-which replays a fixed ``RoutingDecision`` and so cannot test routing quality).
+Validates that the Master Architect routes each intent to the correct specialist
+across the FULL M4 roster — troubleshooting (fault diagnosis), discovery
+(inventory enumeration), **configuration** (drift / compliance narration), and
+**documentation** (inventory / diagram / runbook generation) — using a REAL
+local model (not the ``ScriptedChatModel`` the deterministic suite uses, which
+replays a fixed ``RoutingDecision`` and so cannot test routing quality).
+
+M4 widens the supervisor's decision from three routable specialists to five
+(M4 risk #2: the wider disambiguation surface is exactly the failure the M3
+routing fix addressed). This eval is the real-LLM proof that routing prompt v4 +
+the sharpened five specialist descriptions hold the new boundaries —
+configuration (narrate existing config state) vs documentation (produce
+artifacts) vs troubleshooting (diagnose a live fault) — under a real model.
 
 Scope — this eval tests the ROUTING DECISION, not specialist execution. It
 reproduces exactly what the supervisor's ``route`` node does
@@ -62,21 +71,28 @@ if not os.environ.get(_FLAG):
 #
 # To measure GENERALIZATION rather than in-context echoing, every case below is
 # HELD OUT — a distinct protocol / device / subnet / wording from the few-shot
-# examples baked into ``SUPERVISOR_ROUTING_PROMPT_V3`` — EXCEPT the first, which
+# examples baked into ``SUPERVISOR_ROUTING_PROMPT_V4`` — EXCEPT the first, which
 # is intentionally the exact production regression query (it overlaps a few-shot
 # example by design, and asserts that the specific reported bug stays dead). If
 # a case were a verbatim copy of a prompt example, a model could pass it by
 # pattern-matching the demonstration instead of applying the diagnosis-vs-
-# enumeration rule and the sharpened specialist descriptions the route node
-# actually relies on.
+# enumeration-vs-config-vs-docs rules and the sharpened five specialist
+# descriptions the route node actually relies on.
+#
+# The configuration and documentation cases (added for the M4 five-way roster)
+# are deliberately worded UNLIKE the v4 few-shot examples: v4 demonstrates
+# 'What changed in core-1's config…' and 'Generate a network inventory…'; the
+# held-out cases below say 'how does its current config compare to the signed-off
+# baseline' and 'I need a CSV listing of every interface' — same intent, fresh
+# wording, so a pass reflects the config-vs-docs boundary, not echoing.
 _CASES = [
-    # Exact regression anchor — overlaps a v3 few-shot example on purpose.
+    # Exact regression anchor — overlaps a v4 few-shot example on purpose.
     (
         "Why can't guest users on 10.0.99.0/24 reach the internet? Read the routing "
         "table on the edge firewall edge-fw-01.",
         "troubleshooting",
     ),
-    # Held-out troubleshooting (none of these appear in the v3 few-shot block):
+    # Held-out troubleshooting (none of these appear in the v4 few-shot block):
     (
         "core-sw-02 stopped advertising 192.168.40.0/24 to its OSPF neighbor — read "
         "its routing table and tell me why.",
@@ -91,11 +107,51 @@ _CASES = [
         "firewall ACLs to find the cause.",
         "troubleshooting",
     ),
-    # Held-out discovery / enumeration (none appear in the v3 few-shot block):
+    # Held-out discovery / enumeration (none appear in the v4 few-shot block):
     ("Show me every Cisco device we currently manage.", "discovery"),
     ("How many switches are in the inventory right now?", "discovery"),
     ("Show me the LLDP neighbors of core-sw-01.", "discovery"),
+    # Held-out CONFIGURATION — drift / compliance narration of EXISTING config
+    # state (read-only). Worded apart from the v4 demonstrations, and apart from
+    # troubleshooting: these ask "what diverged" / "does it meet policy", never
+    # "why is something broken".
+    (
+        "How does dist-sw-07's running config compare to the signed-off baseline "
+        "we approved last quarter?",
+        "configuration",
+    ),
+    (
+        "Does access-sw-12 satisfy our hardening standard, and list any rules it "
+        "fails with their severity.",
+        "configuration",
+    ),
+    (
+        "Walk me through every line that diverged from baseline on border-rtr-03.",
+        "configuration",
+    ),
+    # Held-out DOCUMENTATION — PRODUCE an artifact (inventory / diagram /
+    # runbook). Worded apart from the v4 demonstrations; the intent is to
+    # generate/export a document, not to explain config or diagnose a fault.
+    (
+        "I need a CSV listing of every interface and its neighbor for the west-campus "
+        "site to hand to the auditors.",
+        "documentation",
+    ),
+    (
+        "Draw up a Mermaid topology of the distribution layer so I can drop it in the design doc.",
+        "documentation",
+    ),
+    (
+        "Put together an operational runbook for border-rtr-03 covering its role and "
+        "health checks.",
+        "documentation",
+    ),
 ]
+
+#: The five specialists the supervisor routes over in M4 (every routable agent in
+#: the production registry except the supervisor). Each expected label below must
+#: be one of these — a guard so a typo in a case can never silently pass.
+_ROUTABLE_SPECIALISTS = {"troubleshooting", "discovery", "configuration", "documentation"}
 
 
 def _routable_roster() -> str:
@@ -111,11 +167,29 @@ def _routable_roster() -> str:
     return "\n".join(f"- {agent.name}: {agent.description}" for agent in agents)
 
 
+def test_roster_exposes_the_full_five_way_set() -> None:
+    """Sanity: the production roster the eval routes over holds all five M4 specialists.
+
+    A guard so the eval can never silently shrink: if a specialist were dropped
+    from the composition root, its held-out cases would have no valid target.
+    Also pins every expected label in ``_CASES`` to a real routable specialist.
+    """
+    registry = build_default_registry()
+    routable = {agent.name for agent in registry.list() if agent.name != SUPERVISOR_NAME}
+    assert _ROUTABLE_SPECIALISTS.union({"consultant"}) <= routable, (
+        f"roster {routable} is missing one of the M4 specialists"
+    )
+    expected_labels = {expected for _, expected in _CASES}
+    assert expected_labels <= _ROUTABLE_SPECIALISTS, (
+        f"a case expects a non-routable specialist: {expected_labels - _ROUTABLE_SPECIALISTS}"
+    )
+
+
 @pytest.mark.parametrize(("intent", "expected"), _CASES)
 async def test_routing_picks_expected_specialist(intent: str, expected: str) -> None:
     settings = Settings()  # reads NETOPS_LLM_LOCAL_MODEL / profile from env
     llm = get_chat_model("local", settings)
-    prompt = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)  # latest registered (v3)
+    prompt = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)  # latest registered (v4, five-way)
     system = SystemMessage(content=prompt.text.format(specialists=_routable_roster()))
     router = llm.with_structured_output(RoutingDecision)
     decision = await router.ainvoke([system, HumanMessage(content=intent)])
