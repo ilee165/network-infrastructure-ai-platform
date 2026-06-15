@@ -16,7 +16,7 @@ import { apiFetch } from "./client";
 
 // ── Enum literals (match backend ConfigSource / Severity / FindingStatus) ─────
 
-export type ConfigSource = "ssh" | "api" | "manual";
+export type ConfigSource = "scheduled" | "on_demand";
 export type Severity = "info" | "warn" | "violation";
 export type FindingStatus = "pass" | "violation" | "skipped";
 

@@ -481,6 +481,9 @@ export function ConfigPage() {
   const tabBtn = (t: ConfigTab, label: string) => (
     <button
       type="button"
+      role="tab"
+      aria-selected={tab === t}
+      aria-controls={`config-tabpanel-${t}`}
       data-testid={`config-tab-${t}`}
       onClick={() => setTab(t)}
       className={`px-4 py-2 text-xs font-medium transition-colors ${
@@ -542,7 +545,12 @@ export function ConfigPage() {
           </div>
 
           {/* Tab panel */}
-          <div className="pt-4">
+          <div
+            role="tabpanel"
+            id={`config-tabpanel-${tab}`}
+            aria-labelledby={`config-tab-${tab}`}
+            className="pt-4"
+          >
             {tab === "snapshots" && <SnapshotsPanel deviceId={selectedDeviceId} />}
             {tab === "drift" && <DriftPanel deviceId={selectedDeviceId} />}
             {tab === "compliance" && <CompliancePanel deviceId={selectedDeviceId} />}
