@@ -22,6 +22,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Dashboard", abbr: "DB", end: true },
   { to: "/devices", label: "Devices", abbr: "DV" },
+  { to: "/config", label: "Config", abbr: "CF" },
   { to: "/topology", label: "Topology", abbr: "TP" },
   { to: "/chat", label: "Chat", abbr: "CH" },
   { to: "/changes", label: "Changes", abbr: "CR" },
