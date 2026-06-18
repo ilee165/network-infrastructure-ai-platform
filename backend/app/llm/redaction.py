@@ -287,6 +287,37 @@ def _redact_content(content: object) -> object:
     return content
 
 
+def redact_payload(value: Any) -> Any:
+    """Recursively redact secrets in a JSON-like structure (str / list / dict).
+
+    The A9 redaction layer (:func:`redact_prompt`) strips vendor secret patterns
+    from text before it leaves the process toward an LLM. A ChangeRequest
+    ``payload`` (the exact config diff / DDI API calls an agent proposes) is
+    JSON-like and routinely carries that same secret-bearing config/DNS material,
+    and it is rendered toward an LLM for the diff/intent preview (ADR-0020 §4,
+    M5-PLAN risk #3). This helper reuses the one redaction implementation rather
+    than introducing a second secret-stripping path:
+
+    * ``str`` values are passed through :func:`redact_prompt`;
+    * ``dict`` values are redacted value-by-value (keys are structural, never
+      secrets, and are preserved);
+    * ``list`` / ``tuple`` values are redacted element-by-element (a list result
+      is always returned so the structure stays JSON-serialisable);
+    * every other scalar (``int``/``float``/``bool``/``None``) is returned
+      unchanged.
+
+    The input is never mutated — a new structure is returned. Idempotent, because
+    :func:`redact_prompt` is.
+    """
+    if isinstance(value, str):
+        return redact_prompt(value)
+    if isinstance(value, dict):
+        return {key: redact_payload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_payload(item) for item in value]
+    return value
+
+
 def redact_messages(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
     """Return a new message list with secrets redacted in every message body.
 
@@ -402,6 +433,7 @@ __all__ = [
     "REDACTION_TOKENS",
     "RedactingChatModel",
     "redact_messages",
+    "redact_payload",
     "redact_prompt",
     "wrap_with_redaction",
 ]

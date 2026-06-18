@@ -22,7 +22,9 @@ behaviour is deterministic under the scripted fake chat model used in tests
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
+from contextlib import ExitStack
 from typing import Any, cast
 
 from langchain_core.language_models import BaseChatModel
@@ -32,7 +34,11 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
 from app.agents.framework.registry import AgentRegistry
-from app.agents.framework.tools import agent_run_context
+from app.agents.framework.tools import (
+    GateFactory,
+    agent_run_context,
+    change_request_gate_context,
+)
 from app.agents.framework.traces import (
     InMemoryTraceRecorder,
     ReasoningTrace,
@@ -280,13 +286,18 @@ async def run_supervisor(
     messages: Sequence[BaseMessage],
     *,
     role: Role,
+    user_id: uuid.UUID | None = None,
+    session_id: uuid.UUID | None = None,
+    reasoning_trace_id: uuid.UUID | None = None,
+    gate_factory: GateFactory | None = None,
 ) -> SupervisorState:
     """Drive the compiled supervisor *graph* as the invoking user (brief §7).
 
     This is the production run entrypoint: an API route resolves the
     authenticated :class:`~app.models.User` via ``get_current_user`` and passes
-    that user's role (``Role.from_name(user.role.name)``) here. The role is
-    bound with :func:`~app.agents.framework.tools.agent_run_context` for the
+    that user's role (``Role.from_name(user.role.name)``) here. The role — and,
+    from M5, the user's ``user_id`` / ``session_id`` / ``reasoning_trace_id`` —
+    are bound with :func:`~app.agents.framework.tools.agent_run_context` for the
     *entire* graph invocation, so every :class:`~app.agents.framework.tools.NetOpsTool`
     executed inside any specialist subgraph sees the real caller role — a tool
     whose ``min_role`` is ``operator``/``engineer``/``admin`` is reachable
@@ -297,6 +308,15 @@ async def run_supervisor(
     falls back to :attr:`~app.core.security.Role.VIEWER`, leaving every
     higher-tier tool permanently unreachable through an agent run.
 
+    *gate_factory* (M5, ADR-0020 §ref) binds the
+    :func:`~app.agents.framework.tools.change_request_gate_context` for the run:
+    when a state-changing tool fires, the framework gate builds a
+    :class:`~app.agents.framework.approval.ChangeRequestGate` from this factory
+    and the bound identity, creating a ChangeRequest *draft* (the tool returns
+    that CR; it never executes the change). When ``None`` (read-only runs, or
+    pre-M5 callers) a state-changing tool falls back to the secure hard-reject
+    gate — it can never execute unauthorised.
+
     Returns the final :class:`SupervisorState` (the conversation plus its
     completed :class:`~app.agents.framework.traces.ReasoningTrace`).
     """
@@ -304,6 +324,16 @@ async def run_supervisor(
     # seeds the conversation, so the partial input is cast to the state type
     # the compiled graph accepts at its START node.
     initial_state = cast(SupervisorState, {"messages": list(messages)})
-    with agent_run_context(role=role):
+    with ExitStack() as stack:
+        stack.enter_context(
+            agent_run_context(
+                role=role,
+                user_id=user_id,
+                session_id=session_id,
+                reasoning_trace_id=reasoning_trace_id,
+            )
+        )
+        if gate_factory is not None:
+            stack.enter_context(change_request_gate_context(gate_factory))
         final_state = await graph.ainvoke(initial_state)
     return cast(SupervisorState, final_state)
