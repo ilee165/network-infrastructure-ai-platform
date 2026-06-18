@@ -55,7 +55,11 @@ from app.models import (
 )
 from app.models import Role as RoleRow
 from app.services.audit import service as audit_service
-from app.services.change_requests import ChangeRequestService
+from app.services.change_requests import (
+    AUTOMATION_PRINCIPAL,
+    AutomationPrincipal,
+    ChangeRequestService,
+)
 
 
 @pytest.fixture()
@@ -169,17 +173,48 @@ class TestCreateDraft:
                 kind=ChangeRequestKind.DDI_RECORD,
             )
 
-    async def test_create_draft_can_disable_four_eyes(
+    async def test_admin_can_disable_four_eyes_and_waiver_is_audited(
         self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
-        requester = await _seed_user(sessionmaker, role_name="engineer")
+        """Only admin may waive four-eyes, and the waiver is a distinct audit event."""
+        requester = await _seed_user(sessionmaker, role_name="admin")
         cr = await service.create_draft(
             requester_id=requester,
-            actor_role=Role.ENGINEER,
+            actor_role=Role.ADMIN,
             kind=ChangeRequestKind.CONFIG,
             four_eyes_required=False,
         )
         assert cr.four_eyes_required is False
+        # The disablement is a first-class, separately-audited event (ADR-0020 §3),
+        # distinct from change_request.created and attributing the waiver role.
+        rows = await _audit_rows(sessionmaker, cr.id)
+        waiver = next(r for r in rows if r.action == "change_request.four_eyes_waived")
+        assert waiver.detail is not None
+        assert waiver.detail["waived_by_role"] == "admin"
+        assert waiver.actor == f"user:{requester}"
+
+    async def test_engineer_cannot_disable_four_eyes(
+        self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """An engineer may author CRs but may NOT waive four-eyes (ADR-0020 §3)."""
+        requester = await _seed_user(sessionmaker, role_name="engineer")
+        with pytest.raises(ForbiddenError):
+            await service.create_draft(
+                requester_id=requester,
+                actor_role=Role.ENGINEER,
+                kind=ChangeRequestKind.CONFIG,
+                four_eyes_required=False,
+            )
+
+    async def test_four_eyes_default_cr_emits_no_waiver_event(
+        self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        requester = await _seed_user(sessionmaker, role_name="engineer")
+        cr = await service.create_draft(
+            requester_id=requester, actor_role=Role.ENGINEER, kind=ChangeRequestKind.CONFIG
+        )
+        rows = await _audit_rows(sessionmaker, cr.id)
+        assert not any(r.action == "change_request.four_eyes_waived" for r in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -245,14 +280,17 @@ class TestFourEyesAndApproval:
         *,
         requester: uuid.UUID,
         four_eyes_required: bool = True,
+        author_role: Role = Role.ENGINEER,
     ) -> ChangeRequest:
+        # Waiving four-eyes is admin-only (ADR-0020 §3): when the test disables
+        # it the author must be an admin, otherwise create_draft rejects.
         cr = await service.create_draft(
             requester_id=requester,
-            actor_role=Role.ENGINEER,
+            actor_role=author_role,
             kind=ChangeRequestKind.CONFIG,
             four_eyes_required=four_eyes_required,
         )
-        return await service.submit(cr.id, actor_id=requester, actor_role=Role.ENGINEER)
+        return await service.submit(cr.id, actor_id=requester, actor_role=author_role)
 
     async def test_requester_cannot_approve_own_four_eyes_cr(
         self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
@@ -317,12 +355,18 @@ class TestFourEyesAndApproval:
     async def test_self_approval_allowed_when_four_eyes_disabled(
         self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
-        requester = await _seed_user(sessionmaker, role_name="engineer")
+        # Four-eyes may only be waived by an admin (ADR-0020 §3); a waived CR may
+        # then be self-approved by its admin author.
+        requester = await _seed_user(sessionmaker, role_name="admin")
         cr = await self._pending_cr(
-            service, sessionmaker, requester=requester, four_eyes_required=False
+            service,
+            sessionmaker,
+            requester=requester,
+            four_eyes_required=False,
+            author_role=Role.ADMIN,
         )
         approved = await service.approve(
-            cr.id, actor_id=requester, actor_role=Role.ENGINEER, comment="solo lab change"
+            cr.id, actor_id=requester, actor_role=Role.ADMIN, comment="solo lab change"
         )
         assert approved.state is ChangeRequestState.APPROVED
         # The self-approval is still recorded as a distinct, audited approvals row.
@@ -396,29 +440,53 @@ class TestExecutionHandoffs:
         self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         cr = await self._approved_cr(service, sessionmaker)
-        executing = await service.mark_executing(cr.id)
+        executing = await service.mark_executing(cr.id, principal=AUTOMATION_PRINCIPAL)
         assert executing.state is ChangeRequestState.EXECUTING
-        completed = await service.mark_completed(cr.id, after_state={"ip ssh version": 2})
+        completed = await service.mark_completed(
+            cr.id, principal=AUTOMATION_PRINCIPAL, after_state={"ip ssh version": 2}
+        )
         assert completed.state is ChangeRequestState.COMPLETED
         assert completed.after_state == {"ip ssh version": 2}
         rows = await _audit_rows(sessionmaker, cr.id)
         actions = {r.action for r in rows}
         assert "change_request.approved_to_executing" in actions
         assert "change_request.executing_to_completed" in actions
+        # The handoff audit actor is the verified Automation principal, not a user.
+        exec_row = next(r for r in rows if r.action == "change_request.approved_to_executing")
+        assert exec_row.actor == "agent:automation"
 
     async def test_executing_to_failed_to_rolled_back(
         self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         cr = await self._approved_cr(service, sessionmaker)
-        await service.mark_executing(cr.id)
-        failed = await service.mark_failed(cr.id, after_state={"error": "apply timeout"})
+        await service.mark_executing(cr.id, principal=AUTOMATION_PRINCIPAL)
+        failed = await service.mark_failed(
+            cr.id, principal=AUTOMATION_PRINCIPAL, after_state={"error": "apply timeout"}
+        )
         assert failed.state is ChangeRequestState.FAILED
-        rolled = await service.mark_rolled_back(cr.id)
+        rolled = await service.mark_rolled_back(cr.id, principal=AUTOMATION_PRINCIPAL)
         assert rolled.state is ChangeRequestState.ROLLED_BACK
         rows = await _audit_rows(sessionmaker, cr.id)
         actions = {r.action for r in rows}
         assert "change_request.executing_to_failed" in actions
         assert "change_request.failed_to_rolled_back" in actions
+
+    async def test_non_automation_caller_cannot_drive_execution(
+        self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """approved → executing is gated on the verified Automation principal (ADR-0020 §2).
+
+        A forged principal (even one mimicking the actor string) is rejected, and
+        no state change or audit row is written.
+        """
+        cr = await self._approved_cr(service, sessionmaker)
+        forged = AutomationPrincipal(actor="agent:automation")
+        with pytest.raises(ForbiddenError):
+            await service.mark_executing(cr.id, principal=forged)
+        # State unchanged and no transition audit row written for the denied call.
+        assert (await service.get(cr.id)).state is ChangeRequestState.APPROVED
+        rows = await _audit_rows(sessionmaker, cr.id)
+        assert not any(r.action == "change_request.approved_to_executing" for r in rows)
 
     async def test_cannot_execute_unapproved_cr(
         self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
@@ -429,24 +497,24 @@ class TestExecutionHandoffs:
         )
         # pending/draft → executing is illegal; only approved → executing is legal.
         with pytest.raises(ConflictError):
-            await service.mark_executing(cr.id)
+            await service.mark_executing(cr.id, principal=AUTOMATION_PRINCIPAL)
 
     async def test_cannot_complete_without_executing(
         self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         cr = await self._approved_cr(service, sessionmaker)
         with pytest.raises(ConflictError):
-            await service.mark_completed(cr.id)
+            await service.mark_completed(cr.id, principal=AUTOMATION_PRINCIPAL)
 
     async def test_completed_is_terminal(
         self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         cr = await self._approved_cr(service, sessionmaker)
-        await service.mark_executing(cr.id)
-        await service.mark_completed(cr.id)
+        await service.mark_executing(cr.id, principal=AUTOMATION_PRINCIPAL)
+        await service.mark_completed(cr.id, principal=AUTOMATION_PRINCIPAL)
         # No edge leaves completed.
         with pytest.raises(ConflictError):
-            await service.mark_rolled_back(cr.id)
+            await service.mark_rolled_back(cr.id, principal=AUTOMATION_PRINCIPAL)
 
 
 # ---------------------------------------------------------------------------
@@ -536,10 +604,72 @@ class TestAuditTrail:
         )
         assert approve_row.actor == f"user:{approver}"
 
+    async def test_transition_audit_carries_target_refs_not_payload(
+        self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The audited record self-identifies affected targets by id (ADR-0020 §4).
+
+        target_refs (device ids / DDI refs) ride in the audit detail; the
+        secret-bearing payload never does.
+        """
+        requester = await _seed_user(sessionmaker, role_name="engineer")
+        approver = await _seed_user(sessionmaker, role_name="engineer")
+        target_refs = {"device_ids": ["edge-1", "edge-2"]}
+        cr = await service.create_draft(
+            requester_id=requester,
+            actor_role=Role.ENGINEER,
+            kind=ChangeRequestKind.CONFIG,
+            payload={"diff": "secret enable password 0 hunter2"},
+            target_refs=target_refs,
+        )
+        await service.submit(cr.id, actor_id=requester, actor_role=Role.ENGINEER)
+        await service.approve(cr.id, actor_id=approver, actor_role=Role.ENGINEER)
+
+        rows = await _audit_rows(sessionmaker, cr.id)
+        for action in (
+            "change_request.created",
+            "change_request.draft_to_pending_approval",
+            "change_request.pending_approval_to_approved",
+        ):
+            row = next(r for r in rows if r.action == action)
+            assert row.detail is not None
+            assert row.detail["target_refs"] == target_refs, action
+            # The secret-bearing payload is never serialized into the audit detail.
+            assert "hunter2" not in str(row.detail), action
+
+    async def test_request_id_correlation_threaded_into_audit(
+        self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The inbound request/correlation id is persisted on the audit row (ADR-0020 §4)."""
+        requester = await _seed_user(sessionmaker, role_name="engineer")
+        approver = await _seed_user(sessionmaker, role_name="engineer")
+        create_rid = uuid.uuid4()
+        submit_rid = uuid.uuid4()
+        approve_rid = uuid.uuid4()
+        cr = await service.create_draft(
+            requester_id=requester,
+            actor_role=Role.ENGINEER,
+            kind=ChangeRequestKind.CONFIG,
+            request_id=create_rid,
+        )
+        await service.submit(
+            cr.id, actor_id=requester, actor_role=Role.ENGINEER, request_id=submit_rid
+        )
+        await service.approve(
+            cr.id, actor_id=approver, actor_role=Role.ENGINEER, request_id=approve_rid
+        )
+
+        rows = await _audit_rows(sessionmaker, cr.id)
+        by_action = {r.action: r for r in rows}
+        assert by_action["change_request.created"].request_id == create_rid
+        assert by_action["change_request.draft_to_pending_approval"].request_id == submit_rid
+        assert by_action["change_request.pending_approval_to_approved"].request_id == approve_rid
+
 
 def test_change_request_action_constants() -> None:
     """The CR transition action vocabulary is fixed and importable from the audit package."""
     assert audit_service.CHANGE_REQUEST_CREATED == "change_request.created"
+    assert audit_service.CHANGE_REQUEST_FOUR_EYES_WAIVED == "change_request.four_eyes_waived"
     assert (
         audit_service.CHANGE_REQUEST_DRAFT_TO_PENDING == "change_request.draft_to_pending_approval"
     )

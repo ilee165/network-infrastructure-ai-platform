@@ -38,14 +38,29 @@ migration-0007 DB constraint trigger is the backstop, not the only check):
 Auditing (ADR-0020 §4): every transition writes one ``audit_log`` row via the
 shared :func:`app.services.audit.record` helper — action
 ``change_request.<from>_to_<to>`` (``change_request.created`` for the initial
-draft), the actor, the target CR id, before/after lifecycle state in ``detail``,
-and the CR's ``reasoning_trace_id`` link when it originated from an agent run.
+draft), the actor, the target CR id, before/after lifecycle state plus the
+id-only ``target_refs`` (which devices/DDI refs the change touches — never the
+secret-bearing ``payload``) in ``detail``, the CR's ``reasoning_trace_id`` link
+when it originated from an agent run, and the inbound ``request_id`` correlation
+id when the call arrived over HTTP. The full chain (requester -> approver ->
+executor -> before/after -> trace + targets) is therefore reconstructable from
+``audit_log`` + ``approvals`` alone (exit criterion #1).
 
 **Out of scope (by design):** this service performs **no** device or DDI writes.
 The ``approved -> executing`` edge is only a lifecycle handoff; the Automation
 Agent (M5 Wave 4) is the sole executor of approved changes and calls
 :meth:`mark_executing` / :meth:`mark_completed` / :meth:`mark_failed` /
 :meth:`mark_rolled_back` to drive the post-approval lifecycle.
+
+Execution-handoff authorization (ADR-0020 §1/§2): the post-approval ``mark_*``
+edges — most critically ``approved -> executing``, which directly precedes the
+real device/DDI mutation in Wave 4 — require a verified service principal
+(:data:`AUTOMATION_PRINCIPAL`), not merely a holder of a
+:class:`ChangeRequestService` reference. The audit actor on those edges is
+derived from the verified principal rather than a hardcoded literal. The caller
+that supplies that principal (the Automation Agent service identity) is wired in
+Wave 4; until then these methods are unreachable from any HTTP route, but the
+guard is in place so the handoff is provably driven by the Automation Agent.
 """
 
 from __future__ import annotations
@@ -74,6 +89,35 @@ _logger = get_logger(__name__)
 #: inherits via :meth:`Role.can_act_as`. Execution handoffs (``mark_*``) are not
 #: human actions — they are driven by the Automation Agent service-to-service.
 _MIN_LIFECYCLE_ROLE: Role = Role.ENGINEER
+
+#: Waiving four-eyes (``four_eyes_required=False``) is an elevated, admin-only
+#: action (ADR-0020 §3 / ADR-0010 §3): collapsing a two-person control to one
+#: person must not be a free per-CR toggle any engineer can flip, so the secure
+#: default cannot be silently bypassed by the same person who will approve.
+_MIN_FOUR_EYES_WAIVER_ROLE: Role = Role.ADMIN
+
+
+class AutomationPrincipal:
+    """The verified service identity authorized to drive the post-approval
+    lifecycle (``approved -> executing -> completed/failed/rolled_back``).
+
+    ADR-0020 §1/§2 require the ``approved -> executing`` guard to validate that
+    the caller is the Automation Agent. A caller obtains the singleton
+    :data:`AUTOMATION_PRINCIPAL` only by being the Automation Agent service
+    (wired in Wave 4); an arbitrary holder of a :class:`ChangeRequestService`
+    reference cannot mint one, so it cannot drive execution. The ``actor``
+    string is what is stamped into the transition audit row — derived from this
+    verified principal, never a hardcoded literal.
+    """
+
+    __slots__ = ("actor",)
+
+    def __init__(self, actor: str) -> None:
+        self.actor = actor
+
+
+#: The sole principal the ``mark_*`` execution handoffs accept (ADR-0020 §2).
+AUTOMATION_PRINCIPAL: AutomationPrincipal = AutomationPrincipal(actor="agent:automation")
 
 #: ``state``-machine edges keyed by the legal *from* state, with the audit action
 #: that documents the transition. The single source of truth for "what may follow
@@ -119,14 +163,22 @@ class ChangeRequestService:
         four_eyes_required: bool = True,
         generating_session_id: uuid.UUID | None = None,
         reasoning_trace_id: uuid.UUID | None = None,
+        request_id: uuid.UUID | None = None,
     ) -> ChangeRequest:
         """Author a new CR in ``draft`` (engineer+; ADR-0020 §5).
 
         ``four_eyes_required`` defaults to ``True`` (secure by default) and may
-        only be set here — it is frozen at submit (ADR-0020 §3). Audited as
-        ``change_request.created``.
+        only be set here — it is frozen at submit (ADR-0020 §3). Disabling it is
+        an **admin-only** action (ADR-0020 §3 / ADR-0010 §3): an engineer cannot
+        waive four-eyes on their own CR and then self-approve it, which would
+        collapse the two-person control to one person. When four-eyes is waived,
+        a distinct ``change_request.four_eyes_waived`` audit event attributes the
+        waiver, separate from the ``change_request.created`` event, so the
+        waiver is first-class in the audit chain.
         """
         self._require_role(actor_role, action="author a change request")
+        if not four_eyes_required:
+            self._require_four_eyes_waiver(actor_role)
         async with self._sessionmaker() as session:
             cr = ChangeRequest(
                 state=ChangeRequestState.DRAFT,
@@ -149,9 +201,30 @@ class ChangeRequestService:
                 action=audit.CHANGE_REQUEST_CREATED,
                 target_type=_TARGET_TYPE,
                 target_id=str(cr.id),
-                detail={"kind": kind.value, "four_eyes_required": four_eyes_required},
+                detail={
+                    "kind": kind.value,
+                    "four_eyes_required": four_eyes_required,
+                    "target_refs": self._target_refs_projection(target_refs),
+                },
                 reasoning_trace_id=reasoning_trace_id,
+                request_id=request_id,
             )
+            if not four_eyes_required:
+                # The disablement itself is a deliberate, separately-audited
+                # policy event attributing who waived it (ADR-0020 §3).
+                await audit.record(
+                    session,
+                    actor=f"user:{requester_id}",
+                    action=audit.CHANGE_REQUEST_FOUR_EYES_WAIVED,
+                    target_type=_TARGET_TYPE,
+                    target_id=str(cr.id),
+                    detail={
+                        "waived_by_role": actor_role.value,
+                        "target_refs": self._target_refs_projection(target_refs),
+                    },
+                    reasoning_trace_id=reasoning_trace_id,
+                    request_id=request_id,
+                )
             await session.commit()
             cr_id = cr.id
         _logger.info("change_request.created", cr_id=str(cr_id), requester_id=str(requester_id))
@@ -200,7 +273,12 @@ class ChangeRequestService:
     # -- submit / approve / reject ------------------------------------------
 
     async def submit(
-        self, cr_id: uuid.UUID, *, actor_id: uuid.UUID, actor_role: Role
+        self,
+        cr_id: uuid.UUID,
+        *,
+        actor_id: uuid.UUID,
+        actor_role: Role,
+        request_id: uuid.UUID | None = None,
     ) -> ChangeRequest:
         """``draft -> pending_approval`` (engineer+; ADR-0020 §1)."""
         self._require_role(actor_role, action="submit a change request")
@@ -209,7 +287,8 @@ class ChangeRequestService:
             expected=ChangeRequestState.DRAFT,
             new=ChangeRequestState.PENDING_APPROVAL,
             action=audit.CHANGE_REQUEST_DRAFT_TO_PENDING,
-            actor_id=actor_id,
+            actor=f"user:{actor_id}",
+            request_id=request_id,
         )
 
     async def approve(
@@ -219,6 +298,7 @@ class ChangeRequestService:
         actor_id: uuid.UUID,
         actor_role: Role,
         comment: str | None = None,
+        request_id: uuid.UUID | None = None,
     ) -> ChangeRequest:
         """``pending_approval -> approved`` — PRIMARY four-eyes guard (ADR-0020 §3).
 
@@ -252,7 +332,8 @@ class ChangeRequestService:
                 cr,
                 new=ChangeRequestState.APPROVED,
                 action=audit.CHANGE_REQUEST_PENDING_TO_APPROVED,
-                actor_id=actor_id,
+                actor=f"user:{actor_id}",
+                request_id=request_id,
             )
             await session.commit()
         return await self.get(cr_id)
@@ -264,6 +345,7 @@ class ChangeRequestService:
         actor_id: uuid.UUID,
         actor_role: Role,
         comment: str | None = None,
+        request_id: uuid.UUID | None = None,
     ) -> ChangeRequest:
         """``pending_approval -> draft`` (engineer+; ADR-0020 §1).
 
@@ -287,61 +369,89 @@ class ChangeRequestService:
                 cr,
                 new=ChangeRequestState.DRAFT,
                 action=audit.CHANGE_REQUEST_PENDING_TO_DRAFT,
-                actor_id=actor_id,
+                actor=f"user:{actor_id}",
+                request_id=request_id,
             )
             await session.commit()
         return await self.get(cr_id)
 
     # -- execution handoffs (Automation Agent; no device/DDI writes here) ----
+    #
+    # Every ``mark_*`` edge requires a verified ``AutomationPrincipal`` and
+    # authorizes it before transitioning (ADR-0020 §1/§2: the approved ->
+    # executing guard must validate that the caller is the Automation Agent).
+    # The audit actor is derived from the verified principal, never hardcoded.
 
-    async def mark_executing(self, cr_id: uuid.UUID) -> ChangeRequest:
+    async def mark_executing(
+        self, cr_id: uuid.UUID, *, principal: AutomationPrincipal
+    ) -> ChangeRequest:
         """``approved -> executing`` — the Automation Agent claims the CR (ADR-0021).
 
-        A lifecycle handoff only: this service performs no device/DDI write.
+        Security-critical: this edge directly precedes the real device/DDI
+        mutation in Wave 4, so it is gated on a verified
+        :class:`AutomationPrincipal` (ADR-0020 §1/§2) — an arbitrary holder of a
+        :class:`ChangeRequestService` reference cannot drive execution. A
+        lifecycle handoff only: this service performs no device/DDI write.
         """
+        actor = self._require_automation(principal)
         return await self._transition(
             cr_id,
             expected=ChangeRequestState.APPROVED,
             new=ChangeRequestState.EXECUTING,
             action=audit.CHANGE_REQUEST_APPROVED_TO_EXECUTING,
-            actor_id=None,
+            actor=actor,
         )
 
     async def mark_completed(
-        self, cr_id: uuid.UUID, *, after_state: dict[str, Any] | None = None
+        self,
+        cr_id: uuid.UUID,
+        *,
+        principal: AutomationPrincipal,
+        after_state: dict[str, Any] | None = None,
     ) -> ChangeRequest:
         """``executing -> completed`` (terminal). Optional ``after_state`` records the
-        post-apply verified diff (ADR-0020 §4)."""
+        post-apply verified diff (ADR-0020 §4). Automation-Agent-only (ADR-0020 §2)."""
+        actor = self._require_automation(principal)
         return await self._transition(
             cr_id,
             expected=ChangeRequestState.EXECUTING,
             new=ChangeRequestState.COMPLETED,
             action=audit.CHANGE_REQUEST_EXECUTING_TO_COMPLETED,
-            actor_id=None,
+            actor=actor,
             after_state=after_state,
         )
 
     async def mark_failed(
-        self, cr_id: uuid.UUID, *, after_state: dict[str, Any] | None = None
+        self,
+        cr_id: uuid.UUID,
+        *,
+        principal: AutomationPrincipal,
+        after_state: dict[str, Any] | None = None,
     ) -> ChangeRequest:
-        """``executing -> failed`` (non-terminal — rollback may follow, ADR-0021)."""
+        """``executing -> failed`` (non-terminal — rollback may follow, ADR-0021).
+        Automation-Agent-only (ADR-0020 §2)."""
+        actor = self._require_automation(principal)
         return await self._transition(
             cr_id,
             expected=ChangeRequestState.EXECUTING,
             new=ChangeRequestState.FAILED,
             action=audit.CHANGE_REQUEST_EXECUTING_TO_FAILED,
-            actor_id=None,
+            actor=actor,
             after_state=after_state,
         )
 
-    async def mark_rolled_back(self, cr_id: uuid.UUID) -> ChangeRequest:
-        """``failed -> rolled_back`` (terminal) once the structured rollback completes."""
+    async def mark_rolled_back(
+        self, cr_id: uuid.UUID, *, principal: AutomationPrincipal
+    ) -> ChangeRequest:
+        """``failed -> rolled_back`` (terminal) once the structured rollback completes.
+        Automation-Agent-only (ADR-0020 §2)."""
+        actor = self._require_automation(principal)
         return await self._transition(
             cr_id,
             expected=ChangeRequestState.FAILED,
             new=ChangeRequestState.ROLLED_BACK,
             action=audit.CHANGE_REQUEST_FAILED_TO_ROLLED_BACK,
-            actor_id=None,
+            actor=actor,
         )
 
     # -- internals -----------------------------------------------------------
@@ -354,6 +464,50 @@ class ChangeRequestService:
                 f"role '{actor_role.value}' may not {action}; "
                 f"'{_MIN_LIFECYCLE_ROLE.value}' or higher is required"
             )
+
+    @staticmethod
+    def _require_four_eyes_waiver(actor_role: Role) -> None:
+        """Deny disabling four-eyes below ``admin`` (ADR-0020 §3, ADR-0010 §3).
+
+        Waiving the two-person control is an elevated action: an engineer may
+        not author a CR with ``four_eyes_required=False`` (and then self-approve
+        it). Only ``admin`` may waive, and the waiver is separately audited.
+        """
+        if not actor_role.can_act_as(_MIN_FOUR_EYES_WAIVER_ROLE):
+            raise ForbiddenError(
+                f"role '{actor_role.value}' may not waive four-eyes on a change request; "
+                f"'{_MIN_FOUR_EYES_WAIVER_ROLE.value}' is required to set "
+                "four_eyes_required=false"
+            )
+
+    @staticmethod
+    def _require_automation(principal: AutomationPrincipal) -> str:
+        """Authorize an execution-handoff caller and return its audit actor.
+
+        ADR-0020 §1/§2: the ``approved -> executing`` (and the rest of the
+        post-approval) handoffs are driven only by the Automation Agent. The
+        caller must present the verified :data:`AUTOMATION_PRINCIPAL`; any other
+        object (including a forged ``AutomationPrincipal`` with a different
+        actor) is rejected. The returned string becomes the audit actor, so the
+        attribution is derived from the verified identity, not hardcoded.
+        """
+        if principal is not AUTOMATION_PRINCIPAL:
+            raise ForbiddenError(
+                "execution handoffs (approved -> executing -> completed/failed/rolled_back) "
+                "may be driven only by the Automation Agent service principal (ADR-0020 §2)"
+            )
+        return principal.actor
+
+    @staticmethod
+    def _target_refs_projection(target_refs: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Id-only view of ``target_refs`` for the audit detail (ADR-0020 §4).
+
+        ``target_refs`` already holds only device ids / DDI object refs (the
+        secret-bearing change lives in ``payload``, which is never audited), so
+        it is recorded verbatim; this indirection is the single, named place
+        that would project/strip it if that ever stopped being true.
+        """
+        return target_refs
 
     @staticmethod
     def _require_state(cr: ChangeRequest, expected: ChangeRequestState, verb: str) -> None:
@@ -377,16 +531,24 @@ class ChangeRequestService:
         expected: ChangeRequestState,
         new: ChangeRequestState,
         action: str,
-        actor_id: uuid.UUID | None,
+        actor: str,
         after_state: dict[str, Any] | None = None,
+        request_id: uuid.UUID | None = None,
     ) -> ChangeRequest:
-        """Load, validate the *from* state, apply *new* + audit, commit."""
+        """Load, validate the *from* state, apply *new* + audit, commit.
+
+        ``actor`` is the already-resolved audit actor string — derived from a
+        verified user id (``user:<id>``) or the verified Automation principal
+        (``agent:automation``); this method never invents an attribution.
+        """
         async with self._sessionmaker() as session:
             cr = await self._load(session, cr_id)
             self._require_state(cr, expected, action)
             if after_state is not None:
                 cr.after_state = after_state
-            await self._apply_transition(session, cr, new=new, action=action, actor_id=actor_id)
+            await self._apply_transition(
+                session, cr, new=new, action=action, actor=actor, request_id=request_id
+            )
             await session.commit()
         return await self.get(cr_id)
 
@@ -397,25 +559,33 @@ class ChangeRequestService:
         *,
         new: ChangeRequestState,
         action: str,
-        actor_id: uuid.UUID | None,
+        actor: str,
+        request_id: uuid.UUID | None = None,
     ) -> None:
         """Mutate ``state`` and write the before/after-stamped, trace-linked audit row.
 
-        The caller has already validated the *from* state and owns the commit.
-        ``detail`` carries the before/after lifecycle state (the audited
-        transition, ADR-0020 §4) — never the secret-bearing CR ``payload``.
+        The caller has already validated the *from* state, resolved ``actor``
+        from a verified identity, and owns the commit. ``detail`` carries the
+        before/after lifecycle state **and the id-only ``target_refs``** so the
+        audited record self-identifies which devices/DDI refs the change touches
+        (ADR-0020 §4) — never the secret-bearing CR ``payload``. ``request_id``
+        is the inbound correlation id (ADR-0020 §4), ``None`` for non-HTTP calls.
         """
         before = cr.state
         cr.state = new
-        actor = f"user:{actor_id}" if actor_id is not None else "agent:automation"
         await audit.record(
             session,
             actor=actor,
             action=action,
             target_type=_TARGET_TYPE,
             target_id=str(cr.id),
-            detail={"before_state": before.value, "after_state": new.value},
+            detail={
+                "before_state": before.value,
+                "after_state": new.value,
+                "target_refs": self._target_refs_projection(cr.target_refs),
+            },
             reasoning_trace_id=cr.reasoning_trace_id,
+            request_id=request_id,
         )
         _logger.info(
             "change_request.transition",

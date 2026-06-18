@@ -75,6 +75,11 @@ CONFIG_SNAPSHOT_FAILED: Final = "config.snapshot_failed"
 # references the CR / target devices by id only — a CR ``payload`` may carry
 # secret-bearing config/DNS content and must never appear here verbatim.
 CHANGE_REQUEST_CREATED: Final = "change_request.created"
+# Disabling four-eyes on a CR is a deliberate, separately-audited policy event
+# (ADR-0020 §3: "when disabled, the disablement itself is an audited config
+# event"), attributing who waived the control — distinct from
+# ``change_request.created`` so the waiver is first-class in the audit chain.
+CHANGE_REQUEST_FOUR_EYES_WAIVED: Final = "change_request.four_eyes_waived"
 CHANGE_REQUEST_DRAFT_TO_PENDING: Final = "change_request.draft_to_pending_approval"
 CHANGE_REQUEST_PENDING_TO_APPROVED: Final = "change_request.pending_approval_to_approved"
 CHANGE_REQUEST_PENDING_TO_DRAFT: Final = "change_request.pending_approval_to_draft"
@@ -93,6 +98,7 @@ async def record(
     target_id: str | None,
     detail: dict[str, Any] | None,
     reasoning_trace_id: uuid.UUID | None = None,
+    request_id: uuid.UUID | None = None,
 ) -> AuditLog:
     """Append one audit entry and emit the matching structlog event.
 
@@ -104,6 +110,13 @@ async def record(
     that produced it (brief §6, ADR-0020 §4) — a plain indexed UUID with no FK
     (``reasoning_traces`` is range-partitioned). It is ``None`` for actions with
     no originating agent run.
+
+    ``request_id`` is the inbound request/correlation id of the call that
+    produced the audited action (ADR-0020 §4 names ``request id`` as a required
+    dimension of every transition audit entry). It is a plain indexed UUID with
+    no FK — captured at the route layer and threaded down here. It is ``None``
+    for actions raised outside an HTTP request (background/agent-driven calls
+    that carry no inbound correlation id).
     """
     entry = AuditLog(
         actor=actor,
@@ -112,6 +125,7 @@ async def record(
         target_id=target_id,
         detail=detail,
         reasoning_trace_id=reasoning_trace_id,
+        request_id=request_id,
     )
     session.add(entry)
     await session.flush()
@@ -124,5 +138,6 @@ async def record(
         target_id=target_id,
         detail=detail,
         reasoning_trace_id=str(reasoning_trace_id) if reasoning_trace_id is not None else None,
+        request_id=str(request_id) if request_id is not None else None,
     )
     return entry
