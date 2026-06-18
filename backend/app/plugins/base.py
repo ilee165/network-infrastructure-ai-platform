@@ -624,6 +624,10 @@ class DdiDnsCapability(PluginCapability):
     capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DDI_DNS})
 
     @abstractmethod
+    def get_zones(self) -> list[str]:
+        """Return the authoritative DNS zones (FQDNs) as normalized identifiers (ADR-0022 §2)."""
+
+    @abstractmethod
     def get_records(self, zone: str | None = None) -> list[NormalizedDnsRecord]:
         """Return DNS resource records, optionally scoped to *zone*, as normalized records."""
 
@@ -633,13 +637,28 @@ class DdiDnsCapability(PluginCapability):
 
     @abstractmethod
     def modify_record(
-        self, object_ref: str, changes: NormalizedDnsRecord
+        self,
+        object_ref: str,
+        changes: NormalizedDnsRecord,
+        current: NormalizedDnsRecord | None = None,
     ) -> ChangeRequestDraft:
-        """Draft a modification of the object at *object_ref* (no write performed)."""
+        """Draft a modification of the object at *object_ref* (no write performed).
+
+        *current* is the pre-image (prior record state); when supplied the draft's
+        ``inverse`` carries the prior field values so an approved rollback restores
+        them (ADR-0022 §3). When omitted, no blind empty-body restore is emitted.
+        """
 
     @abstractmethod
-    def delete_record(self, object_ref: str) -> ChangeRequestDraft:
-        """Draft the deletion of the object at *object_ref* (no write performed)."""
+    def delete_record(
+        self, object_ref: str, current: NormalizedDnsRecord | None = None
+    ) -> ChangeRequestDraft:
+        """Draft the deletion of the object at *object_ref* (no write performed).
+
+        *current* is the pre-image; when supplied the draft's ``inverse`` re-creates
+        the deleted record from its full state (ADR-0022 §3). Without it the delete
+        is non-reversible and no misleading re-create draft is emitted.
+        """
 
 
 class DdiDhcpCapability(PluginCapability):
@@ -660,8 +679,15 @@ class DdiDhcpCapability(PluginCapability):
         """Draft the addition of *dhcp_range* (no write performed)."""
 
     @abstractmethod
-    def delete_range(self, object_ref: str) -> ChangeRequestDraft:
-        """Draft the deletion of the range at *object_ref* (no write performed)."""
+    def delete_range(
+        self, object_ref: str, current: NormalizedDhcpRange | None = None
+    ) -> ChangeRequestDraft:
+        """Draft the deletion of the range at *object_ref* (no write performed).
+
+        *current* is the pre-image; when supplied the draft's ``inverse`` re-creates
+        the deleted range from its full state (ADR-0022 §3). Without it the delete
+        is non-reversible and no misleading re-create draft is emitted.
+        """
 
 
 class DdiIpamCapability(PluginCapability):
@@ -674,12 +700,27 @@ class DdiIpamCapability(PluginCapability):
         """Return the IPAM networks/subnets as normalized records."""
 
     @abstractmethod
+    def get_next_available_ip(self, network: str) -> str:
+        """Return the next free IP address within *network* (ADR-0022 §2 read interface).
+
+        Read-only: resolves the network's WAPI handle and calls the appliance's
+        ``next_available_ip`` function. Never mutates the source.
+        """
+
+    @abstractmethod
     def add_network(self, network: NormalizedNetwork) -> ChangeRequestDraft:
         """Draft the allocation of *network* (no write performed)."""
 
     @abstractmethod
-    def delete_network(self, object_ref: str) -> ChangeRequestDraft:
-        """Draft the deletion of the network at *object_ref* (no write performed)."""
+    def delete_network(
+        self, object_ref: str, current: NormalizedNetwork | None = None
+    ) -> ChangeRequestDraft:
+        """Draft the deletion of the network at *object_ref* (no write performed).
+
+        *current* is the pre-image; when supplied the draft's ``inverse`` re-creates
+        the deleted network from its full state (ADR-0022 §3). Without it the delete
+        is non-reversible and no misleading re-create draft is emitted.
+        """
 
 
 class VendorPlugin(ABC):

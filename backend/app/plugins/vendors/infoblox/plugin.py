@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar
 from uuid import UUID
 
+from app.core.errors import PluginError
 from app.plugins.base import (
     Capability,
     ChangeRequestDraft,
@@ -184,6 +185,14 @@ class InfobloxDiscoveryApi(_InfobloxCapability, DiscoveryApiCapability):
 class InfobloxDdiDns(_InfobloxCapability, DdiDnsCapability):
     """``DDI_DNS``: read records; mutations produce ChangeRequestDrafts."""
 
+    def get_zones(self) -> list[str]:
+        zones: list[str] = []
+        for obj in self._read(_WAPI_ZONE):
+            fqdn = obj.get("fqdn")
+            if fqdn:
+                zones.append(str(fqdn))
+        return zones
+
     def get_records(self, zone: str | None = None) -> list[NormalizedDnsRecord]:
         provenance = self._provenance()
         records: list[NormalizedDnsRecord] = []
@@ -225,35 +234,70 @@ class InfobloxDdiDns(_InfobloxCapability, DdiDnsCapability):
         )
 
     def modify_record(
-        self, object_ref: str, changes: NormalizedDnsRecord
+        self,
+        object_ref: str,
+        changes: NormalizedDnsRecord,
+        current: NormalizedDnsRecord | None = None,
     ) -> ChangeRequestDraft:
         wapi_object = f"record:{changes.record_type.value}"
-        body = ((_dns_value_field(changes.record_type), changes.value),)
+        value_field = _dns_value_field(changes.record_type)
+        body = ((value_field, changes.value),)
+        # The inverse can only restore the prior value if we have the pre-image.
+        # Without it we must NOT emit a blind empty-body "restore" (ADR-0022 §3).
+        if current is not None:
+            inverse = ChangeRequestDraft(
+                verb=WapiVerb.UPDATE,
+                wapi_object=f"record:{current.record_type.value}",
+                object_ref=object_ref,
+                body=((_dns_value_field(current.record_type), current.value),),
+                summary=f"restore prior {current.record_type.value.upper()} "
+                f"value of {current.name}",
+            )
+            summary = f"modify {changes.record_type.value.upper()} record {changes.name}"
+        else:
+            inverse = None
+            summary = (
+                f"modify {changes.record_type.value.upper()} record {changes.name} "
+                "(rollback needs a fresh pre-image — none captured at draft time)"
+            )
         return ChangeRequestDraft(
             verb=WapiVerb.UPDATE,
             wapi_object=wapi_object,
             object_ref=object_ref,
             body=body,
-            summary=f"modify {changes.record_type.value.upper()} record {changes.name}",
-            inverse=ChangeRequestDraft(
-                verb=WapiVerb.UPDATE,
-                wapi_object=wapi_object,
-                object_ref=object_ref,
-                summary=f"restore prior state of {changes.name}",
-            ),
+            summary=summary,
+            inverse=inverse,
         )
 
-    def delete_record(self, object_ref: str) -> ChangeRequestDraft:
+    def delete_record(
+        self, object_ref: str, current: NormalizedDnsRecord | None = None
+    ) -> ChangeRequestDraft:
+        # The inverse re-create is only possible with the deleted record's full
+        # pre-image; otherwise delete is non-reversible (ADR-0022 §3).
+        if current is not None:
+            inverse = ChangeRequestDraft(
+                verb=WapiVerb.CREATE,
+                wapi_object=f"record:{current.record_type.value}",
+                body=(
+                    ("name", current.name),
+                    (_dns_value_field(current.record_type), current.value),
+                ),
+                summary=f"re-create the deleted {current.record_type.value.upper()} "
+                f"record {current.name}",
+            )
+            summary = f"delete {current.record_type.value.upper()} record {current.name}"
+        else:
+            inverse = None
+            summary = (
+                f"delete DNS record {object_ref} "
+                "(non-reversible — no pre-image captured at draft time)"
+            )
         return ChangeRequestDraft(
             verb=WapiVerb.DELETE,
-            wapi_object="record",
+            wapi_object=f"record:{current.record_type.value}" if current else "record",
             object_ref=object_ref,
-            summary=f"delete DNS record {object_ref}",
-            inverse=ChangeRequestDraft(
-                verb=WapiVerb.CREATE,
-                wapi_object="record",
-                summary=f"re-create the deleted DNS record {object_ref}",
-            ),
+            summary=summary,
+            inverse=inverse,
         )
 
 
@@ -321,17 +365,37 @@ class InfobloxDdiDhcp(_InfobloxCapability, DdiDhcpCapability):
             ),
         )
 
-    def delete_range(self, object_ref: str) -> ChangeRequestDraft:
+    def delete_range(
+        self, object_ref: str, current: NormalizedDhcpRange | None = None
+    ) -> ChangeRequestDraft:
+        # Re-creating the deleted range needs its full pre-image; otherwise the
+        # delete is non-reversible and we emit no misleading draft (ADR-0022 §3).
+        if current is not None:
+            inverse = ChangeRequestDraft(
+                verb=WapiVerb.CREATE,
+                wapi_object=_WAPI_RANGE,
+                body=(
+                    ("start_addr", str(current.start_address)),
+                    ("end_addr", str(current.end_address)),
+                ),
+                summary=f"re-create the deleted DHCP range "
+                f"{current.start_address}-{current.end_address}",
+            )
+            summary = (
+                f"delete DHCP range {current.start_address}-{current.end_address}"
+            )
+        else:
+            inverse = None
+            summary = (
+                f"delete DHCP range {object_ref} "
+                "(non-reversible — no pre-image captured at draft time)"
+            )
         return ChangeRequestDraft(
             verb=WapiVerb.DELETE,
             wapi_object=_WAPI_RANGE,
             object_ref=object_ref,
-            summary=f"delete DHCP range {object_ref}",
-            inverse=ChangeRequestDraft(
-                verb=WapiVerb.CREATE,
-                wapi_object=_WAPI_RANGE,
-                summary=f"re-create the deleted DHCP range {object_ref}",
-            ),
+            summary=summary,
+            inverse=inverse,
         )
 
 
@@ -357,6 +421,24 @@ class InfobloxDdiIpam(_InfobloxCapability, DdiIpamCapability):
             )
         return networks
 
+    def get_next_available_ip(self, network: str) -> str:
+        # Resolve the network's WAPI _ref by its CIDR, then call the appliance's
+        # next_available_ip function on it (ADR-0022 §2 read interface).
+        ref: str | None = None
+        for obj in self._read(_WAPI_NETWORK, {"network": network}):
+            if str(obj.get("network")) == network and obj.get("_ref"):
+                ref = str(obj["_ref"])
+                break
+        if ref is None:
+            raise PluginError(f"infoblox: no such network {network!r} in IPAM")
+        result = self._client.get_function(ref, "next_available_ip", {"num": 1})
+        ips = result.get("ips")
+        if not isinstance(ips, list) or not ips:
+            raise PluginError(
+                f"infoblox: next_available_ip returned no address for {network!r}"
+            )
+        return str(ips[0])
+
     def add_network(self, network: NormalizedNetwork) -> ChangeRequestDraft:
         body: tuple[tuple[str, str], ...] = (("network", str(network.network)),)
         if network.comment:
@@ -373,17 +455,34 @@ class InfobloxDdiIpam(_InfobloxCapability, DdiIpamCapability):
             ),
         )
 
-    def delete_network(self, object_ref: str) -> ChangeRequestDraft:
+    def delete_network(
+        self, object_ref: str, current: NormalizedNetwork | None = None
+    ) -> ChangeRequestDraft:
+        # Re-creating the deleted network needs its full pre-image; otherwise the
+        # delete is non-reversible and we emit no misleading draft (ADR-0022 §3).
+        if current is not None:
+            body: tuple[tuple[str, str], ...] = (("network", str(current.network)),)
+            if current.comment:
+                body = (*body, ("comment", current.comment))
+            inverse = ChangeRequestDraft(
+                verb=WapiVerb.CREATE,
+                wapi_object=_WAPI_NETWORK,
+                body=body,
+                summary=f"re-create the deleted network {current.network}",
+            )
+            summary = f"delete network {current.network}"
+        else:
+            inverse = None
+            summary = (
+                f"delete network {object_ref} "
+                "(non-reversible — no pre-image captured at draft time)"
+            )
         return ChangeRequestDraft(
             verb=WapiVerb.DELETE,
             wapi_object=_WAPI_NETWORK,
             object_ref=object_ref,
-            summary=f"delete network {object_ref}",
-            inverse=ChangeRequestDraft(
-                verb=WapiVerb.CREATE,
-                wapi_object=_WAPI_NETWORK,
-                summary=f"re-create the deleted network {object_ref}",
-            ),
+            summary=summary,
+            inverse=inverse,
         )
 
 
