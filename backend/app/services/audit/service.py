@@ -12,6 +12,7 @@ reference the credential by id instead.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,6 +67,21 @@ CONFIG_SNAPSHOT_CONTENT_READ: Final = "config.snapshot_content_read"
 # credential, unsupported vendor) — the device is identified by id; no config
 # content or credential material appears in the audit detail.
 CONFIG_SNAPSHOT_FAILED: Final = "config.snapshot_failed"
+# M5 ChangeRequest lifecycle audit vocabulary (ADR-0020 §4): every guarded
+# state transition writes one audit entry whose action is
+# ``change_request.<from>_to_<to>`` (and ``change_request.created`` for the
+# initial draft), carrying before/after lifecycle state in ``detail`` and the
+# reasoning-trace link when the CR originated from an agent run. ``detail``
+# references the CR / target devices by id only — a CR ``payload`` may carry
+# secret-bearing config/DNS content and must never appear here verbatim.
+CHANGE_REQUEST_CREATED: Final = "change_request.created"
+CHANGE_REQUEST_DRAFT_TO_PENDING: Final = "change_request.draft_to_pending_approval"
+CHANGE_REQUEST_PENDING_TO_APPROVED: Final = "change_request.pending_approval_to_approved"
+CHANGE_REQUEST_PENDING_TO_DRAFT: Final = "change_request.pending_approval_to_draft"
+CHANGE_REQUEST_APPROVED_TO_EXECUTING: Final = "change_request.approved_to_executing"
+CHANGE_REQUEST_EXECUTING_TO_COMPLETED: Final = "change_request.executing_to_completed"
+CHANGE_REQUEST_EXECUTING_TO_FAILED: Final = "change_request.executing_to_failed"
+CHANGE_REQUEST_FAILED_TO_ROLLED_BACK: Final = "change_request.failed_to_rolled_back"
 
 
 async def record(
@@ -76,12 +92,18 @@ async def record(
     target_type: str,
     target_id: str | None,
     detail: dict[str, Any] | None,
+    reasoning_trace_id: uuid.UUID | None = None,
 ) -> AuditLog:
     """Append one audit entry and emit the matching structlog event.
 
     Flushes (assigning ``id`` / ``created_at``) but never commits: the caller
     owns the transaction, so the audit row commits or rolls back atomically
     with the action it describes.
+
+    ``reasoning_trace_id`` links the audited action back to the reasoning trace
+    that produced it (brief §6, ADR-0020 §4) — a plain indexed UUID with no FK
+    (``reasoning_traces`` is range-partitioned). It is ``None`` for actions with
+    no originating agent run.
     """
     entry = AuditLog(
         actor=actor,
@@ -89,6 +111,7 @@ async def record(
         target_type=target_type,
         target_id=target_id,
         detail=detail,
+        reasoning_trace_id=reasoning_trace_id,
     )
     session.add(entry)
     await session.flush()
@@ -100,5 +123,6 @@ async def record(
         target_type=target_type,
         target_id=target_id,
         detail=detail,
+        reasoning_trace_id=str(reasoning_trace_id) if reasoning_trace_id is not None else None,
     )
     return entry
