@@ -62,6 +62,10 @@ from app.plugins.base import (
     ConfigBackupCapability,
     ConfigDeployCapability,
     ConfigRestoreCapability,
+    DdiDhcpCapability,
+    DdiDnsCapability,
+    DdiIpamCapability,
+    DiscoveryApiCapability,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
     InterfacesCapability,
@@ -76,8 +80,12 @@ from app.schemas.normalized import (
     NeighborProtocol,
     NormalizedAclEntry,
     NormalizedBgpPeer,
+    NormalizedDhcpLease,
+    NormalizedDiscoveredObject,
+    NormalizedDnsRecord,
     NormalizedInterface,
     NormalizedNeighbor,
+    NormalizedNetwork,
     NormalizedOspfNeighbor,
     NormalizedRecord,
     NormalizedRoute,
@@ -161,6 +169,15 @@ _INTERFACE_SPECS: dict[Capability, _InterfaceSpec] = {
     Capability.CONFIG_DEPLOY: _InterfaceSpec(
         ConfigDeployCapability, "deploy", None, change_write=True
     ),
+    # DDI + API discovery (ADR-0022). The fixture case exercises each capability's
+    # no-arg read method over recorded WAPI fixtures; mutation methods are
+    # shape-tested in the plugin's own unit tests (a draft, no I/O).
+    Capability.DISCOVERY_API: _InterfaceSpec(
+        DiscoveryApiCapability, "discover", NormalizedDiscoveredObject
+    ),
+    Capability.DDI_DNS: _InterfaceSpec(DdiDnsCapability, "get_records", NormalizedDnsRecord),
+    Capability.DDI_DHCP: _InterfaceSpec(DdiDhcpCapability, "get_leases", NormalizedDhcpLease),
+    Capability.DDI_IPAM: _InterfaceSpec(DdiIpamCapability, "get_networks", NormalizedNetwork),
 }
 
 

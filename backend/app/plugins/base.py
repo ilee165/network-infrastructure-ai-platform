@@ -43,8 +43,13 @@ from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     NormalizedAclEntry,
     NormalizedBgpPeer,
+    NormalizedDhcpLease,
+    NormalizedDhcpRange,
+    NormalizedDiscoveredObject,
+    NormalizedDnsRecord,
     NormalizedInterface,
     NormalizedNeighbor,
+    NormalizedNetwork,
     NormalizedOspfNeighbor,
     NormalizedRoute,
 )
@@ -55,6 +60,7 @@ __all__ = [
     "Capability",
     "ChangeOutcome",
     "ChangePlan",
+    "ChangeRequestDraft",
     "ChangeResult",
     "CommandTransport",
     "ConfigBackupCapability",
@@ -63,6 +69,10 @@ __all__ = [
     "ConfigSnapshotRef",
     "ConfigWriteTransport",
     "ConnectionParams",
+    "DdiDhcpCapability",
+    "DdiDnsCapability",
+    "DdiIpamCapability",
+    "DiscoveryApiCapability",
     "DiscoverySnmpCapability",
     "DiscoverySshCapability",
     "InterfacesCapability",
@@ -75,6 +85,7 @@ __all__ = [
     "SnmpReadTransport",
     "TransportKind",
     "VendorPlugin",
+    "WapiVerb",
 ]
 
 _VENDOR_ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -522,6 +533,153 @@ class ConfigDeployCapability(PluginCapability):
     @abstractmethod
     def deploy(self, config_fragment: str, *, plan: ChangePlan) -> ChangeResult:
         """Apply *config_fragment* under the approved-CR *plan* (ADR-0021)."""
+
+
+# ---------------------------------------------------------------------------
+# DDI + API-discovery capability interfaces (ADR-0022)
+# ---------------------------------------------------------------------------
+
+
+class WapiVerb(StrEnum):
+    """The mutation verb a :class:`ChangeRequestDraft` would apply to a DDI object.
+
+    Maps onto the REST methods an Infoblox-style WAPI exposes (ADR-0022 §3):
+    ``create`` (POST a new object), ``update`` (PUT onto an existing ``_ref``),
+    ``delete`` (DELETE an existing ``_ref``).
+    """
+
+    CREATE = "create"
+    UPDATE = "update"
+    DELETE = "delete"
+
+
+class ChangeRequestDraft(BaseModel):
+    """A proposed DDI mutation — data only, never an executed write (ADR-0022 §3).
+
+    A DDI capability's mutation method returns one of these instead of calling
+    the appliance: it carries the target object handle (``object_ref`` — ``None``
+    for a create), the exact WAPI verb + object type + body to apply, and an
+    ``inverse`` draft that undoes the change (delete-the-added-record, or restore
+    the prior object state). The DDI Agent hands the draft to the ChangeRequest
+    service (ADR-0020); only the Automation Agent — for an ``approved`` CR — turns
+    a draft into an actual write. Making mutations drafts means the capability
+    layer *cannot* write, so there is no DDI write path that skips the CR spine
+    (ADR-0022 §3 / alternative 2).
+
+    The model is frozen and forbids extra fields. ``body`` carries DDI record
+    fields (names, IPs, TTLs) — never credentials; the WAPI auth secret lives
+    only inside the transport, never in a draft.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    verb: WapiVerb = Field(description="The WAPI mutation to apply (create/update/delete).")
+    wapi_object: str = Field(
+        min_length=1,
+        description="WAPI object type the verb targets (e.g. 'record:a', 'network').",
+    )
+    object_ref: str | None = Field(
+        default=None,
+        description="Opaque WAPI _ref of the existing target object; None for a create. "
+        "Never a secret.",
+    )
+    body: tuple[tuple[str, str], ...] = Field(
+        default=(),
+        description="Object fields to send, as a flat secret-free (key, value) sequence.",
+    )
+    inverse: ChangeRequestDraft | None = Field(
+        default=None,
+        description="The draft that reverses this change (structured rollback spec, ADR-0022 §3).",
+    )
+    summary: str = Field(
+        min_length=1,
+        description="Human-readable, secret-free description of the intended change.",
+    )
+
+
+class DiscoveryApiCapability(PluginCapability):
+    """``Capability.DISCOVERY_API`` — read-only API-based discovery (ADR-0022 §2).
+
+    The first API-based discovery path: implementations query an appliance/cloud
+    REST API (Infoblox WAPI) and return :class:`NormalizedDiscoveredObject`
+    records (networks, DNS zones, members) for the discovery engine. Read-only —
+    it never mutates the source.
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DISCOVERY_API})
+
+    @abstractmethod
+    def discover(self) -> list[NormalizedDiscoveredObject]:
+        """Return the objects observed over the management API as normalized records."""
+
+
+class DdiDnsCapability(PluginCapability):
+    """``Capability.DDI_DNS`` — DNS read + draft-only mutations (ADR-0022 §2/§3).
+
+    Reads return normalized records; mutations return a
+    :class:`ChangeRequestDraft` and **never** write to the appliance (the write
+    is the Automation Agent's job, only for an ``approved`` CR).
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DDI_DNS})
+
+    @abstractmethod
+    def get_records(self, zone: str | None = None) -> list[NormalizedDnsRecord]:
+        """Return DNS resource records, optionally scoped to *zone*, as normalized records."""
+
+    @abstractmethod
+    def add_record(self, record: NormalizedDnsRecord) -> ChangeRequestDraft:
+        """Draft the addition of *record* (no write performed)."""
+
+    @abstractmethod
+    def modify_record(
+        self, object_ref: str, changes: NormalizedDnsRecord
+    ) -> ChangeRequestDraft:
+        """Draft a modification of the object at *object_ref* (no write performed)."""
+
+    @abstractmethod
+    def delete_record(self, object_ref: str) -> ChangeRequestDraft:
+        """Draft the deletion of the object at *object_ref* (no write performed)."""
+
+
+class DdiDhcpCapability(PluginCapability):
+    """``Capability.DDI_DHCP`` — DHCP read + draft-only mutations (ADR-0022 §2/§3)."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DDI_DHCP})
+
+    @abstractmethod
+    def get_ranges(self) -> list[NormalizedDhcpRange]:
+        """Return the configured DHCP ranges as normalized records."""
+
+    @abstractmethod
+    def get_leases(self) -> list[NormalizedDhcpLease]:
+        """Return the current DHCP leases as normalized records."""
+
+    @abstractmethod
+    def add_range(self, dhcp_range: NormalizedDhcpRange) -> ChangeRequestDraft:
+        """Draft the addition of *dhcp_range* (no write performed)."""
+
+    @abstractmethod
+    def delete_range(self, object_ref: str) -> ChangeRequestDraft:
+        """Draft the deletion of the range at *object_ref* (no write performed)."""
+
+
+class DdiIpamCapability(PluginCapability):
+    """``Capability.DDI_IPAM`` — IPAM read + draft-only mutations (ADR-0022 §2/§3)."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DDI_IPAM})
+
+    @abstractmethod
+    def get_networks(self) -> list[NormalizedNetwork]:
+        """Return the IPAM networks/subnets as normalized records."""
+
+    @abstractmethod
+    def add_network(self, network: NormalizedNetwork) -> ChangeRequestDraft:
+        """Draft the allocation of *network* (no write performed)."""
+
+    @abstractmethod
+    def delete_network(self, object_ref: str) -> ChangeRequestDraft:
+        """Draft the deletion of the network at *object_ref* (no write performed)."""
 
 
 class VendorPlugin(ABC):

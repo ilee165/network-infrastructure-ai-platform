@@ -153,18 +153,21 @@ class TestCaseGeneration:
             case.run()
 
     def test_capability_without_typed_interface_gets_no_fixture_case(self) -> None:
-        # DISCOVERY_API has no typed interface in plugins/base.py yet (it lands
+        # FIREWALL_POLICY has no typed interface in plugins/base.py yet (it lands
         # with its milestone); the suite checks the implementation class only.
-        class _Discovery(PluginCapability):
-            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DISCOVERY_API})
+        class _FirewallPolicy(PluginCapability):
+            capabilities: ClassVar[frozenset[Capability]] = frozenset(
+                {Capability.FIREWALL_POLICY}
+            )
 
         plugin = _plugin(
-            frozenset({Capability.DISCOVERY_API}), {Capability.DISCOVERY_API: _Discovery}
+            frozenset({Capability.FIREWALL_POLICY}),
+            {Capability.FIREWALL_POLICY: _FirewallPolicy},
         )
         cases = _cases(plugin)
         ids = [case.id for case in cases]
-        assert "implementation:discovery_api" in ids
-        assert "fixtures:discovery_api" not in ids
+        assert "implementation:firewall_policy" in ids
+        assert "fixtures:firewall_policy" not in ids
         for case in cases:
             case.run()
 

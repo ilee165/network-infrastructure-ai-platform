@@ -1,0 +1,9 @@
+[
+  {
+    "_ref": "record:cname/ZG5zLmJpbmRfY25hbWUkLl9kZWZhdWx0LmV4YW1wbGUuY29tLnd3dw:www.example.com/default",
+    "name": "www.example.com",
+    "canonical": "web.example.com",
+    "ttl": 3600,
+    "zone": "example.com"
+  }
+]

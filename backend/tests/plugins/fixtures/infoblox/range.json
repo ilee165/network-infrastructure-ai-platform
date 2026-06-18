@@ -1,0 +1,10 @@
+[
+  {
+    "_ref": "range/ZG5zLmRoY3BfcmFuZ2UkMTAuMC4wLjEwMC8xMC4wLjAuMjAwLzAvMA:10.0.0.100/10.0.0.200/default",
+    "start_addr": "10.0.0.100",
+    "end_addr": "10.0.0.200",
+    "network": "10.0.0.0/24",
+    "comment": "lab dynamic pool",
+    "member": {"name": "infoblox.example.com"}
+  }
+]

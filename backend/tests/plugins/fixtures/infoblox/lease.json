@@ -1,0 +1,18 @@
+[
+  {
+    "_ref": "lease/ZG5zLmxlYXNlJDAvMTAuMC4wLjEwMS8w:10.0.0.101",
+    "address": "10.0.0.101",
+    "binding_state": "ACTIVE",
+    "hardware": "aa:bb:cc:00:11:22",
+    "client_hostname": "laptop-01",
+    "network": "10.0.0.0/24",
+    "starts": 1718000000,
+    "ends": 1718086400
+  },
+  {
+    "_ref": "lease/ZG5zLmxlYXNlJDAvMTAuMC4wLjEwMi8w:10.0.0.102",
+    "address": "10.0.0.102",
+    "binding_state": "FREE",
+    "network": "10.0.0.0/24"
+  }
+]

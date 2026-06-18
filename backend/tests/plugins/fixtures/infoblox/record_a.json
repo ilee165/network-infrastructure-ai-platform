@@ -1,0 +1,15 @@
+[
+  {
+    "_ref": "record:a/ZG5zLmJpbmRfYSQuX2RlZmF1bHQuZXhhbXBsZS5jb20ud2Vi:web.example.com/default",
+    "name": "web.example.com",
+    "ipv4addr": "10.0.0.10",
+    "ttl": 3600,
+    "zone": "example.com"
+  },
+  {
+    "_ref": "record:a/ZG5zLmJpbmRfYSQuX2RlZmF1bHQuZXhhbXBsZS5jb20uYXBp:api.example.com/default",
+    "name": "api.example.com",
+    "ipv4addr": "10.0.0.11",
+    "zone": "example.com"
+  }
+]
