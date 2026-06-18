@@ -28,8 +28,12 @@ Both consume a `ChangePlan` carrying the originating `change_request_id`, the ca
 
 - **Capture-before (baseline):** immediately before the write, the executor runs `CONFIG_BACKUP` (ADR-0017 §5) against the live device and pins that snapshot as the CR's rollback baseline. This is the *actual* running state at apply time — preferred over the CR's `rollback_plan` reference, which may be stale if the device drifted since submit (drift between submit and execute is itself surfaced and can fail the apply pre-check).
 - **Apply** the change (restore = replay snapshot text; deploy = merge the fragment) over the D7 netmiko session, capturing per-block results.
-- **Verify-after:** re-capture the running config and assert the intended end-state (for restore: the post-change running config normalizes equal to the restored snapshot — exit criterion "device config matches the snapshot afterward"; for deploy: the target lines are present and the device is still reachable / session re-establishes).
-- **Rollback on failure:** if apply errors or verify fails, the executor restores the captured pre-change baseline (vendor-native mechanism, §4), transitions the CR `failed → rolled_back` (ADR-0020), and audits before/after. A rollback that itself fails leaves the CR `failed` and raises an operator alert (never silently closed).
+- **Verify-after:** re-capture the running config and assert the intended end-state.
+  - *Restore success predicate:* the post-change running config normalizes equal to the restored snapshot (exit criterion "device config matches the snapshot afterward").
+  - *Deploy success predicate:* the device is still reachable / the session re-establishes **and** the re-captured running config, normalized, contains every line of the applied fragment with no unintended residual diff outside the fragment's scope (the target lines are present and nothing else changed unexpectedly). This is the asserted, tested deploy post-condition — symmetric in rigor with the restore predicate, not merely "lines present + reachable."
+- **Rollback on failure:** if apply errors or verify-after fails, the executor restores the captured pre-change baseline (vendor-native mechanism, §4), then **verifies the rollback** before declaring success.
+  - *Rollback success criterion (both restore and deploy, symmetric with the restore exit criterion):* after baseline replay, re-capture the running config and assert it normalizes **equal to the captured pre-change baseline**. Only then does the CR transition `failed → rolled_back` (ADR-0020) with before/after audited.
+  - For the deploy case specifically: a baseline replay of a partially-applied, order-sensitive or stateful fragment (§4 `cisco_ios`, §5) may not reproduce the exact baseline. If the re-captured config does **not** normalize equal to the baseline, the rollback is treated as **rollback-failed** — the CR stays `failed` and an operator alert is raised (it is never silently closed and never reported as `rolled_back`). Rollback success is thus an asserted equality, not an assumption, on the same footing as the restore exit criterion.
 
 ### 4. Vendor-native apply/rollback mechanics
 
@@ -41,6 +45,11 @@ Both consume a `ChangePlan` carrying the originating `change_request_id`, the ca
 
 `cisco_ios` is certified first against the conformance suite (M5 task #5); `cisco_iosxe` and `eos` mirror it (task #6). Where a vendor offers commit-confirm (IOS-XE, EOS), the executor uses it so a connectivity-breaking change auto-reverts even if the worker loses the session.
 
+- **`cisco_ios` reachability-loss handling (the "reversible by construction" hole on the one platform without commit-confirm).** Classic IOS has no commit-confirm: rollback is a worker-initiated replay of the captured baseline over the netmiko session. If the change severs the management path mid-apply (an ACL on the mgmt interface, shutting the uplink, changing the mgmt VLAN/IP), the worker can no longer reach the device to replay the baseline and the device is stranded — replay is not merely non-atomic but *impossible*. Because this is the single highest-blast-radius operation in the project, M5 handles it as follows:
+  1. **Dead-man auto-revert where the image supports it (preferred).** Before applying a `cisco_ios` change, the executor arms a device-side timed revert to the captured baseline — `configure replace <baseline> ... commit timer` (the IOS reload/rollback-timer form) on images that have it, or an EEM/kron-scheduled `configure replace` of the baseline — and disarms it only after verify-after confirms reachability. This gives classic IOS a commit-confirm-equivalent so a connectivity-severing change auto-reverts even when the worker loses the session.
+  2. **Management-path guardrail on images without a dead-man primitive.** If the running image offers no such timed-revert mechanism, the deploy/restore fragment validation **rejects** any change touching the management path (mgmt-interface ACLs, the mgmt interface/uplink admin state, the mgmt VLAN/IP, or the line/transport that carries the session) on `cisco_ios`. Such changes are **out of M5 scope** for classic IOS and require a console/OOB-fallback path documented for the operator.
+  3. **Unreachable rollback is never silent success.** A rollback that cannot reach the device (replay impossible because reachability is gone, and no device-side dead-man revert fired) is treated as the **rollback-failed → CR stays `failed` → operator alert** path of §3 — explicitly *not* reported as `rolled_back` and never silently closed.
+
 ### 5. Idempotency & verification
 
 - Restore is naturally idempotent (replaying the same snapshot onto a matching device is a no-op diff); the executor computes the pre-apply diff and, if empty, completes the CR without touching the device (logged as a no-op apply).
@@ -49,7 +58,7 @@ Both consume a `ChangePlan` carrying the originating `change_request_id`, the ca
 ## Consequences
 
 **Positive**
-- Every device write is reversible by construction: a fresh pre-change baseline plus a vendor-native rollback primitive means a broken change returns the device to its exact prior running state without manual re-entry.
+- Every device write is reversible by construction: a fresh pre-change baseline plus a vendor-native rollback primitive means a broken change returns the device to its exact prior running state without manual re-entry — including on classic `cisco_ios`, where §4's dead-man auto-revert (or, absent the primitive, the management-path guardrail) closes the one case the captured-baseline replay cannot cover: loss of reachability to the device mid-apply.
 - Commit-confirm on IOS-XE/EOS protects against the worst case — a change that severs the management session — via device-side auto-revert.
 - Reusing M4's `CONFIG_BACKUP`/`config_snapshots` machinery for both the restore source and the rollback baseline means no new snapshot storage (M5-PLAN baseline note) and one tested capture path.
 - Verify-after makes "the device matches the snapshot" an asserted, tested post-condition (exit criterion), not an assumption.
