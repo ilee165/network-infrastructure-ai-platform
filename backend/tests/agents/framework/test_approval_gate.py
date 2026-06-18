@@ -231,7 +231,38 @@ class TestStateChangingToolCreatesChangeRequest:
         actions = await _audit_actions(sessionmaker)
         assert audit_service.CHANGE_REQUEST_CREATED in actions
 
-    async def test_secret_payload_is_redacted_before_storage(
+    async def test_tool_audit_event_arguments_are_redacted(
+        self,
+        service: ChangeRequestService,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        audit_sink: RecordingAuditSink,
+    ) -> None:
+        # A9: the tool-layer audit event must NOT carry the raw secret — _emit
+        # redacts arguments before they reach any sink (e.g. structlog would
+        # otherwise log them verbatim). The CR payload stays verbatim (ADR-0020
+        # §2); only the audit + LLM-preview surfaces are redacted.
+        engineer_id = await _seed_user(sessionmaker, role_name="engineer")
+        tool, _ = _deploy_tool(audit_sink)
+
+        def factory(identity: AgentRunIdentity) -> ChangeRequestGate:
+            return ChangeRequestGate(
+                service, requester_id=identity.user_id, actor_role=identity.role
+            )
+
+        with (
+            agent_run_context(role=Role.ENGINEER, user_id=engineer_id),
+            change_request_gate_context(factory),
+        ):
+            await tool.ainvoke({"device": "edge-1", "config_blob": _SECRET_LINE})
+
+        assert len(audit_sink.events) == 1
+        recorded = audit_sink.events[0].arguments["config_blob"]
+        assert "S3cr3tRO" not in recorded
+        assert REDACTION_TOKENS["snmp_community"] in recorded
+        # Non-secret args are preserved so the event still says what ran.
+        assert audit_sink.events[0].arguments["device"] == "edge-1"
+
+    async def test_payload_is_verbatim_and_only_preview_is_redacted(
         self,
         service: ChangeRequestService,
         sessionmaker: async_sessionmaker[AsyncSession],
@@ -252,14 +283,19 @@ class TestStateChangingToolCreatesChangeRequest:
             await tool.ainvoke({"device": "edge-1", "config_blob": _SECRET_LINE})
 
         cr = (await _all_change_requests(sessionmaker))[0]
-        # A9: the raw secret is gone from the stored payload AND the preview, the
-        # stable token is present, and the directive context survives.
+        # ADR-0020 §2: the stored payload is VERBATIM — it is exactly what the
+        # executor (Wave 4) renders, so the secret survives there unchanged (no
+        # approve-then-swap TOCTOU from redacting the apply-time content).
         assert cr.payload is not None
-        stored = cr.payload["config_blob"]
-        assert "S3cr3tRO" not in stored
-        assert REDACTION_TOKENS["snmp_community"] in stored
+        assert cr.payload["config_blob"] == _SECRET_LINE
+        assert "S3cr3tRO" in cr.payload["config_blob"]
+        # ADR-0020 §4: redaction is applied only at the LLM-preview boundary —
+        # the after_state diff/intent preview the agent surfaces. The raw secret
+        # is gone there and the stable token + directive context survive.
         assert cr.after_state is not None
-        assert "S3cr3tRO" not in str(cr.after_state)
+        preview = cr.after_state["proposed"]["config_blob"]
+        assert "S3cr3tRO" not in preview
+        assert REDACTION_TOKENS["snmp_community"] in preview
 
 
 class TestRbacInheritancePreserved:

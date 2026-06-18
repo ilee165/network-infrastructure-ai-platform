@@ -32,13 +32,16 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agents.framework.approval import ApprovalGate, ChangeRequestGate
 from app.agents.framework.supervisor import SupervisorState, run_supervisor
+from app.agents.framework.tools import AgentRunIdentity, GateFactory
 from app.agents.framework.traces import PostgresTraceRecorder
 from app.core.errors import NotFoundError, translate_llm_error
 from app.core.logging import get_logger
 from app.core.security import Role
 from app.models.agents import AgentSession, AgentSessionStatus
 from app.models.mixins import utcnow
+from app.services.change_requests import ChangeRequestService
 
 _logger = get_logger(__name__)
 
@@ -124,10 +127,14 @@ class AgentSessionService:
 
         Drives the supervisor as *role* (so every
         :class:`~app.agents.framework.tools.NetOpsTool` inside the run sees the
-        real caller role), then marks the session ``COMPLETED`` — or ``FAILED``
-        and re-raises if the run raises (e.g. an RBAC denial when *role* is below
-        a tool's ``min_role``). *messages* defaults to a single user turn carrying
-        *intent*.
+        real caller role) and binds the ChangeRequest gate factory
+        (:meth:`_change_request_gate_factory`) plus the run identity (``user_id`` /
+        ``session_id``) into :func:`~app.agents.framework.supervisor.run_supervisor`
+        — so a state-changing tool CREATES a CR draft as the real user (ADR-0020
+        §4, M5 task #4) instead of falling back to the hard-reject gate. Then marks
+        the session ``COMPLETED`` — or ``FAILED`` and re-raises if the run raises
+        (e.g. an RBAC denial when *role* is below a tool's ``min_role``).
+        *messages* defaults to a single user turn carrying *intent*.
         """
         if session_id is None:
             run_session = await self.start(user_id=user_id, role=role, intent=intent)
@@ -139,7 +146,14 @@ class AgentSessionService:
             messages if messages is not None else [HumanMessage(content=intent)]
         )
         try:
-            result = await run_supervisor(graph, conversation, role=role)
+            result = await run_supervisor(
+                graph,
+                conversation,
+                role=role,
+                user_id=user_id,
+                session_id=active_session_id,
+                gate_factory=self._change_request_gate_factory(),
+            )
         except Exception as exc:
             await self.fail(active_session_id)
             # An upstream LLM/transport failure (provider rejected/unavailable)
@@ -156,6 +170,38 @@ class AgentSessionService:
             raise
         await self.complete(active_session_id)
         return result
+
+    def _change_request_gate_factory(self) -> GateFactory:
+        """Build the per-run ChangeRequest gate factory (ADR-0020 §4, M5 task #4).
+
+        Closes over a :class:`~app.services.change_requests.ChangeRequestService`
+        bound to this service's sessionmaker and, for each state-changing tool
+        call, builds a :class:`~app.agents.framework.approval.ChangeRequestGate`
+        from the bound :class:`~app.agents.framework.tools.AgentRunIdentity` — so a
+        state-changing tool now CREATES a CR *draft* as the real user instead of
+        falling back to the hard-reject :class:`DenyAllGate`. Wiring this here is
+        what makes CR creation reachable end-to-end in production (the API route
+        drives the supervisor through :meth:`run`), not only in tests.
+
+        Returns ``None`` for any identity without a real ``user_id`` (the CR
+        ``requester_id`` is a NOT NULL FK to ``users``): such a run cannot author a
+        CR, so the framework keeps the secure hard-reject fallback rather than
+        minting an unattributable CR.
+        """
+        service = ChangeRequestService(self._sessionmaker)
+
+        def factory(identity: AgentRunIdentity) -> ApprovalGate | None:
+            if identity.user_id is None:
+                return None
+            return ChangeRequestGate(
+                service,
+                requester_id=identity.user_id,
+                actor_role=identity.role,
+                generating_session_id=identity.session_id,
+                reasoning_trace_id=identity.reasoning_trace_id,
+            )
+
+        return factory
 
     def recorder_for(self, session_id: uuid.UUID) -> PostgresTraceRecorder:
         """Build a trace recorder whose persisted traces link to *session_id*.

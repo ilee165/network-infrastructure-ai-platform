@@ -28,9 +28,14 @@ Invariants preserved across the rewire (M3, brief §7):
 - **Audit everything** — CR creation is audited by the service
   (``change_request.created``); the tool layer additionally records the gate
   decision on every invocation.
-- **A9 redaction** — the proposed ``payload``/preview is scrubbed through the A9
-  redaction layer (``llm/redaction.py``) *before* it is stored on the CR, so no
-  config/DNS secret material is persisted in the CR payload or its preview.
+- **A9 redaction at the LLM-preview boundary** — the CR ``payload`` is stored
+  **verbatim** (ADR-0020 §2: the executor renders it byte-for-byte, so it must be
+  the real apply-time content — redacting it would make the executor re-materialize
+  or replay sentinels, reopening the approve-then-swap TOCTOU class). Redaction
+  (``llm/redaction.py``) is applied only where the proposal is rendered *toward an
+  LLM*: the ``after_state`` diff/intent preview the agent surfaces. So no
+  config/DNS secret is persisted in the LLM-facing preview, while the verbatim
+  payload the approver reviews is exactly what executes.
 
 :class:`DenyAllGate` is retained for tools that are never CR-eligible (a
 state-changing action with no ChangeRequest representation): such a tool keeps the
@@ -74,8 +79,9 @@ class ApprovalRequest(BaseModel):
     """What an agent is asking permission to do.
 
     The :class:`ChangeRequestGate` turns this into a persistent ChangeRequest:
-    ``arguments`` become the proposed (redacted) ``payload``, ``kind`` selects the
-    CR class, and ``target_refs`` records the device/DDI refs the change touches.
+    ``arguments`` become the verbatim apply-time ``payload`` (redacted only for the
+    LLM-facing preview, ADR-0020 §2/§4), ``kind`` selects the CR class, and
+    ``target_refs`` records the device/DDI refs the change touches.
     M3 carried only the minimum needed for an auditable gate decision; M5 adds the
     fields the CR spine needs (ADR-0020 §2).
     """
@@ -184,10 +190,14 @@ class ChangeRequestGate:
     agent run bound to a viewer/operator cannot create a CR — "an agent can never
     do what its user cannot" holds end-to-end.
 
-    A9 redaction: the proposed tool ``arguments`` are scrubbed through
-    :func:`~app.llm.redaction.redact_payload` *before* being stored as the CR
-    ``payload`` and ``after_state`` preview, so no config/DNS secret material is
-    persisted on the CR or rendered into its preview.
+    A9 redaction (LLM-preview boundary only): the CR ``payload`` is stored
+    **verbatim** — ADR-0020 §2 requires the approver to review, and the executor
+    to render, the exact apply-time content; redacting it would persist sentinels
+    the executor would have to re-materialize, reopening the approve-then-swap
+    TOCTOU. Redaction via :func:`~app.llm.redaction.redact_payload` is applied only
+    to the ``after_state`` diff/intent *preview* (the surface rendered toward an
+    LLM, ADR-0020 §4), so no config/DNS secret reaches a prompt while the stored
+    payload stays the real change.
     """
 
     def __init__(
@@ -207,18 +217,23 @@ class ChangeRequestGate:
 
     async def authorize(self, request: ApprovalRequest) -> ApprovalDecision:
         """Create a ``draft`` CR for *request* and return it (never approve)."""
-        # A9: scrub secrets out of the proposed change BEFORE it is persisted on
-        # the CR payload/preview. The stored payload is the redacted proposal —
-        # the verbatim apply-time payload is materialised by the executor, never
-        # by the gate (ADR-0020 §4, M5-PLAN risk #3).
-        redacted_payload = redact_payload(request.arguments)
+        # ADR-0020 §2: the ``payload`` is stored VERBATIM — it is the exact
+        # apply-time content the approver reviews and the executor (Wave 4)
+        # renders byte-for-byte. Redacting it here would persist redaction
+        # sentinels the executor cannot apply (or would have to re-materialize a
+        # different payload from), reopening the approve-then-swap TOCTOU class.
+        # A9 redaction is applied only at the LLM-preview boundary (ADR-0020 §4):
+        # the ``after_state`` diff/intent preview is the surface rendered toward
+        # an LLM, so secrets are scrubbed there while the stored payload stays the
+        # real change.
+        preview_payload = redact_payload(request.arguments)
         cr = await self._service.create_draft(
             requester_id=self._requester_id,
             actor_role=self._actor_role,
             kind=request.kind,
-            payload=redacted_payload,
+            payload=request.arguments,
             target_refs=request.target_refs,
-            after_state={"proposed": redacted_payload},
+            after_state={"proposed": preview_payload},
             generating_session_id=self._generating_session_id,
             reasoning_trace_id=self._reasoning_trace_id,
         )

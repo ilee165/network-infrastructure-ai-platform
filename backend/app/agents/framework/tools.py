@@ -55,6 +55,7 @@ from app.agents.framework.approval import (
 from app.core.errors import NetOpsError
 from app.core.logging import get_logger
 from app.core.security import Role
+from app.llm.redaction import redact_payload
 from app.models.change_requests import ChangeRequestKind
 
 _logger = get_logger(__name__)
@@ -271,9 +272,10 @@ class ToolAuditEvent(BaseModel):
 
     M0 events flow to a pluggable :class:`AuditSink`; M3 links them to
     ``reasoning_traces`` and M5 lands them in the append-only ``audit_log``
-    (ADR-0011). Arguments are recorded verbatim at M0 — the mandatory
-    redaction pipeline (``llm/redaction.py``, REPO-STRUCTURE P20) is applied
-    before persistence from M3 on.
+    (ADR-0011). ``arguments`` carry the A9-**redacted** call arguments: the
+    mandatory redaction pipeline (``llm/redaction.py``, REPO-STRUCTURE P20) is
+    applied in :meth:`NetOpsTool._emit` before the event reaches any sink, so a
+    sink (e.g. structlog) never logs secret-bearing config/DNS material.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -282,7 +284,9 @@ class ToolAuditEvent(BaseModel):
     tool_name: str
     #: Declared classification of the tool.
     classification: ToolClassification
-    #: Validated arguments the tool was (or would have been) executed with.
+    #: Validated arguments the tool was (or would have been) executed with,
+    #: A9-redacted at emit time (:meth:`NetOpsTool._emit`) so no secret value is
+    #: ever recorded by a sink.
     arguments: dict[str, Any] = Field(default_factory=dict)
     #: How the invocation ended.
     outcome: ToolOutcome
@@ -361,12 +365,22 @@ class NetOpsTool(StructuredTool):
         detail: str | None = None,
         approval: ApprovalDecision | None = None,
     ) -> None:
-        """Build and record the audit event for one invocation."""
+        """Build and record the audit event for one invocation.
+
+        A9 (ADR-0011/0017): tool arguments routinely carry secret-bearing
+        config/DNS material (e.g. a ``config_blob`` with an SNMP community), so
+        they are scrubbed through :func:`~app.llm.redaction.redact_payload`
+        *here*, at the single audit-emit chokepoint, before they reach any
+        :class:`AuditSink` — the structlog :class:`LoggingAuditSink` would
+        otherwise log them verbatim. Redaction is idempotent and key-preserving,
+        so the event still records *which* tool ran with *what* (redacted)
+        arguments.
+        """
         await self.audit_sink.record(
             ToolAuditEvent(
                 tool_name=self.name,
                 classification=self.classification,
-                arguments=arguments,
+                arguments=redact_payload(arguments),
                 outcome=outcome,
                 detail=detail,
                 approval=approval,
@@ -439,9 +453,11 @@ class NetOpsTool(StructuredTool):
         decision = await gate.authorize(self._approval_request(arguments))
         if decision.approved:
             return decision
-        # Not approved: the tool body will NOT run. Audit the gate outcome with
-        # the (redaction-applied) arguments; the gate has already scrubbed the CR
-        # payload it persisted (A9), this records the same denied invocation.
+        # Not approved: the tool body will NOT run. Record the denied invocation;
+        # :meth:`_emit` scrubs the arguments through the A9 redaction layer before
+        # they reach the audit sink, so no secret-bearing config/DNS material is
+        # logged. (The CR ``payload`` the gate persisted is verbatim per ADR-0020
+        # §2; redaction lives at the audit-emit and LLM-preview boundaries.)
         await self._emit(
             outcome="denied", arguments=arguments, detail=decision.reason, approval=decision
         )
