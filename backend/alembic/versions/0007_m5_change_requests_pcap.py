@@ -17,10 +17,17 @@ migration test in both the enabled (self-approval rejected) and disabled
 
 Tables (ADR-0020 §2, ADR-0023 §3):
 - ``change_requests`` — the single spine for every state-changing action;
-  ``state`` lifecycle enum, ``kind`` (config / ddi_record), ``before_state`` /
-  ``after_state`` JSONB, real FK ``requester_id`` → ``users``,
-  ``four_eyes_required`` NOT NULL DEFAULT true, plain indexed ``reasoning_trace_id``
-  (no FK — ``reasoning_traces`` is partitioned, cf. ``audit_log``).
+  ``state`` lifecycle enum, ``kind`` (config / ddi_record), real FK
+  ``requester_id`` → ``users``, ``four_eyes_required`` NOT NULL DEFAULT true,
+  plain indexed ``reasoning_trace_id`` (no FK — ``reasoning_traces`` is
+  partitioned, cf. ``audit_log``). The execution inputs the approver reviews and
+  that run verbatim are ``payload`` (the exact diff/API calls), ``target_refs``
+  (device ids / DDI object refs) and ``rollback_plan`` (ADR-0021 baseline/inverse
+  spec) JSONB, all frozen at submit; ``generating_session_id`` is a real FK →
+  ``agent_sessions`` (non-partitioned, so a real FK, nullable for human-authored
+  CRs). ``before_state`` / ``after_state`` JSONB ride alongside as the audited
+  diff (ADR-0020 §4) — they record what changed, distinct from the
+  ``payload``/``rollback_plan`` the executor applies.
 - ``approvals`` — append-only approve/reject decision history; real FKs
   ``change_request_id`` → ``change_requests`` and ``actor_id`` → ``users``.
 - ``pcap_metadata`` — capture metadata + retention/tombstone/audit record; real
@@ -117,6 +124,15 @@ def _create_change_requests() -> None:
         sa.Column("state", sa.String(length=32), nullable=False),
         sa.Column("kind", sa.String(length=32), nullable=False),
         sa.Column("requester_id", sa.Uuid(), nullable=False),
+        # Real FK → agent_sessions (non-partitioned); nullable for human-authored
+        # CRs that did not originate from an agent run (ADR-0020 §2).
+        sa.Column("generating_session_id", sa.Uuid(), nullable=True),
+        # Frozen-at-submit execution inputs the approver reviewed and that the
+        # Automation Agent executor applies verbatim (ADR-0020 §2, ADR-0021 §2/§3).
+        sa.Column("target_refs", _JSON, nullable=True),
+        sa.Column("payload", _JSON, nullable=True),
+        sa.Column("rollback_plan", _JSON, nullable=True),
+        # Audited diff (ADR-0020 §4): what changed, alongside the applied payload.
         sa.Column("before_state", _JSON, nullable=True),
         sa.Column("after_state", _JSON, nullable=True),
         sa.Column("four_eyes_required", sa.Boolean(), nullable=False, server_default=sa.true()),
@@ -127,9 +143,19 @@ def _create_change_requests() -> None:
         sa.ForeignKeyConstraint(
             ["requester_id"], ["users.id"], name=op.f("fk_change_requests_requester_id")
         ),
+        sa.ForeignKeyConstraint(
+            ["generating_session_id"],
+            ["agent_sessions.id"],
+            name=op.f("fk_change_requests_generating_session_id"),
+        ),
     )
     op.create_index(op.f("ix_change_requests_state"), "change_requests", ["state"])
     op.create_index(op.f("ix_change_requests_requester_id"), "change_requests", ["requester_id"])
+    op.create_index(
+        op.f("ix_change_requests_generating_session_id"),
+        "change_requests",
+        ["generating_session_id"],
+    )
     # Plain indexed UUID linking a CR to the reasoning trace that authored it.
     # No FK: reasoning_traces is partitioned (cf. audit_log.reasoning_trace_id).
     op.create_index(
@@ -224,6 +250,7 @@ def downgrade() -> None:
     op.drop_table("approvals")
 
     op.drop_index(op.f("ix_change_requests_reasoning_trace_id"), table_name="change_requests")
+    op.drop_index(op.f("ix_change_requests_generating_session_id"), table_name="change_requests")
     op.drop_index(op.f("ix_change_requests_requester_id"), table_name="change_requests")
     op.drop_index(op.f("ix_change_requests_state"), table_name="change_requests")
     op.drop_table("change_requests")

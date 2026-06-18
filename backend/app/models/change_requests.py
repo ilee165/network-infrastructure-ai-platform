@@ -8,11 +8,16 @@ Aggregates:
 
 - :class:`ChangeRequest` — one proposed change and its lifecycle state
   (``draft → pending_approval → approved → executing → completed | failed →
-  rolled_back``, ADR-0020 §1). ``before_state`` / ``after_state`` ride in JSONB
-  (the diff an approver reviews and that executes verbatim — no approve-then-swap
-  TOCTOU, ADR-0020 §2). ``four_eyes_required`` defaults to **true** (secure by
-  default); ``requester_id`` is a real FK to ``users``; ``reasoning_trace_id``
-  links the agent run that authored the CR.
+  rolled_back``, ADR-0020 §1). The execution inputs an approver reviews and that
+  run verbatim — ``payload`` (the exact diff/API calls), ``target_refs`` (device
+  ids / DDI object refs) and ``rollback_plan`` (ADR-0021 baseline/inverse spec) —
+  ride in JSONB, frozen at submit so what executes is what was approved (no
+  approve-then-swap TOCTOU, ADR-0020 §2). ``before_state`` / ``after_state`` JSONB
+  ride alongside as the audited diff (ADR-0020 §4) — what changed, distinct from
+  the applied ``payload``. ``four_eyes_required`` defaults to **true** (secure by
+  default); ``requester_id`` is a real FK to ``users``; ``generating_session_id``
+  is a real FK to ``agent_sessions`` (non-partitioned, nullable for human-authored
+  CRs); ``reasoning_trace_id`` links the agent run that authored the CR.
 - :class:`Approval` — one append-only approve/reject *decision* per row (full
   history with comments, not a mutable column — ADR-0020 alt #2). ``actor_id``
   is a real FK to ``users``; ``change_request_id`` a real FK to the CR.
@@ -109,11 +114,16 @@ def _wire_enum(enum_cls: type[StrEnum], *, length: int = 32) -> SaEnum:
 class ChangeRequest(UuidPkMixin, TimestampMixin, Base):
     """A proposed state-changing action and its guarded lifecycle (ADR-0020).
 
-    ``before_state`` / ``after_state`` capture the exact change an approver
-    reviews; they are immutable through approval/execution (re-editing requires
+    ``payload`` (the exact diff/API calls to apply), ``target_refs`` (device ids /
+    DDI object refs) and ``rollback_plan`` (ADR-0021 baseline/inverse spec) carry
+    the change an approver reviews and the executor applies verbatim; they are
+    frozen at submit and immutable through approval/execution (re-editing requires
     ``reject → draft`` + a fresh submit) so what executes is what was approved.
-    ``four_eyes_required`` defaults to ``True`` — the secure default that keeps
-    the DB four-eyes constraint trigger in force.
+    ``before_state`` / ``after_state`` are the audited diff (ADR-0020 §4) — what
+    changed — kept alongside the applied ``payload``. ``four_eyes_required``
+    defaults to ``True`` — the secure default that keeps the DB four-eyes
+    constraint trigger in force. ``generating_session_id`` is a real FK to the
+    ``agent_sessions`` row that authored the CR (nullable for human-authored CRs).
     """
 
     __tablename__ = "change_requests"
@@ -125,6 +135,18 @@ class ChangeRequest(UuidPkMixin, TimestampMixin, Base):
     requester_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id"), nullable=False, index=True
     )
+    # Real FK → agent_sessions (non-partitioned, so a real DB FK); nullable for
+    # human-authored CRs that did not originate from an agent run (ADR-0020 §2).
+    generating_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agent_sessions.id"), index=True
+    )
+    # Frozen-at-submit execution inputs (ADR-0020 §2, ADR-0021 §2/§3): the payload
+    # the approver reviewed and the executor renders verbatim, the target device /
+    # DDI refs, and the rollback plan the Automation Agent executor reads.
+    target_refs: Mapped[dict[str, Any] | None] = mapped_column(JSON_VARIANT)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON_VARIANT)
+    rollback_plan: Mapped[dict[str, Any] | None] = mapped_column(JSON_VARIANT)
+    # Audited diff (ADR-0020 §4): what changed, distinct from the applied payload.
     before_state: Mapped[dict[str, Any] | None] = mapped_column(JSON_VARIANT)
     after_state: Mapped[dict[str, Any] | None] = mapped_column(JSON_VARIANT)
     four_eyes_required: Mapped[bool] = mapped_column(nullable=False, default=True)
