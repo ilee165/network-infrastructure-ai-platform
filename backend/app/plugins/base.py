@@ -189,16 +189,41 @@ class SnmpReadTransport(Protocol):
 class ConfigWriteTransport(CommandTransport, Protocol):
     """A CLI session that can both read (``send_command``) and **write** config.
 
-    The write surface for ``CONFIG_RESTORE``/``CONFIG_DEPLOY`` (ADR-0021 §4): the
-    netmiko ``send_config_set`` family enters ``configure terminal``, sends the
-    lines, and exits — satisfied by
-    :class:`app.plugins.transport.ssh.SshTransport`; tests use in-memory fakes.
+    The write surface for ``CONFIG_RESTORE``/``CONFIG_DEPLOY`` (ADR-0021 §4):
+
+    - :meth:`send_config` is the netmiko ``send_config_set`` family — it enters
+      ``configure terminal``, sends the lines, and exits. This is a **MERGE**
+      into the running config: it adds/overrides lines but cannot *remove* a
+      line that is not mentioned. It is the apply surface for an additive
+      ``CONFIG_DEPLOY`` fragment.
+    - :meth:`replace_config` is the vendor-native config-**replace** primitive
+      (``configure replace`` on IOS): it makes the running config become exactly
+      the supplied lines, including removing device-only lines absent from the
+      target. This is the apply surface for ``CONFIG_RESTORE`` and the rollback
+      surface for both, because only a replace can re-establish *equality* with a
+      captured baseline (ADR-0021 §4: "configure replace ... otherwise replay of
+      the captured pre-change baseline as the inverse"). A merge cannot satisfy
+      the symmetric equal-to-baseline predicate of §3.
+
     ``send_command`` (inherited) is used to capture/verify the running config
-    around the write. Implementations return device output verbatim.
+    around the write. Both are satisfied by
+    :class:`app.plugins.transport.ssh.SshTransport`; tests use in-memory fakes.
+    Implementations return device output verbatim.
     """
 
     def send_config(self, lines: Sequence[str]) -> str:
-        """Apply *lines* in configuration mode; return the device output verbatim."""
+        """Merge *lines* into the running config (``configure terminal``); verbatim output."""
+        ...
+
+    def replace_config(self, lines: Sequence[str]) -> str:
+        """Replace the running config so it becomes exactly *lines* (configure replace).
+
+        The vendor-native config-replace primitive (ADR-0021 §4): unlike
+        :meth:`send_config`, this removes any running line not present in *lines*,
+        so a post-replace re-capture can normalize **equal** to the supplied
+        target — the precondition for the symmetric rollback/restore equality
+        predicate (§3). Returns the device output verbatim.
+        """
         ...
 
 

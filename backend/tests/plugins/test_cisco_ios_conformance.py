@@ -78,9 +78,15 @@ def _make_capability(impl: type[PluginCapability]) -> PluginCapability:
 class _ConfigWriteFixtureTransport:
     """Recorded :class:`ConfigWriteTransport` for the change-write conformance case.
 
-    A minimal running-config state machine: ``send_config`` replaces the running
-    config with the applied lines (restore/replace semantics) so verify-after
-    confirms the intended end-state — no device, no network (D16).
+    A minimal running-config state machine modelling the REAL IOS write surfaces
+    (no device, no network — D16):
+
+    - ``send_config`` MERGES the lines into the running config (union, no
+      deletion) — the deploy apply surface.
+    - ``replace_config`` REPLACES the running config with exactly the lines — the
+      restore apply / rollback surface.
+
+    so verify-after confirms the intended end-state for both capabilities.
     """
 
     def __init__(self, running: str) -> None:
@@ -92,6 +98,13 @@ class _ConfigWriteFixtureTransport:
         raise AssertionError(f"unexpected command sent to device: {command!r}")
 
     def send_config(self, lines: Sequence[str]) -> str:
+        present = self._running.splitlines()
+        present_set = set(present)
+        merged = present + [line for line in lines if line not in present_set]
+        self._running = "\n".join(merged) + "\n"
+        return ""
+
+    def replace_config(self, lines: Sequence[str]) -> str:
         self._running = "\n".join(lines) + "\n"
         return ""
 
@@ -103,8 +116,12 @@ def _executing_plan() -> ChangePlan:
 
 
 def _invoke_restore(impl: type[PluginCapability]) -> ChangeResult:
-    # Device starts on a *different* config so the restore actually applies.
-    transport = _ConfigWriteFixtureTransport("hostname DIFFERENT\n!\nend\n")
+    # Device drifted on a *non-management* line (hostname) only, so the restore
+    # actually applies but the change delta does not touch the management path
+    # (the ADR-0021 §4.2 guardrail would otherwise refuse a mgmt-path change on
+    # classic cisco_ios).
+    drifted = _RUNNING_CONFIG.replace("hostname core-rtr01", "hostname DRIFTED")
+    transport = _ConfigWriteFixtureTransport(drifted)
     cap = impl(transport, uuid4())
     assert isinstance(cap, ConfigRestoreCapability)
 

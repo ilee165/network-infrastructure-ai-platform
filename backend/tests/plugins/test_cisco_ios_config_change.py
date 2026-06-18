@@ -65,29 +65,37 @@ _FRAGMENT = (
 
 
 class ConfigWriteFakeTransport:
-    """In-memory ``ConfigWriteTransport``: a running-config replace state machine.
+    """In-memory ``ConfigWriteTransport`` modelling the REAL IOS write surfaces.
 
     ``send_command('show running-config')`` returns the current config text.
-    ``send_config(lines)`` models IOS ``configure replace`` semantics: it sets
-    the running config to the applied lines — so a baseline replay (the plugin's
-    rollback) naturally restores the captured baseline, and a successful apply
-    lands the requested end-state. Failure injection flags:
 
-    - ``corrupt_apply``: the FIRST ``send_config`` (the apply) records the lines
-      but leaves the running config unchanged (verify-after fails); a later
-      baseline replay (the rollback) still applies normally, so the rollback
-      succeeds. Models "the apply did not land" with a healthy rollback path.
-    - ``raise_on_apply``: the FIRST ``send_config`` raises (apply error); the
-      rollback replay still applies, so the device returns to the baseline.
+    - ``send_config(lines)`` models netmiko ``send_config_set`` — a **MERGE**:
+      lines not already present are appended (in order); nothing is removed. This
+      is the deploy apply surface. It cannot reproduce a baseline that is a strict
+      superset of the merged lines (matching real IOS), so it is never used by the
+      plugin for an equal-to-baseline result.
+    - ``replace_config(lines)`` models ``configure replace`` — a **REPLACE**: the
+      running config becomes exactly the applied lines (device-only lines are
+      removed). This is the restore apply surface and the rollback surface, the
+      only surface that can re-establish equality with a captured baseline.
+
+    Failure injection flags (apply = the FIRST write call):
+
+    - ``corrupt_apply``: the first write records the lines but leaves the running
+      config unchanged (verify-after fails); the later rollback ``replace_config``
+      still applies, so rollback succeeds. Models "the apply did not land."
+    - ``raise_on_apply``: the first write raises (apply error); the rollback
+      ``replace_config`` still applies, so the device returns to the baseline.
     """
 
     def __init__(self, running: str) -> None:
         self._running = running
         self.config_batches: list[list[str]] = []
+        self.replace_batches: list[list[str]] = []
         self.commands: list[str] = []
         self.corrupt_apply: bool = False
         self.raise_on_apply: bool = False
-        self._applies = 0
+        self._writes = 0
 
     def send_command(self, command: str) -> str:
         self.commands.append(command)
@@ -95,15 +103,34 @@ class ConfigWriteFakeTransport:
             return self._running
         raise AssertionError(f"unexpected command sent to device: {command!r}")
 
-    def send_config(self, lines: list[str]) -> str:
-        self.config_batches.append(list(lines))
-        self._applies += 1
-        is_apply = self._applies == 1
+    def _begin_write(self) -> bool:
+        """Advance the write counter; return whether this is the apply (first) write."""
+        self._writes += 1
+        is_apply = self._writes == 1
         if is_apply and self.raise_on_apply:
             raise RuntimeError("config session dropped")
+        return is_apply
+
+    def send_config(self, lines: list[str]) -> str:
+        # MERGE: union into the running config, no deletion, additions appended in
+        # order (deterministic model of send_config_set).
+        self.config_batches.append(list(lines))
+        is_apply = self._begin_write()
         if is_apply and self.corrupt_apply:
             return ""  # apply did not land
-        self._running = "\n".join(lines) + "\n"  # configure-replace semantics
+        present = self._running.splitlines()
+        present_set = set(present)
+        merged = present + [line for line in lines if line not in present_set]
+        self._running = "\n".join(merged) + "\n"
+        return ""
+
+    def replace_config(self, lines: list[str]) -> str:
+        # REPLACE: running config becomes exactly the applied lines.
+        self.replace_batches.append(list(lines))
+        is_apply = self._begin_write()
+        if is_apply and self.corrupt_apply:
+            return ""  # apply did not land
+        self._running = "\n".join(lines) + "\n"
         return ""
 
 
@@ -278,16 +305,20 @@ class TestDeploy:
 
 class TestRollbackFailedNeverSilent:
     def test_deploy_rollback_failure_surfaces_failed(self, device_id: UUID) -> None:
-        # The apply does not land (verify-after fails), and the baseline replay
+        # The apply does not land (verify-after fails), and the baseline REPLACE
         # also fails to reproduce the captured baseline (a partially-applied,
         # order-sensitive fragment per ADR-0021 §3) -> rollback-failed.
         class _PartialRollbackTransport(ConfigWriteFakeTransport):
             def send_config(self, lines: list[str]) -> str:
+                # The apply (first write): record it but do not land it.
                 self.config_batches.append(list(lines))
-                self._applies += 1
-                if self._applies == 1:
-                    return ""  # apply did not land (verify-after will fail)
-                # rollback replay leaves residual mangling -> != baseline
+                self._begin_write()
+                return ""  # verify-after will fail
+
+            def replace_config(self, lines: list[str]) -> str:
+                # The rollback replace leaves residual mangling -> != baseline.
+                self.replace_batches.append(list(lines))
+                self._begin_write()
                 self._running = "hostname BROKEN-AFTER-ROLLBACK\n!\nend\n"
                 return ""
 
@@ -302,3 +333,161 @@ class TestRollbackFailedNeverSilent:
         assert result.rollback is not None
         assert result.rollback.succeeded is False
         assert result.rollback.verified is False
+
+
+# ---------------------------------------------------------------------------
+# Deploy verify-after: residual-diff check, not mere line-membership (ADR-0021 §3)
+# ---------------------------------------------------------------------------
+
+
+class TestDeployResidualDiff:
+    def test_deploy_fragment_present_but_residual_diff_fails_verify(self, device_id: UUID) -> None:
+        # The apply lands the fragment lines BUT also drops an unrelated baseline
+        # line (a device-mangled / connectivity-affecting apply). Mere
+        # set-membership of the fragment lines would pass; the strengthened
+        # predicate (re-captured config == baseline + additions exactly) must FAIL
+        # and trigger rollback (ADR-0021 §3, line 33).
+        class _ResidualDiffTransport(ConfigWriteFakeTransport):
+            def send_config(self, lines: list[str]) -> str:
+                self.config_batches.append(list(lines))
+                is_apply = self._begin_write()
+                if is_apply:
+                    # Land the fragment, but DROP an unrelated baseline line.
+                    merged = self._running.replace("ip route 0.0.0.0 0.0.0.0 192.0.2.9\n", "")
+                    present = merged.splitlines()
+                    present_set = set(present)
+                    merged_lines = present + [ln for ln in lines if ln not in present_set]
+                    self._running = "\n".join(merged_lines) + "\n"
+                    return ""
+                # rollback replace restores the exact baseline
+                self._running = "\n".join(lines) + "\n"
+                return ""
+
+            def replace_config(self, lines: list[str]) -> str:
+                self.replace_batches.append(list(lines))
+                self._begin_write()
+                self._running = "\n".join(lines) + "\n"
+                return ""
+
+        transport = _ResidualDiffTransport(_BASELINE)
+        cap = CiscoIosConfigDeploy(transport, device_id)
+
+        result = cap.deploy(_FRAGMENT, plan=_executing_plan())
+
+        # Fragment present, but an unrelated line changed -> NOT applied.
+        assert result.outcome is not ChangeOutcome.APPLIED
+        assert result.verified is False
+        # The captured baseline replace restored the device -> rolled_back.
+        assert result.outcome is ChangeOutcome.ROLLED_BACK
+        assert result.rollback is not None
+        assert result.rollback.succeeded is True
+
+
+# ---------------------------------------------------------------------------
+# Restore verify-after tolerates the volatile IOS preamble (ADR-0021 §4/§5)
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreVolatilePreamble:
+    def test_restore_succeeds_despite_changed_byte_count_header(self, device_id: UUID) -> None:
+        # A real `show running-config` re-capture carries `Building
+        # configuration...` and a `Current configuration : NNN bytes` header whose
+        # byte count changes with config size. The snapshot was taken at a
+        # different size, so the headers differ. A correct restore must still
+        # report APPLIED/verified — the volatile preamble is stripped before the
+        # equality comparison (ADR-0021 §5); it must not trigger a spurious
+        # rollback.
+        snapshot_text = (
+            "Building configuration...\n\nCurrent configuration : 1840 bytes\n" + _BASELINE
+        )
+
+        class _VolatileHeaderTransport(ConfigWriteFakeTransport):
+            def send_command(self, command: str) -> str:
+                self.commands.append(command)
+                if command == SHOW_RUNNING_CONFIG:
+                    # Re-capture carries a DIFFERENT byte-count header than the
+                    # snapshot, plus the volatile build banner.
+                    return (
+                        "Building configuration...\n\n"
+                        "Current configuration : 9999 bytes\n" + self._running
+                    )
+                raise AssertionError(f"unexpected command sent to device: {command!r}")
+
+        # Device drifted on a non-mgmt line so the restore actually applies.
+        current = _BASELINE.replace("hostname core-rtr01", "hostname WRONG")
+        transport = _VolatileHeaderTransport(current)
+        cap = CiscoIosConfigRestore(transport, device_id)
+
+        result = cap.restore(_SnapshotStub(snapshot_text), plan=_executing_plan())
+
+        assert result.outcome is ChangeOutcome.APPLIED
+        assert result.verified is True
+        assert result.rollback is None
+
+
+# ---------------------------------------------------------------------------
+# Management-path guardrail: refuse mgmt-path changes on classic IOS (ADR-0021 §4.2)
+# ---------------------------------------------------------------------------
+
+
+class TestManagementPathGuardrail:
+    def test_deploy_rejects_vty_transport_change_before_any_write(self, device_id: UUID) -> None:
+        # A fragment touching the session-carrying vty/transport must be refused
+        # with a typed PluginError BEFORE any device write — classic cisco_ios has
+        # no dead-man auto-revert (ADR-0021 §4.2).
+        transport = ConfigWriteFakeTransport(_BASELINE)
+        cap = CiscoIosConfigDeploy(transport, device_id)
+
+        fragment = "line vty 0 4\n transport input telnet ssh\n"
+        with pytest.raises(PluginError, match="management path"):
+            cap.deploy(fragment, plan=_executing_plan())
+
+        # Refused before any write surface was touched.
+        assert transport.config_batches == []
+        assert transport.replace_batches == []
+
+    def test_deploy_rejects_vty_access_class_change(self, device_id: UUID) -> None:
+        transport = ConfigWriteFakeTransport(_BASELINE)
+        cap = CiscoIosConfigDeploy(transport, device_id)
+
+        fragment = "line vty 0 4\n access-class MGMT-ACL in\n"
+        with pytest.raises(PluginError, match="management path"):
+            cap.deploy(fragment, plan=_executing_plan())
+        assert transport.config_batches == []
+
+    def test_deploy_rejects_mgmt_svi_ip_change(self, device_id: UUID) -> None:
+        transport = ConfigWriteFakeTransport(_BASELINE)
+        cap = CiscoIosConfigDeploy(transport, device_id)
+
+        fragment = "interface Vlan10\n ip address 10.0.0.9 255.255.255.0\n"
+        with pytest.raises(PluginError, match="management path"):
+            cap.deploy(fragment, plan=_executing_plan())
+        assert transport.config_batches == []
+
+    def test_deploy_allows_benign_non_mgmt_fragment(self, device_id: UUID) -> None:
+        # A loopback/data interface fragment (the existing _FRAGMENT) is NOT a
+        # mgmt-path change and must be allowed through to apply.
+        transport = ConfigWriteFakeTransport(_BASELINE)
+        cap = CiscoIosConfigDeploy(transport, device_id)
+
+        result = cap.deploy(_FRAGMENT, plan=_executing_plan())
+
+        assert result.outcome is ChangeOutcome.APPLIED
+        assert transport.config_batches  # the write surface WAS used
+
+    def test_restore_rejects_when_delta_touches_mgmt_path(self, device_id: UUID) -> None:
+        # The device drifted by ADDING a vty access-class; restoring the snapshot
+        # would REMOVE it — a management-path change — so restore is refused before
+        # any write (ADR-0021 §4.2: the guardrail validates the change delta).
+        drifted = _BASELINE.replace(
+            "line vty 0 4\n login local\n",
+            "line vty 0 4\n access-class TIGHTENED in\n login local\n",
+        )
+        assert drifted != _BASELINE  # guard against a no-op fixture edit
+        transport = ConfigWriteFakeTransport(drifted)
+        cap = CiscoIosConfigRestore(transport, device_id)
+
+        with pytest.raises(PluginError, match="management path"):
+            cap.restore(_SnapshotStub(_BASELINE), plan=_executing_plan())
+        assert transport.config_batches == []
+        assert transport.replace_batches == []

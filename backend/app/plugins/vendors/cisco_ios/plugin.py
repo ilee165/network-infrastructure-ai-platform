@@ -14,6 +14,7 @@ M1 refactor once more capabilities land).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import ClassVar
@@ -235,21 +236,128 @@ class CiscoIosConfigBackup(_CiscoIosCommandCapability, ConfigBackupCapability):
 # ---------------------------------------------------------------------------
 
 
+#: Volatile / non-settable IOS ``show running-config`` preamble lines. A real
+#: device emits ``Building configuration...`` and ``Current configuration : NNN
+#: bytes`` (the byte count changes with config size on every capture) — display
+#: artifacts the device rejects as config commands and which would otherwise make
+#: a byte-for-byte equality spuriously fail (ADR-0021 §4/§5). They are stripped
+#: before equality comparison and before any line is replayed as configuration.
+_VOLATILE_PREAMBLE_RE = re.compile(
+    r"^(?:Building configuration\.\.\.|Current configuration\s*:.*)$"
+)
+
+
 def _normalize_config(raw_config: str) -> str:
     """Byte-stable normalized form for equality comparison (ADR-0017 §1 parity).
 
     Collapses ``\\r\\n``/``\\r`` to ``\\n``, strips trailing per-line whitespace,
+    drops the volatile/non-settable IOS preamble (``Building configuration...`` /
+    ``Current configuration : NNN bytes`` — see :data:`_VOLATILE_PREAMBLE_RE`),
     and guarantees a single trailing newline — so a verify-after / rollback
-    equality reflects a *real* config difference, not transport CR/LF noise. The
-    transform is duplicated here (rather than importing
-    ``app.engines.config_mgmt.capture``) to keep the plugin layer free of an
-    ``app.engines`` import; it is intentionally identical to ``normalize_config``
-    so a snapshot stored by M4 compares equal to a fresh capture here.
+    equality reflects a *real* config difference, not transport CR/LF noise or a
+    volatile header byte count that changes on every capture. Stripping the
+    preamble is also what lets the normalized form be replayed as configuration:
+    the display artifacts are not settable commands. The CR/LF + trailing-newline
+    transform stays identical to M4's ``normalize_config`` so a snapshot stored by
+    M4 still compares equal to a fresh capture here.
     """
     unified = raw_config.replace("\r\n", "\n").replace("\r", "\n")
-    stripped = "\n".join(line.rstrip() for line in unified.split("\n"))
-    body = stripped.strip("\n")
+    lines = [
+        line.rstrip()
+        for line in unified.split("\n")
+        if not _VOLATILE_PREAMBLE_RE.match(line.strip())
+    ]
+    body = "\n".join(lines).strip("\n")
     return f"{body}\n" if body else ""
+
+
+#: ``line con|vty|aux`` block header — the lines that carry the operator's
+#: session itself; any change inside one can sever reachability.
+_LINE_BLOCK_RE = re.compile(r"^line\s+(?:con|console|vty|aux)\b", re.IGNORECASE)
+#: An interface block header.
+_INTERFACE_BLOCK_RE = re.compile(r"^interface\s+(\S+)", re.IGNORECASE)
+#: Management-class interface names (the mgmt interface / uplink / mgmt SVI). A
+#: change to admin state / addressing / ACL binding on one of these can strand the
+#: device; ordinary data/loopback interfaces are deliberately NOT matched, so a
+#: benign interface deploy is not refused.
+_MGMT_INTERFACE_NAME_RE = re.compile(
+    r"^(?:Vlan\d+|(?:Mgmt|Management|FastEthernet0/0|GigabitEthernet0/0)\S*)$",
+    re.IGNORECASE,
+)
+#: Commands that, in any context, touch the session-carrying management path
+#: (ADR-0021 §4.2): vty/line ACLs (``access-class``), the session transport
+#: (``transport input/output``), and the management default-gateway.
+_MGMT_GLOBAL_RES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^access-class\b", re.IGNORECASE), "line access-class (mgmt ACL)"),
+    (re.compile(r"^transport\s+(?:input|output)\b", re.IGNORECASE), "line transport (session)"),
+    (re.compile(r"^ip\s+default-gateway\b", re.IGNORECASE), "management default-gateway"),
+)
+#: Within a *management-class* interface block, commands that can drop
+#: reachability: admin state, the mgmt-interface ACL binding, and addressing.
+_MGMT_INTERFACE_RES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^(?:no\s+)?shutdown\b", re.IGNORECASE), "mgmt interface admin state (shutdown)"),
+    (re.compile(r"^ip\s+access-group\b", re.IGNORECASE), "mgmt interface ip access-group"),
+    (re.compile(r"^(?:no\s+)?ip\s+address\b", re.IGNORECASE), "mgmt interface ip address"),
+)
+
+
+def _management_path_hits(baseline: str, end_state: str) -> tuple[str, ...]:
+    """Reasons the change baseline -> end_state touches the management path, or ``()``.
+
+    The unit the guardrail validates (ADR-0021 §4.2) is the *change* — the lines
+    a deploy/restore actually adds or removes — not the whole target. To keep
+    interface-block context correct even when only an indented child line changes
+    (its ``interface`` header may be unchanged), the scan walks the full ordered
+    config (end-state, then baseline-only lines for removals) for context but
+    flags a line only when it is part of the delta.
+
+    A line is a management-path hit when it is a ``line con|vty|aux`` block, an
+    ``access-class``/``transport input`` line, a management default-gateway, or —
+    inside a *management-class* ``interface`` block (a VLAN SVI or a
+    Mgmt/Management/0/0 uplink, see :data:`_MGMT_INTERFACE_NAME_RE`) — an
+    admin-state (``shutdown``), an ``ip access-group`` binding, or an ``ip
+    address`` change. Ordinary data/loopback interfaces are deliberately not
+    flagged, so a benign interface deploy is not refused. Detection is
+    conservative within the management scope (over-reject rather than strand a
+    device); empty for a non-management change.
+    """
+    baseline_set = set(baseline.splitlines())
+    end_set = set(end_state.splitlines())
+    # Scan end-state for context + additions, then baseline-only lines (removals).
+    end_lines = end_state.splitlines()
+    removed_lines = [line for line in baseline.splitlines() if line not in end_set]
+
+    hits: list[str] = []
+    for sequence, changed_against in ((end_lines, baseline_set), (removed_lines, end_set)):
+        in_mgmt_interface = False
+        for raw in sequence:
+            line = raw.strip()
+            if not line:
+                continue
+            indented = raw[:1].isspace()
+            interface_match = _INTERFACE_BLOCK_RE.match(line)
+            if not indented:
+                in_mgmt_interface = bool(
+                    interface_match and _MGMT_INTERFACE_NAME_RE.match(interface_match.group(1))
+                )
+            # Only a line that is part of the delta (not present on the other
+            # side) is a candidate hit; unchanged lines provide context only.
+            if raw in changed_against:
+                continue
+            if not indented and _LINE_BLOCK_RE.match(line):
+                hits.append("line con/vty/aux block (session transport)")
+            for pattern, reason in _MGMT_GLOBAL_RES:
+                if pattern.match(line):
+                    hits.append(reason)
+            if in_mgmt_interface:
+                for pattern, reason in _MGMT_INTERFACE_RES:
+                    if pattern.match(line):
+                        hits.append(reason)
+    # De-duplicate while preserving first-seen order.
+    seen: dict[str, None] = {}
+    for hit in hits:
+        seen.setdefault(hit, None)
+    return tuple(seen)
 
 
 class _CiscoIosConfigWriteCapability(PluginCapability):
@@ -282,9 +390,25 @@ class _CiscoIosConfigWriteCapability(PluginCapability):
         )
 
     def _send_config(self, lines: list[str]) -> None:
-        """Apply *lines* in config mode; record the verbatim device output."""
+        """Merge *lines* in config mode; record the verbatim device output.
+
+        A ``send_config_set`` merge (additive) — the deploy apply surface. It
+        cannot remove lines, so it is never used for an equal-to-baseline result.
+        """
         output = self._transport.send_config(lines)
         self._record_raw("configure terminal\n" + "\n".join(lines), output)
+
+    def _replace_config(self, lines: list[str]) -> None:
+        """Replace the running config with exactly *lines* (configure replace).
+
+        The vendor-native config-replace primitive (ADR-0021 §4): the apply
+        surface for ``CONFIG_RESTORE`` and the rollback surface for both
+        operations, because only a replace can re-establish equality with a
+        captured baseline (a merge cannot remove device-only lines). Records the
+        verbatim device output for audit.
+        """
+        output = self._transport.replace_config(lines)
+        self._record_raw("configure replace\n" + "\n".join(lines), output)
 
     @staticmethod
     def _require_executing(plan: ChangePlan, operation: str) -> None:
@@ -323,6 +447,31 @@ class _CiscoIosConfigWriteCapability(PluginCapability):
             summary.append(f"-{removed} line(s)")
         return tuple(summary)
 
+    def _reject_management_path(self, operation: str, baseline: str, end_state: str) -> None:
+        """Refuse a change that touches the management path (ADR-0021 §4.2).
+
+        Classic ``cisco_ios`` implements neither a ``configure replace ... commit
+        timer`` nor an EEM/kron dead-man auto-revert, so a change that severs the
+        management path mid-apply strands the device: the worker can no longer
+        reach it to replay the baseline (§4.1). On images without a dead-man
+        primitive, ADR-0021 §4.2 places the guardrail in the deploy/restore
+        fragment validation: it **rejects**, with a typed :class:`PluginError`
+        and before any device write, any change touching the management path
+        (mgmt-interface ACLs, the mgmt interface/uplink admin state, the mgmt
+        VLAN/IP, or the line/transport carrying the session). The change is the
+        delta baseline -> end_state. Such changes are out of M5 scope for classic
+        IOS and need a console/OOB-fallback path.
+        """
+        offending = _management_path_hits(baseline, end_state)
+        if offending:
+            raise PluginError(
+                f"cisco_ios: {operation} refused — change touches the management path "
+                f"({', '.join(offending)}) and classic cisco_ios has no dead-man "
+                "auto-revert primitive; a mid-apply reachability loss would strand the "
+                "device with no replay path (ADR-0021 §4.2: management-path guardrail). "
+                "This is out of M5 scope for classic IOS — use a console/OOB-fallback path."
+            )
+
     def _execute(
         self,
         *,
@@ -330,26 +479,38 @@ class _CiscoIosConfigWriteCapability(PluginCapability):
         operation: str,
         project: Callable[[str], str],
         config_lines: list[str],
-        verify: Callable[[str], bool],
+        apply: Callable[[list[str]], None],
     ) -> ChangeResult:
         """Run the ADR-0021 §3 contract and return a structured :class:`ChangeResult`.
 
         ``project`` maps the captured baseline to the intended normalized
-        end-state (restore: the snapshot; deploy: baseline + fragment) — used
-        only for the redaction-safe diff summary. ``verify`` is the verify-after
-        predicate applied to the *normalized* re-captured config — symmetric
-        between restore (equal to snapshot) and deploy (fragment present, no
-        unintended residual diff).
+        end-state (restore: the snapshot; deploy: baseline + fragment additions).
+        That projection is BOTH the redaction-safe diff target AND the
+        verify-after target: verify-after asserts the re-captured config equals
+        the projection **exactly** — symmetric in rigor between restore (equal to
+        the snapshot) and deploy (equal to baseline + fragment, i.e. fragment
+        present AND no unintended residual diff outside the fragment scope,
+        ADR-0021 §3). ``apply`` is the write surface (deploy merges via
+        ``send_config``; restore replaces via ``replace_config``).
         """
         self._require_executing(plan, operation)
 
         # Capture the FRESH pre-change baseline — the authoritative rollback
         # target (preferred over a possibly-stale CR rollback_plan reference, §3).
         baseline = _normalize_config(self._capture_running())
+        end_state = project(baseline)
+
+        # Management-path guardrail BEFORE any device write (ADR-0021 §4.2): on
+        # classic IOS (no dead-man revert) a change touching the mgmt path is
+        # refused. Scoped to the *delta* vs the captured baseline — the lines this
+        # operation actually adds or removes — so restoring/replaying a snapshot
+        # whose mgmt lines already match the live config is not spuriously refused;
+        # only a change that would alter the management path is rejected.
+        self._reject_management_path(operation, baseline, end_state)
 
         # Idempotency: if the device already satisfies the intended end-state,
         # complete without touching it (restore no-op; deploy fragment present).
-        if verify(baseline):
+        if baseline == end_state:
             return ChangeResult(
                 change_request_id=plan.change_request_id,
                 outcome=ChangeOutcome.NO_OP,
@@ -358,19 +519,20 @@ class _CiscoIosConfigWriteCapability(PluginCapability):
                 rollback=None,
             )
 
-        applied_diff = self._diff_summary(baseline, project(baseline))
+        applied_diff = self._diff_summary(baseline, end_state)
 
-        # Apply, then verify-after by re-capturing the running config.
+        # Apply, then verify-after by re-capturing the running config and
+        # asserting it equals the intended end-state exactly (residual-diff check).
         apply_failed = False
         try:
-            self._send_config(config_lines)
+            apply(config_lines)
         except Exception:  # noqa: BLE001 — any apply failure triggers rollback (§3)
             apply_failed = True
 
         verified = False
         if not apply_failed:
             after = _normalize_config(self._capture_running())
-            verified = verify(after)
+            verified = after == end_state
 
         if verified:
             return ChangeResult(
@@ -393,25 +555,29 @@ class _CiscoIosConfigWriteCapability(PluginCapability):
         )
 
     def _rollback_to_baseline(self, baseline_normalized: str) -> RollbackResult:
-        """Replay the captured baseline and verify equality (vendor-native, §4).
+        """Replace the device with the captured baseline and verify equality (§4).
 
-        Classic IOS has no transactional commit, so rollback is a replay of the
-        captured pre-change baseline. Success is an **asserted equality** (the
+        Classic IOS has no transactional commit, so rollback is a **config
+        replace** of the captured pre-change baseline (ADR-0021 §4: the native
+        rollback primitive is ``configure replace`` / replay of the baseline as
+        the inverse). A replace — not a merge — is required: a merge cannot
+        remove lines the failed apply added, so the re-capture could never
+        normalize equal to the baseline. Success is an **asserted equality** (the
         re-captured config normalizes equal to the baseline), symmetric with the
-        restore exit criterion — not an assumption. A replay that cannot reach
+        restore exit criterion — not an assumption. A replace that cannot reach
         the device (the transport raises) or whose re-capture does not normalize
         equal is ``succeeded=False`` -> the caller surfaces ``rollback_failed``,
         never ``rolled_back`` (§3).
         """
         try:
-            self._send_config(baseline_normalized.splitlines())
+            self._replace_config(baseline_normalized.splitlines())
             after = _normalize_config(self._capture_running())
         except Exception as exc:  # noqa: BLE001 — unreachable device = rollback-failed
             return RollbackResult(
                 attempted=True,
                 succeeded=False,
                 verified=False,
-                detail=f"baseline replay failed ({type(exc).__name__})",
+                detail=f"baseline replace failed ({type(exc).__name__})",
             )
         equal = after == baseline_normalized
         return RollbackResult(
@@ -433,18 +599,24 @@ class CiscoIosConfigRestore(_CiscoIosConfigWriteCapability, ConfigRestoreCapabil
     """
 
     def restore(self, snapshot: ConfigSnapshotRef, *, plan: ChangePlan) -> ChangeResult:
-        """Restore the device to *snapshot* as the execution step of *plan*."""
-        target = _normalize_config(snapshot.content)
+        """Restore the device to *snapshot* as the execution step of *plan*.
 
-        def verify(running: str) -> bool:
-            return running == target
+        Apply is a **config replace** (``replace_config``) to the normalized
+        snapshot — the only surface that can re-establish equality with the
+        snapshot, since the live config may be a superset of it (a merge could
+        not remove the device-only lines, leaving verify-after unachievable,
+        ADR-0021 §4). The volatile IOS preamble is stripped by
+        :func:`_normalize_config`, so a benign byte-count header change does not
+        defeat the equality predicate (§5).
+        """
+        target = _normalize_config(snapshot.content)
 
         return self._execute(
             plan=plan,
             operation="config restore",
             project=lambda _baseline: target,
             config_lines=target.splitlines(),
-            verify=verify,
+            apply=self._replace_config,
         )
 
 
@@ -463,18 +635,27 @@ class CiscoIosConfigDeploy(_CiscoIosConfigWriteCapability, ConfigDeployCapabilit
     """
 
     def deploy(self, config_fragment: str, *, plan: ChangePlan) -> ChangeResult:
-        """Apply *config_fragment* as the execution step of *plan*."""
+        """Apply *config_fragment* as the execution step of *plan*.
+
+        Apply is a **merge** (``send_config`` / ``send_config_set``) — the IOS
+        apply primitive for an additive fragment (ADR-0021 §4). Verify-after is
+        the *strengthened* predicate ADR-0021 §3 mandates: the re-captured,
+        normalized running config must equal the projected end-state
+        (baseline + the fragment's additions) **exactly** — every fragment line
+        present AND no line outside the fragment's scope changed unexpectedly (no
+        unintended residual diff), symmetric in rigor with the restore predicate,
+        not merely set-membership of the fragment lines.
+        """
         fragment_lines = [
             line for line in _normalize_config(config_fragment).splitlines() if line.strip()
         ]
 
-        def verify(running: str) -> bool:
-            running_lines = set(running.splitlines())
-            return all(line in running_lines for line in fragment_lines)
-
         def project(baseline: str) -> str:
-            # Intended end-state for the diff summary: baseline merged with the
-            # fragment lines not already present (a merge never removes lines).
+            # Intended end-state AND verify-after target: baseline merged with the
+            # fragment lines not already present (a merge never removes lines). The
+            # deploy post-condition is the re-captured config equals this
+            # projection exactly — fragment present AND no unintended residual diff
+            # outside the fragment scope (ADR-0021 §3), not mere set-membership.
             present = set(baseline.splitlines())
             additions = [line for line in fragment_lines if line not in present]
             body = baseline.rstrip("\n")
@@ -487,7 +668,7 @@ class CiscoIosConfigDeploy(_CiscoIosConfigWriteCapability, ConfigDeployCapabilit
             operation="config deploy",
             project=project,
             config_lines=fragment_lines,
-            verify=verify,
+            apply=self._send_config,
         )
 
 

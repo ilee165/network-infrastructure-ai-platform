@@ -49,11 +49,14 @@ class FakeConnection:
         outputs: dict[str, str] | None = None,
         send_error: Exception | None = None,
         disconnect_error: Exception | None = None,
+        config_error: Exception | None = None,
     ) -> None:
         self.outputs = outputs or {}
         self.send_error = send_error
         self.disconnect_error = disconnect_error
+        self.config_error = config_error
         self.commands: list[tuple[str, float]] = []
+        self.config_sets: list[list[str]] = []
         self.enabled = False
         self.disconnected = False
 
@@ -62,6 +65,12 @@ class FakeConnection:
             raise self.send_error
         self.commands.append((command, read_timeout))
         return self.outputs.get(command, "")
+
+    def send_config_set(self, config_commands: list[str], read_timeout: float = 10.0) -> str:
+        if self.config_error is not None:
+            raise self.config_error
+        self.config_sets.append(list(config_commands))
+        return "configured"
 
     def enable(self) -> str:
         self.enabled = True
@@ -189,6 +198,57 @@ class TestSshTransportSession:
         transport = SshTransport(make_params())
         with pytest.raises(SshTransportError, match="not open"):
             transport.run("show version")
+
+
+class TestSshConfigWrite:
+    """The ADR-0021 config-write surfaces: merge (send_config) + replace."""
+
+    def test_send_config_merges_via_send_config_set(self, fake_netmiko: FakeConnectHandler) -> None:
+        with SshTransport(make_params()) as transport:
+            output = transport.send_config(["interface Loopback0", " description x"])
+        assert output == "configured"
+        assert fake_netmiko.connection.config_sets == [["interface Loopback0", " description x"]]
+
+    def test_send_config_before_open_raises(self) -> None:
+        transport = SshTransport(make_params())
+        with pytest.raises(SshTransportError, match="not open"):
+            transport.send_config(["hostname x"])
+
+    def test_send_config_failure_wrapped_without_credentials(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        fake_netmiko.connection.config_error = ReadException(f"apply failed; pw={PASSWORD}")
+        with SshTransport(make_params()) as transport, pytest.raises(SshTransportError) as excinfo:
+            transport.send_config(["hostname x"])
+        assert PASSWORD not in str(excinfo.value)
+        assert "ReadException" in str(excinfo.value)
+
+    def test_replace_config_runs_configure_replace(self, fake_netmiko: FakeConnectHandler) -> None:
+        fake_netmiko.connection.outputs["configure replace flash:netops-rollback.cfg force"] = (
+            "applied 3 lines"
+        )
+        with SshTransport(make_params()) as transport:
+            output = transport.replace_config(["hostname core-rtr01", "!", "end"])
+        assert output == "applied 3 lines"
+        # The candidate was staged via a config set before the replace ran.
+        assert fake_netmiko.connection.config_sets
+        issued = [command for command, _timeout in fake_netmiko.connection.commands]
+        assert "configure replace flash:netops-rollback.cfg force" in issued
+
+    def test_replace_config_before_open_raises(self) -> None:
+        transport = SshTransport(make_params())
+        with pytest.raises(SshTransportError, match="not open"):
+            transport.replace_config(["hostname x"])
+
+    def test_replace_config_failure_wrapped_without_credentials(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        fake_netmiko.connection.config_error = ReadException(f"replace failed; pw={PASSWORD}")
+        with SshTransport(make_params()) as transport, pytest.raises(SshTransportError) as excinfo:
+            transport.replace_config(["hostname x"])
+        assert PASSWORD not in str(excinfo.value)
+        assert "ReadException" in str(excinfo.value)
+        assert "config replace" in str(excinfo.value)
 
 
 class TestSshErrorWrapping:
