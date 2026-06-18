@@ -86,6 +86,27 @@ class Settings(BaseSettings):
     config_backup_hour: int = 2
     config_backup_minute: int = 0
 
+    #: Packet-analysis sandbox + pcap retention (ADR-0023). The pcap volume mount
+    #: point (read-write for the capture worker, read-only for the analysis
+    #: worker), the absolute tshark/tcpdump binaries the sandbox spawns by argv,
+    #: the hard tshark subprocess timeout, and the retention window after which a
+    #: pcap file is purged and its metadata row tombstoned. Operators retune
+    #: without code changes; the defaults match ADR-0023.
+    pcap_dir: Path = Path("/data/pcaps")
+    tshark_bin: str = "tshark"
+    tcpdump_bin: str = "tcpdump"
+    packet_analysis_timeout_seconds: int = 60
+    pcap_retention_days: int = 30
+    #: Default capture duration/size caps (ADR-0023 §2). The engine clamps any
+    #: request to MAX_DURATION_SECONDS (300) / MAX_SIZE_BYTES (50 MB).
+    packet_capture_duration_seconds: int = 300
+    packet_capture_size_bytes: int = 50 * 1024 * 1024
+
+    #: pcap-retention beat schedule (ADR-0023 §4): the UTC hour/minute the
+    #: ``packet.purge_expired`` task fires at. Default 03:00 UTC.
+    pcap_retention_hour: int = 3
+    pcap_retention_minute: int = 0
+
     def llm_profile_for_role(self, role: str) -> str:
         """Resolve an LLM *role* (``reasoning``/``fast``) to a configured profile.
 

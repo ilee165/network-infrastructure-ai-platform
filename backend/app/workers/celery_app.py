@@ -48,8 +48,9 @@ def create_celery_app() -> Celery:
             "app.workers.tasks.discovery",
             "app.workers.tasks.topology",
             "app.workers.tasks.config",
+            "app.workers.tasks.packet",
         ],
-        # M4+: ".packet", ".docs"
+        # M5+: ".docs"
     )
     celery.conf.update(
         # JSON-only serialization (no pickle — secure by default).
@@ -89,6 +90,15 @@ def create_celery_app() -> Celery:
                 "schedule": crontab(
                     hour=str(settings.config_backup_hour),
                     minute=str(settings.config_backup_minute),
+                ),
+            },
+            # pcap retention purge (ADR-0023 §4): delete expired pcap files and
+            # tombstone their metadata rows on a daily UTC schedule.
+            "pcap-retention-purge": {
+                "task": "packet.purge_expired",
+                "schedule": crontab(
+                    hour=str(settings.pcap_retention_hour),
+                    minute=str(settings.pcap_retention_minute),
                 ),
             },
         },
