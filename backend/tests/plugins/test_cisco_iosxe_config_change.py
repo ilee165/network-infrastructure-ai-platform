@@ -407,32 +407,57 @@ class TestDeployResidualDiff:
 
 
 # ---------------------------------------------------------------------------
-# IOS-XE: management-path changes are NOT pre-refused (commit-confirm timer)
+# IOS-XE: management-path changes ARE pre-refused (no armed dead-man revert)
 # ---------------------------------------------------------------------------
 
 
-class TestManagementPathNotRefusedOnIosXe:
-    """IOS-XE has a dead-man auto-revert (commit-confirm timer), so ADR-0021
-    §4.2's pre-write management-path guardrail (which applies to classic IOS
-    only) does NOT apply to IOS-XE. A vty/mgmt-path fragment must be allowed
-    through and not refused before the write.
+class TestManagementPathRefusedOnIosXe:
+    """The ADR-0021 §4.2 management-path guardrail applies to IOS-XE.
+
+    §4 sanctions relaxing the guardrail ONLY when the executor arms a device-side
+    dead-man auto-revert (``configure replace ... commit <timer>``) so a
+    connectivity-severing change reverts even if the worker loses the session. No
+    production transport implements that primitive (``SshTransport.replace_config``
+    issues a plain ``configure replace <file> force`` with no commit timer), so the
+    compensating control does not exist. Until it does, a management-path change
+    must be REFUSED before any device write — never silently strand the device.
     """
 
-    def test_deploy_allows_vty_fragment_iosxe(self, device_id: UUID) -> None:
-        """A vty transport fragment must reach the apply stage on IOS-XE."""
+    def test_deploy_refuses_vty_fragment_iosxe(self, device_id: UUID) -> None:
+        """A vty/transport fragment must be refused BEFORE any device write."""
         transport = ConfigWriteFakeTransport(_BASELINE)
         cap = CiscoIosXeConfigDeploy(transport, device_id)
 
-        # This would be refused on classic cisco_ios but must NOT be refused here.
         fragment = "line vty 0 4\n transport input ssh\n"
-        # Must not raise PluginError; apply may succeed or rollback — just not pre-refused.
-        result = cap.deploy(fragment, plan=_executing_plan())
+        with pytest.raises(PluginError, match="management path"):
+            cap.deploy(fragment, plan=_executing_plan())
 
-        # The write surface was reached (no pre-write PluginError raised).
+        # The guardrail fires BEFORE any write: no config/replace surface touched.
+        assert transport.config_batches == []
+        assert transport.replace_batches == []
+
+    def test_deploy_refuses_mgmt_svi_ip_change_iosxe(self, device_id: UUID) -> None:
+        """Adding/altering a management-SVI IP must be refused before any write."""
+        transport = ConfigWriteFakeTransport(_BASELINE)
+        cap = CiscoIosXeConfigDeploy(transport, device_id)
+
+        fragment = "interface Vlan99\n ip address 10.9.9.9 255.255.255.0\n"
+        with pytest.raises(PluginError, match="management path"):
+            cap.deploy(fragment, plan=_executing_plan())
+
+        assert transport.config_batches == []
+        assert transport.replace_batches == []
+
+    def test_deploy_allows_non_mgmt_fragment_iosxe(self, device_id: UUID) -> None:
+        """A benign (non-mgmt) fragment is NOT refused — it reaches the apply stage."""
+        transport = ConfigWriteFakeTransport(_BASELINE)
+        cap = CiscoIosXeConfigDeploy(transport, device_id)
+
+        result = cap.deploy(_FRAGMENT, plan=_executing_plan())
+
         assert result.outcome in {
             ChangeOutcome.APPLIED,
             ChangeOutcome.NO_OP,
             ChangeOutcome.ROLLED_BACK,
         }
-        # send_config was invoked — the apply stage was reached.
         assert transport.config_batches or result.outcome is ChangeOutcome.NO_OP

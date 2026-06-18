@@ -414,3 +414,61 @@ class TestDeployResidualDiff:
         assert result.outcome is ChangeOutcome.ROLLED_BACK
         assert result.rollback is not None
         assert result.rollback.succeeded is True
+
+
+# ---------------------------------------------------------------------------
+# EOS: management-path changes ARE pre-refused (no armed dead-man revert)
+# ---------------------------------------------------------------------------
+
+
+class TestManagementPathRefusedOnEos:
+    """The ADR-0021 §4.2 management-path guardrail applies to EOS.
+
+    §4 sanctions relaxing the guardrail ONLY when the executor arms a device-side
+    dead-man auto-revert (an EOS ``configure session`` + commit-timer) so a
+    connectivity-severing change reverts even if the worker loses the session. No
+    production transport implements that primitive (``SshTransport.replace_config``
+    issues a plain ``configure replace <file> force`` with neither a config session
+    nor a commit timer), so the compensating control does not exist. Until it does,
+    a management-path change must be REFUSED before any device write — never
+    silently strand the device.
+    """
+
+    def test_deploy_refuses_vty_fragment_eos(self, device_id: UUID) -> None:
+        """A vty/transport fragment must be refused BEFORE any device write."""
+        transport = EosConfigWriteFakeTransport(_BASELINE)
+        cap = EosConfigDeploy(transport, device_id)
+
+        fragment = "line vty 0 4\n   transport input ssh\n"
+        with pytest.raises(PluginError, match="management path"):
+            cap.deploy(fragment, plan=_executing_plan())
+
+        # The guardrail fires BEFORE any write: no config/replace surface touched.
+        assert transport.config_batches == []
+        assert transport.replace_batches == []
+
+    def test_deploy_refuses_mgmt_svi_ip_change_eos(self, device_id: UUID) -> None:
+        """Adding/altering a management-SVI IP must be refused before any write."""
+        transport = EosConfigWriteFakeTransport(_BASELINE)
+        cap = EosConfigDeploy(transport, device_id)
+
+        fragment = "interface Vlan99\n   ip address 10.9.9.9/24\n"
+        with pytest.raises(PluginError, match="management path"):
+            cap.deploy(fragment, plan=_executing_plan())
+
+        assert transport.config_batches == []
+        assert transport.replace_batches == []
+
+    def test_deploy_allows_non_mgmt_fragment_eos(self, device_id: UUID) -> None:
+        """A benign (non-mgmt) fragment is NOT refused — it reaches the apply stage."""
+        transport = EosConfigWriteFakeTransport(_BASELINE)
+        cap = EosConfigDeploy(transport, device_id)
+
+        result = cap.deploy(_FRAGMENT, plan=_executing_plan())
+
+        assert result.outcome in {
+            ChangeOutcome.APPLIED,
+            ChangeOutcome.NO_OP,
+            ChangeOutcome.ROLLED_BACK,
+        }
+        assert transport.config_batches or result.outcome is ChangeOutcome.NO_OP

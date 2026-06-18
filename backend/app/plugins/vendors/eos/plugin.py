@@ -48,6 +48,13 @@ from app.plugins.base import (
     SnmpReadTransport,
     VendorPlugin,
 )
+
+# Re-use the cisco_ios management-path detector (the regex machinery is the
+# single source of truth, ADR-0021 §4.2). EOS shares the IOS-style mgmt-path
+# constructs the scan flags (``line vty``/``transport input``, ``interface
+# Management*`` admin-state / addressing / ACL binding), so the same
+# delta-scoped scan applies.
+from app.plugins.vendors.cisco_ios.plugin import _management_path_hits
 from app.plugins.vendors.eos import parsers
 from app.plugins.vendors.eos.parsers import (
     SNMP_OID_SYSDESCR,
@@ -317,18 +324,22 @@ def _normalize_config(raw_config: str) -> str:
 class _EosConfigWriteCapability(PluginCapability):
     """Shared capture-before -> apply -> verify-after -> rollback engine (ADR-0021 §3).
 
-    **EOS config-session rollback**: Arista EOS supports transactional config
-    sessions (``configure session <name>`` / ``commit`` / ``abort``). The apply
-    is sent as a config session that is committed on success or aborted on failure.
-    On verify-after failure the captured pre-change baseline is replayed via
-    ``replace_config`` (which models an abort-and-reapply of the baseline session).
-    The symmetric equality predicate (re-captured config == baseline after rollback)
-    is still asserted — a session abort that does not restore equality surfaces
-    ``rollback_failed`` (never silently closed, ADR-0021 §3).
+    **EOS rollback**: Arista EOS *can* run transactional config sessions
+    (``configure session <name>`` / ``commit`` / ``abort`` with a commit-timer
+    dead-man revert), but the production ``SshTransport`` does NOT use a config
+    session or commit-timer — ``replace_config`` issues a plain ``configure replace
+    <file> force``. Rollback is therefore a worker-initiated ``configure replace``
+    of the captured pre-change baseline. The symmetric equality predicate
+    (re-captured config == baseline after rollback) is asserted — a rollback that
+    cannot reach the device or does not restore equality surfaces ``rollback_failed``
+    (never silently closed, ADR-0021 §3).
 
-    No management-path guardrail: EOS config sessions are transactional (abort
-    reverts atomically), so there is no stranded-device risk and no pre-write
-    refusal for management-path changes.
+    Management-path guardrail **applied** (ADR-0021 §4.2): ADR-0021 §4 would permit
+    relaxing it only if the executor armed a device-side dead-man auto-revert (an
+    EOS config session + commit-timer). No transport implements that primitive, so
+    EOS is an image without a dead-man primitive and a management-path change is
+    refused before any device write rather than silently stranding the device. See
+    :meth:`_reject_management_path`.
 
     The capability **never self-authorizes**: every entry point asserts
     :class:`~app.plugins.base.ChangePlan` attests an ``executing`` CR (ADR-0021 §2).
@@ -361,10 +372,39 @@ class _EosConfigWriteCapability(PluginCapability):
         Models an EOS ``configure replace`` or baseline-session-commit — the only
         surface that can re-establish equality with a captured baseline (a merge
         cannot remove device-only lines). Used for CONFIG_RESTORE apply and for
-        rollback of both operations. Records the verbatim device output for audit.
+        rollback of both operations. The production transport issues a plain
+        ``configure replace <file> force`` with no commit-timer, so no device-side
+        dead-man auto-revert is armed. Records the verbatim device output for audit.
         """
         output = self._transport.replace_config(lines)
         self._record_raw("configure replace\n" + "\n".join(lines), output)
+
+    def _reject_management_path(self, operation: str, baseline: str, end_state: str) -> None:
+        """Refuse a change that touches the management path (ADR-0021 §4.2).
+
+        ADR-0021 §4 sanctions relaxing this guardrail on EOS ONLY when the executor
+        arms a device-side dead-man auto-revert (an EOS ``configure session`` with a
+        commit-timer) so a connectivity-severing change reverts even if the worker
+        loses the session. No production transport implements that primitive —
+        :meth:`app.plugins.transport.ssh.SshTransport.replace_config` issues a plain
+        ``configure replace <file> force`` with neither a config session nor a commit
+        timer — so the compensating control does not exist. Until it does, EOS is an
+        image *without* a dead-man primitive (§4 sub-bullet 2): a change touching the
+        management path is **rejected**, with a typed :class:`PluginError` and before
+        any device write, rather than silently stranding the device with no replay
+        path. The change is the delta baseline -> end_state.
+        """
+        offending = _management_path_hits(baseline, end_state)
+        if offending:
+            raise PluginError(
+                f"eos: {operation} refused — change touches the management path "
+                f"({', '.join(offending)}) and no armed dead-man auto-revert "
+                "(config-session commit timer) is implemented by the transport; a "
+                "mid-apply reachability loss would strand the device with no replay "
+                "path (ADR-0021 §4.2: management-path guardrail). Out of M5 scope until "
+                "a config-session/commit-timer apply surface exists — use a "
+                "console/OOB-fallback path."
+            )
 
     @staticmethod
     def _require_executing(plan: ChangePlan, operation: str) -> None:
@@ -407,13 +447,22 @@ class _EosConfigWriteCapability(PluginCapability):
         ``project`` maps the captured baseline to the intended normalized end-state.
         ``apply`` is the write surface (DEPLOY commits a session; RESTORE replaces).
 
-        EOS note: the management-path guardrail (ADR-0021 §4.2) is NOT applied here
-        because EOS config sessions are transactional (abort reverts atomically).
+        EOS note: the management-path guardrail (ADR-0021 §4.2) IS applied here.
+        ADR-0021 §4 would permit relaxing it only if the executor armed a device-side
+        config-session commit-timer dead-man auto-revert, but no transport implements
+        that primitive (``SshTransport.replace_config`` issues a plain ``configure
+        replace ... force``), so EOS is an image without a dead-man primitive and a
+        management-path change must be refused before any write.
         """
         self._require_executing(plan, operation)
 
         baseline = _normalize_config(self._capture_running())
         end_state = project(baseline)
+
+        # Management-path guardrail BEFORE any device write (ADR-0021 §4.2): scoped
+        # to the *delta* vs the captured baseline so replaying a snapshot whose mgmt
+        # lines already match is not spuriously refused.
+        self._reject_management_path(operation, baseline, end_state)
 
         if baseline == end_state:
             return ChangeResult(

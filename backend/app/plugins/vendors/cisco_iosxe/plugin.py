@@ -54,6 +54,11 @@ from app.plugins.vendors.cisco_ios.parsers import (
     SNMP_OID_SYSNAME,
     SNMP_OID_SYSOBJECTID,
 )
+
+# Re-use the cisco_ios management-path detector (the regex machinery is the
+# single source of truth, ADR-0021 §4.2). IOS-XE shares the IOS config syntax,
+# so the same delta-scoped scan applies unchanged.
+from app.plugins.vendors.cisco_ios.plugin import _management_path_hits
 from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     NormalizedAclEntry,
@@ -258,12 +263,14 @@ class _CiscoIosXeConfigWriteCapability(PluginCapability):
     Mirrors :class:`~app.plugins.vendors.cisco_ios.plugin._CiscoIosConfigWriteCapability`
     with IOS-XE differences:
 
-    - **Transactional rollback**: IOS-XE supports ``configure replace ... commit-confirm
-      <timer>`` (dead-man auto-revert). The ``replace_config`` transport method models
-      this: if the session is dropped (apply error), the device auto-reverts. This
-      also means the management-path guardrail (ADR-0021 §4.2) is NOT applied here —
-      there is no stranded-device risk on classic IOS-XE because the dead-man timer
-      reverts the session automatically.
+    - **Rollback primitive**: rollback is a ``configure replace`` of the captured
+      pre-change baseline. IOS-XE *can* support ``configure replace ... commit-confirm
+      <timer>`` (dead-man auto-revert), but the production ``replace_config`` transport
+      does NOT arm one — it issues a plain ``configure replace <file> force``. Because
+      no dead-man primitive is actually armed, the management-path guardrail
+      (ADR-0021 §4.2) **IS applied here** (a change touching the management path is
+      refused before any write); relaxing it would require a real commit-confirm
+      apply surface that does not yet exist.
     - **Same verify-after and rollback contract**: the re-captured config must normalize
       equal to the intended end-state (apply) or to the captured baseline (rollback);
       ``rollback_failed`` is surfaced when the equality predicate does not hold
@@ -296,12 +303,40 @@ class _CiscoIosXeConfigWriteCapability(PluginCapability):
 
         IOS-XE native config-replace primitive (ADR-0021 §4): the apply surface
         for ``CONFIG_RESTORE`` and the rollback surface for both operations. The
-        ``commit-confirm`` timer provides dead-man auto-revert on classic IOS-XE
-        (the caller may set a timer; the transport models the committed outcome).
-        Records the verbatim device output for audit.
+        production ``SshTransport.replace_config`` issues a plain ``configure
+        replace <file> force`` — it does NOT arm a ``commit-confirm`` /
+        rollback-timer dead-man revert, so this path provides no device-side
+        auto-revert (see :meth:`_reject_management_path`). Records the verbatim
+        device output for audit.
         """
         output = self._transport.replace_config(lines)
         self._record_raw("configure replace\n" + "\n".join(lines), output)
+
+    def _reject_management_path(self, operation: str, baseline: str, end_state: str) -> None:
+        """Refuse a change that touches the management path (ADR-0021 §4.2).
+
+        ADR-0021 §4 sanctions relaxing this guardrail on IOS-XE ONLY when the
+        executor arms a device-side dead-man auto-revert (``configure replace ...
+        commit <timer>``) so a connectivity-severing change reverts even if the
+        worker loses the session. No production transport implements that
+        primitive — :meth:`app.plugins.transport.ssh.SshTransport.replace_config`
+        issues a plain ``configure replace <file> force`` with no commit timer —
+        so the compensating control does not exist. Until it does, IOS-XE is an
+        image *without* a dead-man primitive (§4 sub-bullet 2): a change touching
+        the management path is **rejected**, with a typed :class:`PluginError` and
+        before any device write, rather than silently stranding the device with no
+        replay path. The change is the delta baseline -> end_state.
+        """
+        offending = _management_path_hits(baseline, end_state)
+        if offending:
+            raise PluginError(
+                f"cisco_iosxe: {operation} refused — change touches the management path "
+                f"({', '.join(offending)}) and no armed dead-man auto-revert "
+                "(commit-confirm timer) is implemented by the transport; a mid-apply "
+                "reachability loss would strand the device with no replay path "
+                "(ADR-0021 §4.2: management-path guardrail). Out of M5 scope until a "
+                "commit-confirm apply surface exists — use a console/OOB-fallback path."
+            )
 
     @staticmethod
     def _require_executing(plan: ChangePlan, operation: str) -> None:
@@ -345,14 +380,22 @@ class _CiscoIosXeConfigWriteCapability(PluginCapability):
         ``apply`` is the write surface (DEPLOY merges via ``send_config``; RESTORE
         replaces via ``replace_config``).
 
-        IOS-XE note: the management-path guardrail (ADR-0021 §4.2) is NOT applied
-        here because IOS-XE has a dead-man auto-revert (``commit-confirm`` timer)
-        that prevents stranded-device scenarios.
+        IOS-XE note: the management-path guardrail (ADR-0021 §4.2) IS applied here.
+        ADR-0021 §4 would permit relaxing it only if the executor armed a device-side
+        ``commit-confirm`` dead-man auto-revert, but no transport implements that
+        primitive (``SshTransport.replace_config`` issues a plain ``configure replace
+        ... force``), so IOS-XE is an image without a dead-man primitive and a
+        management-path change must be refused before any write.
         """
         self._require_executing(plan, operation)
 
         baseline = _normalize_config(self._capture_running())
         end_state = project(baseline)
+
+        # Management-path guardrail BEFORE any device write (ADR-0021 §4.2): scoped
+        # to the *delta* vs the captured baseline so replaying a snapshot whose mgmt
+        # lines already match is not spuriously refused.
+        self._reject_management_path(operation, baseline, end_state)
 
         if baseline == end_state:
             return ChangeResult(
@@ -399,9 +442,10 @@ class _CiscoIosXeConfigWriteCapability(PluginCapability):
         """Replace the device with the captured baseline and verify equality (§4).
 
         IOS-XE rollback uses ``configure replace`` of the captured pre-change
-        baseline. The ``commit-confirm`` timer on IOS-XE ensures auto-revert if the
-        session is lost; a committed replace that cannot re-establish equality still
-        surfaces ``rollback_failed`` (never silently closed, ADR-0021 §3).
+        baseline (the production transport issues a plain ``configure replace ...
+        force`` — no ``commit-confirm`` timer is armed). A replace that cannot reach
+        the device or cannot re-establish equality surfaces ``rollback_failed``
+        (never silently closed, ADR-0021 §3).
         """
         try:
             self._replace_config(baseline_normalized.splitlines())
