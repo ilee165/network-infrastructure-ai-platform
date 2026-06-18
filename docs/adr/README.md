@@ -24,5 +24,9 @@
 | [0017](0017-config-snapshot-storage-and-drift.md) | Configuration Snapshot Storage and Drift Detection | Accepted | M4 |
 | [0018](0018-compliance-policy-rule-format.md) | Compliance Policy Rule Format | Accepted | M4 |
 | [0019](0019-document-generation-and-rag.md) | Document Generation and RAG | Accepted | M4 |
+| [0020](0020-changerequest-workflow-and-four-eyes-approval.md) | ChangeRequest Workflow and Four-Eyes Approval | Accepted | M5 |
+| [0021](0021-config-deploy-restore-and-structured-rollback.md) | Config Deploy/Restore and Structured Rollback | Accepted | M5 |
+| [0022](0022-infoblox-wapi-plugin-and-ddi-capability-interfaces.md) | Infoblox WAPI Plugin and DDI Capability Interfaces | Accepted | M5 |
+| [0023](0023-packet-analysis-sandbox-and-pcap-retention.md) | Packet Analysis Sandbox and pcap Retention | Accepted | M5 |
 
 **Conventions:** every binding decision D1–D16 has a current ADR; any deviation requires a superseding ADR (no silent drift — see `PRODUCTION.md` gate G-MNT). New capabilities, normalized models, agents, or vendors beyond the CLAUDE.md lists require an ADR *before* implementation (`REPO-STRUCTURE.md` §6–§7).
