@@ -19,6 +19,7 @@ worker tasks, never on the FastAPI event loop (ADR-0007 §3, ADR-0008).
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from types import TracebackType
 from typing import TYPE_CHECKING
@@ -151,6 +152,32 @@ class SshTransport:
     def send_command(self, command: str) -> str:
         """:class:`~app.plugins.base.CommandTransport`-compatible alias of :meth:`run`."""
         return self.run(command)
+
+    def send_config(self, lines: Sequence[str]) -> str:
+        """Apply *lines* in configuration mode; return device output verbatim.
+
+        The :class:`~app.plugins.base.ConfigWriteTransport` write surface for the
+        M5 config write path (ADR-0021): netmiko's ``send_config_set`` enters
+        ``configure terminal``, sends the lines, and exits config mode. Used only
+        as the execution step of an approved ChangeRequest (the Automation Agent,
+        Wave 4); the capability layer captures/verifies around it.
+        """
+        connection = self._connection
+        if connection is None:
+            raise SshTransportError(
+                f"SSH session to {self._params.host}:{self._params.port} is not open "
+                "(use SshTransport as a context manager)"
+            )
+        try:
+            output = connection.send_config_set(list(lines), read_timeout=self._params.read_timeout)
+        except _NETMIKO_FAILURES as exc:
+            raise SshTransportError(self._failure_message("config apply", exc)) from exc
+        if not isinstance(output, str):  # pragma: no cover - structured output never requested
+            raise SshTransportError(
+                f"SSH config apply for {self._params.host}:{self._params.port} "
+                "returned non-text output"
+            )
+        return output
 
     def _close(self) -> None:
         """Best-effort disconnect; never raises (close failures don't mask errors)."""

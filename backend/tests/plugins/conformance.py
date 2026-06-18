@@ -57,7 +57,11 @@ from app.plugins.base import (
     AclCapability,
     BgpCapability,
     Capability,
+    ChangeOutcome,
+    ChangeResult,
     ConfigBackupCapability,
+    ConfigDeployCapability,
+    ConfigRestoreCapability,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
     InterfacesCapability,
@@ -81,6 +85,7 @@ from app.schemas.normalized import (
 
 __all__ = [
     "CapabilityFactory",
+    "ChangeWriteInvoker",
     "ConformanceCase",
     "FixtureReplayTransport",
     "FixtureSnmpTransport",
@@ -91,6 +96,13 @@ CapabilityFactory = Callable[[type[PluginCapability]], PluginCapability]
 """Builds a ready-to-call capability instance wired to bundled fixtures."""
 
 _VENDOR_ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+#: Invokes a change-write capability (CONFIG_RESTORE/DEPLOY) wired to fixtures
+#: and returns its :class:`~app.plugins.base.ChangeResult`. The plugin's test
+#: module supplies it via the capability factory because the call needs a
+#: vendor-specific snapshot/fragment + an ``executing`` :class:`ChangePlan`.
+ChangeWriteInvoker = Callable[[PluginCapability], ChangeResult]
 
 
 @dataclass(frozen=True)
@@ -104,6 +116,11 @@ class _InterfaceSpec:
     match the plugin (``DISCOVERY_SSH``/``DISCOVERY_SNMP``).
     ``neighbor_protocol`` pins the ``protocol`` field for the two neighbor
     capabilities served by the shared interface.
+    ``change_write`` marks a device-write capability (CONFIG_RESTORE/DEPLOY,
+    ADR-0021): its data method takes arguments and returns a
+    :class:`~app.plugins.base.ChangeResult`, so the fixture case validates the
+    structured result rather than a normalized-record list. The vendor-specific
+    invocation is supplied per-plugin (see :func:`make_conformance_cases`).
     """
 
     interface: type[PluginCapability]
@@ -111,6 +128,7 @@ class _InterfaceSpec:
     item_model: type[NormalizedRecord] | None
     neighbor_protocol: NeighborProtocol | None = None
     facts_model: type[DeviceFacts] | None = None
+    change_write: bool = False
 
 
 #: Capability -> typed-interface contract from app.plugins.base. Extend this
@@ -137,6 +155,12 @@ _INTERFACE_SPECS: dict[Capability, _InterfaceSpec] = {
     Capability.OSPF: _InterfaceSpec(OspfCapability, "get_ospf_neighbors", NormalizedOspfNeighbor),
     Capability.ACL: _InterfaceSpec(AclCapability, "get_acls", NormalizedAclEntry),
     Capability.CONFIG_BACKUP: _InterfaceSpec(ConfigBackupCapability, "fetch_running_config", None),
+    Capability.CONFIG_RESTORE: _InterfaceSpec(
+        ConfigRestoreCapability, "restore", None, change_write=True
+    ),
+    Capability.CONFIG_DEPLOY: _InterfaceSpec(
+        ConfigDeployCapability, "deploy", None, change_write=True
+    ),
 }
 
 
@@ -200,6 +224,7 @@ def make_conformance_cases(
     plugin: VendorPlugin,
     *,
     capability_factory: CapabilityFactory,
+    change_write_invokers: Mapping[Capability, ChangeWriteInvoker] | None = None,
 ) -> list[ConformanceCase]:
     """Build the full conformance case list for *plugin*.
 
@@ -207,7 +232,15 @@ def make_conformance_cases(
     return an instance wired to the plugin's bundled fixtures (typically via
     :class:`FixtureReplayTransport`); it is only invoked for capabilities
     with a typed interface in ``_INTERFACE_SPECS``.
+
+    *change_write_invokers* supplies, per device-write capability
+    (CONFIG_RESTORE/DEPLOY, ADR-0021), the vendor-specific call that invokes the
+    factory-built capability with a fixture snapshot/fragment and an
+    ``executing`` :class:`ChangePlan`, returning its
+    :class:`~app.plugins.base.ChangeResult`. Required for any declared
+    change-write capability; the fixture case asserts the structured result.
     """
+    invokers = dict(change_write_invokers or {})
     cases = [
         ConformanceCase("metadata:vendor_id", partial(_check_vendor_id, plugin)),
         ConformanceCase("metadata:display_name", partial(_check_display_name, plugin)),
@@ -221,7 +254,19 @@ def make_conformance_cases(
             )
         )
     for capability in sorted(plugin.capabilities):
-        if capability in _INTERFACE_SPECS:
+        spec = _INTERFACE_SPECS.get(capability)
+        if spec is None:
+            continue
+        if spec.change_write:
+            cases.append(
+                ConformanceCase(
+                    f"fixtures:{capability.value}",
+                    partial(
+                        _check_change_write_outputs, plugin, capability, invokers.get(capability)
+                    ),
+                )
+            )
+        else:
             cases.append(
                 ConformanceCase(
                     f"fixtures:{capability.value}",
@@ -323,6 +368,40 @@ def _resolve(plugin: VendorPlugin, capability: Capability) -> type[PluginCapabil
 # ---------------------------------------------------------------------------
 # fixtures:<capability> checks
 # ---------------------------------------------------------------------------
+
+
+def _check_change_write_outputs(
+    plugin: VendorPlugin,
+    capability: Capability,
+    invoker: ChangeWriteInvoker | None,
+) -> None:
+    """Certify a device-write capability over its bundled fixtures (ADR-0021).
+
+    The capability is the first device-write path; it returns a structured
+    :class:`ChangeResult`, not a normalized-record list, so the contract asserts
+    the result shape and a successful end-state (``applied``/``no_op``) over a
+    recorded :class:`ConfigWriteTransport` fixture — never a live device (D16).
+    """
+    spec = _INTERFACE_SPECS[capability]
+    impl = _resolve(plugin, capability)
+    ctx = f"{plugin.vendor_id}: capability {capability.value!r} ({impl.__name__}.{spec.method})"
+    assert invoker is not None, (
+        f"{ctx}: a change-write capability requires a 'change_write_invokers' entry "
+        f"in make_conformance_cases() for {capability.value!r}"
+    )
+
+    result = invoker(impl)
+    assert isinstance(result, ChangeResult), (
+        f"{ctx}: must return ChangeResult, got {type(result).__name__}"
+    )
+    assert result.outcome in {ChangeOutcome.APPLIED, ChangeOutcome.NO_OP}, (
+        f"{ctx}: over the bundled fixture the write must succeed "
+        f"(applied/no_op), got {result.outcome.value!r}"
+    )
+    assert result.verified is True, (
+        f"{ctx}: a successful write must report verify-after success (verified=True)"
+    )
+    assert result.rollback is None, f"{ctx}: a successful write must not carry a rollback result"
 
 
 def _check_fixture_outputs(

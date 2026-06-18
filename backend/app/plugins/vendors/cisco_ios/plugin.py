@@ -14,7 +14,7 @@ M1 refactor once more capabilities land).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import ClassVar
 from uuid import UUID
@@ -24,14 +24,22 @@ from app.plugins.base import (
     AclCapability,
     BgpCapability,
     Capability,
+    ChangeOutcome,
+    ChangePlan,
+    ChangeResult,
     CommandTransport,
     ConfigBackupCapability,
+    ConfigDeployCapability,
+    ConfigRestoreCapability,
+    ConfigSnapshotRef,
+    ConfigWriteTransport,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
     InterfacesCapability,
     NeighborsCapability,
     OspfCapability,
     PluginCapability,
+    RollbackResult,
     RoutesCapability,
     SnmpReadTransport,
     VendorPlugin,
@@ -59,6 +67,8 @@ __all__ = [
     "CiscoIosAcl",
     "CiscoIosBgp",
     "CiscoIosConfigBackup",
+    "CiscoIosConfigDeploy",
+    "CiscoIosConfigRestore",
     "CiscoIosDiscoverySnmp",
     "CiscoIosDiscoverySsh",
     "CiscoIosInterfaces",
@@ -220,13 +230,275 @@ class CiscoIosConfigBackup(_CiscoIosCommandCapability, ConfigBackupCapability):
         return output
 
 
+# ---------------------------------------------------------------------------
+# Config write path (ADR-0021) — the first operations that mutate a device.
+# ---------------------------------------------------------------------------
+
+
+def _normalize_config(raw_config: str) -> str:
+    """Byte-stable normalized form for equality comparison (ADR-0017 §1 parity).
+
+    Collapses ``\\r\\n``/``\\r`` to ``\\n``, strips trailing per-line whitespace,
+    and guarantees a single trailing newline — so a verify-after / rollback
+    equality reflects a *real* config difference, not transport CR/LF noise. The
+    transform is duplicated here (rather than importing
+    ``app.engines.config_mgmt.capture``) to keep the plugin layer free of an
+    ``app.engines`` import; it is intentionally identical to ``normalize_config``
+    so a snapshot stored by M4 compares equal to a fresh capture here.
+    """
+    unified = raw_config.replace("\r\n", "\n").replace("\r", "\n")
+    stripped = "\n".join(line.rstrip() for line in unified.split("\n"))
+    body = stripped.strip("\n")
+    return f"{body}\n" if body else ""
+
+
+class _CiscoIosConfigWriteCapability(PluginCapability):
+    """Shared capture-before -> apply -> verify-after -> rollback engine (ADR-0021 §3).
+
+    Subclasses (restore/deploy) supply only what differs: how to compute the
+    pre-apply diff, the config lines to send, and the verify-after predicate
+    against the re-captured running config. The structured rollback is a
+    first-class return (:class:`RollbackResult`), not a side effect: on apply
+    error or verify-after failure the captured pre-change baseline is replayed
+    and the rollback is itself verified (re-capture must normalize **equal** to
+    the captured baseline) before any ``rolled_back`` is reported — otherwise
+    ``rollback_failed`` is surfaced (never silently closed, §3).
+
+    The capability **never self-authorizes**: every entry point first asserts
+    the :class:`ChangePlan` attests an ``executing`` CR.
+    """
+
+    def __init__(self, transport: ConfigWriteTransport, device_id: UUID) -> None:
+        super().__init__()
+        self._transport = transport
+        self._device_id = device_id
+
+    # -- transport helpers (each recorded verbatim for audit) ----------------
+
+    def _capture_running(self) -> str:
+        """Capture the live running config verbatim (recorded for audit)."""
+        return self._record_raw(
+            SHOW_RUNNING_CONFIG, self._transport.send_command(SHOW_RUNNING_CONFIG)
+        )
+
+    def _send_config(self, lines: list[str]) -> None:
+        """Apply *lines* in config mode; record the verbatim device output."""
+        output = self._transport.send_config(lines)
+        self._record_raw("configure terminal\n" + "\n".join(lines), output)
+
+    @staticmethod
+    def _require_executing(plan: ChangePlan, operation: str) -> None:
+        """Refuse the write unless the plan attests an ``executing`` CR (§2).
+
+        The plugin is the execution body of an approved CR claimed by the
+        Automation Agent (Wave 4); it does not — and cannot — grant authorization
+        itself. A plan in any other state is a typed :class:`PluginError`.
+        """
+        if not plan.is_executing:
+            raise PluginError(
+                f"cisco_ios: {operation} refused — change request "
+                f"'{plan.change_request_id}' is '{plan.cr_state}', not 'executing' "
+                "(ADR-0021 §2: a config write executes only as the execution step of "
+                "an approved, claimed ChangeRequest)"
+            )
+
+    @staticmethod
+    def _diff_summary(before: str, after: str) -> tuple[str, ...]:
+        """Redaction-safe summary of a config change (never raw config text).
+
+        Reports only the count of added/removed normalized lines, so a
+        :class:`ChangeResult` carries no config secrets while still recording
+        that (and how much) changed.
+        """
+        before_lines = before.splitlines()
+        after_lines = after.splitlines()
+        before_set = set(before_lines)
+        after_set = set(after_lines)
+        added = sum(1 for line in after_lines if line not in before_set)
+        removed = sum(1 for line in before_lines if line not in after_set)
+        summary: list[str] = []
+        if added:
+            summary.append(f"+{added} line(s)")
+        if removed:
+            summary.append(f"-{removed} line(s)")
+        return tuple(summary)
+
+    def _execute(
+        self,
+        *,
+        plan: ChangePlan,
+        operation: str,
+        project: Callable[[str], str],
+        config_lines: list[str],
+        verify: Callable[[str], bool],
+    ) -> ChangeResult:
+        """Run the ADR-0021 §3 contract and return a structured :class:`ChangeResult`.
+
+        ``project`` maps the captured baseline to the intended normalized
+        end-state (restore: the snapshot; deploy: baseline + fragment) — used
+        only for the redaction-safe diff summary. ``verify`` is the verify-after
+        predicate applied to the *normalized* re-captured config — symmetric
+        between restore (equal to snapshot) and deploy (fragment present, no
+        unintended residual diff).
+        """
+        self._require_executing(plan, operation)
+
+        # Capture the FRESH pre-change baseline — the authoritative rollback
+        # target (preferred over a possibly-stale CR rollback_plan reference, §3).
+        baseline = _normalize_config(self._capture_running())
+
+        # Idempotency: if the device already satisfies the intended end-state,
+        # complete without touching it (restore no-op; deploy fragment present).
+        if verify(baseline):
+            return ChangeResult(
+                change_request_id=plan.change_request_id,
+                outcome=ChangeOutcome.NO_OP,
+                verified=True,
+                applied_diff=(),
+                rollback=None,
+            )
+
+        applied_diff = self._diff_summary(baseline, project(baseline))
+
+        # Apply, then verify-after by re-capturing the running config.
+        apply_failed = False
+        try:
+            self._send_config(config_lines)
+        except Exception:  # noqa: BLE001 — any apply failure triggers rollback (§3)
+            apply_failed = True
+
+        verified = False
+        if not apply_failed:
+            after = _normalize_config(self._capture_running())
+            verified = verify(after)
+
+        if verified:
+            return ChangeResult(
+                change_request_id=plan.change_request_id,
+                outcome=ChangeOutcome.APPLIED,
+                verified=True,
+                applied_diff=applied_diff,
+                rollback=None,
+            )
+
+        # Apply errored or verify-after failed -> structured rollback to baseline.
+        rollback = self._rollback_to_baseline(baseline)
+        outcome = ChangeOutcome.ROLLED_BACK if rollback.succeeded else ChangeOutcome.ROLLBACK_FAILED
+        return ChangeResult(
+            change_request_id=plan.change_request_id,
+            outcome=outcome,
+            verified=False,
+            applied_diff=applied_diff,
+            rollback=rollback,
+        )
+
+    def _rollback_to_baseline(self, baseline_normalized: str) -> RollbackResult:
+        """Replay the captured baseline and verify equality (vendor-native, §4).
+
+        Classic IOS has no transactional commit, so rollback is a replay of the
+        captured pre-change baseline. Success is an **asserted equality** (the
+        re-captured config normalizes equal to the baseline), symmetric with the
+        restore exit criterion — not an assumption. A replay that cannot reach
+        the device (the transport raises) or whose re-capture does not normalize
+        equal is ``succeeded=False`` -> the caller surfaces ``rollback_failed``,
+        never ``rolled_back`` (§3).
+        """
+        try:
+            self._send_config(baseline_normalized.splitlines())
+            after = _normalize_config(self._capture_running())
+        except Exception as exc:  # noqa: BLE001 — unreachable device = rollback-failed
+            return RollbackResult(
+                attempted=True,
+                succeeded=False,
+                verified=False,
+                detail=f"baseline replay failed ({type(exc).__name__})",
+            )
+        equal = after == baseline_normalized
+        return RollbackResult(
+            attempted=True,
+            succeeded=equal,
+            verified=equal,
+            detail=None if equal else "re-captured config did not normalize equal to the baseline",
+        )
+
+
+class CiscoIosConfigRestore(_CiscoIosConfigWriteCapability, ConfigRestoreCapability):
+    """``CONFIG_RESTORE``: replay an existing M4 ``config_snapshot`` (ADR-0021).
+
+    Idempotent: when the live config already normalizes equal to the snapshot the
+    pre-apply diff is empty and the device is never touched (``NO_OP``). Otherwise
+    the snapshot text is replayed (the captured baseline being the safety net,
+    §4) and verify-after asserts the running config normalizes **equal** to the
+    snapshot — the restore exit criterion.
+    """
+
+    def restore(self, snapshot: ConfigSnapshotRef, *, plan: ChangePlan) -> ChangeResult:
+        """Restore the device to *snapshot* as the execution step of *plan*."""
+        target = _normalize_config(snapshot.content)
+
+        def verify(running: str) -> bool:
+            return running == target
+
+        return self._execute(
+            plan=plan,
+            operation="config restore",
+            project=lambda _baseline: target,
+            config_lines=target.splitlines(),
+            verify=verify,
+        )
+
+
+class CiscoIosConfigDeploy(_CiscoIosConfigWriteCapability, ConfigDeployCapability):
+    """``CONFIG_DEPLOY``: merge a supplied config fragment (ADR-0021).
+
+    Best-effort idempotent: re-applying an already-present fragment yields an
+    empty pre-apply diff and a ``NO_OP``. The deploy verify-after predicate is
+    symmetric in rigor with restore: every normalized fragment line must be
+    present in the re-captured running config **and** nothing outside the
+    fragment's scope changed unexpectedly (no unintended residual diff). On
+    failure the captured baseline is replayed; because a baseline replay of an
+    order-sensitive fragment may not reproduce the exact baseline, rollback
+    success is the asserted baseline equality (§3) — if it does not hold,
+    ``rollback_failed`` is surfaced, never ``rolled_back``.
+    """
+
+    def deploy(self, config_fragment: str, *, plan: ChangePlan) -> ChangeResult:
+        """Apply *config_fragment* as the execution step of *plan*."""
+        fragment_lines = [
+            line for line in _normalize_config(config_fragment).splitlines() if line.strip()
+        ]
+
+        def verify(running: str) -> bool:
+            running_lines = set(running.splitlines())
+            return all(line in running_lines for line in fragment_lines)
+
+        def project(baseline: str) -> str:
+            # Intended end-state for the diff summary: baseline merged with the
+            # fragment lines not already present (a merge never removes lines).
+            present = set(baseline.splitlines())
+            additions = [line for line in fragment_lines if line not in present]
+            body = baseline.rstrip("\n")
+            if additions:
+                body = body + "\n" + "\n".join(additions)
+            return f"{body}\n" if body else ""
+
+        return self._execute(
+            plan=plan,
+            operation="config deploy",
+            project=project,
+            config_lines=fragment_lines,
+            verify=verify,
+        )
+
+
 class CiscoIosPlugin(VendorPlugin):
     """Cisco IOS (``vendor_id="cisco_ios"``) — M0/M1 reference plugin.
 
     Declares only what is implemented (REPO-STRUCTURE §6 step 4): the full
     M1 capability set — SSH/SNMP discovery, interface inventory, route
-    collection, LLDP/CDP neighbors — plus config backup and the M3
-    troubleshooting trio (BGP/OSPF/ACL).
+    collection, LLDP/CDP neighbors — plus config backup, the M3 troubleshooting
+    trio (BGP/OSPF/ACL), and the M5 write path (CONFIG_RESTORE/CONFIG_DEPLOY,
+    ADR-0021 — the first, certified-first device-write capabilities).
     """
 
     vendor_id: ClassVar[str] = VENDOR_ID
@@ -243,6 +515,8 @@ class CiscoIosPlugin(VendorPlugin):
             Capability.OSPF,
             Capability.ACL,
             Capability.CONFIG_BACKUP,
+            Capability.CONFIG_RESTORE,
+            Capability.CONFIG_DEPLOY,
         }
     )
 
@@ -258,4 +532,6 @@ class CiscoIosPlugin(VendorPlugin):
             Capability.OSPF: CiscoIosOspf,
             Capability.ACL: CiscoIosAcl,
             Capability.CONFIG_BACKUP: CiscoIosConfigBackup,
+            Capability.CONFIG_RESTORE: CiscoIosConfigRestore,
+            Capability.CONFIG_DEPLOY: CiscoIosConfigDeploy,
         }

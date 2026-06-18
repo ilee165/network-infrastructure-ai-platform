@@ -29,6 +29,7 @@ FastAPI event loop (ADR-0007 §3, ADR-0008).
 from __future__ import annotations
 
 import re
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -52,8 +53,15 @@ __all__ = [
     "AclCapability",
     "BgpCapability",
     "Capability",
+    "ChangeOutcome",
+    "ChangePlan",
+    "ChangeResult",
     "CommandTransport",
     "ConfigBackupCapability",
+    "ConfigDeployCapability",
+    "ConfigRestoreCapability",
+    "ConfigSnapshotRef",
+    "ConfigWriteTransport",
     "ConnectionParams",
     "DiscoverySnmpCapability",
     "DiscoverySshCapability",
@@ -62,6 +70,7 @@ __all__ = [
     "OspfCapability",
     "PluginCapability",
     "RawOutput",
+    "RollbackResult",
     "RoutesCapability",
     "SnmpReadTransport",
     "TransportKind",
@@ -174,6 +183,145 @@ class SnmpReadTransport(Protocol):
     def get(self, oids: Sequence[str]) -> dict[str, str]:
         """SNMP GET for *oids*; returns ``{dotted_oid: pretty_value}``."""
         ...
+
+
+@runtime_checkable
+class ConfigWriteTransport(CommandTransport, Protocol):
+    """A CLI session that can both read (``send_command``) and **write** config.
+
+    The write surface for ``CONFIG_RESTORE``/``CONFIG_DEPLOY`` (ADR-0021 §4): the
+    netmiko ``send_config_set`` family enters ``configure terminal``, sends the
+    lines, and exits — satisfied by
+    :class:`app.plugins.transport.ssh.SshTransport`; tests use in-memory fakes.
+    ``send_command`` (inherited) is used to capture/verify the running config
+    around the write. Implementations return device output verbatim.
+    """
+
+    def send_config(self, lines: Sequence[str]) -> str:
+        """Apply *lines* in configuration mode; return the device output verbatim."""
+        ...
+
+
+@runtime_checkable
+class ConfigSnapshotRef(Protocol):
+    """Read-only view of a stored config snapshot a restore replays (ADR-0021 §1).
+
+    The persisted ``app.models.ConfigSnapshot`` row structurally satisfies this
+    protocol (it exposes ``content`` and ``content_hash``). Declaring the
+    capability against the protocol — not the ORM model — keeps the plugin layer
+    free of any ``app.models`` import (plugins are stateless transport-only
+    descriptors); the executor (Wave 4) passes the real snapshot row.
+    """
+
+    @property
+    def content(self) -> str:
+        """The verbatim configuration text captured in the snapshot."""
+        ...
+
+    @property
+    def content_hash(self) -> str:
+        """The content-address (SHA-256) identifying the snapshot."""
+        ...
+
+
+class ChangeOutcome(StrEnum):
+    """Terminal classification of one config write attempt (ADR-0021 §3).
+
+    Maps onto the ChangeRequest lifecycle the executor drives: ``applied`` /
+    ``no_op`` -> ``completed``; ``rolled_back`` -> ``failed -> rolled_back``;
+    ``rollback_failed`` -> CR stays ``failed`` + operator alert (never silently
+    closed, never reported ``rolled_back``).
+    """
+
+    APPLIED = "applied"
+    NO_OP = "no_op"
+    ROLLED_BACK = "rolled_back"
+    ROLLBACK_FAILED = "rollback_failed"
+
+
+class ChangePlan(BaseModel):
+    """Execution context handed to a config-write capability (ADR-0021 §1/§2).
+
+    Carries the originating ``change_request_id``, the attested CR lifecycle
+    state, and the captured pre-change baseline reference / idempotency
+    metadata. The capability **never self-authorizes**: it refuses to run unless
+    ``cr_state`` attests ``executing`` (the state the Automation-Agent executor
+    claims from ``approved`` before constructing the plan, ADR-0020 §1). The plan
+    is data the executor builds *after* the four-eyes-approved CR is claimed; the
+    plugin verifies the attestation but does not — and cannot — grant it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    change_request_id: uuid.UUID = Field(
+        description="The approved ChangeRequest this write executes (ADR-0020 §2)."
+    )
+    cr_state: str = Field(
+        description="Attested CR lifecycle state; must be 'executing' or the write is refused."
+    )
+    baseline_content_hash: str | None = Field(
+        default=None,
+        description="Content-address of the CR's rollback_plan baseline reference (audit only; "
+        "the authoritative baseline is captured fresh at apply time, ADR-0021 §3).",
+    )
+
+    #: The single CR state in which a config write may execute (ADR-0021 §2).
+    EXECUTING_STATE: ClassVar[str] = "executing"
+
+    @property
+    def is_executing(self) -> bool:
+        """Whether the plan attests an ``executing`` CR (apply-time precondition)."""
+        return self.cr_state == self.EXECUTING_STATE
+
+
+class RollbackResult(BaseModel):
+    """Outcome of the structured per-change rollback step (ADR-0021 §3).
+
+    A first-class return value, not a side effect: ``succeeded`` is True only
+    when the post-rollback re-capture normalizes **equal to the captured
+    pre-change baseline** (the asserted equality criterion, symmetric with the
+    restore exit criterion). A rollback that cannot reach the device or whose
+    re-capture does not normalize equal to the baseline is ``succeeded=False`` —
+    surfaced by the caller as ``ChangeOutcome.ROLLBACK_FAILED``, never
+    ``rolled_back``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    attempted: bool = Field(description="Whether a rollback was attempted (apply/verify failed).")
+    succeeded: bool = Field(description="Whether the device was restored to the baseline.")
+    verified: bool = Field(
+        description="Whether the post-rollback re-capture normalized equal to the baseline."
+    )
+    detail: str | None = Field(
+        default=None, description="Human-readable rollback note (never carries config secrets)."
+    )
+
+
+class ChangeResult(BaseModel):
+    """Structured outcome of a ``CONFIG_RESTORE``/``CONFIG_DEPLOY`` execution.
+
+    ADR-0021 §1: both capabilities return this — the applied diff summary, the
+    verify-after outcome, and the structured rollback outcome when one ran. The
+    executor maps ``outcome`` onto the CR lifecycle (ADR-0020). ``applied_diff``
+    is a redaction-safe summary (line counts / changed-line markers), not raw
+    config text, so a ``ChangeResult`` never carries config secrets.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    change_request_id: uuid.UUID
+    outcome: ChangeOutcome
+    verified: bool = Field(
+        description="Whether verify-after confirmed the intended end-state on the device."
+    )
+    applied_diff: tuple[str, ...] = Field(
+        default=(),
+        description="Redaction-safe summary of what the apply changed (empty for a no-op).",
+    )
+    rollback: RollbackResult | None = Field(
+        default=None, description="Structured rollback outcome when apply/verify failed; else None."
+    )
 
 
 class PluginCapability(ABC):
@@ -311,6 +459,44 @@ class ConfigBackupCapability(PluginCapability):
     @abstractmethod
     def fetch_running_config(self) -> str:
         """Return the device running configuration verbatim."""
+
+
+class ConfigRestoreCapability(PluginCapability):
+    """``Capability.CONFIG_RESTORE`` — replay a stored snapshot onto a device.
+
+    The first device-write path (ADR-0021). Restores the device's running
+    configuration to an existing M4 ``config_snapshot`` as the execution step of
+    an ``executing`` ChangeRequest: capture a fresh pre-change baseline, compute
+    the diff (empty => idempotent no-op), apply, verify-after (the re-captured
+    config normalizes equal to the snapshot), and on failure replay the captured
+    baseline and verify the rollback. The method **never self-authorizes** — it
+    refuses unless the :class:`ChangePlan` attests an ``executing`` CR (§2).
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.CONFIG_RESTORE})
+
+    @abstractmethod
+    def restore(self, snapshot: ConfigSnapshotRef, *, plan: ChangePlan) -> ChangeResult:
+        """Restore the device to *snapshot* under the approved-CR *plan* (ADR-0021)."""
+
+
+class ConfigDeployCapability(PluginCapability):
+    """``Capability.CONFIG_DEPLOY`` — merge a supplied config fragment onto a device.
+
+    The first device-write path (ADR-0021). Applies a config fragment as the
+    execution step of an ``executing`` ChangeRequest with the same
+    capture-before -> apply -> verify-after -> rollback-on-failure contract as
+    restore: the deploy verify-after predicate (every fragment line present, no
+    unintended residual diff) and the rollback-success criterion are symmetric
+    with restore. The method **never self-authorizes** — it refuses unless the
+    :class:`ChangePlan` attests an ``executing`` CR (§2).
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.CONFIG_DEPLOY})
+
+    @abstractmethod
+    def deploy(self, config_fragment: str, *, plan: ChangePlan) -> ChangeResult:
+        """Apply *config_fragment* under the approved-CR *plan* (ADR-0021)."""
 
 
 class VendorPlugin(ABC):
