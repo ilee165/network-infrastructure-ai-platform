@@ -62,6 +62,7 @@ from app.engines.packet import (
     PacketFindings,
     analyze_pcap,
     build_eos_capture_commands,
+    build_eos_finalize_commands,
     build_tcpdump_argv,
     expired_capture_ids,
     ingest_capture,
@@ -129,6 +130,18 @@ def _open_ssh(params: Any) -> Any:
     from app.plugins.transport import SshTransport
 
     return SshTransport(params)
+
+
+def _sleep(seconds: float) -> None:
+    """Block for *seconds* (the EOS capture dwell).
+
+    Seam: unit tests replace this so the capture-duration wait is instant. The
+    EOS ``monitor capture ... start`` is non-blocking, so the worker must dwell
+    the capped duration before issuing ``stop``/``copy`` (ADR-0023 §2).
+    """
+    import time  # local import: capture-only dependency
+
+    time.sleep(seconds)
 
 
 def _analyze_pcap(path: str, *, display_filter: str | None, settings: Settings) -> PacketFindings:
@@ -381,8 +394,7 @@ def capture_device(
             size_bytes=size_bytes or settings.packet_capture_size_bytes,
         )
         remote_path = f"flash:netops-{capture_id}.pcap"
-        commands = build_eos_capture_commands(spec, remote_path)
-        _drive_eos_capture(device_uuid, commands, storage_path)
+        _drive_eos_capture(device_uuid, spec, remote_path, storage_path)
         byte_count = os.path.getsize(storage_path)
         sha256 = sha256_file(storage_path)
     except Exception as exc:  # noqa: BLE001 — failure is audited, not raised
@@ -426,16 +438,31 @@ def capture_device(
     }
 
 
-def _drive_eos_capture(device_id: UUID, commands: list[str], storage_path: str) -> None:
-    """Run the EOS capture CLI lines over SSH and retrieve the pcap.
+def _drive_eos_capture(
+    device_id: UUID, spec: CaptureSpec, remote_path: str, storage_path: str
+) -> None:
+    """Run the EOS capture CLI lines over SSH, dwell, then retrieve the pcap.
 
-    Seam-driven so unit tests can fake the transport+retrieval. The credential
-    plaintext lives only inside the SSH session; it never enters this function's
-    arguments, return value, or any log/audit line.
+    ``monitor capture ... start`` is non-blocking on EOS, so this drives the
+    capture in two phases: send the setup+``start`` lines, **wait
+    ``spec.duration_seconds``** for traffic to be recorded (mirroring the device's
+    own ``limit duration``), then send ``stop``+``copy`` and retrieve. Issuing
+    ``stop`` immediately after ``start`` would terminate the session before any
+    traffic is captured and produce an empty pcap (ADR-0023 §2).
+
+    Seam-driven so unit tests can fake the transport, retrieval, and the dwell.
+    The credential plaintext lives only inside the SSH session; it never enters
+    this function's arguments, return value, or any log/audit line.
     """
     context = asyncio.run(_load_ssh_context(device_id))
+    start_commands = build_eos_capture_commands(spec, remote_path)
+    finalize_commands = build_eos_finalize_commands(remote_path)
     with _open_ssh(context.params) as transport:
-        for command in commands:
+        for command in start_commands:
+            transport.send_command(command)
+        # Let the capture run for the capped duration before stopping it.
+        _sleep(spec.duration_seconds)
+        for command in finalize_commands:
             transport.send_command(command)
         context.retrieve(transport, storage_path)
 

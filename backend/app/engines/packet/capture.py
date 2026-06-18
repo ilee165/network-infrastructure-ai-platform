@@ -48,6 +48,7 @@ __all__ = [
     "MAX_SIZE_BYTES",
     "CaptureSpec",
     "build_eos_capture_commands",
+    "build_eos_finalize_commands",
     "build_tcpdump_argv",
     "expired_capture_ids",
     "ingest_capture",
@@ -176,16 +177,28 @@ def build_tcpdump_argv(spec: CaptureSpec, output_path: str | Path) -> list[str]:
     return argv
 
 
-def build_eos_capture_commands(spec: CaptureSpec, remote_path: str) -> list[str]:
-    """Build the Arista ``eos`` device-side monitor-session capture CLI lines.
+#: Name of the EOS monitor-capture point this engine drives.
+_EOS_CAPTURE_POINT = "netops"
 
-    Returns a list of discrete EOS CLI command strings (run one-per-line over the
-    SSH transport, never concatenated into a shell): a ``monitor capture`` point
-    on the validated interface, a capped duration/size, and a write to
-    *remote_path* for retrieval. Each interface/filter value is already
-    whitelisted, so no command line is attacker-constructible (ADR-0023 §2).
+
+def build_eos_capture_commands(spec: CaptureSpec, remote_path: str) -> list[str]:
+    """Build the Arista ``eos`` device-side monitor-session **setup+start** lines.
+
+    Returns the discrete EOS CLI command strings (run one-per-line over the SSH
+    transport, never concatenated into a shell) that configure the capture point
+    on the validated interface, apply the capped duration/size, and **start** the
+    capture — the last line is always ``monitor capture netops start``.
+
+    ``start`` is non-blocking on EOS, so the capture must be allowed to run for
+    ``spec.duration_seconds`` before it is stopped; this builder therefore does
+    **not** emit ``stop``/``copy`` (an adjacent ``stop`` would terminate the
+    session before any traffic is captured and defeat ``limit duration``). The
+    worker waits the duration and then sends :func:`build_eos_finalize_commands`.
+    Each interface/filter value is already whitelisted, so no command line is
+    attacker-constructible (ADR-0023 §2). *remote_path* is accepted for symmetry
+    and used by the finalize step.
     """
-    point = "netops"
+    point = _EOS_CAPTURE_POINT
     commands = [
         f"monitor capture {point} interface {spec.interface} both",
     ]
@@ -195,10 +208,24 @@ def build_eos_capture_commands(spec: CaptureSpec, remote_path: str) -> list[str]
         f"monitor capture {point} limit duration {spec.duration_seconds}",
         f"monitor capture {point} limit packet-length 0 size {spec.size_bytes}",
         f"monitor capture {point} start",
+    ]
+    return commands
+
+
+def build_eos_finalize_commands(remote_path: str) -> list[str]:
+    """Build the EOS ``stop`` + ``copy`` lines, sent only **after** the dwell.
+
+    The worker issues these once the capture has run for ``duration_seconds`` (or
+    the device's own ``limit duration`` has auto-stopped it): stop the capture
+    point, then write the staged pcap to *remote_path* for retrieval. Kept
+    separate from :func:`build_eos_capture_commands` so ``stop`` can never be sent
+    adjacent to ``start`` (ADR-0023 §2).
+    """
+    point = _EOS_CAPTURE_POINT
+    return [
         f"monitor capture {point} stop",
         f"copy capture {point} {remote_path}",
     ]
-    return commands
 
 
 def sha256_file(path: str | Path) -> str:

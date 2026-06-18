@@ -123,6 +123,18 @@ def validate_capture_filter(capture_filter: str | None) -> str | None:
             "capture filter contains characters outside the BPF whitelist "
             "(shell metacharacters and control characters are rejected)"
         )
+    # ``-`` is allowed *within* the grammar (e.g. an arithmetic operator), but a
+    # whitespace-delimited token that *begins* with ``-`` (``greater -1``,
+    # ``-w/tmp/x``) would be appended after ``tcpdump -w`` and reach getopt as a
+    # flag. The keyword loop below only inspects alphabetic tokens, so a pure
+    # ``-<digits>`` token would otherwise slip through — reject it at the token
+    # boundary so no filter token can ever be parsed as an option/flag.
+    for token in stripped.split():
+        if token.startswith("-"):
+            raise FilterValidationError(
+                "capture filter contains a token that begins with '-' "
+                "(a dash-prefixed token could be parsed as a flag and is rejected)"
+            )
     for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", stripped):
         if token.lower() not in _BPF_KEYWORDS:
             raise FilterValidationError(

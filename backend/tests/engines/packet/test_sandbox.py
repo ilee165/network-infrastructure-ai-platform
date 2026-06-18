@@ -44,6 +44,9 @@ _MALICIOUS_FILTERS = [
     'host "10.0.0.1"',
     "host 10.0.0.1 -w /tmp/evil.pcap",  # cannot smuggle a second flag
     "evilfunc(1)",  # unknown bareword
+    "greater -1",  # leading-dash numeric token would become a trailing flag
+    "tcp and -5",  # ditto — a '-'-prefixed token must never reach getopt
+    "-w/tmp/evil",  # whole filter is a dash flag
 ]
 
 

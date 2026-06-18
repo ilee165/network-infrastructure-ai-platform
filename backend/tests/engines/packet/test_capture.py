@@ -14,6 +14,7 @@ from app.engines.packet import (
     MAX_SIZE_BYTES,
     CaptureSpec,
     build_eos_capture_commands,
+    build_eos_finalize_commands,
     build_tcpdump_argv,
     summarize_packets,
     validate_interface,
@@ -113,9 +114,31 @@ def test_build_eos_capture_commands_are_discrete_capped_lines() -> None:
     joined = "\n".join(commands)
     assert "monitor capture netops interface Ethernet1 both" in joined
     assert "limit duration 60" in joined
-    assert "copy capture netops flash:cap.pcap" in joined
     # No shell metacharacters in any generated line (validated inputs only).
     assert ";" not in joined and "|" not in joined and "&" not in joined
+
+
+def test_build_eos_capture_commands_do_not_stop_immediately_after_start() -> None:
+    # ADR-0023 §2: ``monitor capture ... start`` is non-blocking on EOS, so an
+    # adjacent ``stop`` would terminate the session before any traffic is captured
+    # (defeating ``limit duration``). The start command must be the last line of
+    # the setup sequence — stop/copy are deferred to the finalize commands, run by
+    # the worker only after waiting the capture duration.
+    spec = CaptureSpec.create(interface="Ethernet1", duration_seconds=60)
+    commands = build_eos_capture_commands(spec, "flash:cap.pcap")
+    assert commands[-1] == "monitor capture netops start"
+    # No ``stop`` and no ``copy`` may appear in the start sequence at all.
+    assert not any("stop" in c for c in commands)
+    assert not any("copy" in c for c in commands)
+
+
+def test_build_eos_finalize_commands_carry_stop_then_copy() -> None:
+    finalize = build_eos_finalize_commands("flash:cap.pcap")
+    assert isinstance(finalize, list)
+    assert finalize == [
+        "monitor capture netops stop",
+        "copy capture netops flash:cap.pcap",
+    ]
 
 
 # ---------------------------------------------------------------------------

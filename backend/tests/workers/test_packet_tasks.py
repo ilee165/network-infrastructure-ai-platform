@@ -148,6 +148,65 @@ def test_capture_segment_rejects_malicious_interface_and_audits(
 
 
 # ---------------------------------------------------------------------------
+# packet.capture_device (eos monitor-session) — dwell ordering
+# ---------------------------------------------------------------------------
+
+
+def test_drive_eos_capture_waits_duration_between_start_and_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The EOS capture must dwell ``duration_seconds`` after ``start`` before it
+    sends ``stop``/``copy`` — otherwise it records an empty pcap (ADR-0023 §2)."""
+    from app.engines.packet import CaptureSpec, build_eos_capture_commands
+
+    spec = CaptureSpec.create(interface="Ethernet1", duration_seconds=42)
+    start_commands = build_eos_capture_commands(spec, "flash:cap.pcap")
+
+    timeline: list[str] = []
+
+    class _FakeTransport:
+        def send_command(self, command: str) -> None:
+            timeline.append(command)
+
+        def retrieve_file(self, storage_path: str) -> None:
+            timeline.append(f"retrieve {storage_path}")
+
+    class _FakeCtx:
+        params = object()
+
+        def retrieve(self, transport: Any, storage_path: str) -> None:
+            transport.retrieve_file(storage_path)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake_open_ssh(params: Any) -> Any:
+        yield _FakeTransport()
+
+    slept: list[float] = []
+    monkeypatch.setattr(tasks, "_open_ssh", _fake_open_ssh)
+    monkeypatch.setattr(tasks, "_sleep", lambda seconds: slept.append(seconds))
+
+    async def _fake_ctx(device_id: Any) -> Any:
+        return _FakeCtx()
+
+    monkeypatch.setattr(tasks, "_load_ssh_context", _fake_ctx)
+
+    tasks._drive_eos_capture(uuid.uuid4(), spec, "flash:cap.pcap", str(tmp_path / "x.pcap"))
+
+    # Dwell equal to the capture duration happens before stop/copy.
+    assert slept == [42]
+    stop_idx = timeline.index("monitor capture netops stop")
+    start_idx = timeline.index("monitor capture netops start")
+    # start precedes stop, and the engine never bundles stop with the start lines.
+    assert start_idx < stop_idx
+    assert "monitor capture netops stop" not in start_commands
+    # copy follows stop; retrieve is last.
+    assert timeline.index("copy capture netops flash:cap.pcap") > stop_idx
+    assert timeline[-1] == f"retrieve {tmp_path / 'x.pcap'}"
+
+
+# ---------------------------------------------------------------------------
 # packet.analyze_capture (sandboxed tshark)
 # ---------------------------------------------------------------------------
 
