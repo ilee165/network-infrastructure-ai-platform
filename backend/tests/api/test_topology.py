@@ -29,6 +29,8 @@ from app.api import deps
 from app.knowledge.schema import (
     REL_CONNECTED_TO,
     REL_HAS_INTERFACE,
+    REL_IN_ZONE,
+    REL_RESOLVES_TO,
     REL_ROUTES_TO,
 )
 from app.models import DiscoveryRun, TopologySnapshot
@@ -124,6 +126,18 @@ def _seed_records() -> list[dict[str, Any]]:
     dev_b = _dev("dev-b", "edge-rt-01", "nyc", EARLIER_PROJECTED_AT)
     dev_c = _dev("dev-c", "lon-sw-01", "lon", PROJECTED_AT)
     subnet = {"cidr": "10.0.0.0/24", "last_projected_at": PROJECTED_AT}
+    # DNS-dependency layer (M5 task #13): one zone, one record resolving to a
+    # known IPAddress node (reconciled against the L3 projection).
+    zone = {"fqdn": "corp.example.com", "last_projected_at": PROJECTED_AT}
+    record = {
+        "record_key": "www.corp.example.com|a|10.0.0.9",
+        "name": "www.corp.example.com",
+        "record_type": "a",
+        "value": "10.0.0.9",
+        "zone": "corp.example.com",
+        "last_projected_at": PROJECTED_AT,
+    }
+    ipaddr = {"pg_id": "if-1", "address": "10.0.0.9", "last_projected_at": PROJECTED_AT}
     return [
         _edge_record(
             rel_type=REL_CONNECTED_TO,
@@ -148,6 +162,22 @@ def _seed_records() -> list[dict[str, Any]]:
             b_label="Subnet",
             b_props=subnet,
             rel_props={"vrf": "blue", "protocol": "ospf", "last_projected_at": PROJECTED_AT},
+        ),
+        _edge_record(
+            rel_type=REL_IN_ZONE,
+            a_label="DnsZone",
+            a_props=zone,
+            b_label="DnsRecord",
+            b_props=record,
+            rel_props={"last_projected_at": PROJECTED_AT},
+        ),
+        _edge_record(
+            rel_type=REL_RESOLVES_TO,
+            a_label="DnsRecord",
+            a_props=record,
+            b_label="IPAddress",
+            b_props=ipaddr,
+            rel_props={"value": "10.0.0.9", "last_projected_at": PROJECTED_AT},
         ),
     ]
 
@@ -217,12 +247,29 @@ class TestGraph:
         response = await graph_client.get("/api/v1/topology/graph", headers=auth_headers("viewer"))
         assert response.status_code == 200, response.text
         body = response.json()
-        # Three distinct device nodes + one subnet, deduped across edges.
+        # Three devices + one subnet (L2/L3) plus the DNS-layer zone/record/ip.
         labels = sorted(n["label"] for n in body["nodes"])
-        assert labels == ["Device", "Device", "Device", "Subnet"]
+        assert labels == [
+            "Device",
+            "Device",
+            "Device",
+            "DnsRecord",
+            "DnsZone",
+            "IPAddress",
+            "Subnet",
+        ]
         keys = {n["key"] for n in body["nodes"]}
-        assert keys == {"dev-a", "dev-b", "dev-c", "10.0.0.0/24"}
-        assert len(body["edges"]) == 3
+        assert keys == {
+            "dev-a",
+            "dev-b",
+            "dev-c",
+            "10.0.0.0/24",
+            "corp.example.com",
+            "www.corp.example.com|a|10.0.0.9",
+            "if-1",
+        }
+        # 2 CONNECTED_TO + 1 ROUTES_TO + 1 IN_ZONE + 1 RESOLVES_TO.
+        assert len(body["edges"]) == 5
         # projected_at is the MOST RECENT stamp across nodes (dev-b is older).
         assert body["projected_at"] == PROJECTED_AT
 
@@ -254,6 +301,44 @@ class TestGraph:
         assert response.status_code == 200, response.text
         body = response.json()
         assert {e["type"] for e in body["edges"]} == {REL_ROUTES_TO}
+
+    async def test_layer_dns_returns_only_dns_dependency_edges(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        response = await graph_client.get(
+            "/api/v1/topology/graph",
+            params={"layer": "dns"},
+            headers=auth_headers("viewer"),
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert {e["type"] for e in body["edges"]} == {REL_IN_ZONE, REL_RESOLVES_TO}
+        labels = sorted(n["label"] for n in body["nodes"])
+        assert labels == ["DnsRecord", "DnsZone", "IPAddress"]
+        # No L2/L3 leakage into the DNS layer.
+        assert "Device" not in labels
+        assert "Subnet" not in labels
+
+    async def test_layer_dns_resolves_to_edge_targets_reconciled_ipaddress(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        response = await graph_client.get(
+            "/api/v1/topology/graph",
+            params={"layer": "dns"},
+            headers=auth_headers("viewer"),
+        )
+        body = response.json()
+        resolves = [e for e in body["edges"] if e["type"] == REL_RESOLVES_TO]
+        assert len(resolves) == 1
+        edge = resolves[0]
+        # The record key resolves onto the IPAddress projected node (if-1).
+        assert edge["source"] == "www.corp.example.com|a|10.0.0.9"
+        assert edge["target"] == "if-1"
+        assert edge["properties"]["value"] == "10.0.0.9"
 
     async def test_site_filter_scopes_subgraph(
         self,

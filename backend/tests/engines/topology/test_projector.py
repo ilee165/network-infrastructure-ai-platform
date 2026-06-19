@@ -17,6 +17,13 @@ from uuid import UUID
 
 import pytest
 
+from app.engines.topology.dns import (
+    DerivedDns,
+    DnsRecordNode,
+    DnsZoneNode,
+    InZoneEdge,
+    ResolvesToEdge,
+)
 from app.engines.topology.edges import (
     ConnectedToEdge,
     EdgeEndpoint,
@@ -192,7 +199,7 @@ def _sweeps(client: FakeClient) -> list[tuple[str, dict[str, Any]]]:
 # ---------------------------------------------------------------------------
 
 
-def test_projected_label_and_rel_constants_cover_the_m2_subset() -> None:
+def test_projected_label_and_rel_constants_cover_the_m2_subset_plus_dns() -> None:
     assert set(PROJECTED_NODE_LABELS) == {
         "Device",
         "Interface",
@@ -201,6 +208,9 @@ def test_projected_label_and_rel_constants_cover_the_m2_subset() -> None:
         "Subnet",
         "VRF",
         "Site",
+        # M5 task #13 DNS-dependency layer.
+        "DnsZone",
+        "DnsRecord",
     }
     assert set(PROJECTED_REL_TYPES) == {
         "CONNECTED_TO",
@@ -208,6 +218,9 @@ def test_projected_label_and_rel_constants_cover_the_m2_subset() -> None:
         "IN_SUBNET",
         "L3_ADJACENT",
         "ROUTES_TO",
+        # M5 task #13 DNS-dependency layer.
+        "IN_ZONE",
+        "RESOLVES_TO",
     }
 
 
@@ -367,7 +380,7 @@ async def test_project_routes_to_rows_keep_route_properties() -> None:
 
 
 async def test_project_sweeps_every_projected_label_and_rel_type_even_when_empty() -> None:
-    """An empty derivation still sweeps all 7 labels + 5 rel types clean."""
+    """An empty derivation still sweeps every projected label + rel type clean."""
     client = FakeClient()
     await project(client, DerivedNodes(), DerivedEdges(), PROJECTED_AT)
 
@@ -421,6 +434,118 @@ async def test_project_batches_rows_into_unwind_chunks_not_per_row_calls() -> No
 
 
 # ---------------------------------------------------------------------------
+# project() — DNS-dependency layer (M5 task #13)
+# ---------------------------------------------------------------------------
+
+
+def small_dns() -> DerivedDns:
+    """A zone with one reconciled (IPAddress) and one unreconciled record."""
+    return DerivedDns(
+        zones=(DnsZoneNode(fqdn="corp.example.com"),),
+        records=(
+            DnsRecordNode(
+                record_key="www.corp.example.com|a|10.0.0.1",
+                name="www.corp.example.com",
+                record_type="a",
+                value="10.0.0.1",
+                zone="corp.example.com",
+            ),
+            DnsRecordNode(
+                record_key="ext.corp.example.com|a|203.0.113.7",
+                name="ext.corp.example.com",
+                record_type="a",
+                value="203.0.113.7",
+                zone="corp.example.com",
+            ),
+        ),
+        in_zone=(
+            InZoneEdge(zone_fqdn="corp.example.com", record_key="www.corp.example.com|a|10.0.0.1"),
+            InZoneEdge(
+                zone_fqdn="corp.example.com", record_key="ext.corp.example.com|a|203.0.113.7"
+            ),
+        ),
+        resolves_to=(
+            ResolvesToEdge(
+                record_key="www.corp.example.com|a|10.0.0.1",
+                value="10.0.0.1",
+                reconciled=True,
+                target_label="IPAddress",
+                target_key=str(IF1),
+            ),
+            ResolvesToEdge(
+                record_key="ext.corp.example.com|a|203.0.113.7",
+                value="203.0.113.7",
+                reconciled=False,
+            ),
+        ),
+    )
+
+
+async def test_project_merges_dns_zone_and_record_by_their_key_properties() -> None:
+    client = FakeClient()
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, dns=small_dns())
+    statements = " \n".join(c for c, _ in _upserts(client))
+    assert "MERGE (n:DnsZone {fqdn: row.key})" in statements
+    assert "MERGE (n:DnsRecord {record_key: row.key})" in statements
+
+    record_upserts = [(c, p) for c, p in _upserts(client) if "(n:DnsRecord" in c]
+    assert len(record_upserts) == 1
+    rows = record_upserts[0][1]["rows"]
+    assert [r["key"] for r in rows] == [
+        "www.corp.example.com|a|10.0.0.1",
+        "ext.corp.example.com|a|203.0.113.7",
+    ]
+    assert rows[0]["props"]["zone"] == "corp.example.com"
+    assert rows[0]["props"]["last_projected_at"] == PROJECTED_AT
+
+
+async def test_project_in_zone_edges_link_dnszone_to_dnsrecord() -> None:
+    client = FakeClient()
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, dns=small_dns())
+    in_zone = [c for c, _ in _upserts(client) if ":IN_ZONE" in c]
+    assert len(in_zone) == 1
+    cypher = in_zone[0]
+    assert "MATCH (a:DnsZone {fqdn: row.a_key})" in cypher
+    assert "MATCH (b:DnsRecord {record_key: row.b_key})" in cypher
+    assert "MERGE (a)-[r:IN_ZONE]->(b)" in cypher
+
+
+async def test_project_resolves_to_targets_reconciled_node_and_carries_value() -> None:
+    client = FakeClient()
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, dns=small_dns())
+    resolves = [(c, p) for c, p in _upserts(client) if ":RESOLVES_TO" in c]
+    # Only the reconciled (IPAddress) record yields an edge; the unreconciled one
+    # carries no RESOLVES_TO edge (no phantom-node endpoint).
+    assert len(resolves) == 1
+    cypher, params = resolves[0]
+    assert "MATCH (a:DnsRecord {record_key: row.a_key})" in cypher
+    assert "MATCH (b:IPAddress {pg_id: row.b_key})" in cypher
+    assert "MERGE (a)-[r:RESOLVES_TO]->(b)" in cypher
+    rows = params["rows"]
+    assert rows == [
+        {
+            "a_key": "www.corp.example.com|a|10.0.0.1",
+            "b_key": str(IF1),
+            "props": {"value": "10.0.0.1", "last_projected_at": PROJECTED_AT},
+        }
+    ]
+
+
+async def test_project_without_dns_sweeps_dns_layer_and_emits_no_dns_upserts() -> None:
+    client = FakeClient()
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT)  # dns=None
+    upserts = [c for c, _ in _upserts(client)]
+    assert not any("DnsZone" in c or "DnsRecord" in c for c in upserts)
+    assert not any(":IN_ZONE" in c or ":RESOLVES_TO" in c for c in upserts)
+    # The DNS labels/rel types are still swept (an absent derivation deletes them).
+    sweeps = [c for c, _ in _sweeps(client)]
+    assert any("(n:DnsZone)" in c and "DETACH DELETE" in c for c in sweeps)
+    assert any("(n:DnsRecord)" in c and "DETACH DELETE" in c for c in sweeps)
+    assert any("[r:IN_ZONE]" in c for c in sweeps)
+    assert any("[r:RESOLVES_TO]" in c for c in sweeps)
+
+
+# ---------------------------------------------------------------------------
 # full_rebuild()
 # ---------------------------------------------------------------------------
 
@@ -435,7 +560,7 @@ async def test_full_rebuild_wipes_then_constrains_then_projects() -> None:
     projections = [i for i, c in enumerate(statements) if "UNWIND" in c]
 
     assert len(wipes) == len(PROJECTED_NODE_LABELS)
-    assert len(constraints) == 7
+    assert len(constraints) == len(PROJECTED_NODE_LABELS)
     assert projections, "full_rebuild must end with a projection pass"
     assert max(wipes) < min(constraints) < min(projections)
 
