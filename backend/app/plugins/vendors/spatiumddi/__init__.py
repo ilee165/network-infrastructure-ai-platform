@@ -7,6 +7,11 @@ Reads normalize to :mod:`app.schemas.normalized`; mutations return
 The REST client is vendor-private (ADR-0006 §6) — engines reach SpatiumDDI only
 through the registry.
 
-This package currently ships the REST client (ADR-0024 T3); the capability
-implementations + plugin land in the follow-on task.
+This package ships the REST client (ADR-0024 T3) plus the
+:class:`~app.plugins.vendors.spatiumddi.plugin.SpatiumddiPlugin` and its four
+capability implementations (ADR-0024 T4).
 """
+
+from app.plugins.vendors.spatiumddi.plugin import SpatiumddiPlugin
+
+__all__ = ["SpatiumddiPlugin"]

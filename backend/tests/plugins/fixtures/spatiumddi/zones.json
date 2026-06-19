@@ -1,0 +1,30 @@
+[
+  {
+    "id": "22222222-2222-2222-2222-222222222222",
+    "group_id": "11111111-1111-1111-1111-111111111111",
+    "view_id": null,
+    "name": "example.com",
+    "zone_type": "authoritative",
+    "kind": "primary",
+    "ttl": 3600,
+    "primary_ns": "ns1.example.com",
+    "admin_email": "hostmaster.example.com",
+    "dnssec_enabled": false,
+    "last_serial": 2026061901,
+    "comment": "source-derived, not live-recorded (ADR-0024 §5)"
+  },
+  {
+    "id": "2222aaaa-2222-2222-2222-222222222222",
+    "group_id": "11111111-1111-1111-1111-111111111111",
+    "view_id": null,
+    "name": "0.0.10.in-addr.arpa",
+    "zone_type": "authoritative",
+    "kind": "primary",
+    "ttl": 3600,
+    "primary_ns": "ns1.example.com",
+    "admin_email": "hostmaster.example.com",
+    "dnssec_enabled": false,
+    "last_serial": 2026061901,
+    "comment": "reverse zone — source-derived, not live-recorded (ADR-0024 §5)"
+  }
+]

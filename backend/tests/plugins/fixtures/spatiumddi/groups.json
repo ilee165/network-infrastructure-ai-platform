@@ -1,0 +1,7 @@
+[
+  {
+    "id": "11111111-1111-1111-1111-111111111111",
+    "name": "default-dns-group",
+    "comment": "source-derived, not live-recorded (ADR-0024 §5)"
+  }
+]
