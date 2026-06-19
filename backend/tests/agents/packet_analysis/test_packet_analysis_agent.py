@@ -141,9 +141,7 @@ class TestPacketAnalysisToolClassification:
         # The agent must NOT be able to launch a capture itself — that is the
         # diagnostic capture tier (T8), not this read-only analysis agent.
         offenders = [
-            t.name
-            for t in _make_agent().tools
-            if t.classification is ToolClassification.DIAGNOSTIC
+            t.name for t in _make_agent().tools if t.classification is ToolClassification.DIAGNOSTIC
         ]
         assert not offenders, f"DIAGNOSTIC tools found: {offenders}"
 
@@ -186,9 +184,7 @@ class TestSummarizeCaptureTool:
         assert out["packet_count"] == 180
 
     async def test_respects_top_n_limit(self) -> None:
-        raw = await summarize_capture.ainvoke(
-            {"findings": _findings_payload(), "top_n": 1}
-        )
+        raw = await summarize_capture.ainvoke({"findings": _findings_payload(), "top_n": 1})
         out = json.loads(raw)
         assert len(out["top_talkers"]) == 1
         assert out["top_talkers"][0]["src"] == HOST_A
@@ -211,9 +207,7 @@ class TestSummarizeCaptureTool:
 
 class TestQueryCaptureTool:
     async def test_filter_talkers_by_host(self) -> None:
-        raw = await query_capture.ainvoke(
-            {"findings": _findings_payload(), "host": HOST_C}
-        )
+        raw = await query_capture.ainvoke({"findings": _findings_payload(), "host": HOST_C})
         out = json.loads(raw)
         talkers = out["top_talkers"]
         # Only conversations that involve HOST_C (as src or dst).
@@ -224,26 +218,20 @@ class TestQueryCaptureTool:
         assert not any(t["src"] == HOST_A and t["dst"] == HOST_B for t in talkers)
 
     async def test_filter_by_protocol(self) -> None:
-        raw = await query_capture.ainvoke(
-            {"findings": _findings_payload(), "protocol": "dns"}
-        )
+        raw = await query_capture.ainvoke({"findings": _findings_payload(), "protocol": "dns"})
         out = json.loads(raw)
         protos = out["protocol_breakdown"]
         assert protos == [{"protocol": "dns", "packets": 30}]
 
     async def test_protocol_filter_is_case_insensitive(self) -> None:
-        raw = await query_capture.ainvoke(
-            {"findings": _findings_payload(), "protocol": "DNS"}
-        )
+        raw = await query_capture.ainvoke({"findings": _findings_payload(), "protocol": "DNS"})
         out = json.loads(raw)
         assert out["protocol_breakdown"] == [{"protocol": "dns", "packets": 30}]
 
     async def test_anomaly_counts_always_present(self) -> None:
         # Even a host/protocol filtered query reports the capture-wide anomaly
         # totals so the model can answer "were there resets?".
-        raw = await query_capture.ainvoke(
-            {"findings": _findings_payload(), "host": HOST_A}
-        )
+        raw = await query_capture.ainvoke({"findings": _findings_payload(), "host": HOST_A})
         out = json.loads(raw)
         assert out["tcp_resets"] == 7
         assert out["tcp_retransmissions"] == 12
@@ -255,9 +243,7 @@ class TestQueryCaptureTool:
         assert len(out["protocol_breakdown"]) == 3
 
     async def test_unmatched_host_yields_empty_talkers(self) -> None:
-        raw = await query_capture.ainvoke(
-            {"findings": _findings_payload(), "host": "192.0.2.99"}
-        )
+        raw = await query_capture.ainvoke({"findings": _findings_payload(), "host": "192.0.2.99"})
         out = json.loads(raw)
         assert out["top_talkers"] == []
         # Anomaly totals still reported.
@@ -301,9 +287,7 @@ class TestFindingsAttachToSession:
         recorder = InMemoryTraceRecorder()
         agent = _make_agent(trace_recorder=recorder)
         await agent.summarize_findings(_findings())
-        all_evidence = [
-            ref for step in recorder.list_traces()[0].steps for ref in step.evidence
-        ]
+        all_evidence = [ref for step in recorder.list_traces()[0].steps for ref in step.evidence]
         assert all_evidence, "expected the findings to be cited as evidence on the trace"
         kinds = {ref.kind for ref in all_evidence}
         # Top talkers and the anomaly counts are both grounded as evidence.
@@ -315,9 +299,7 @@ class TestFindingsAttachToSession:
         agent = _make_agent(trace_recorder=recorder)
         await agent.summarize_findings(_findings())
         conclusion = next(
-            s
-            for s in recorder.list_traces()[0].steps
-            if s.kind is TraceStepKind.CONCLUSION
+            s for s in recorder.list_traces()[0].steps if s.kind is TraceStepKind.CONCLUSION
         )
         assert HOST_A in conclusion.summary
         # The headline numbers appear in the narrative.

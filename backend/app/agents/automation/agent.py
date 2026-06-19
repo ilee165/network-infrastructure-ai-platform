@@ -274,9 +274,25 @@ class AutomationAgent(BaseSpecialistAgent):
     # internals
     # ------------------------------------------------------------------
 
+    @property
+    def _svc(self) -> ChangeRequestService:
+        """Narrow ``self._service`` to non-None for internal call sites.
+
+        All internal helpers are only reachable from :meth:`execute`, which
+        raises :class:`ChangeExecutionRefused` before the internal helpers are
+        ever called when ``self._service is None``.  This property exists so
+        mypy can see the narrowing without scattering ``assert`` statements
+        across every helper.
+        """
+        assert self._service is not None, (  # noqa: S101
+            "_svc accessed with no ChangeRequestService wired; this is a bug — "
+            "execute() should have raised ChangeExecutionRefused first"
+        )
+        return self._service
+
     async def _refuse(self, cr: ChangeRequest, trace: ReasoningTrace) -> None:
         """Audit the refusal of a non-``approved`` CR; performs no write."""
-        async with self._service.sessionmaker() as session:
+        async with self._svc.sessionmaker() as session:
             await audit.record(
                 session,
                 actor=self._principal.actor,
@@ -311,13 +327,14 @@ class AutomationAgent(BaseSpecialistAgent):
         if cr.kind is ChangeRequestKind.DDI_RECORD:
             return await self._execute_ddi(cr, trace)
         # Unknown kind: fail closed rather than guess (no half-run).
-        return await self._fail_no_executor(cr, trace, reason=f"unknown CR kind '{cr.kind.value}'")
+        # The ignore below suppresses the unreachable-code warning — this is an
+        # exhaustive-enum safety guard for new ChangeRequestKind members added
+        # before this switch is updated.
+        return await self._fail_no_executor(cr, trace, reason=f"unknown CR kind '{cr.kind.value}'")  # type: ignore[unreachable]
 
     # -- config (CONFIG_RESTORE / CONFIG_DEPLOY) -----------------------------
 
-    async def _execute_config(
-        self, cr: ChangeRequest, trace: ReasoningTrace
-    ) -> ChangeRequestState:
+    async def _execute_config(self, cr: ChangeRequest, trace: ReasoningTrace) -> ChangeRequestState:
         if self._config_executor is None:
             return await self._fail_no_executor(
                 cr, trace, reason="no config executor wired for this run"
@@ -373,7 +390,7 @@ class AutomationAgent(BaseSpecialistAgent):
     ) -> ChangeRequestState:
         """Map a structured :class:`ChangeOutcome` onto the CR lifecycle (ADR-0021 §3)."""
         if outcome in _SUCCESS_OUTCOMES:
-            await self._service.mark_completed(
+            await self._svc.mark_completed(
                 cr.id, principal=self._principal, after_state=after_state
             )
             await self._trace_recorder.record_step(
@@ -381,15 +398,14 @@ class AutomationAgent(BaseSpecialistAgent):
                 TraceStep(
                     kind=TraceStepKind.CONCLUSION,
                     summary=(
-                        f"applied change request {cr.id}: executing -> completed "
-                        f"({outcome.value})"
+                        f"applied change request {cr.id}: executing -> completed ({outcome.value})"
                     ),
                 ),
             )
             return ChangeRequestState.COMPLETED
 
         # Apply/verify failed: executing -> failed, then structured rollback.
-        await self._service.mark_failed(cr.id, principal=self._principal, after_state=after_state)
+        await self._svc.mark_failed(cr.id, principal=self._principal, after_state=after_state)
         await self._trace_recorder.record_step(
             trace.trace_id,
             TraceStep(
@@ -400,7 +416,7 @@ class AutomationAgent(BaseSpecialistAgent):
 
         if outcome is ChangeOutcome.ROLLED_BACK and rollback_succeeded:
             await self._audit_rollback(cr, succeeded=True)
-            await self._service.mark_rolled_back(cr.id, principal=self._principal)
+            await self._svc.mark_rolled_back(cr.id, principal=self._principal)
             await self._trace_recorder.record_step(
                 trace.trace_id,
                 TraceStep(
@@ -430,8 +446,8 @@ class AutomationAgent(BaseSpecialistAgent):
         self, cr: ChangeRequest, trace: ReasoningTrace, *, reason: str
     ) -> ChangeRequestState:
         """Mark an executing CR failed when no executor could apply it (fail closed)."""
-        await self._service.mark_failed(cr.id, principal=self._principal)
-        async with self._service.sessionmaker() as session:
+        await self._svc.mark_failed(cr.id, principal=self._principal)
+        async with self._svc.sessionmaker() as session:
             await audit.record(
                 session,
                 actor=self._principal.actor,
@@ -454,7 +470,7 @@ class AutomationAgent(BaseSpecialistAgent):
     # -- audit helpers (redaction-safe details only) -------------------------
 
     async def _audit_applied_config(self, cr: ChangeRequest, result: ChangeResult) -> None:
-        async with self._service.sessionmaker() as session:
+        async with self._svc.sessionmaker() as session:
             await audit.record(
                 session,
                 actor=self._principal.actor,
@@ -475,7 +491,7 @@ class AutomationAgent(BaseSpecialistAgent):
             await session.commit()
 
     async def _audit_applied_ddi(self, cr: ChangeRequest, result: DdiChangeResult) -> None:
-        async with self._service.sessionmaker() as session:
+        async with self._svc.sessionmaker() as session:
             await audit.record(
                 session,
                 actor=self._principal.actor,
@@ -494,7 +510,7 @@ class AutomationAgent(BaseSpecialistAgent):
 
     async def _audit_rollback(self, cr: ChangeRequest, *, succeeded: bool) -> None:
         action = audit.AUTOMATION_ROLLBACK if succeeded else audit.AUTOMATION_ROLLBACK_FAILED
-        async with self._service.sessionmaker() as session:
+        async with self._svc.sessionmaker() as session:
             await audit.record(
                 session,
                 actor=self._principal.actor,

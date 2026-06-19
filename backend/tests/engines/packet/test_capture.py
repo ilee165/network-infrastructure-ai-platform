@@ -80,9 +80,7 @@ def test_capture_spec_rejects_nonpositive_bounds() -> None:
 
 
 def test_build_tcpdump_argv_is_capped_list() -> None:
-    spec = CaptureSpec.create(
-        interface="eth0", capture_filter="tcp port 443", duration_seconds=120
-    )
+    spec = CaptureSpec.create(interface="eth0", capture_filter="tcp port 443", duration_seconds=120)
     argv = build_tcpdump_argv(spec, "/data/pcaps/abc.pcap")
     assert isinstance(argv, list)
     assert argv[0] == "tcpdump"

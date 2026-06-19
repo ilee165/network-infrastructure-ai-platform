@@ -940,11 +940,7 @@ def _session_facts_block(session: dict[str, Any], change_requests: list[dict[str
     lines = [
         "Session:",
         json.dumps(
-            {
-                k: v
-                for k, v in session.items()
-                if k not in ("timeline", "evidence_refs")
-            },
+            {k: v for k, v in session.items() if k not in ("timeline", "evidence_refs")},
             sort_keys=True,
         ),
         "Timeline:",
@@ -989,9 +985,7 @@ def _redact_change_requests(change_requests: list[dict[str, Any]]) -> list[dict[
             return {k: _redact_value(val) for k, val in v.items()}
         return v
 
-    return [
-        {k: _redact_value(val) for k, val in cr.items()} for cr in change_requests
-    ]
+    return [{k: _redact_value(val) for k, val in cr.items()} for cr in change_requests]
 
 
 async def render_incident_report(

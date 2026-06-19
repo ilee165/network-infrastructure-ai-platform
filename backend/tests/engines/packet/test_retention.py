@@ -159,9 +159,7 @@ async def test_tombstone_preserves_row_and_path(session: AsyncSession) -> None:
     assert row is not None
 
     reloaded = (
-        await session.execute(
-            select(PcapMetadata).where(PcapMetadata.capture_id == capture_id)
-        )
+        await session.execute(select(PcapMetadata).where(PcapMetadata.capture_id == capture_id))
     ).scalar_one()
     # The row survives (audit fact); only the file is removed elsewhere.
     assert reloaded.tombstoned_at == purged_at

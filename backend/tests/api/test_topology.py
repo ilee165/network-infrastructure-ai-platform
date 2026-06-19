@@ -77,9 +77,7 @@ class _FakeTx:
             if (
                 site is not None
                 and rec["rel_type"] not in _DNS_REL_TYPES
-                and not (
-                    rec["a_props"].get("site") == site or rec["b_props"].get("site") == site
-                )
+                and not (rec["a_props"].get("site") == site or rec["b_props"].get("site") == site)
             ):
                 continue
             if (

@@ -156,9 +156,7 @@ class TestCaseGeneration:
         # FIREWALL_POLICY has no typed interface in plugins/base.py yet (it lands
         # with its milestone); the suite checks the implementation class only.
         class _FirewallPolicy(PluginCapability):
-            capabilities: ClassVar[frozenset[Capability]] = frozenset(
-                {Capability.FIREWALL_POLICY}
-            )
+            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.FIREWALL_POLICY})
 
         plugin = _plugin(
             frozenset({Capability.FIREWALL_POLICY}),

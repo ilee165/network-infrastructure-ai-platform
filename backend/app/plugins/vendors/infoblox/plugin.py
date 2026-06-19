@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from ipaddress import ip_address, ip_network
 from typing import Any, ClassVar
 from uuid import UUID
 
@@ -107,9 +108,7 @@ class _InfobloxCapability(PluginCapability):
         self._client = client
         self._device_id = device_id
 
-    def _read(
-        self, objtype: str, params: Mapping[str, str] | None = None
-    ) -> list[dict[str, Any]]:
+    def _read(self, objtype: str, params: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
         objects = self._client.get(objtype, params)
         self._record_raw(f"GET {objtype}", join_raw(objtype, objects))
         return objects
@@ -315,8 +314,8 @@ class InfobloxDdiDhcp(_InfobloxCapability, DdiDhcpCapability):
             ranges.append(
                 NormalizedDhcpRange(
                     **provenance,
-                    start_address=str(start),
-                    end_address=str(end),
+                    start_address=ip_address(str(start)),
+                    end_address=ip_address(str(end)),
                     network=obj.get("network"),
                     name=obj.get("name") or obj.get("comment"),
                     member=_member_name(obj.get("member")),
@@ -336,7 +335,7 @@ class InfobloxDdiDhcp(_InfobloxCapability, DdiDhcpCapability):
             leases.append(
                 NormalizedDhcpLease(
                     **provenance,
-                    ip_address=str(address),
+                    ip_address=ip_address(str(address)),
                     state=_LEASE_STATE_MAP.get(binding, DhcpLeaseState.OTHER),
                     mac_address=obj.get("hardware") or None,
                     hostname=obj.get("client_hostname") or None,
@@ -381,9 +380,7 @@ class InfobloxDdiDhcp(_InfobloxCapability, DdiDhcpCapability):
                 summary=f"re-create the deleted DHCP range "
                 f"{current.start_address}-{current.end_address}",
             )
-            summary = (
-                f"delete DHCP range {current.start_address}-{current.end_address}"
-            )
+            summary = f"delete DHCP range {current.start_address}-{current.end_address}"
         else:
             inverse = None
             summary = (
@@ -412,7 +409,7 @@ class InfobloxDdiIpam(_InfobloxCapability, DdiIpamCapability):
             networks.append(
                 NormalizedNetwork(
                     **provenance,
-                    network=str(cidr),
+                    network=ip_network(str(cidr), strict=False),
                     comment=obj.get("comment"),
                     network_view=obj.get("network_view"),
                     utilization_percent=_utilization(obj.get("utilization")),
@@ -434,9 +431,7 @@ class InfobloxDdiIpam(_InfobloxCapability, DdiIpamCapability):
         result = self._client.get_function(ref, "next_available_ip", {"num": 1})
         ips = result.get("ips")
         if not isinstance(ips, list) or not ips:
-            raise PluginError(
-                f"infoblox: next_available_ip returned no address for {network!r}"
-            )
+            raise PluginError(f"infoblox: next_available_ip returned no address for {network!r}")
         return str(ips[0])
 
     def add_network(self, network: NormalizedNetwork) -> ChangeRequestDraft:

@@ -256,9 +256,7 @@ class TestChangeRequestAuthz:
     async def test_get_unknown_cr_is_404(
         self, client: httpx.AsyncClient, auth: Callable[[str], dict[str, str]]
     ) -> None:
-        resp = await client.get(
-            f"/api/v1/agents/changes/{uuid.uuid4()}", headers=auth("engineer")
-        )
+        resp = await client.get(f"/api/v1/agents/changes/{uuid.uuid4()}", headers=auth("engineer"))
         assert resp.status_code == 404
 
 
@@ -436,9 +434,7 @@ class TestCaptureStatus:
     async def test_status_unknown_is_404(
         self, client: httpx.AsyncClient, auth: Callable[[str], dict[str, str]]
     ) -> None:
-        resp = await client.get(
-            f"/api/v1/agents/captures/{uuid.uuid4()}", headers=auth("engineer")
-        )
+        resp = await client.get(f"/api/v1/agents/captures/{uuid.uuid4()}", headers=auth("engineer"))
         assert resp.status_code == 404
 
     async def test_status_returns_metadata(
@@ -464,9 +460,7 @@ class TestCaptureStatus:
                 )
             )
             await session.commit()
-        resp = await client.get(
-            f"/api/v1/agents/captures/{capture_id}", headers=auth("engineer")
-        )
+        resp = await client.get(f"/api/v1/agents/captures/{capture_id}", headers=auth("engineer"))
         assert resp.status_code == 200
         body = resp.json()
         assert body["capture_id"] == str(capture_id)
@@ -479,9 +473,7 @@ class TestCaptureStatus:
         client: httpx.AsyncClient,
         auth: Callable[[str], dict[str, str]],
     ) -> None:
-        resp = await client.get(
-            f"/api/v1/agents/captures/{uuid.uuid4()}", headers=auth("viewer")
-        )
+        resp = await client.get(f"/api/v1/agents/captures/{uuid.uuid4()}", headers=auth("viewer"))
         assert resp.status_code == 403
 
 

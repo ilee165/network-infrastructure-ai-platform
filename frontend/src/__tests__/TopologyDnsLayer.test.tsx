@@ -117,7 +117,7 @@ describe("TopologyPage — DNS layer toggle", () => {
     fireEvent.click(screen.getByTestId("topology-layer-dns"));
 
     await waitFor(() => {
-      const urls = fetchMock.mock.calls.map((args) => String(args[0]));
+      const urls = fetchMock.mock.calls.map((args) => String((args as unknown[])[0]));
       const dnsCall = urls.find((u) => u.includes("layer=dns"));
       expect(dnsCall).toBeDefined();
     });
@@ -150,14 +150,14 @@ describe("TopologyPage — DNS layer toggle", () => {
     // Switch to dns
     fireEvent.click(screen.getByTestId("topology-layer-dns"));
     await waitFor(() => {
-      const urls = fetchMock.mock.calls.map((args) => String(args[0]));
+      const urls = fetchMock.mock.calls.map((args) => String((args as unknown[])[0]));
       expect(urls.some((u) => u.includes("layer=dns"))).toBe(true);
     });
 
     // Switch back to all
     fireEvent.click(screen.getByTestId("topology-layer-all"));
     await waitFor(() => {
-      const urls = fetchMock.mock.calls.map((args) => String(args[0]));
+      const urls = fetchMock.mock.calls.map((args) => String((args as unknown[])[0]));
       // The latest call should be layer=all (or no layer param, depending on
       // the implementation — check the param is absent or equal to "all")
       const lastUrl = urls[urls.length - 1] ?? "";

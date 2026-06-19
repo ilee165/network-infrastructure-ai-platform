@@ -291,9 +291,7 @@ async def scope_utilization(
     from ipaddress import ip_address
 
     active_ips = [
-        str(lease.get("ip_address"))
-        for lease in leases
-        if str(lease.get("state")) == "active"
+        str(lease.get("ip_address")) for lease in leases if str(lease.get("state")) == "active"
     ]
 
     scopes: list[dict[str, Any]] = []
@@ -322,9 +320,7 @@ async def scope_utilization(
         # When pool_size is None the range addresses are unparsable; in_pool
         # stays 0.  Attributing len(active_ips) here would inflate every
         # bad-IP range in a multi-range scenario with the same global count.
-        utilization = (
-            round(100.0 * in_pool / pool_size, 2) if pool_size else None
-        )
+        utilization = round(100.0 * in_pool / pool_size, 2) if pool_size else None
         scopes.append(
             {
                 "start_address": start,
@@ -343,9 +339,7 @@ async def scope_utilization(
         }
         for net in networks
     ]
-    return json.dumps(
-        {"device_id": device_id, "scopes": scopes, "networks": network_views}
-    )
+    return json.dumps({"device_id": device_id, "scopes": scopes, "networks": network_views})
 
 
 @netops_tool(classification=ToolClassification.READ_ONLY)
@@ -418,9 +412,7 @@ async def check_dhcp_conflicts(
             macs_by_ip.setdefault(ip, set()).add(str(mac))
 
     conflicts = [
-        {"ip_address": ip, "macs": sorted(macs)}
-        for ip, macs in macs_by_ip.items()
-        if len(macs) > 1
+        {"ip_address": ip, "macs": sorted(macs)} for ip, macs in macs_by_ip.items() if len(macs) > 1
     ]
     return json.dumps(
         {

@@ -219,8 +219,7 @@ def _evidence_from_findings(findings: PacketFindings) -> list[EvidenceRef]:
                 kind="top_talker",
                 reference=f"talker:{talker.src}->{talker.dst}",
                 description=(
-                    f"{talker.src} -> {talker.dst}: {talker.packets} packets, "
-                    f"{talker.bytes} bytes"
+                    f"{talker.src} -> {talker.dst}: {talker.packets} packets, {talker.bytes} bytes"
                 ),
             )
         )
@@ -257,14 +256,11 @@ def _compose_summary(findings: PacketFindings) -> str:
     parts = [f"Capture of {findings.packet_count} packets."]
     if findings.top_talkers:
         top = findings.top_talkers[0]
-        parts.append(
-            f"Busiest talker {top.src} -> {top.dst} ({top.packets} packets)."
-        )
+        parts.append(f"Busiest talker {top.src} -> {top.dst} ({top.packets} packets).")
     if findings.protocol_hierarchy:
         dominant = findings.protocol_hierarchy[0]
         parts.append(f"Dominant protocol {dominant.protocol} ({dominant.packets} packets).")
     parts.append(
-        f"{findings.tcp_resets} TCP reset(s), "
-        f"{findings.tcp_retransmissions} retransmission(s)."
+        f"{findings.tcp_resets} TCP reset(s), {findings.tcp_retransmissions} retransmission(s)."
     )
     return " ".join(parts)

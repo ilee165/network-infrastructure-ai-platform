@@ -315,8 +315,8 @@ def capture_segment(
     is generated.
     """
     settings = _settings()
-    capture_id = uuid.UUID(capture_id) if capture_id else uuid.uuid4()
-    storage_path = pcap_path_for(capture_id, pcap_dir=settings.pcap_dir)
+    cid: uuid.UUID = uuid.UUID(capture_id) if capture_id else uuid.uuid4()
+    storage_path = pcap_path_for(cid, pcap_dir=settings.pcap_dir)
     started_at = utcnow()
     try:
         spec = CaptureSpec.create(
@@ -331,17 +331,15 @@ def capture_segment(
         sha256 = sha256_file(storage_path)
     except Exception as exc:  # noqa: BLE001 — capture/validation failure is audited, not raised
         error = f"{type(exc).__name__}: {exc}"
-        logger.warning("packet.segment_capture_failed", capture_id=str(capture_id), error=error)
+        logger.warning("packet.segment_capture_failed", capture_id=str(cid), error=error)
         asyncio.run(
-            _audit_failure(
-                capture_id=capture_id, error=error, action=_CAPTURE_FAILED, device_id=None
-            )
+            _audit_failure(capture_id=cid, error=error, action=_CAPTURE_FAILED, device_id=None)
         )
-        return {"ok": False, "capture_id": str(capture_id), "error": error}
+        return {"ok": False, "capture_id": str(cid), "error": error}
 
     asyncio.run(
         _persist_capture(
-            capture_id=capture_id,
+            capture_id=cid,
             requester_id=uuid.UUID(requester_id),
             interface=spec.interface,
             storage_path=storage_path,
@@ -355,10 +353,10 @@ def capture_segment(
             retention_days=settings.pcap_retention_days,
         )
     )
-    logger.info("packet.segment_captured", capture_id=str(capture_id), byte_count=byte_count)
+    logger.info("packet.segment_captured", capture_id=str(cid), byte_count=byte_count)
     return {
         "ok": True,
-        "capture_id": str(capture_id),
+        "capture_id": str(cid),
         "storage_path": storage_path,
         "sha256": sha256,
         "byte_count": byte_count,
@@ -393,9 +391,9 @@ def capture_device(
     when omitted a fresh id is generated.
     """
     settings = _settings()
-    capture_id = uuid.UUID(capture_id) if capture_id else uuid.uuid4()
+    cid: uuid.UUID = uuid.UUID(capture_id) if capture_id else uuid.uuid4()
     device_uuid = uuid.UUID(device_id)
-    storage_path = pcap_path_for(capture_id, pcap_dir=settings.pcap_dir)
+    storage_path = pcap_path_for(cid, pcap_dir=settings.pcap_dir)
     started_at = utcnow()
     try:
         spec = CaptureSpec.create(
@@ -404,28 +402,26 @@ def capture_device(
             duration_seconds=duration_seconds or settings.packet_capture_duration_seconds,
             size_bytes=size_bytes or settings.packet_capture_size_bytes,
         )
-        remote_path = f"flash:netops-{capture_id}.pcap"
+        remote_path = f"flash:netops-{cid}.pcap"
         _drive_eos_capture(device_uuid, spec, remote_path, storage_path)
         byte_count = os.path.getsize(storage_path)
         sha256 = sha256_file(storage_path)
     except Exception as exc:  # noqa: BLE001 — failure is audited, not raised
         error = f"{type(exc).__name__}: {exc}"
-        logger.warning(
-            "packet.device_capture_failed", capture_id=str(capture_id), error=error
-        )
+        logger.warning("packet.device_capture_failed", capture_id=str(cid), error=error)
         asyncio.run(
             _audit_failure(
-                capture_id=capture_id,
+                capture_id=cid,
                 error=error,
                 action=_CAPTURE_FAILED,
                 device_id=device_uuid,
             )
         )
-        return {"ok": False, "capture_id": str(capture_id), "error": error}
+        return {"ok": False, "capture_id": str(cid), "error": error}
 
     asyncio.run(
         _persist_capture(
-            capture_id=capture_id,
+            capture_id=cid,
             requester_id=uuid.UUID(requester_id),
             interface=spec.interface,
             storage_path=storage_path,
@@ -439,10 +435,10 @@ def capture_device(
             retention_days=settings.pcap_retention_days,
         )
     )
-    logger.info("packet.device_captured", capture_id=str(capture_id), byte_count=byte_count)
+    logger.info("packet.device_captured", capture_id=str(cid), byte_count=byte_count)
     return {
         "ok": True,
-        "capture_id": str(capture_id),
+        "capture_id": str(cid),
         "storage_path": storage_path,
         "sha256": sha256,
         "byte_count": byte_count,
@@ -536,9 +532,7 @@ def analyze_capture(capture_id: str, display_filter: str | None = None) -> dict[
     cap_uuid = uuid.UUID(capture_id)
     storage_path = pcap_path_for(cap_uuid, pcap_dir=settings.pcap_dir)
     try:
-        findings = _analyze_pcap(
-            storage_path, display_filter=display_filter, settings=settings
-        )
+        findings = _analyze_pcap(storage_path, display_filter=display_filter, settings=settings)
     except Exception as exc:  # noqa: BLE001 — sandbox/validation failure is audited, not raised
         error = f"{type(exc).__name__}: {exc}"
         logger.warning("packet.analysis_failed", capture_id=capture_id, error=error)
@@ -567,9 +561,7 @@ async def _purge_one(capture_id: UUID) -> bool:
     """Delete the file and tombstone the row for one expired capture (audited)."""
     async with _session() as session:
         row = (
-            await session.execute(
-                select(PcapMetadata).where(PcapMetadata.capture_id == capture_id)
-            )
+            await session.execute(select(PcapMetadata).where(PcapMetadata.capture_id == capture_id))
         ).scalar_one_or_none()
         if row is None:
             return False

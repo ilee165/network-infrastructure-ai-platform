@@ -316,14 +316,14 @@ def _edge_groups(
     # Unreconciled records (target_label is None) carry no edge: a RESOLVES_TO
     # endpoint must be a real projected node (no-phantom-nodes invariant).
     resolves_groups: dict[str, list[dict[str, Any]]] = {}
-    for edge in dns.resolves_to:
-        if edge.target_label is None or edge.target_key is None:
+    for rte in dns.resolves_to:
+        if rte.target_label is None or rte.target_key is None:
             continue
-        resolves_groups.setdefault(edge.target_label, []).append(
+        resolves_groups.setdefault(rte.target_label, []).append(
             {
-                "a_key": edge.record_key,
-                "b_key": edge.target_key,
-                "props": {"value": edge.value, "last_projected_at": projected_at},
+                "a_key": rte.record_key,
+                "b_key": rte.target_key,
+                "props": {"value": rte.value, "last_projected_at": projected_at},
             }
         )
     for target_label, rows in sorted(resolves_groups.items()):

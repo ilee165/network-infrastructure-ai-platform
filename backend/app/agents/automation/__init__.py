@@ -32,7 +32,7 @@ registry: AgentRegistry = AgentRegistry()
 #: and executor ports are wired by the composition root before :meth:`execute` is
 #: called (Wave 5); the singleton exists so the registry/supervisor can compose
 #: against the declaration (name/description/tools), which needs no live wiring.
-automation_agent: AutomationAgent = AutomationAgent(change_request_service=None)  # type: ignore[arg-type]
+automation_agent: AutomationAgent = AutomationAgent(change_request_service=None)
 registry.register(automation_agent)
 
 __all__ = ["AutomationAgent", "automation_agent", "registry"]

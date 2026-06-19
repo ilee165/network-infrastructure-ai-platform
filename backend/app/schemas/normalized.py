@@ -426,6 +426,5 @@ class NormalizedDiscoveredObject(NormalizedRecord):
     attributes: tuple[tuple[str, str], ...] = ()
     object_ref: str | None = Field(
         default=None,
-        description="Opaque DDI handle (Infoblox WAPI _ref) for the source object. "
-        "Never a secret.",
+        description="Opaque DDI handle (Infoblox WAPI _ref) for the source object. Never a secret.",
     )

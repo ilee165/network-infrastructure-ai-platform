@@ -59,9 +59,7 @@ __all__ = [
 
 #: Record types whose value is an IP literal eligible for IPAddress/Device
 #: reconciliation.  Everything else (CNAME/MX/TXT/...) keeps a literal target.
-_ADDRESS_RECORD_TYPES: frozenset[DnsRecordType] = frozenset(
-    {DnsRecordType.A, DnsRecordType.AAAA}
-)
+_ADDRESS_RECORD_TYPES: frozenset[DnsRecordType] = frozenset({DnsRecordType.A, DnsRecordType.AAAA})
 
 
 def dns_record_key(name: str, record_type: DnsRecordType, value: str) -> str:
@@ -242,17 +240,13 @@ def derive_dns(
                 ttl=rec.ttl,
             ),
         )
-    record_nodes = tuple(
-        sorted(record_by_key.values(), key=lambda node: node.record_key)
-    )
+    record_nodes = tuple(sorted(record_by_key.values(), key=lambda node: node.record_key))
 
     # Zones come from the explicit list AND from every record's zone field, so a
     # record's IN_ZONE edge always lands on a projected DnsZone node.
     zone_fqdns: set[str] = {z.strip() for z in zones if z and z.strip()}
     zone_fqdns |= {
-        node.zone.strip()
-        for node in record_nodes
-        if node.zone is not None and node.zone.strip()
+        node.zone.strip() for node in record_nodes if node.zone is not None and node.zone.strip()
     }
     zone_nodes = tuple(DnsZoneNode(fqdn=fqdn) for fqdn in sorted(zone_fqdns))
 

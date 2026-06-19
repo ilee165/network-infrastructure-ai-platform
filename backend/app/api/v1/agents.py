@@ -809,9 +809,7 @@ async def launch_capture(
 async def _get_capture_or_404(session: AsyncSession, capture_id: uuid.UUID) -> PcapMetadata:
     """Reload one capture's metadata row or raise :class:`NotFoundError`."""
     row = (
-        await session.execute(
-            select(PcapMetadata).where(PcapMetadata.capture_id == capture_id)
-        )
+        await session.execute(select(PcapMetadata).where(PcapMetadata.capture_id == capture_id))
     ).scalar_one_or_none()
     if row is None:
         raise NotFoundError(f"capture {capture_id} does not exist")

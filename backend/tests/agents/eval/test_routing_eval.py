@@ -175,12 +175,27 @@ _CASES = [
         "Change request CR-1009 has been approved — go ahead and run it.",
         "automation",
     ),
+    # Held-out CONSULTANT — ambiguous / multi-intent requests where the correct
+    # action is to escalate for clarification rather than to act unilaterally.
+    # Worded to be genuinely ambiguous across multiple specialists so a capable
+    # model escalates instead of guessing. These are HELD OUT: none of these
+    # phrasings appear in the v5 routing prompt few-shot examples.
+    (
+        "Can you help with the network issues we've been seeing"
+        " and maybe sort out the DNS at the same time?",
+        "consultant",
+    ),
+    (
+        "Something is wrong — devices are unreachable, configs look off,"
+        " and I think we need new DNS records too. Where do we start?",
+        "consultant",
+    ),
 ]
 
-#: The seven non-consultant specialists the supervisor routes over in M5 (every
-#: routable agent in the production registry except the supervisor and the
-#: consultant escalation target). Each expected label below must be one of these
-#: — a guard so a typo in a case can never silently pass.
+#: The eight specialists the supervisor routes over in M5 (every routable agent
+#: in the production registry except the supervisor itself). Each expected label
+#: below must be one of these — a guard so a typo in a case can never silently
+#: pass.
 _ROUTABLE_SPECIALISTS = {
     "troubleshooting",
     "discovery",
@@ -189,6 +204,7 @@ _ROUTABLE_SPECIALISTS = {
     "ddi",
     "packet_analysis",
     "automation",
+    "consultant",
 }
 
 
@@ -214,7 +230,7 @@ def test_roster_exposes_the_full_eight_way_set() -> None:
     """
     registry = build_default_registry()
     routable = {agent.name for agent in registry.list() if agent.name != SUPERVISOR_NAME}
-    assert _ROUTABLE_SPECIALISTS.union({"consultant"}) <= routable, (
+    assert routable >= _ROUTABLE_SPECIALISTS, (
         f"roster {routable} is missing one of the M5 specialists"
     )
     expected_labels = {expected for _, expected in _CASES}

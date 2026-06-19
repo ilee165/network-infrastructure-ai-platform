@@ -71,9 +71,7 @@ class WapiClient:
         self._auth = httpx.BasicAuth(credentials.username, credentials.password)
         self._client = client or httpx.Client(verify=verify, timeout=timeout)
 
-    def get(
-        self, objtype: str, params: Mapping[str, str] | None = None
-    ) -> list[dict[str, Any]]:
+    def get(self, objtype: str, params: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
         """GET ``/wapi/vX/<objtype>`` and return the decoded JSON list verbatim.
 
         WAPI returns a JSON array of objects (each with an ``_ref`` handle). On a
@@ -89,16 +87,13 @@ class WapiClient:
             payload = response.json()
         except httpx.HTTPStatusError as exc:
             raise PluginError(
-                f"infoblox: WAPI GET {objtype!r} failed with status "
-                f"{exc.response.status_code}"
+                f"infoblox: WAPI GET {objtype!r} failed with status {exc.response.status_code}"
             ) from None
         except httpx.HTTPError:
             # Deliberately drop the original exception detail: an httpx error repr
             # can contain the request URL (which, for some auth schemes, carries
             # credentials). Re-raise with a sanitized message.
-            raise PluginError(
-                f"infoblox: WAPI GET {objtype!r} failed (transport error)"
-            ) from None
+            raise PluginError(f"infoblox: WAPI GET {objtype!r} failed (transport error)") from None
 
         if not isinstance(payload, list):
             raise PluginError(
