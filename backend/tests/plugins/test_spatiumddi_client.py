@@ -25,7 +25,7 @@ from app.plugins.vendors.spatiumddi.client import SpatiumClient, SpatiumCredenti
 #: A clearly-fake bearer token — never a real secret. A distinctive sentinel so
 #: a leak assertion cannot collide with any path segment or host in the mocks.
 _FAKE_TOKEN = "sddi_FAKE-token-zzz"  # noqa: S105 — obviously-fake test sentinel
-_FAKE_CREDS = SpatiumCredentials(token=_FAKE_TOKEN)
+_FAKE_CREDS = SpatiumCredentials(appliance_id="test-appliance", token=_FAKE_TOKEN)
 
 _GROUP = "11111111-1111-1111-1111-111111111111"
 _ZONE = "22222222-2222-2222-2222-222222222222"
@@ -34,6 +34,9 @@ _SCOPE = "44444444-4444-4444-4444-444444444444"
 _POOL = "55555555-5555-5555-5555-555555555555"
 _SERVER = "66666666-6666-6666-6666-666666666666"
 _SUBNET = "77777777-7777-7777-7777-777777777777"
+_DHCP_GROUP = "88888888-8888-8888-8888-888888888888"
+_SPACE = "99999999-9999-9999-9999-999999999999"
+_BLOCK = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
 def _client(
@@ -291,6 +294,125 @@ class TestErrorSanitization:
         client = _client(_record_handler(json_body={"not": "a list"}))
         with pytest.raises(PluginError, match="non-list"):
             await client.get_subnets()
+
+
+class TestDiscoveryApiEndpoints:
+    """DISCOVERY_API fan-out root endpoints (ADR-0024 §1).
+
+    Covers the five GET endpoints that :class:`SpatiumClient` must expose so the
+    capability layer can implement ``DISCOVERY_API.discover()``::
+
+        GET /ipam/spaces
+        GET /ipam/blocks
+        GET /ipam/subnets          (already tested in TestIpamEndpoints)
+        GET /dns/groups/{id}/zones (already tested in TestDnsEndpoints)
+        GET /dhcp/server-groups/{id}/scopes
+    """
+
+    # -- IPAM roots -----------------------------------------------------------
+
+    async def test_get_spaces_path_and_auth(self) -> None:
+        seen: list[httpx.Request] = []
+        client = _client(_record_handler(seen, json_body=[{"id": _SPACE, "name": "default"}]))
+        out = await client.get_spaces()
+        assert seen, "no request was issued"
+        assert seen[0].method == "GET"
+        assert seen[0].url.path == "/api/v1/ipam/spaces"
+        assert seen[0].headers["Authorization"] == f"Bearer {_FAKE_TOKEN}"
+        assert out == [{"id": _SPACE, "name": "default"}]
+
+    async def test_get_spaces_returns_raw_list(self) -> None:
+        body = [{"id": _SPACE, "name": "Corp"}, {"id": _BLOCK, "name": "DMZ"}]
+        client = _client(_record_handler(json_body=body))
+        assert await client.get_spaces() == body
+
+    async def test_get_blocks_path_and_auth(self) -> None:
+        seen: list[httpx.Request] = []
+        client = _client(_record_handler(seen, json_body=[{"id": _BLOCK, "network": "10.0.0.0/8"}]))
+        out = await client.get_blocks()
+        assert seen, "no request was issued"
+        assert seen[0].method == "GET"
+        assert seen[0].url.path == "/api/v1/ipam/blocks"
+        assert seen[0].headers["Authorization"] == f"Bearer {_FAKE_TOKEN}"
+        assert out == [{"id": _BLOCK, "network": "10.0.0.0/8"}]
+
+    async def test_get_blocks_returns_raw_list(self) -> None:
+        body = [{"id": _BLOCK, "network": "192.168.0.0/16"}]
+        client = _client(_record_handler(json_body=body))
+        assert await client.get_blocks() == body
+
+    # -- DNS root -------------------------------------------------------------
+
+    async def test_get_dns_groups_path_and_auth(self) -> None:
+        seen: list[httpx.Request] = []
+        body = [{"id": _GROUP, "name": "primary"}]
+        client = _client(_record_handler(seen, json_body=body))
+        out = await client.get_dns_groups()
+        assert seen, "no request was issued"
+        assert seen[0].method == "GET"
+        assert seen[0].url.path == "/api/v1/dns/groups"
+        assert seen[0].headers["Authorization"] == f"Bearer {_FAKE_TOKEN}"
+        assert out == body
+
+    async def test_get_dns_groups_returns_raw_list(self) -> None:
+        body = [{"id": _GROUP, "name": "corp-dns"}]
+        client = _client(_record_handler(json_body=body))
+        assert await client.get_dns_groups() == body
+
+    # -- DHCP root ------------------------------------------------------------
+
+    async def test_get_dhcp_scopes_path_and_auth(self) -> None:
+        seen: list[httpx.Request] = []
+        body = [{"id": _SCOPE, "name": "office"}]
+        client = _client(_record_handler(seen, json_body=body))
+        out = await client.get_dhcp_scopes(_DHCP_GROUP)
+        assert seen, "no request was issued"
+        assert seen[0].method == "GET"
+        assert seen[0].url.path == f"/api/v1/dhcp/server-groups/{_DHCP_GROUP}/scopes"
+        assert seen[0].headers["Authorization"] == f"Bearer {_FAKE_TOKEN}"
+        assert out == body
+
+    async def test_get_dhcp_scopes_returns_raw_list(self) -> None:
+        body = [{"id": _SCOPE, "name": "lab-scope"}]
+        client = _client(_record_handler(json_body=body))
+        assert await client.get_dhcp_scopes(_DHCP_GROUP) == body
+
+
+class TestCredentialsIdentity:
+    """SpatiumCredentials equality/hash use appliance_id, not the secret token."""
+
+    def test_same_appliance_same_token_equal(self) -> None:
+        a = SpatiumCredentials(appliance_id="appliance-1", token=_FAKE_TOKEN)
+        b = SpatiumCredentials(appliance_id="appliance-1", token=_FAKE_TOKEN)
+        assert a == b
+        assert hash(a) == hash(b)
+
+    def test_different_appliance_not_equal(self) -> None:
+        a = SpatiumCredentials(appliance_id="appliance-1", token=_FAKE_TOKEN)
+        b = SpatiumCredentials(appliance_id="appliance-2", token=_FAKE_TOKEN)
+        assert a != b
+
+    def test_different_appliance_different_hash(self) -> None:
+        a = SpatiumCredentials(appliance_id="appliance-1", token=_FAKE_TOKEN)
+        b = SpatiumCredentials(appliance_id="appliance-2", token=_FAKE_TOKEN)
+        # Different appliances must hash differently (collision theoretically
+        # possible but trivially avoided for these distinct strings).
+        assert hash(a) != hash(b)
+
+    def test_usable_as_dict_key(self) -> None:
+        a = SpatiumCredentials(appliance_id="appliance-1", token=_FAKE_TOKEN)
+        b = SpatiumCredentials(appliance_id="appliance-2", token=_FAKE_TOKEN)
+        d = {a: "first", b: "second"}
+        assert d[a] == "first"
+        assert d[b] == "second"
+
+    def test_token_not_in_repr(self) -> None:
+        creds = SpatiumCredentials(appliance_id="appliance-1", token=_FAKE_TOKEN)
+        assert _FAKE_TOKEN not in repr(creds)
+
+    def test_appliance_id_visible_in_repr(self) -> None:
+        creds = SpatiumCredentials(appliance_id="appliance-1", token=_FAKE_TOKEN)
+        assert "appliance-1" in repr(creds)
 
 
 class TestNoTokenLeak:
