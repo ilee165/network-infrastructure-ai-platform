@@ -65,7 +65,7 @@ const EMPTY_GRAPH: TopologyGraph = {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function makeFetch(body: unknown = GRAPH_WITH_DNS) {
-  return vi.fn((_url: string): Promise<Response> =>
+  return vi.fn((): Promise<Response> =>
     Promise.resolve(
       new Response(JSON.stringify(body), {
         status: 200,
