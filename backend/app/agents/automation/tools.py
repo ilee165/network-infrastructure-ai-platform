@@ -57,8 +57,8 @@ async def summarize_change_request(
 ) -> str:
     """Narrate an approved change request's intent with secrets redacted (read-only).
 
-    Returns a JSON object with the CR id, kind, the secret-free ``summary``, and
-    the **A9-redacted** ``content`` so the model can explain *what* the change does
+    Returns a JSON object with the CR id, kind, and the **A9-redacted** ``summary``
+    and ``content`` so the model can explain *what* the change does
     (which lines/fields it touches) without ever seeing a secret value (enable
     secrets, SNMP communities, keys). Read-only: this tool applies nothing — the
     deterministic executor performs the gated write.
@@ -67,7 +67,7 @@ async def summarize_change_request(
         {
             "change_request_id": change_request_id,
             "kind": kind,
-            "summary": summary,
+            "summary": redact_prompt(summary),
             "content": redact_prompt(content) if content else "",
         }
     )

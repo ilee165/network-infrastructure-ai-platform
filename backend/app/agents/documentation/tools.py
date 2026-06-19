@@ -35,12 +35,12 @@ import csv
 import io
 import json
 import logging
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from pydantic import Field
 
 from app.agents.framework.tools import ToolClassification, netops_tool
-from app.llm.redaction import redact_prompt
+from app.llm.redaction import redact_payload, redact_prompt
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -954,38 +954,22 @@ def _session_facts_block(session: dict[str, Any], change_requests: list[dict[str
 
 
 def _redact_session(session: dict[str, Any]) -> dict[str, Any]:
-    """Redact every string value in the session dict (A9 boundary)."""
+    """Redact every string value in the session dict (A9 boundary).
 
-    def _redact_value(v: Any) -> Any:
-        if isinstance(v, str):
-            return redact_prompt(v)
-        if isinstance(v, list):
-            return [_redact_value(i) for i in v]
-        if isinstance(v, dict):
-            return {k: _redact_value(val) for k, val in v.items()}
-        return v
-
-    return {k: _redact_value(v) for k, v in session.items()}
+    Delegates to :func:`~app.llm.redaction.redact_payload` — the single recursive
+    str/dict/list redaction walk — rather than a second local copy.
+    """
+    return cast("dict[str, Any]", redact_payload(session))
 
 
 def _redact_change_requests(change_requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Redact every string value in the change request list (A9 boundary).
 
-    Uses the same recursive ``_redact_value`` walk as :func:`_redact_session`
-    so that nested dict values (e.g. ``target_refs``) are fully redacted rather
-    than passed through by the flat :func:`_redact_rows` helper.
+    Uses :func:`~app.llm.redaction.redact_payload` so nested dict values (e.g.
+    ``target_refs``) are fully redacted rather than passed through by the flat
+    :func:`_redact_rows` helper.
     """
-
-    def _redact_value(v: Any) -> Any:
-        if isinstance(v, str):
-            return redact_prompt(v)
-        if isinstance(v, list):
-            return [_redact_value(i) for i in v]
-        if isinstance(v, dict):
-            return {k: _redact_value(val) for k, val in v.items()}
-        return v
-
-    return [{k: _redact_value(val) for k, val in cr.items()} for cr in change_requests]
+    return cast("list[dict[str, Any]]", redact_payload(change_requests))
 
 
 async def render_incident_report(
