@@ -27,6 +27,8 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/config", label: "Config", abbr: "CF" },
   { to: "/documents", label: "Documents", abbr: "DC" },
   { to: "/topology", label: "Topology", abbr: "TP" },
+  { to: "/packet", label: "Packet", abbr: "PK", engineerOnly: true },
+  { to: "/incidents", label: "Incidents", abbr: "IR" },
   { to: "/chat", label: "Chat", abbr: "CH" },
   { to: "/changes", label: "Changes", abbr: "CR", engineerOnly: true },
   { to: "/audit", label: "Audit", abbr: "AU" },

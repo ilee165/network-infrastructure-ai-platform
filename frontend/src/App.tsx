@@ -30,7 +30,9 @@ import { ConfigPage } from "./pages/ConfigPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DocumentsPage } from "./pages/DocumentsPage";
 import { DevicesPage } from "./pages/DevicesPage";
+import { IncidentReportsPage } from "./pages/IncidentReportsPage";
 import { LoginPage } from "./pages/LoginPage";
+import { PacketPage } from "./pages/PacketPage";
 import { ProfilePage } from "./pages/ProfilePage";
 import { SettingsLlmSection, SettingsPage } from "./pages/SettingsPage";
 import { TopologyPage } from "./pages/TopologyPage";
@@ -52,7 +54,13 @@ export function App() {
           <Route path="config" element={<ConfigPage />} />
           <Route path="documents" element={<DocumentsPage />} />
           <Route path="topology" element={<TopologyPage />} />
+          <Route path="incidents" element={<IncidentReportsPage />} />
           <Route path="chat" element={<ChatPage />} />
+
+          {/* /packet: engineer+ (capture launch requires engineer+ RBAC) */}
+          <Route element={<RoleRoute minimum="engineer" />}>
+            <Route path="packet" element={<PacketPage />} />
+          </Route>
 
           {/* /changes: the ChangeRequest approval queue is an engineer+
               capability (operator/viewer are not on the change surface;

@@ -50,6 +50,7 @@ const LAYERS: { value: Layer; label: string; title: string }[] = [
   { value: "all", label: "All", title: "All relationship types" },
   { value: "l2", label: "L2", title: "LLDP/CDP neighbor links only" },
   { value: "l3", label: "L3", title: "Subnet adjacency and routing links only" },
+  { value: "dns", label: "DNS", title: "DNS zone/record dependency layer (DnsZone, DnsRecord, RESOLVES_TO)" },
 ];
 
 // ── Stylesheet ──────────────────────────────────────────────────────────────
