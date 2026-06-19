@@ -1,0 +1,2 @@
+# Lab-only secrets — never commit a real SpatiumDDI lab .env (admin/db passwords).
+.env
