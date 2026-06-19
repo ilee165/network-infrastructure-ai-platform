@@ -61,7 +61,7 @@ from app.models import (
     User,
 )
 from app.models import Role as RoleRow
-from app.plugins.base import ChangeOutcome, ChangePlan, ChangeRequestDraft, ChangeResult, WapiVerb
+from app.plugins.base import ChangeOutcome, ChangePlan, ChangeRequestDraft, ChangeResult, ChangeVerb
 from app.services.audit import service as audit_service
 from app.services.change_requests import ChangeRequestService
 
@@ -249,12 +249,12 @@ async def _approved_ddi_cr(
     if payload is None:
         payload = {
             "verb": "create",
-            "wapi_object": "record:a",
+            "resource": "record:a",
             "body": [["name", "host.example.com"], ["ipv4addr", "10.0.0.5"]],
             "summary": "add A record host.example.com",
             "inverse": {
                 "verb": "delete",
-                "wapi_object": "record:a",
+                "resource": "record:a",
                 "object_ref": "record:a/ZG5z:host",
                 "summary": "delete A record host.example.com",
             },
@@ -447,12 +447,12 @@ class TestHappyPath:
             kind=ChangeRequestKind.DDI_RECORD,
             payload={
                 "verb": "create",
-                "wapi_object": "record:a",
+                "resource": "record:a",
                 "body": [["name", "host.example.com"], ["ipv4addr", "10.0.0.5"]],
                 "summary": "add A record host.example.com",
                 "inverse": {
                     "verb": "delete",
-                    "wapi_object": "record:a",
+                    "resource": "record:a",
                     "object_ref": "record:a/ZG5z:host",
                     "summary": "delete A record host.example.com",
                 },
@@ -463,7 +463,7 @@ class TestHappyPath:
         await service.approve(cr.id, actor_id=approver, actor_role=Role.ENGINEER)
 
         def _ddi_ok(cr: ChangeRequest, draft: ChangeRequestDraft) -> DdiChangeResult:
-            assert draft.verb is WapiVerb.CREATE
+            assert draft.verb is ChangeVerb.CREATE
             return DdiChangeResult(verified=True, object_ref="record:a/new", rolled_back=False)
 
         ddi_exec = _ScriptedDdiExecutor(_ddi_ok)
@@ -550,7 +550,7 @@ class TestFailurePath:
             # The inverse draft must coerce on the failure branch too (recursive
             # tuple coercion of ``inverse.body`` in _coerce_draft).
             assert draft.inverse is not None
-            assert draft.inverse.verb is WapiVerb.DELETE
+            assert draft.inverse.verb is ChangeVerb.DELETE
             return DdiChangeResult(
                 verified=False,
                 object_ref="record:a/ZG5z:host",
@@ -624,7 +624,7 @@ class TestFailurePath:
         cr = await _approved_ddi_cr(
             service,
             sessionmaker,
-            payload={"summary": "missing verb/wapi_object — not a draft"},
+            payload={"summary": "missing verb/resource — not a draft"},
         )
         ddi_exec = _ScriptedDdiExecutor(
             lambda cr, draft: DdiChangeResult(verified=True, object_ref="x")

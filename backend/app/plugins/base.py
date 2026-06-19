@@ -62,6 +62,7 @@ __all__ = [
     "ChangePlan",
     "ChangeRequestDraft",
     "ChangeResult",
+    "ChangeVerb",
     "CommandTransport",
     "ConfigBackupCapability",
     "ConfigDeployCapability",
@@ -85,7 +86,6 @@ __all__ = [
     "SnmpReadTransport",
     "TransportKind",
     "VendorPlugin",
-    "WapiVerb",
 ]
 
 _VENDOR_ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -540,12 +540,15 @@ class ConfigDeployCapability(PluginCapability):
 # ---------------------------------------------------------------------------
 
 
-class WapiVerb(StrEnum):
-    """The mutation verb a :class:`ChangeRequestDraft` would apply to a DDI object.
+class ChangeVerb(StrEnum):
+    """The mutation verb a :class:`ChangeRequestDraft` would apply to a DDI resource.
 
-    Maps onto the REST methods an Infoblox-style WAPI exposes (ADR-0022 §3):
-    ``create`` (POST a new object), ``update`` (PUT onto an existing ``_ref``),
-    ``delete`` (DELETE an existing ``_ref``).
+    Vendor-neutral (D-SP1): a transport-agnostic create/update/delete that any DDI
+    backend can map onto its native API — a WAPI POST/PUT/DELETE for Infoblox, a
+    REST resource create/update/delete for a SpatiumDDI-style appliance, etc. The
+    string values are stable so persisted draft payloads remain valid across the
+    rename (``create`` -> POST a new object, ``update`` -> mutate an existing
+    object_ref, ``delete`` -> remove an existing object_ref).
     """
 
     CREATE = "create"
@@ -558,29 +561,35 @@ class ChangeRequestDraft(BaseModel):
 
     A DDI capability's mutation method returns one of these instead of calling
     the appliance: it carries the target object handle (``object_ref`` — ``None``
-    for a create), the exact WAPI verb + object type + body to apply, and an
-    ``inverse`` draft that undoes the change (delete-the-added-record, or restore
+    for a create), the transport-agnostic verb + resource type + body to apply, and
+    an ``inverse`` draft that undoes the change (delete-the-added-record, or restore
     the prior object state). The DDI Agent hands the draft to the ChangeRequest
     service (ADR-0020); only the Automation Agent — for an ``approved`` CR — turns
     a draft into an actual write. Making mutations drafts means the capability
     layer *cannot* write, so there is no DDI write path that skips the CR spine
     (ADR-0022 §3 / alternative 2).
 
+    Vendor-neutral shape (D-SP1): ``resource`` names the target resource type as a
+    backend-defined string (Infoblox sets its WAPI object type, e.g. ``record:a``;
+    a REST appliance would set e.g. ``dns.record``). The draft carries no transport
+    or vendor coupling.
+
     The model is frozen and forbids extra fields. ``body`` carries DDI record
-    fields (names, IPs, TTLs) — never credentials; the WAPI auth secret lives
+    fields (names, IPs, TTLs) — never credentials; the backend auth secret lives
     only inside the transport, never in a draft.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    verb: WapiVerb = Field(description="The WAPI mutation to apply (create/update/delete).")
-    wapi_object: str = Field(
+    verb: ChangeVerb = Field(description="The mutation to apply (create/update/delete).")
+    resource: str = Field(
         min_length=1,
-        description="WAPI object type the verb targets (e.g. 'record:a', 'network').",
+        description="Backend resource type the verb targets (e.g. 'record:a', 'network', "
+        "'dns.record'). Vendor-neutral identifier, never a secret.",
     )
     object_ref: str | None = Field(
         default=None,
-        description="Opaque WAPI _ref of the existing target object; None for a create. "
+        description="Opaque identifier of the existing target object; None for a create. "
         "Never a secret.",
     )
     body: tuple[tuple[str, str], ...] = Field(

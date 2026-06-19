@@ -22,7 +22,7 @@ import httpx
 import pytest
 
 from app.core.errors import PluginError
-from app.plugins.base import ChangeRequestDraft, WapiVerb
+from app.plugins.base import ChangeRequestDraft, ChangeVerb
 from app.plugins.vendors.infoblox.plugin import (
     VENDOR_ID,
     InfobloxDdiDhcp,
@@ -149,11 +149,36 @@ class TestDdiDns:
         )
         draft = cap.add_record(record)
         assert isinstance(draft, ChangeRequestDraft)
-        assert draft.verb is WapiVerb.CREATE
-        assert draft.wapi_object == "record:a"
+        assert draft.verb is ChangeVerb.CREATE
+        assert draft.resource == "record:a"
         assert dict(draft.body) == {"name": "new.example.com", "ipv4addr": "10.0.0.50"}
-        assert draft.inverse is not None and draft.inverse.verb is WapiVerb.DELETE
+        assert draft.inverse is not None and draft.inverse.verb is ChangeVerb.DELETE
         assert seen == [], "a mutation must not touch the appliance"
+
+    def test_draft_uses_vendor_neutral_verb_and_resource(self) -> None:
+        # D-SP1: the draft is transport-agnostic — ``verb`` is the neutral
+        # ChangeVerb enum and ``resource`` carries the backend resource type
+        # string (Infoblox sets its WAPI object type). The inverse mirrors the
+        # neutral shape. Asserts the rename is behavior-preserving end to end.
+        cap = InfobloxDdiDns(_client(), uuid4())
+        record = NormalizedDnsRecord(
+            device_id=uuid4(),
+            collected_at=cap._now(),  # noqa: SLF001 — test helper reuse
+            source_vendor=VENDOR_ID,
+            name="new.example.com",
+            record_type=DnsRecordType.A,
+            value="10.0.0.50",
+        )
+        draft = cap.add_record(record)
+        assert isinstance(draft.verb, ChangeVerb)
+        assert draft.verb is ChangeVerb.CREATE
+        assert draft.resource == "record:a"
+        assert not hasattr(draft, "wapi_object")
+        # The neutral enum serializes to the stable string value (no payload break).
+        assert draft.verb.value == "create"
+        assert draft.inverse is not None
+        assert draft.inverse.verb is ChangeVerb.DELETE
+        assert draft.inverse.resource == "record:a"
 
     def test_get_zones_normalizes_fqdns(self) -> None:
         cap = InfobloxDdiDns(_client(), uuid4())
@@ -181,11 +206,11 @@ class TestDdiDns:
         )
         changes = current.model_copy(update={"value": "10.0.0.99"})
         draft = cap.modify_record(object_ref, changes, current=current)
-        assert draft.verb is WapiVerb.UPDATE
+        assert draft.verb is ChangeVerb.UPDATE
         assert dict(draft.body) == {"ipv4addr": "10.0.0.99"}
         # The inverse must carry the PRIOR value so an approved rollback restores it.
         assert draft.inverse is not None
-        assert draft.inverse.verb is WapiVerb.UPDATE
+        assert draft.inverse.verb is ChangeVerb.UPDATE
         assert draft.inverse.object_ref == object_ref
         assert dict(draft.inverse.body) == {"ipv4addr": "10.0.0.10"}
 
@@ -218,12 +243,12 @@ class TestDdiDns:
             object_ref=object_ref,
         )
         draft = cap.delete_record(object_ref, current=current)
-        assert draft.verb is WapiVerb.DELETE
+        assert draft.verb is ChangeVerb.DELETE
         assert draft.object_ref == object_ref
         # The inverse re-create carries the typed object + full body to recreate.
         assert draft.inverse is not None
-        assert draft.inverse.verb is WapiVerb.CREATE
-        assert draft.inverse.wapi_object == "record:a"
+        assert draft.inverse.verb is ChangeVerb.CREATE
+        assert draft.inverse.resource == "record:a"
         assert dict(draft.inverse.body) == {
             "name": "web.example.com",
             "ipv4addr": "10.0.0.10",
@@ -232,7 +257,7 @@ class TestDdiDns:
     def test_delete_record_without_pre_image_is_non_reversible(self) -> None:
         cap = InfobloxDdiDns(_client(), uuid4())
         draft = cap.delete_record("record:a/abc:web.example.com/default")
-        assert draft.verb is WapiVerb.DELETE
+        assert draft.verb is ChangeVerb.DELETE
         # No pre-image -> delete is non-reversible; no misleading re-create draft.
         assert draft.inverse is None
 
@@ -266,9 +291,9 @@ class TestDdiDhcp:
             end_address="10.0.0.220",
         )
         draft = cap.add_range(rng)
-        assert draft.verb is WapiVerb.CREATE
+        assert draft.verb is ChangeVerb.CREATE
         assert dict(draft.body) == {"start_addr": "10.0.0.210", "end_addr": "10.0.0.220"}
-        assert draft.inverse is not None and draft.inverse.verb is WapiVerb.DELETE
+        assert draft.inverse is not None and draft.inverse.verb is ChangeVerb.DELETE
 
     def test_delete_range_inverse_recreates_from_pre_image(self) -> None:
         cap = InfobloxDdiDhcp(_client(), uuid4())
@@ -282,10 +307,10 @@ class TestDdiDhcp:
             object_ref=object_ref,
         )
         draft = cap.delete_range(object_ref, current=current)
-        assert draft.verb is WapiVerb.DELETE
+        assert draft.verb is ChangeVerb.DELETE
         assert draft.inverse is not None
-        assert draft.inverse.verb is WapiVerb.CREATE
-        assert draft.inverse.wapi_object == "range"
+        assert draft.inverse.verb is ChangeVerb.CREATE
+        assert draft.inverse.resource == "range"
         assert dict(draft.inverse.body) == {
             "start_addr": "10.0.0.100",
             "end_addr": "10.0.0.200",
@@ -294,7 +319,7 @@ class TestDdiDhcp:
     def test_delete_range_without_pre_image_is_non_reversible(self) -> None:
         cap = InfobloxDdiDhcp(_client(), uuid4())
         draft = cap.delete_range("range/abc:10.0.0.100/10.0.0.200/default")
-        assert draft.verb is WapiVerb.DELETE
+        assert draft.verb is ChangeVerb.DELETE
         assert draft.inverse is None
 
 
@@ -317,9 +342,9 @@ class TestDdiIpam:
             comment="new alloc",
         )
         draft = cap.add_network(net)
-        assert draft.verb is WapiVerb.CREATE
+        assert draft.verb is ChangeVerb.CREATE
         assert dict(draft.body)["network"] == "172.16.0.0/24"
-        assert draft.inverse is not None and draft.inverse.verb is WapiVerb.DELETE
+        assert draft.inverse is not None and draft.inverse.verb is ChangeVerb.DELETE
 
     def test_delete_network_inverse_recreates_from_pre_image(self) -> None:
         cap = InfobloxDdiIpam(_client(), uuid4())
@@ -333,10 +358,10 @@ class TestDdiIpam:
             object_ref=object_ref,
         )
         draft = cap.delete_network(object_ref, current=current)
-        assert draft.verb is WapiVerb.DELETE
+        assert draft.verb is ChangeVerb.DELETE
         assert draft.inverse is not None
-        assert draft.inverse.verb is WapiVerb.CREATE
-        assert draft.inverse.wapi_object == "network"
+        assert draft.inverse.verb is ChangeVerb.CREATE
+        assert draft.inverse.resource == "network"
         assert dict(draft.inverse.body) == {
             "network": "10.0.0.0/24",
             "comment": "lab access subnet",
@@ -345,7 +370,7 @@ class TestDdiIpam:
     def test_delete_network_without_pre_image_is_non_reversible(self) -> None:
         cap = InfobloxDdiIpam(_client(), uuid4())
         draft = cap.delete_network("network/abc:10.0.0.0/24/default")
-        assert draft.verb is WapiVerb.DELETE
+        assert draft.verb is ChangeVerb.DELETE
         assert draft.inverse is None
 
     def test_get_next_available_ip_calls_function_on_resolved_ref(self) -> None:
