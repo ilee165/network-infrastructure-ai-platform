@@ -1,0 +1,2 @@
+# Generated dev TLS material — never commit key/cert bytes (secret by default).
+certs/

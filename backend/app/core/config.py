@@ -107,6 +107,16 @@ class Settings(BaseSettings):
     pcap_retention_hour: int = 3
     pcap_retention_minute: int = 0
 
+    #: Raw-artifact retention (M5 hardening, ADR-0023 §4 parity). ``raw_artifacts``
+    #: hold verbatim device CLI output captured during discovery — potentially
+    #: credential-bearing text (D11). A beat job hard-deletes rows older than this
+    #: window (the row *is* the sensitive payload, with no separate tombstone). A
+    #: value of ``0`` disables the purge (keep-forever policy). Default 90 days,
+    #: configurable per policy; fires daily at the UTC hour/minute below.
+    raw_artifact_retention_days: int = 90
+    raw_artifact_retention_hour: int = 4
+    raw_artifact_retention_minute: int = 0
+
     def llm_profile_for_role(self, role: str) -> str:
         """Resolve an LLM *role* (``reasoning``/``fast``) to a configured profile.
 

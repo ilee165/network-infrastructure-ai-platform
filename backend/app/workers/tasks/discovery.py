@@ -48,17 +48,18 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
 import structlog
 from celery import group
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app import db
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.crypto import KeyProvider, get_key_provider
 from app.core.errors import PluginError
 from app.engines.discovery import engine as discovery_engine
@@ -67,7 +68,7 @@ from app.engines.discovery.expansion import next_wave
 from app.engines.discovery.persistence import persist_device_result
 from app.engines.discovery.planner import DiscoveryPlan
 from app.models import Device, DiscoveryRun, DiscoveryRunStatus
-from app.models.inventory import CredentialKind, DeviceCredential
+from app.models.inventory import CredentialKind, DeviceCredential, RawArtifact
 from app.models.mixins import utcnow
 from app.plugins.base import (
     Capability,
@@ -90,15 +91,21 @@ from app.plugins.transport import (
     SshTransportError,
 )
 from app.schemas.normalized import NormalizedNeighbor
-from app.services import credentials
+from app.services import audit, credentials
 from app.workers.celery_app import celery_app
 
-__all__ = ["collect_device", "run_discovery"]
+__all__ = ["collect_device", "purge_expired_artifacts", "run_discovery"]
 
 logger = structlog.get_logger(__name__)
 
 #: Audit actor recorded for every credential decryption by these tasks.
 _ACTOR = "worker:discovery"
+
+#: Audit actor for the raw-artifact retention beat (parity with pcap retention).
+_RETENTION_ACTOR = "system:retention"
+
+#: Audit action for a raw-artifact retention sweep (one entry per run).
+_RAW_ARTIFACT_PURGED = "raw_artifact.purged"
 
 #: CLI capabilities collected once a vendor is detected, in order
 #: (facts first: the engine keeps the first successful facts).
@@ -126,6 +133,11 @@ _NETMIKO_DEVICE_TYPES: dict[str, str] = {
 def _make_engine() -> AsyncEngine:
     """New async engine for one task phase (loop-scoped, disposed after use)."""
     return db.create_engine(get_settings())
+
+
+def _settings() -> Settings:
+    """Process settings (seam: tests monkeypatch the returned instance)."""
+    return get_settings()
 
 
 def _registry() -> PluginRegistry:
@@ -650,3 +662,59 @@ def _trigger_topology_sync(run_id: str) -> None:
         logger.info("discovery.topology_sync_enqueued", run_id=run_id)
     except Exception:  # dispatch failures must not fail an already-finished run
         logger.warning("discovery.topology_sync_dispatch_failed", run_id=run_id)
+
+
+# ---------------------------------------------------------------------------
+# Task: discovery.purge_expired_artifacts (raw-artifact retention beat)
+# ---------------------------------------------------------------------------
+
+
+async def _purge_artifacts(cutoff: datetime) -> int:
+    """Hard-delete raw_artifacts created before *cutoff*, audited; return count.
+
+    ``raw_artifacts`` hold verbatim device CLI output — potentially
+    credential-bearing text (D11) — and, unlike a pcap (whose metadata row is the
+    surviving audit fact), the artifact row *is* the sensitive payload, so it is
+    removed outright. The retention sweep is summarized in one audit row: the
+    deleted count and the cutoff, never any captured device text.
+    """
+    async with _session() as session:
+        count = (
+            await session.execute(
+                select(func.count()).select_from(RawArtifact).where(RawArtifact.created_at < cutoff)
+            )
+        ).scalar_one()
+        if count:
+            await session.execute(delete(RawArtifact).where(RawArtifact.created_at < cutoff))
+        await audit.record(
+            session,
+            actor=_RETENTION_ACTOR,
+            action=_RAW_ARTIFACT_PURGED,
+            target_type="raw_artifacts",
+            target_id=None,
+            detail={"purged": int(count), "cutoff": cutoff.isoformat()},
+        )
+        await session.commit()
+    return int(count)
+
+
+@celery_app.task(name="discovery.purge_expired_artifacts")
+def purge_expired_artifacts() -> dict[str, Any]:
+    """Retention beat: hard-delete raw_artifacts past the retention window.
+
+    Computes ``cutoff = now - raw_artifact_retention_days``, deletes every
+    ``raw_artifacts`` row older than the cutoff, and records one audit entry for
+    the sweep (actor=system/retention, action=``raw_artifact.purged``, count +
+    cutoff). A retention of ``0`` days disables the purge (keep-forever policy):
+    the task no-ops and returns ``disabled=True`` without deleting or auditing.
+    """
+    settings = _settings()
+    days = settings.raw_artifact_retention_days
+    if days <= 0:
+        logger.info("discovery.artifact_retention_disabled")
+        return {"purged": 0, "disabled": True}
+
+    cutoff = utcnow() - timedelta(days=days)
+    purged = asyncio.run(_purge_artifacts(cutoff))
+    logger.info("discovery.artifact_retention_run", purged=purged, cutoff=cutoff.isoformat())
+    return {"purged": purged, "cutoff": cutoff.isoformat()}

@@ -101,6 +101,16 @@ def create_celery_app() -> Celery:
                     minute=str(settings.pcap_retention_minute),
                 ),
             },
+            # raw-artifact retention purge (M5 hardening, ADR-0023 §4 parity):
+            # hard-delete verbatim device CLI output past the retention window on
+            # a daily UTC schedule (auditing each sweep).
+            "raw-artifact-retention-purge": {
+                "task": "discovery.purge_expired_artifacts",
+                "schedule": crontab(
+                    hour=str(settings.raw_artifact_retention_hour),
+                    minute=str(settings.raw_artifact_retention_minute),
+                ),
+            },
         },
     )
     return celery
