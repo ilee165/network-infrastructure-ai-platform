@@ -11,7 +11,9 @@ redaction), ADR-0013 (deployment).
 changes. Each item is signed off against concrete evidence (`file:line` and/or a
 test that pins the behavior). All backend/frontend gates are green at sign-off.
 
-Legend: **PASS** = control implemented, evidenced, and test-pinned.
+Legend: **PASS** = control implemented, evidenced, and test-pinned. **PARTIAL** =
+some sub-controls implemented and signed off; others not yet implemented and
+explicitly deferred (named below with their target milestone).
 
 ---
 
@@ -53,12 +55,16 @@ rejected under default config."
 
 ## 2. Packet sandbox per D14 — resource limits / no network / dropped capabilities
 
-**Status: PASS** (process-launch controls in code; OS-level controls in deploy)
+**Status: PARTIAL** — process-launch controls signed PASS (in code, test-pinned);
+OS-level controls (resource limits / no network / dropped capabilities) **NOT YET
+IMPLEMENTED**, deferred to the production/K8s milestone.
 
 tshark parses **untrusted pcaps** and its C dissectors carry parsing CVEs, so the
-analysis path is the platform's highest-risk operation. Containment is split
-between the code (process-launch controls) and the deployment (OS isolation), per
-ADR-0023 §1:
+analysis path is the platform's highest-risk operation. Containment is intended to
+be split between the code (process-launch controls) and the deployment (OS
+isolation) per ADR-0023 §1; **only the process-launch half exists today.**
+
+**Signed PASS — process-launch controls (in code, test-pinned):**
 
 - **argv-not-shell:** `backend/app/engines/packet/sandbox.py:69` (`build_tshark_argv`)
   returns a `list[str]`; `:118` spawns it with `subprocess.run(..., shell=False)`.
@@ -76,11 +82,30 @@ ADR-0023 §1:
   credentials** and the capture credential plaintext never enters a log/audit/
   result line — the EOS path keeps it inside the SSH session only
   (`backend/app/workers/tasks/packet.py:502`, module docstring §"Secret discipline").
-- **OS-level isolation (deployment):** no-network container, `cap_drop: [ALL]`,
-  non-root, read-only pcap mount, CPU/mem limits — the dedicated `packet`-queue
-  worker per ADR-0023 §1 and ADR-0013 §3/§4 (Helm NetworkPolicy + PodSecurityContext).
 
-**Evidence (tests):**
+**NOT YET IMPLEMENTED — OS-level isolation (deferred to production/K8s milestone):**
+
+The OS-level controls named for this item — **resource (CPU/mem) limits, no-network
+container, dropped capabilities (`cap_drop: [ALL]`), non-root, read-only pcap
+mount** — have **no implemented or declared evidence today** and are therefore
+**not signed PASS**:
+
+- **No Helm chart.** `deploy/kubernetes/` ships only `README.md`, which states the
+  chart is *planned* and "**no manifests ship**"
+  (`deploy/kubernetes/README.md:1,6`). The NetworkPolicy / PodSecurityContext are
+  described there as future chart contents, not as shipped controls.
+- **No Compose hardening.** `deploy/docker/docker-compose.yml` defines a single
+  shared Celery `worker` consuming all queues
+  (`discovery,config,packet,docs,system`) with **no** `cap_drop`, `security_opt`,
+  `read_only`, network isolation, or `mem_limit`/`cpus` (verified: no matches). The
+  `packet` queue is **not** split into its own least-privilege worker container, and
+  there is no separate hardened "worker profile."
+
+These three controls are deferred to the production/K8s milestone (Helm chart per
+ADR-0013 §3/§4 + dedicated least-privilege `packet` worker per ADR-0023 §1) and are
+tracked as outstanding for T20 / PRODUCTION.md.
+
+**Evidence (tests — process-launch controls only):**
 - `tests/engines/packet/test_sandbox.py::test_analyze_pcap_invokes_tshark_argv_not_shell`
 - `tests/engines/packet/test_sandbox.py::test_analyze_pcap_rejects_malicious_filter_without_spawning`
 - `tests/engines/packet/test_sandbox.py::test_analyze_pcap_timeout_becomes_sandbox_error`
@@ -89,11 +114,13 @@ ADR-0023 §1:
   (the LLM/audit path sees normalized counts only, never raw packet bytes)
 
 **Residual / deployment note:** the OS-level controls (NetworkPolicy, dropped
-caps, RO mount, resource limits) are declared in the Helm chart and the Compose
-worker profile; in the single-worker Compose dev stack the `packet` queue is not
-yet split into its own least-privilege worker container. Splitting it is the K8s
-production posture (ADR-0023 §1, ADR-0013 §4) and is tracked as a deployment-time
-hardening item, not a code gap.
+caps, RO mount, resource limits) are **not implemented anywhere today** — there is
+no Helm chart (`deploy/kubernetes/` is README-only, chart planned) and the Compose
+stack runs a single shared worker with no hardening. Implementing them — the Helm
+chart (ADR-0013 §4) plus splitting the `packet` queue into its own least-privilege
+worker container (ADR-0023 §1) — is the K8s production posture and is deferred to
+the production/PRODUCTION.md milestone. Until then this item is **PARTIAL**, not
+PASS.
 
 ---
 
@@ -203,13 +230,16 @@ whether Debian has since published fixes for the deferred CVEs.
 | # | Control | Status |
 |---|---------|--------|
 | 1 | Four-eyes integrity (server-side, approver != requester) | PASS |
-| 2 | Packet sandbox per D14 (limits / no network / dropped caps) | PASS (deploy note) |
+| 2 | Packet sandbox per D14 (limits / no network / dropped caps) | PARTIAL — process-launch controls PASS; OS-level limits / no-network / dropped-caps NOT YET IMPLEMENTED, deferred to production/K8s |
 | 3 | A9 redaction on every CR-diff / DNS / config → LLM path | PASS |
 | 4 | RBAC on changes API (approve requires engineer+) | PASS |
 | 5 | Secret handling (never logged/leaked) | PASS |
 | 6 | Trivy zero-critical posture | PASS |
 
-**Outstanding for T20 (release):** confirm the Trivy CI step is green on the
-release commit; complete the deployment-time split of the least-privilege
-`packet` analysis worker (Compose) as the OS-level half of control #2 (the code-
-level controls are already in place and pinned).
+**Outstanding for T20 (release) / deferred to production:** confirm the Trivy CI
+step is green on the release commit. Control #2 is **PARTIAL**: the process-launch
+controls are in place and test-pinned, but the OS-level half — resource limits,
+no-network container, dropped capabilities, read-only mount, and the dedicated
+least-privilege `packet` worker — is **not yet implemented** (no Helm chart, no
+Compose hardening) and is deferred to the production/K8s milestone (ADR-0013 §4,
+ADR-0023 §1, PRODUCTION.md). It must not be signed PASS until that work lands.
