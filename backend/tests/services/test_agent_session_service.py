@@ -37,9 +37,13 @@ from app.agents.framework.tools import (
 )
 from app.core.errors import LLMUpstreamError, NotFoundError
 from app.core.security import Role
+from app.llm.redaction import REDACTION_TOKENS
 from app.models import (
     AgentSession,
     AgentSessionStatus,
+    ChangeRequest,
+    ChangeRequestKind,
+    ChangeRequestState,
     ReasoningTraceStep,
     User,
 )
@@ -397,3 +401,130 @@ class TestProviderErrorTranslation:
                 role=Role.VIEWER,
                 session_id=run_session.id,
             )
+
+
+# -- M5: ChangeRequest gate wiring through the production driver ------------
+
+_CR_SECRET_LINE = "snmp-server community S3cr3tRO RO"
+
+
+def _deploy_config_tool(sink: RecordingAuditSink) -> NetOpsTool:
+    """A state-changing config-deploy tool with NO baked-in gate.
+
+    With no explicit ``approval_gate`` the tool relies on the per-run gate factory
+    that :meth:`AgentSessionService.run` must bind (the M5 default) — or, if the
+    driver fails to bind one, falls back to the hard-reject ``DenyAllGate`` and the
+    run raises. That is exactly the seam this test exercises end-to-end.
+    """
+
+    @netops_tool(
+        classification=ToolClassification.STATE_CHANGING,
+        audit_sink=sink,
+        min_role=Role.ENGINEER,
+        change_request_kind=ChangeRequestKind.CONFIG,
+        target_refs=lambda args: {"device_ids": [args["device"]]},
+    )
+    async def deploy_config(device: str, config_blob: str) -> str:
+        """Deploy a rendered configuration to a device."""
+        return f"deployed to {device}"
+
+    return deploy_config
+
+
+def _config_deploy_script() -> list[AIMessage]:
+    """Route to the config specialist, call the deploy tool, then conclude."""
+    return [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "RoutingDecision",
+                    "args": {
+                        "specialist": "configuration",
+                        "ambiguous": False,
+                        "rationale": "config deploy request",
+                    },
+                    "id": "route-1",
+                }
+            ],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "deploy_config",
+                    "args": {"device": "edge-1", "config_blob": _CR_SECRET_LINE},
+                    "id": "call-1",
+                }
+            ],
+        ),
+        AIMessage(content="I drafted a change request for the edge-1 deploy."),
+    ]
+
+
+def _config_tool_registry(
+    specialist_factory: SpecialistFactory, sink: RecordingAuditSink
+) -> AgentRegistry:
+    registry = AgentRegistry()
+    registry.register(
+        specialist_factory(
+            "configuration",
+            description="Manages device configuration: backup, restore, and deploy.",
+            tools=[_deploy_config_tool(sink)],
+        )
+    )
+    return registry
+
+
+class TestChangeRequestGateWiredThroughRun:
+    """The production driver wires a ChangeRequest gate factory into
+    ``run_supervisor`` (ADR-0020 §4, M5 task #4), so a state-changing tool driven
+    through an agent session CREATES a CR draft instead of falling back to the
+    hard-reject ``DenyAllGate``. This closes the binder gap that previously made
+    CR creation reachable only in unit tests, never end-to-end in production.
+    """
+
+    async def test_state_changing_tool_creates_change_request_draft(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        specialist_factory: SpecialistFactory,
+        audit_sink: RecordingAuditSink,
+    ) -> None:
+        engineer_id = await _seed_user(sessionmaker, role_name="engineer")
+        service = AgentSessionService(sessionmaker)
+        registry = _config_tool_registry(specialist_factory, audit_sink)
+        graph = build_supervisor_graph(scripted_model(_config_deploy_script()), registry)
+
+        await service.run(
+            graph,
+            "deploy this config to edge-1",
+            user_id=engineer_id,
+            role=Role.ENGINEER,
+        )
+
+        # The gate created a real, persisted CR draft attributed to the engineer
+        # and to the session that drove the run — not a DenyAllGate hard-reject.
+        async with sessionmaker() as db:
+            crs = (await db.execute(select(ChangeRequest))).scalars().all()
+            assert len(crs) == 1, "the driver must wire the CR gate factory end-to-end"
+            cr = crs[0]
+            assert cr.state is ChangeRequestState.DRAFT
+            assert cr.kind is ChangeRequestKind.CONFIG
+            assert cr.requester_id == engineer_id
+            assert cr.generating_session_id is not None
+            assert cr.target_refs == {"device_ids": ["edge-1"]}
+            # ADR-0020 §2: payload verbatim; only the preview is redacted (§4).
+            assert cr.payload is not None
+            assert cr.payload["config_blob"] == _CR_SECRET_LINE
+            assert cr.after_state is not None
+            assert REDACTION_TOKENS["snmp_community"] in cr.after_state["proposed"]["config_blob"]
+
+        # The tool-layer audit event is a denial carrying the CR id (the change
+        # did not execute) with A9-redacted arguments.
+        deploy_events = [e for e in audit_sink.events if e.tool_name == "deploy_config"]
+        assert len(deploy_events) == 1
+        event = deploy_events[0]
+        assert event.outcome == "denied"
+        assert event.approval is not None
+        assert event.approval.change_request_created is True
+        assert "S3cr3tRO" not in event.arguments["config_blob"]

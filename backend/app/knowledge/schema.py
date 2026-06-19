@@ -38,6 +38,12 @@ LABEL_VLAN: str = "Vlan"
 LABEL_SUBNET: str = "Subnet"
 LABEL_VRF: str = "VRF"
 LABEL_SITE: str = "Site"
+#: DNS-dependency layer (M5 task #13, ADR-0022): zones + records projected from
+#: Infoblox DDI data.  ``DnsZone`` is keyed by its FQDN; ``DnsRecord`` by a
+#: composite ``key`` (``name|type|value``) so same-name records of different
+#: type/value stay distinct.
+LABEL_DNS_ZONE: str = "DnsZone"
+LABEL_DNS_RECORD: str = "DnsRecord"
 
 # ---------------------------------------------------------------------------
 # Relationship type constants
@@ -48,6 +54,12 @@ REL_HAS_INTERFACE: str = "HAS_INTERFACE"
 REL_IN_SUBNET: str = "IN_SUBNET"
 REL_L3_ADJACENT: str = "L3_ADJACENT"
 REL_ROUTES_TO: str = "ROUTES_TO"
+#: DNS-dependency layer relationships (M5 task #13).  ``IN_ZONE`` links a
+#: ``DnsZone`` to each record it contains; ``RESOLVES_TO`` links a ``DnsRecord``
+#: to the projected node its value resolves to (a reconciled ``IPAddress`` /
+#: ``Device``), or carries only the literal value when unreconciled.
+REL_IN_ZONE: str = "IN_ZONE"
+REL_RESOLVES_TO: str = "RESOLVES_TO"
 
 # ---------------------------------------------------------------------------
 # Key property per label
@@ -60,6 +72,9 @@ REL_ROUTES_TO: str = "ROUTES_TO"
 #: - ``vlan_id`` — integer VLAN tag stored as string key (Vlan).
 #: - ``cidr``    — CIDR notation string, e.g. ``"10.0.0.0/24"`` (Subnet).
 #: - ``name``    — human-readable name string (VRF, Site).
+#: - ``fqdn``       — fully-qualified zone name, e.g. ``"corp.example.com"`` (DnsZone).
+#: - ``record_key`` — composite ``name|type|value`` string (DnsRecord); ``name``
+#:                    alone is not unique (a host may have several records).
 NODE_KEY_PROPERTY: dict[str, str] = {
     LABEL_DEVICE: "pg_id",
     LABEL_INTERFACE: "pg_id",
@@ -68,6 +83,8 @@ NODE_KEY_PROPERTY: dict[str, str] = {
     LABEL_SUBNET: "cidr",
     LABEL_VRF: "name",
     LABEL_SITE: "name",
+    LABEL_DNS_ZONE: "fqdn",
+    LABEL_DNS_RECORD: "record_key",
 }
 
 # ---------------------------------------------------------------------------

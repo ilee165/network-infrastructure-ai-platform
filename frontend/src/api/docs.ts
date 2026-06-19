@@ -14,7 +14,7 @@ import { apiFetch } from "./client";
 
 // ── Enum literals (match backend DocumentKind / DocumentFormat) ───────────────
 
-export type DocumentKind = "inventory" | "diagram" | "runbook";
+export type DocumentKind = "inventory" | "diagram" | "runbook" | "incident_report";
 export type DocumentFormat = "md" | "csv" | "mermaid";
 
 // ── Response shapes ───────────────────────────────────────────────────────────

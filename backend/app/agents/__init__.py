@@ -7,16 +7,24 @@ all ten core agents. Specialist packages (``master_architect/``,
 ``agents.framework`` plus ``core``/``schemas``/``llm`` (REPO-STRUCTURE
 section 3.2, row 11).
 
-Composition root (M3-14, extended in M4 T13)
+Composition root (M3-14, extended in M4 T13 and M5 T14)
     :func:`build_default_registry` assembles the process-wide
     :class:`~app.agents.framework.registry.AgentRegistry` for the core set — the
-    Master Architect supervisor plus the five routable specialists (consultant,
-    discovery, troubleshooting, configuration, documentation; the last two added
-    in M4 T13). :func:`build_default_supervisor` compiles the runnable supervisor
-    graph over the *routable* subset of that registry (everything except the
-    Master Architect itself, which is the supervisor and must never route to
-    itself). Both take their inputs explicitly so a fresh, isolated set can be
-    built per process or per test.
+    Master Architect supervisor plus the EIGHT routable specialists (consultant,
+    discovery, troubleshooting, configuration, documentation added M3/M4;
+    automation, ddi, packet_analysis added in M5 T14). :func:`build_default_supervisor`
+    compiles the runnable supervisor graph over the *routable* subset of that
+    registry (everything except the Master Architect itself, which is the
+    supervisor and must never route to itself). Both take their inputs explicitly
+    so a fresh, isolated set can be built per process or per test.
+
+    The Automation Agent is registered for ROUTING only — its
+    name/description/system_prompt and read-only narration tools — built without a
+    :class:`~app.services.change_requests.ChangeRequestService`, so the
+    DB-free composition root stays pure. Its execution write path
+    (:meth:`~app.agents.automation.agent.AutomationAgent.execute`) is driven
+    separately by the Wave-5 API/worker with a real service; a routing-only
+    instance cannot execute a change (M5-PLAN risk #4).
 """
 
 from __future__ import annotations
@@ -24,8 +32,10 @@ from __future__ import annotations
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
 
+from app.agents.automation.agent import AutomationAgent
 from app.agents.configuration.agent import ConfigurationAgent
 from app.agents.consultant.agent import ConsultantAgent
+from app.agents.ddi.agent import DdiAgent
 from app.agents.discovery.agent import DiscoveryAgent
 from app.agents.documentation.agent import DocumentationAgent
 from app.agents.framework.registry import AgentRegistry
@@ -36,6 +46,7 @@ from app.agents.framework.supervisor import (
 )
 from app.agents.framework.traces import TraceRecorder
 from app.agents.master_architect.agent import MasterArchitectAgent
+from app.agents.packet_analysis.agent import PacketAnalysisAgent
 from app.agents.troubleshooting.agent import TroubleshootingAgent
 
 __all__ = [
@@ -47,12 +58,18 @@ __all__ = [
 def build_default_registry() -> AgentRegistry:
     """Build the default :class:`AgentRegistry` (the composition root).
 
-    Registers the six core agents — the Master Architect supervisor (CLAUDE.md
-    Core Agent #1) and the consultant, discovery, troubleshooting, configuration,
-    and documentation specialists (the last two added in M4 T13) — each as a
-    fresh instance so the registry owns no shared mutable state across processes
-    or tests. Registration validates every agent's declaration
+    Registers the nine core agents — the Master Architect supervisor (CLAUDE.md
+    Core Agent #1) and the eight routable specialists: consultant, discovery,
+    troubleshooting, configuration, documentation (M3/M4) plus automation, ddi,
+    and packet_analysis (M5 T14) — each as a fresh instance so the registry owns
+    no shared mutable state across processes or tests. Registration validates
+    every agent's declaration
     (:meth:`~app.agents.framework.base.BaseSpecialistAgent.validate_definition`).
+
+    The Automation Agent is built routing-only (no
+    :class:`~app.services.change_requests.ChangeRequestService`): its supervisor
+    surface is its read-only narration tools, and execution is wired separately
+    with a real service, so the composition root needs no DB.
 
     The Master Architect is included so the supervisor is a named, addressable
     citizen of the registry; :func:`build_default_supervisor` excludes it from
@@ -65,6 +82,9 @@ def build_default_registry() -> AgentRegistry:
     registry.register(TroubleshootingAgent())
     registry.register(ConfigurationAgent())
     registry.register(DocumentationAgent())
+    registry.register(AutomationAgent())
+    registry.register(DdiAgent())
+    registry.register(PacketAnalysisAgent())
     return registry
 
 

@@ -26,6 +26,7 @@ from app.llm.redaction import (
     REDACTION_TOKENS,
     RedactingChatModel,
     redact_messages,
+    redact_payload,
     redact_prompt,
 )
 
@@ -333,3 +334,53 @@ class TestCentralWiring:
         for profile in KNOWN_PROFILES:
             model = get_chat_model(profile, settings)
             assert isinstance(model, RedactingChatModel), profile
+
+
+class TestRedactPayload:
+    """``redact_payload`` recurses through a JSON-like CR payload (A9, ADR-0020).
+
+    The ChangeRequest ``payload`` an agent proposes is JSON-like and carries the
+    same secret-bearing config/DNS material as a raw prompt. ``redact_payload``
+    must reuse the one redaction implementation across str / dict / list while
+    leaving structure (keys, scalars) intact, and stay idempotent.
+    """
+
+    def test_redacts_secret_in_nested_dict_and_list(self) -> None:
+        payload = {
+            "device": "edge-1",
+            "config_lines": [
+                "snmp-server community S3cr3tRO RO",
+                "interface Gi0/0",
+            ],
+            "nested": {"enable": "enable secret MyEnablePass"},
+            "ttl": 3600,
+            "enabled": True,
+        }
+        redacted = redact_payload(payload)
+        # Structure and benign scalars preserved.
+        assert redacted["device"] == "edge-1"
+        assert redacted["ttl"] == 3600
+        assert redacted["enabled"] is True
+        assert "interface Gi0/0" in redacted["config_lines"]
+        # Secrets gone, replaced by the stable tokens; directive context kept.
+        assert REDACTION_TOKENS["snmp_community"] in redacted["config_lines"][0]
+        assert "S3cr3tRO" not in redacted["config_lines"][0]
+        assert REDACTION_TOKENS["enable_secret"] in redacted["nested"]["enable"]
+        assert "MyEnablePass" not in redacted["nested"]["enable"]
+
+    def test_input_is_not_mutated(self) -> None:
+        payload = {"line": "snmp-server community S3cr3tRO RO"}
+        original = dict(payload)
+        redact_payload(payload)
+        assert payload == original
+
+    def test_idempotent(self) -> None:
+        payload = {"line": "enable secret MyEnablePass", "list": ["password 7 070C285F4D06"]}
+        once = redact_payload(payload)
+        twice = redact_payload(once)
+        assert once == twice
+
+    def test_scalars_pass_through(self) -> None:
+        assert redact_payload(42) == 42
+        assert redact_payload(None) is None
+        assert redact_payload("plain text") == "plain text"

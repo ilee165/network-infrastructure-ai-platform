@@ -8,13 +8,23 @@ module and swap the plugin class and fixture map.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from app.plugins.base import DiscoverySnmpCapability, PluginCapability
+from app.plugins.base import (
+    Capability,
+    ChangePlan,
+    ChangeResult,
+    ConfigDeployCapability,
+    ConfigRestoreCapability,
+    DiscoverySnmpCapability,
+    PluginCapability,
+)
 from app.plugins.vendors.cisco_ios.plugin import (
+    SHOW_RUNNING_CONFIG,
     SNMP_OID_SYSDESCR,
     SNMP_OID_SYSNAME,
     SNMP_OID_SYSOBJECTID,
@@ -28,6 +38,7 @@ from tests.plugins.conformance import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+_RUNNING_CONFIG = (FIXTURES / "show_running_config.txt").read_text(encoding="utf-8")
 
 #: Bundled recorded outputs keyed by exact device command — the same fixture
 #: files the cisco_ios parser tests replay.
@@ -64,7 +75,79 @@ def _make_capability(impl: type[PluginCapability]) -> PluginCapability:
     return impl(FixtureReplayTransport(responses), uuid4())
 
 
-CASES = make_conformance_cases(CiscoIosPlugin(), capability_factory=_make_capability)
+class _ConfigWriteFixtureTransport:
+    """Recorded :class:`ConfigWriteTransport` for the change-write conformance case.
+
+    A minimal running-config state machine modelling the REAL IOS write surfaces
+    (no device, no network — D16):
+
+    - ``send_config`` MERGES the lines into the running config (union, no
+      deletion) — the deploy apply surface.
+    - ``replace_config`` REPLACES the running config with exactly the lines — the
+      restore apply / rollback surface.
+
+    so verify-after confirms the intended end-state for both capabilities.
+    """
+
+    def __init__(self, running: str) -> None:
+        self._running = running
+
+    def send_command(self, command: str) -> str:
+        if command == SHOW_RUNNING_CONFIG:
+            return self._running
+        raise AssertionError(f"unexpected command sent to device: {command!r}")
+
+    def send_config(self, lines: Sequence[str]) -> str:
+        present = self._running.splitlines()
+        present_set = set(present)
+        merged = present + [line for line in lines if line not in present_set]
+        self._running = "\n".join(merged) + "\n"
+        return ""
+
+    def replace_config(self, lines: Sequence[str]) -> str:
+        self._running = "\n".join(lines) + "\n"
+        return ""
+
+
+def _executing_plan() -> ChangePlan:
+    return ChangePlan(
+        change_request_id=uuid4(), cr_state="executing", baseline_content_hash="sha-fixture"
+    )
+
+
+def _invoke_restore(impl: type[PluginCapability]) -> ChangeResult:
+    # Device drifted on a *non-management* line (hostname) only, so the restore
+    # actually applies but the change delta does not touch the management path
+    # (the ADR-0021 §4.2 guardrail would otherwise refuse a mgmt-path change on
+    # classic cisco_ios).
+    drifted = _RUNNING_CONFIG.replace("hostname core-rtr01", "hostname DRIFTED")
+    transport = _ConfigWriteFixtureTransport(drifted)
+    cap = impl(transport, uuid4())
+    assert isinstance(cap, ConfigRestoreCapability)
+
+    class _Snapshot:
+        content = _RUNNING_CONFIG
+        content_hash = "sha-fixture-snapshot"
+
+    return cap.restore(_Snapshot(), plan=_executing_plan())
+
+
+def _invoke_deploy(impl: type[PluginCapability]) -> ChangeResult:
+    transport = _ConfigWriteFixtureTransport(_RUNNING_CONFIG)
+    cap = impl(transport, uuid4())
+    assert isinstance(cap, ConfigDeployCapability)
+    fragment = "interface Loopback0\n description conformance fixture\n"
+    return cap.deploy(fragment, plan=_executing_plan())
+
+
+CASES = make_conformance_cases(
+    CiscoIosPlugin(),
+    capability_factory=_make_capability,
+    change_write_invokers={
+        Capability.CONFIG_RESTORE: _invoke_restore,
+        Capability.CONFIG_DEPLOY: _invoke_deploy,
+    },
+)
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.id)

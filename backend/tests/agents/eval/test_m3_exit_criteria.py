@@ -202,18 +202,33 @@ class TestCriterion2AmbiguousTriggersConsultant:
 
 
 def _state_changing_tool(sink: TraceLinkingAuditSink) -> NetOpsTool:
-    """A STATE_CHANGING tool with the default (secure) DenyAllGate."""
+    """A STATE_CHANGING tool exercised with NO gate bound (secure default).
+
+    M3/M4 baked a :class:`DenyAllGate` into every state-changing tool. M5 (TASK
+    #4) removes that bake-in: the gate is the request-scoped ChangeRequestGate,
+    resolved per run. With no gate factory bound (as here), the framework still
+    falls back to the secure hard-reject :class:`DenyAllGate`, so the M3 exit
+    criterion — "a state-changing tool can never execute unauthorised, and the
+    denial is audited" — still holds. The M5 CR-creation path is covered by
+    ``tests/agents/framework/test_approval_gate.py``.
+    """
 
     @netops_tool(classification=ToolClassification.STATE_CHANGING, audit_sink=sink)
     async def deploy_config(device: str) -> str:
-        """Push configuration to a device (state-changing — must be denied in M3)."""
+        """Push configuration to a device (state-changing — must never execute here)."""
         return f"deployed to {device}"  # pragma: no cover - must never execute
 
     return deploy_config
 
 
 class TestCriterion3StateChangingToolRejectedAndAudited:
-    """A state-changing tool is denied (DenyAllGate) and the denial is audited."""
+    """An unauthorised state-changing tool call is denied and the denial audited.
+
+    Secure default with no gate bound: the framework hard-rejects via the
+    fallback :class:`DenyAllGate`. (The M5 default for a CR-eligible tool under a
+    bound gate factory is CR-creation, not hard reject — see the dedicated
+    approval-gate rewire tests.)
+    """
 
     async def test_state_changing_tool_is_rejected_and_audited(
         self, sessionmaker: async_sessionmaker[AsyncSession]
@@ -233,8 +248,9 @@ class TestCriterion3StateChangingToolRejectedAndAudited:
         assert event.outcome == "denied"
         assert event.tool_name == "deploy_config"
         assert event.classification is ToolClassification.STATE_CHANGING
-        # The denial reason points at the M5 ChangeRequest workflow.
-        assert "ChangeRequest" in (event.detail or "")
+        # No CR was created (this is the hard-reject fallback, not the CR path).
+        assert event.approval is not None
+        assert event.approval.change_request_created is False
         # And it landed in the append-only audit log.
         async with sessionmaker() as db:
             rows = (await db.execute(select(AuditLog))).scalars().all()

@@ -67,6 +67,7 @@ dev = [
 cisco_ios = "app.plugins.vendors.cisco_ios.plugin:CiscoIosPlugin"
 cisco_iosxe = "app.plugins.vendors.cisco_iosxe.plugin:CiscoIosXePlugin"
 eos = "app.plugins.vendors.eos.plugin:EosPlugin"
+infoblox = "app.plugins.vendors.infoblox.plugin:InfobloxPlugin"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

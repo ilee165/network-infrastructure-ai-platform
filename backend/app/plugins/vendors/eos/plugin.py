@@ -17,7 +17,8 @@ source of command text for this plugin (REPO-STRUCTURE §6 step 7).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import ClassVar
 from uuid import UUID
@@ -27,18 +28,33 @@ from app.plugins.base import (
     AclCapability,
     BgpCapability,
     Capability,
+    ChangeOutcome,
+    ChangePlan,
+    ChangeResult,
     CommandTransport,
     ConfigBackupCapability,
+    ConfigDeployCapability,
+    ConfigRestoreCapability,
+    ConfigSnapshotRef,
+    ConfigWriteTransport,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
     InterfacesCapability,
     NeighborsCapability,
     OspfCapability,
     PluginCapability,
+    RollbackResult,
     RoutesCapability,
     SnmpReadTransport,
     VendorPlugin,
 )
+
+# Re-use the cisco_ios management-path detector (the regex machinery is the
+# single source of truth, ADR-0021 §4.2). EOS shares the IOS-style mgmt-path
+# constructs the scan flags (``line vty``/``transport input``, ``interface
+# Management*`` admin-state / addressing / ACL binding), so the same
+# delta-scoped scan applies.
+from app.plugins.vendors.cisco_ios.plugin import _management_path_hits
 from app.plugins.vendors.eos import parsers
 from app.plugins.vendors.eos.parsers import (
     SNMP_OID_SYSDESCR,
@@ -56,12 +72,15 @@ from app.schemas.normalized import (
 )
 
 __all__ = [
+    "SHOW_RUNNING_CONFIG",
     "SNMP_OID_SYSDESCR",
     "SNMP_OID_SYSNAME",
     "SNMP_OID_SYSOBJECTID",
     "EosAcl",
     "EosBgp",
     "EosConfigBackup",
+    "EosConfigDeploy",
+    "EosConfigRestore",
     "EosDiscoverySnmp",
     "EosDiscoverySsh",
     "EosInterfaces",
@@ -264,6 +283,320 @@ class EosConfigBackup(_EosCommandCapability, ConfigBackupCapability):
         return output
 
 
+# ---------------------------------------------------------------------------
+# Config write path (ADR-0021) — EOS config-session rollback
+# ---------------------------------------------------------------------------
+
+#: EOS ``show running-config`` comment headers — volatile / non-settable lines
+#: that appear at the top of EOS output but are not configuration commands.
+#: Examples:
+#:   ``! Command: show running-config``
+#:   ``! device: leaf01 (DCS-7050TX-64, EOS-4.28.3M)``
+#:   ``! boot system flash:/EOS.swi``
+#: These differ across captures (device description/version changes) and must
+#: be stripped before equality comparison (ADR-0021 §4/§5 parity).
+_EOS_COMMENT_LINE_RE = re.compile(r"^!")
+
+
+def _normalize_config(raw_config: str) -> str:
+    """Byte-stable normalized form for equality comparison (ADR-0021 §4/§5).
+
+    Collapses ``\\r\\n``/``\\r`` to ``\\n``, strips trailing per-line whitespace,
+    drops EOS ``!``-prefixed comment/header lines (``! Command: show running-config``,
+    ``! device: ...``, ``! boot system ...`` — volatile lines that vary between
+    captures), and guarantees a single trailing newline.
+
+    EOS does not emit the IOS ``Building configuration...`` / ``Current
+    configuration : NNN bytes`` preamble; instead it has ``!``-comment headers.
+    Stripping all ``!``-prefixed lines (which are also not settable as config
+    commands) keeps the form replay-safe.
+    """
+    unified = raw_config.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [
+        line.rstrip()
+        for line in unified.split("\n")
+        if not _EOS_COMMENT_LINE_RE.match(line.strip())
+    ]
+    body = "\n".join(lines).strip("\n")
+    return f"{body}\n" if body else ""
+
+
+class _EosConfigWriteCapability(PluginCapability):
+    """Shared capture-before -> apply -> verify-after -> rollback engine (ADR-0021 §3).
+
+    **EOS rollback**: Arista EOS *can* run transactional config sessions
+    (``configure session <name>`` / ``commit`` / ``abort`` with a commit-timer
+    dead-man revert), but the production ``SshTransport`` does NOT use a config
+    session or commit-timer — ``replace_config`` issues a plain ``configure replace
+    <file> force``. Rollback is therefore a worker-initiated ``configure replace``
+    of the captured pre-change baseline. The symmetric equality predicate
+    (re-captured config == baseline after rollback) is asserted — a rollback that
+    cannot reach the device or does not restore equality surfaces ``rollback_failed``
+    (never silently closed, ADR-0021 §3).
+
+    Management-path guardrail **applied** (ADR-0021 §4.2): ADR-0021 §4 would permit
+    relaxing it only if the executor armed a device-side dead-man auto-revert (an
+    EOS config session + commit-timer). No transport implements that primitive, so
+    EOS is an image without a dead-man primitive and a management-path change is
+    refused before any device write rather than silently stranding the device. See
+    :meth:`_reject_management_path`.
+
+    The capability **never self-authorizes**: every entry point asserts
+    :class:`~app.plugins.base.ChangePlan` attests an ``executing`` CR (ADR-0021 §2).
+    """
+
+    def __init__(self, transport: ConfigWriteTransport, device_id: UUID) -> None:
+        super().__init__()
+        self._transport = transport
+        self._device_id = device_id
+
+    def _capture_running(self) -> str:
+        """Capture the live running config verbatim (recorded for audit)."""
+        return self._record_raw(
+            SHOW_RUNNING_CONFIG, self._transport.send_command(SHOW_RUNNING_CONFIG)
+        )
+
+    def _send_config(self, lines: list[str]) -> None:
+        """Commit a config-session with *lines* (additive); record verbatim output.
+
+        Models an EOS ``configure session <name>`` / commit — an additive merge
+        that enters the lines and exits, equivalent to ``send_config_set`` for the
+        deploy apply surface.
+        """
+        output = self._transport.send_config(lines)
+        self._record_raw("configure session\n" + "\n".join(lines), output)
+
+    def _replace_config(self, lines: list[str]) -> None:
+        """Replace the running config with exactly *lines* (configure replace / session rollback).
+
+        Models an EOS ``configure replace`` or baseline-session-commit — the only
+        surface that can re-establish equality with a captured baseline (a merge
+        cannot remove device-only lines). Used for CONFIG_RESTORE apply and for
+        rollback of both operations. The production transport issues a plain
+        ``configure replace <file> force`` with no commit-timer, so no device-side
+        dead-man auto-revert is armed. Records the verbatim device output for audit.
+        """
+        output = self._transport.replace_config(lines)
+        self._record_raw("configure replace\n" + "\n".join(lines), output)
+
+    def _reject_management_path(self, operation: str, baseline: str, end_state: str) -> None:
+        """Refuse a change that touches the management path (ADR-0021 §4.2).
+
+        ADR-0021 §4 sanctions relaxing this guardrail on EOS ONLY when the executor
+        arms a device-side dead-man auto-revert (an EOS ``configure session`` with a
+        commit-timer) so a connectivity-severing change reverts even if the worker
+        loses the session. No production transport implements that primitive —
+        :meth:`app.plugins.transport.ssh.SshTransport.replace_config` issues a plain
+        ``configure replace <file> force`` with neither a config session nor a commit
+        timer — so the compensating control does not exist. Until it does, EOS is an
+        image *without* a dead-man primitive (§4 sub-bullet 2): a change touching the
+        management path is **rejected**, with a typed :class:`PluginError` and before
+        any device write, rather than silently stranding the device with no replay
+        path. The change is the delta baseline -> end_state.
+        """
+        offending = _management_path_hits(baseline, end_state)
+        if offending:
+            raise PluginError(
+                f"eos: {operation} refused — change touches the management path "
+                f"({', '.join(offending)}) and no armed dead-man auto-revert "
+                "(config-session commit timer) is implemented by the transport; a "
+                "mid-apply reachability loss would strand the device with no replay "
+                "path (ADR-0021 §4.2: management-path guardrail). Out of M5 scope until "
+                "a config-session/commit-timer apply surface exists — use a "
+                "console/OOB-fallback path."
+            )
+
+    @staticmethod
+    def _require_executing(plan: ChangePlan, operation: str) -> None:
+        """Refuse the write unless the plan attests an ``executing`` CR (§2)."""
+        if not plan.is_executing:
+            raise PluginError(
+                f"eos: {operation} refused — change request "
+                f"'{plan.change_request_id}' is '{plan.cr_state}', not 'executing' "
+                "(ADR-0021 §2: a config write executes only as the execution step of "
+                "an approved, claimed ChangeRequest)"
+            )
+
+    @staticmethod
+    def _diff_summary(before: str, after: str) -> tuple[str, ...]:
+        """Redaction-safe summary of a config change (line counts only)."""
+        before_lines = before.splitlines()
+        after_lines = after.splitlines()
+        before_set = set(before_lines)
+        after_set = set(after_lines)
+        added = sum(1 for line in after_lines if line not in before_set)
+        removed = sum(1 for line in before_lines if line not in after_set)
+        summary: list[str] = []
+        if added:
+            summary.append(f"+{added} line(s)")
+        if removed:
+            summary.append(f"-{removed} line(s)")
+        return tuple(summary)
+
+    def _execute(
+        self,
+        *,
+        plan: ChangePlan,
+        operation: str,
+        project: Callable[[str], str],
+        config_lines: list[str],
+        apply: Callable[[list[str]], None],
+    ) -> ChangeResult:
+        """Run the ADR-0021 §3 contract and return a structured :class:`ChangeResult`.
+
+        ``project`` maps the captured baseline to the intended normalized end-state.
+        ``apply`` is the write surface (DEPLOY commits a session; RESTORE replaces).
+
+        EOS note: the management-path guardrail (ADR-0021 §4.2) IS applied here.
+        ADR-0021 §4 would permit relaxing it only if the executor armed a device-side
+        config-session commit-timer dead-man auto-revert, but no transport implements
+        that primitive (``SshTransport.replace_config`` issues a plain ``configure
+        replace ... force``), so EOS is an image without a dead-man primitive and a
+        management-path change must be refused before any write.
+        """
+        self._require_executing(plan, operation)
+
+        baseline = _normalize_config(self._capture_running())
+        end_state = project(baseline)
+
+        # Management-path guardrail BEFORE any device write (ADR-0021 §4.2): scoped
+        # to the *delta* vs the captured baseline so replaying a snapshot whose mgmt
+        # lines already match is not spuriously refused.
+        self._reject_management_path(operation, baseline, end_state)
+
+        if baseline == end_state:
+            return ChangeResult(
+                change_request_id=plan.change_request_id,
+                outcome=ChangeOutcome.NO_OP,
+                verified=True,
+                applied_diff=(),
+                rollback=None,
+            )
+
+        applied_diff = self._diff_summary(baseline, end_state)
+
+        apply_failed = False
+        try:
+            apply(config_lines)
+        except Exception:  # noqa: BLE001
+            apply_failed = True
+
+        verified = False
+        if not apply_failed:
+            after = _normalize_config(self._capture_running())
+            verified = after == end_state
+
+        if verified:
+            return ChangeResult(
+                change_request_id=plan.change_request_id,
+                outcome=ChangeOutcome.APPLIED,
+                verified=True,
+                applied_diff=applied_diff,
+                rollback=None,
+            )
+
+        rollback = self._rollback_to_baseline(baseline)
+        outcome = ChangeOutcome.ROLLED_BACK if rollback.succeeded else ChangeOutcome.ROLLBACK_FAILED
+        return ChangeResult(
+            change_request_id=plan.change_request_id,
+            outcome=outcome,
+            verified=False,
+            applied_diff=applied_diff,
+            rollback=rollback,
+        )
+
+    def _rollback_to_baseline(self, baseline_normalized: str) -> RollbackResult:
+        """Restore the device to the captured baseline (§4).
+
+        EOS rollback uses a ``configure replace`` of the captured pre-change
+        baseline (modelled by ``replace_config``). In practice on a real device
+        this maps to either a ``configure replace`` command or a baseline-session
+        commit that restores the pre-change state. The rollback success criterion
+        is symmetric: the re-captured config must normalize equal to the baseline
+        (never assumed, always asserted). A replace that cannot reach the device
+        or whose re-capture does not normalize equal is ``succeeded=False`` ->
+        the caller surfaces ``rollback_failed``, never ``rolled_back`` (§3).
+        """
+        try:
+            self._replace_config(baseline_normalized.splitlines())
+            after = _normalize_config(self._capture_running())
+        except Exception as exc:  # noqa: BLE001
+            return RollbackResult(
+                attempted=True,
+                succeeded=False,
+                verified=False,
+                detail=f"baseline replace failed ({type(exc).__name__})",
+            )
+        equal = after == baseline_normalized
+        return RollbackResult(
+            attempted=True,
+            succeeded=equal,
+            verified=equal,
+            detail=None if equal else "re-captured config did not normalize equal to the baseline",
+        )
+
+
+class EosConfigRestore(_EosConfigWriteCapability, ConfigRestoreCapability):
+    """``CONFIG_RESTORE``: replay an existing M4 ``config_snapshot`` (ADR-0021).
+
+    Apply is a **config replace** (``replace_config`` / EOS ``configure replace``)
+    to the normalized snapshot — the only surface that can re-establish equality
+    with the snapshot. EOS config sessions are transactional (abort on failure);
+    the management-path guardrail (ADR-0021 §4.2) does not apply. Idempotent:
+    empty diff yields ``NO_OP`` without touching the device.
+
+    EOS comment headers (``! Command: ...`` / ``! device: ...``) are stripped by
+    :func:`_normalize_config` before equality comparison, so a changed device
+    version string does not defeat the equality predicate.
+    """
+
+    def restore(self, snapshot: ConfigSnapshotRef, *, plan: ChangePlan) -> ChangeResult:
+        """Restore the device to *snapshot* as the execution step of *plan*."""
+        target = _normalize_config(snapshot.content)
+
+        return self._execute(
+            plan=plan,
+            operation="config restore",
+            project=lambda _baseline: target,
+            config_lines=target.splitlines(),
+            apply=self._replace_config,
+        )
+
+
+class EosConfigDeploy(_EosConfigWriteCapability, ConfigDeployCapability):
+    """``CONFIG_DEPLOY``: merge a supplied config fragment (ADR-0021).
+
+    Apply is a **merge** (``send_config`` / EOS config-session commit of an
+    additive fragment) — additive. The verify-after predicate is the strengthened
+    residual-diff check (ADR-0021 §3): re-captured config must equal
+    baseline + fragment additions exactly. On failure the captured baseline is
+    replayed via ``replace_config``; rollback success is the asserted baseline
+    equality. EOS config sessions are transactional; no management-path guardrail.
+    """
+
+    def deploy(self, config_fragment: str, *, plan: ChangePlan) -> ChangeResult:
+        """Apply *config_fragment* as the execution step of *plan*."""
+        fragment_lines = [
+            line for line in _normalize_config(config_fragment).splitlines() if line.strip()
+        ]
+
+        def project(baseline: str) -> str:
+            present = set(baseline.splitlines())
+            additions = [line for line in fragment_lines if line not in present]
+            body = baseline.rstrip("\n")
+            if additions:
+                body = body + "\n" + "\n".join(additions)
+            return f"{body}\n" if body else ""
+
+        return self._execute(
+            plan=plan,
+            operation="config deploy",
+            project=project,
+            config_lines=fragment_lines,
+            apply=self._send_config,
+        )
+
+
 class EosPlugin(VendorPlugin):
     """Arista EOS (``vendor_id="eos"``) — leaf/spine switching plugin.
 
@@ -285,6 +618,8 @@ class EosPlugin(VendorPlugin):
             Capability.OSPF,
             Capability.ACL,
             Capability.CONFIG_BACKUP,
+            Capability.CONFIG_RESTORE,
+            Capability.CONFIG_DEPLOY,
         }
     )
 
@@ -299,4 +634,6 @@ class EosPlugin(VendorPlugin):
             Capability.OSPF: EosOspf,
             Capability.ACL: EosAcl,
             Capability.CONFIG_BACKUP: EosConfigBackup,
+            Capability.CONFIG_RESTORE: EosConfigRestore,
+            Capability.CONFIG_DEPLOY: EosConfigDeploy,
         }

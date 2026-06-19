@@ -1,0 +1,45 @@
+# TLS overlay for the compose edge (M5 hardening — ADR-0013 §3, Dev Standards 5).
+#
+# Adds a TLS-terminating reverse proxy (`edge`) in front of `frontend` + `api`
+# so no plaintext HTTP crosses the host boundary. This is an OVERLAY: it is
+# applied ON TOP of docker-compose.yml and never replaces it, so the base
+# `docker compose -f deploy/docker/docker-compose.yml up -d` bring-up is
+# unchanged. Run the TLS edge with BOTH files (base first, overlay second):
+#
+#   # 1. one-time: generate a dev self-signed cert into deploy/docker/tls/certs/
+#   bash deploy/docker/tls/generate-dev-cert.sh
+#
+#   # 2. bring the stack up with TLS terminated at the edge:
+#   docker compose --env-file .env \
+#     -f deploy/docker/docker-compose.yml \
+#     -f deploy/docker/docker-compose.tls.yml up -d
+#
+# Then browse https://localhost (the dev cert is self-signed — expect a browser
+# trust warning on first visit). The base stack still publishes :8000/:8080 for
+# debugging; in a hardened deployment, drop those host port mappings and reach
+# the platform only through the TLS edge.
+#
+# Production uses the Kubernetes Ingress TLS path (ADR-0013 §4), not this edge.
+
+services:
+  edge:
+    image: nginx:1.27-alpine
+    depends_on:
+      - api
+      - frontend
+    ports:
+      # Host 80/443 -> edge 8080/8443 (the container listens on unprivileged
+      # ports as the non-root nginx user; the host maps the privileged ones).
+      - "80:8080"
+      - "443:8443"
+    volumes:
+      - ./tls/edge.nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./tls/certs:/etc/nginx/tls:ro
+    restart: unless-stopped
+    healthcheck:
+      # Probe the TLS listener; -k because the dev cert is self-signed.
+      test: ["CMD-SHELL", "wget -q --no-check-certificate --spider https://127.0.0.1:8443/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

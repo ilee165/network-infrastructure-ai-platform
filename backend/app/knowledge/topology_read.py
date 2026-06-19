@@ -40,13 +40,16 @@ from app.knowledge.schema import (
     REL_CONNECTED_TO,
     REL_HAS_INTERFACE,
     REL_IN_SUBNET,
+    REL_IN_ZONE,
     REL_L3_ADJACENT,
+    REL_RESOLVES_TO,
     REL_ROUTES_TO,
 )
 
 __all__ = [
     "GraphData",
     "LAYER_ALL",
+    "LAYER_DNS",
     "LAYER_L2",
     "LAYER_L3",
     "LAYERS",
@@ -57,8 +60,10 @@ __all__ = [
 #: ``layer`` query-parameter values.
 LAYER_L2 = "l2"
 LAYER_L3 = "l3"
+#: DNS-dependency layer (M5 task #13): ``IN_ZONE`` + ``RESOLVES_TO``.
+LAYER_DNS = "dns"
 LAYER_ALL = "all"
-LAYERS: tuple[str, ...] = (LAYER_L2, LAYER_L3, LAYER_ALL)
+LAYERS: tuple[str, ...] = (LAYER_L2, LAYER_L3, LAYER_DNS, LAYER_ALL)
 
 #: The L3 relationship family (everything that is not the single L2 type).
 _L3_REL_TYPES: tuple[str, ...] = (
@@ -66,6 +71,12 @@ _L3_REL_TYPES: tuple[str, ...] = (
     REL_IN_SUBNET,
     REL_L3_ADJACENT,
     REL_ROUTES_TO,
+)
+
+#: The DNS-dependency relationship family (M5 task #13).
+_DNS_REL_TYPES: tuple[str, ...] = (
+    REL_IN_ZONE,
+    REL_RESOLVES_TO,
 )
 
 #: Property name every projected element carries (the projection watermark).
@@ -79,12 +90,14 @@ GraphData = dict[str, Any]
 
 
 def rel_types_for_layer(layer: str) -> tuple[str, ...]:
-    """Relationship types selected by *layer* (``l2`` / ``l3`` / ``all``)."""
+    """Relationship types selected by *layer* (``l2`` / ``l3`` / ``dns`` / ``all``)."""
     if layer == LAYER_L2:
         return (REL_CONNECTED_TO,)
     if layer == LAYER_L3:
         return _L3_REL_TYPES
-    return (REL_CONNECTED_TO, *_L3_REL_TYPES)
+    if layer == LAYER_DNS:
+        return _DNS_REL_TYPES
+    return (REL_CONNECTED_TO, *_L3_REL_TYPES, *_DNS_REL_TYPES)
 
 
 def _node_key(label: str, properties: dict[str, Any]) -> Any:
@@ -154,15 +167,23 @@ async def _read_graph(
     # Relationship types are validated module constants — safe to interpolate
     # into the type pattern (the driver cannot parameterize a rel-type literal).
     rel_pattern = "|".join(rel_types)
+    # DNS-family edges (IN_ZONE, RESOLVES_TO) connect DnsZone/DnsRecord/IPAddress
+    # nodes which carry no .site property; Neo4j evaluates a missing property as
+    # null, so `null = $site` is always false and would silently drop every DNS
+    # edge whenever site is non-null.  The guard `OR type(r) IN $dns_rel_types`
+    # short-circuits the site predicate for those relationship types, mirroring
+    # the existing VRF guard for ROUTES_TO.
+    dns_rel_types = list(_DNS_REL_TYPES)
     cypher = (
         f"MATCH (a)-[r:{rel_pattern}]->(b) "
-        "WHERE ($site IS NULL OR a.site = $site OR b.site = $site) "
+        "WHERE ($site IS NULL OR a.site = $site OR b.site = $site "
+        "       OR type(r) IN $dns_rel_types) "
         "  AND ($vrf IS NULL OR r.vrf = $vrf OR NOT type(r) = 'ROUTES_TO') "
         "RETURN labels(a) AS a_labels, properties(a) AS a_props, "
         "       labels(b) AS b_labels, properties(b) AS b_props, "
         "       type(r) AS rel_type, properties(r) AS rel_props"
     )
-    result = await tx.run(cypher, site=site, vrf=vrf)
+    result = await tx.run(cypher, site=site, vrf=vrf, dns_rel_types=dns_rel_types)
 
     nodes: dict[tuple[str, Any], dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []

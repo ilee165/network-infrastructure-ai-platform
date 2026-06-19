@@ -12,6 +12,7 @@ reference the credential by id instead.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,6 +67,48 @@ CONFIG_SNAPSHOT_CONTENT_READ: Final = "config.snapshot_content_read"
 # credential, unsupported vendor) — the device is identified by id; no config
 # content or credential material appears in the audit detail.
 CONFIG_SNAPSHOT_FAILED: Final = "config.snapshot_failed"
+# M5 ChangeRequest lifecycle audit vocabulary (ADR-0020 §4): every guarded
+# state transition writes one audit entry whose action is
+# ``change_request.<from>_to_<to>`` (and ``change_request.created`` for the
+# initial draft), carrying before/after lifecycle state in ``detail`` and the
+# reasoning-trace link when the CR originated from an agent run. ``detail``
+# references the CR / target devices by id only — a CR ``payload`` may carry
+# secret-bearing config/DNS content and must never appear here verbatim.
+CHANGE_REQUEST_CREATED: Final = "change_request.created"
+# Disabling four-eyes on a CR is a deliberate, separately-audited policy event
+# (ADR-0020 §3: "when disabled, the disablement itself is an audited config
+# event"), attributing who waived the control — distinct from
+# ``change_request.created`` so the waiver is first-class in the audit chain.
+CHANGE_REQUEST_FOUR_EYES_WAIVED: Final = "change_request.four_eyes_waived"
+CHANGE_REQUEST_DRAFT_TO_PENDING: Final = "change_request.draft_to_pending_approval"
+CHANGE_REQUEST_PENDING_TO_APPROVED: Final = "change_request.pending_approval_to_approved"
+CHANGE_REQUEST_PENDING_TO_DRAFT: Final = "change_request.pending_approval_to_draft"
+CHANGE_REQUEST_APPROVED_TO_EXECUTING: Final = "change_request.approved_to_executing"
+CHANGE_REQUEST_EXECUTING_TO_COMPLETED: Final = "change_request.executing_to_completed"
+CHANGE_REQUEST_EXECUTING_TO_FAILED: Final = "change_request.executing_to_failed"
+CHANGE_REQUEST_FAILED_TO_ROLLED_BACK: Final = "change_request.failed_to_rolled_back"
+# M5 Automation Agent audit vocabulary (M5 task #9; ADR-0020 §1/§4, ADR-0021 §3).
+# The Automation Agent is the sole executor of approved ChangeRequests: each
+# device/DDI write step, each structured rollback, and every refusal of a
+# non-``approved`` CR is audited here — distinct from the CR *lifecycle*
+# transitions above so the executor's own actions (apply / rollback / refusal)
+# are first-class in the audit chain. ``detail`` references the CR / target by id
+# and carries only redaction-safe summaries (applied-diff line counts, rollback
+# notes) — never the secret-bearing CR ``payload`` (config fragment / DDI body).
+AUTOMATION_CHANGE_APPLIED: Final = "automation.change_applied"
+AUTOMATION_ROLLBACK: Final = "automation.rollback"
+AUTOMATION_ROLLBACK_FAILED: Final = "automation.rollback_failed"
+# An executor that is handed a CR not in ``approved`` refuses it (no device/DDI
+# write, CR state left untouched) and audits the refusal — the executor never
+# acts on a draft/pending/rejected/in-flight/terminal CR (M5-PLAN risk #1).
+AUTOMATION_EXECUTION_REFUSED: Final = "automation.execution_refused"
+# M5 packet-capture API audit vocabulary (M5 task #15; ADR-0023 §2/§3): an
+# engineer launching a capture through the API enqueues the worker-side capture
+# task — the request itself is audited at the route (who requested a capture on
+# which interface/device), distinct from the worker's ``packet.capture_completed``
+# entry. ``detail`` references the device by id and carries no packet payload or
+# credential material (the BPF filter is whitelist-validated, never secret).
+PACKET_CAPTURE_REQUESTED: Final = "packet.capture_requested"
 
 
 async def record(
@@ -76,12 +119,26 @@ async def record(
     target_type: str,
     target_id: str | None,
     detail: dict[str, Any] | None,
+    reasoning_trace_id: uuid.UUID | None = None,
+    request_id: uuid.UUID | None = None,
 ) -> AuditLog:
     """Append one audit entry and emit the matching structlog event.
 
     Flushes (assigning ``id`` / ``created_at``) but never commits: the caller
     owns the transaction, so the audit row commits or rolls back atomically
     with the action it describes.
+
+    ``reasoning_trace_id`` links the audited action back to the reasoning trace
+    that produced it (brief §6, ADR-0020 §4) — a plain indexed UUID with no FK
+    (``reasoning_traces`` is range-partitioned). It is ``None`` for actions with
+    no originating agent run.
+
+    ``request_id`` is the inbound request/correlation id of the call that
+    produced the audited action (ADR-0020 §4 names ``request id`` as a required
+    dimension of every transition audit entry). It is a plain indexed UUID with
+    no FK — captured at the route layer and threaded down here. It is ``None``
+    for actions raised outside an HTTP request (background/agent-driven calls
+    that carry no inbound correlation id).
     """
     entry = AuditLog(
         actor=actor,
@@ -89,6 +146,8 @@ async def record(
         target_type=target_type,
         target_id=target_id,
         detail=detail,
+        reasoning_trace_id=reasoning_trace_id,
+        request_id=request_id,
     )
     session.add(entry)
     await session.flush()
@@ -100,5 +159,7 @@ async def record(
         target_type=target_type,
         target_id=target_id,
         detail=detail,
+        reasoning_trace_id=str(reasoning_trace_id) if reasoning_trace_id is not None else None,
+        request_id=str(request_id) if request_id is not None else None,
     )
     return entry

@@ -14,6 +14,13 @@ from app.models.agents import (
 )
 from app.models.audit import AuditLog
 from app.models.base import Base
+from app.models.change_requests import (
+    Approval,
+    ApprovalDecision,
+    ChangeRequest,
+    ChangeRequestKind,
+    ChangeRequestState,
+)
 from app.models.config_mgmt import (
     EMBEDDING_DIM,
     CompliancePolicy,
@@ -38,14 +45,20 @@ from app.models.inventory import (
     RawArtifact,
 )
 from app.models.mixins import TimestampMixin, UuidPkMixin
+from app.models.pcap_metadata import PcapMetadata
 from app.models.topology import TopologySnapshot
 
 __all__ = [
     "EMBEDDING_DIM",
     "AgentSession",
     "AgentSessionStatus",
+    "Approval",
+    "ApprovalDecision",
     "AuditLog",
     "Base",
+    "ChangeRequest",
+    "ChangeRequestKind",
+    "ChangeRequestState",
     "CompliancePolicy",
     "ConfigSnapshot",
     "ConfigSource",
@@ -62,6 +75,7 @@ __all__ = [
     "NormalizedInterfaceRow",
     "NormalizedNeighborRow",
     "NormalizedRouteRow",
+    "PcapMetadata",
     "RawArtifact",
     "ReasoningTraceRow",
     "ReasoningTraceStep",

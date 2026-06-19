@@ -89,6 +89,8 @@ class TestPluginDeclaration:
                 Capability.OSPF,
                 Capability.ACL,
                 Capability.CONFIG_BACKUP,
+                Capability.CONFIG_RESTORE,
+                Capability.CONFIG_DEPLOY,
             }
         )
 

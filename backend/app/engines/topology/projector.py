@@ -35,6 +35,11 @@ from typing import Any
 import structlog
 from pydantic import BaseModel, ConfigDict
 
+from app.engines.topology.dns import (
+    DerivedDns,
+    DnsRecordNode,
+    DnsZoneNode,
+)
 from app.engines.topology.edges import (
     ConnectedToEdge,
     HasInterfaceEdge,
@@ -55,13 +60,17 @@ from app.engines.topology.nodes import (
 )
 from app.knowledge.schema import (
     LABEL_DEVICE,
+    LABEL_DNS_RECORD,
+    LABEL_DNS_ZONE,
     LABEL_INTERFACE,
     LABEL_SUBNET,
     NODE_KEY_PROPERTY,
     REL_CONNECTED_TO,
     REL_HAS_INTERFACE,
     REL_IN_SUBNET,
+    REL_IN_ZONE,
     REL_L3_ADJACENT,
+    REL_RESOLVES_TO,
     REL_ROUTES_TO,
     ensure_constraints,
 )
@@ -80,13 +89,15 @@ __all__ = [
 #: The seven node labels this projector owns (and is allowed to delete from).
 PROJECTED_NODE_LABELS: tuple[str, ...] = tuple(NODE_KEY_PROPERTY)
 
-#: The five relationship types this projector owns.
+#: The relationship types this projector owns (M2 L2/L3 + M5 DNS-dependency).
 PROJECTED_REL_TYPES: tuple[str, ...] = (
     REL_CONNECTED_TO,
     REL_HAS_INTERFACE,
     REL_IN_SUBNET,
     REL_L3_ADJACENT,
     REL_ROUTES_TO,
+    REL_IN_ZONE,
+    REL_RESOLVES_TO,
 )
 
 #: Rows per UNWIND statement; bounds transaction size on large inventories.
@@ -94,7 +105,7 @@ DEFAULT_BATCH_SIZE: int = 1000
 
 
 class DerivedEdges(BaseModel):
-    """The complete edge sets of one derivation pass (L2 + L3 combined)."""
+    """The complete edge sets of one derivation pass (L2 + L3 + DNS combined)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -157,8 +168,15 @@ def _chunks(rows: list[dict[str, Any]], size: int) -> Iterator[list[dict[str, An
         yield rows[start : start + size]
 
 
-def _node_sets(nodes: DerivedNodes) -> tuple[tuple[str, Sequence[GraphNode]], ...]:
-    """The seven (label, node tuple) pairs in deterministic projection order."""
+def _node_sets(
+    nodes: DerivedNodes, dns: DerivedDns | None = None
+) -> tuple[tuple[str, Sequence[GraphNode]], ...]:
+    """The (label, node tuple) pairs in deterministic projection order.
+
+    The seven M2 labels first, then the two DNS-dependency labels (M5 task #13)
+    when *dns* is supplied — empty otherwise so a non-DNS pass is unchanged.
+    """
+    dns = dns or DerivedDns()
     return (
         (DeviceNode.label, nodes.devices),
         (InterfaceNode.label, nodes.interfaces),
@@ -167,6 +185,8 @@ def _node_sets(nodes: DerivedNodes) -> tuple[tuple[str, Sequence[GraphNode]], ..
         (VlanNode.label, nodes.vlans),
         (VrfNode.label, nodes.vrfs),
         (SiteNode.label, nodes.sites),
+        (DnsZoneNode.label, dns.zones),
+        (DnsRecordNode.label, dns.records),
     )
 
 
@@ -185,12 +205,17 @@ def _node_rows(
 _EdgeGroup = tuple[str, str, str, list[dict[str, Any]]]
 
 
-def _edge_groups(edges: DerivedEdges, projected_at: datetime) -> Iterator[_EdgeGroup]:
+def _edge_groups(
+    edges: DerivedEdges, dns: DerivedDns | None, projected_at: datetime
+) -> Iterator[_EdgeGroup]:
     """Yield ``(rel_type, label_a, label_b, rows)`` upsert groups.
 
     ``CONNECTED_TO`` endpoints mix Device/Interface labels, so its edges are
     grouped per (label_a, label_b) pair — one UNWIND statement each. The four
-    L3 types have fixed endpoint labels.
+    L3 types have fixed endpoint labels.  The DNS-dependency edges (M5 task #13)
+    are appended when *dns* is supplied: ``IN_ZONE`` (DnsZone -> DnsRecord) and
+    ``RESOLVES_TO`` (DnsRecord -> the reconciled IPAddress/Device endpoint, one
+    UNWIND per target label; unreconciled records carry no edge).
     """
     connected_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for edge in edges.connected_to:
@@ -269,6 +294,41 @@ def _edge_groups(edges: DerivedEdges, projected_at: datetime) -> Iterator[_EdgeG
         ],
     )
 
+    if dns is None:
+        return
+
+    yield (
+        REL_IN_ZONE,
+        LABEL_DNS_ZONE,
+        LABEL_DNS_RECORD,
+        [
+            {
+                "a_key": edge.zone_fqdn,
+                "b_key": edge.record_key,
+                "props": {"last_projected_at": projected_at},
+            }
+            for edge in dns.in_zone
+        ],
+    )
+
+    # RESOLVES_TO endpoints land on either IPAddress or Device (the reconciled
+    # node), so — like CONNECTED_TO — group per target label, one UNWIND each.
+    # Unreconciled records (target_label is None) carry no edge: a RESOLVES_TO
+    # endpoint must be a real projected node (no-phantom-nodes invariant).
+    resolves_groups: dict[str, list[dict[str, Any]]] = {}
+    for rte in dns.resolves_to:
+        if rte.target_label is None or rte.target_key is None:
+            continue
+        resolves_groups.setdefault(rte.target_label, []).append(
+            {
+                "a_key": rte.record_key,
+                "b_key": rte.target_key,
+                "props": {"value": rte.value, "last_projected_at": projected_at},
+            }
+        )
+    for target_label, rows in sorted(resolves_groups.items()):
+        yield (REL_RESOLVES_TO, LABEL_DNS_RECORD, target_label, rows)
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -281,6 +341,7 @@ async def project(
     edges: DerivedEdges,
     projected_at: datetime,
     *,
+    dns: DerivedDns | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> None:
     """Make the graph converge to one derivation pass (incremental sync).
@@ -288,7 +349,7 @@ async def project(
     Upserts every derived node and edge stamped with *projected_at*, then
     deletes every node/edge of the projected labels / relationship types that
     was *not* stamped in this pass (its key is absent from the derivation).
-    Elements outside the seven labels and five types are never touched.
+    Elements outside the projected labels and types are never touched.
 
     Parameters
     ----------
@@ -301,6 +362,11 @@ async def project(
     projected_at:
         tz-aware UTC instant stamped as ``last_projected_at`` on every
         upserted element; also the staleness watermark for the sweep.
+    dns:
+        Optional DNS-dependency derivation (``derive_dns``, M5 task #13).  When
+        supplied its ``DnsZone``/``DnsRecord`` nodes and ``IN_ZONE``/``RESOLVES_TO``
+        edges are projected too; when ``None`` the DNS layer is swept clean (no
+        DNS elements are stamped this pass) like any other empty derivation.
     batch_size:
         Rows per ``UNWIND`` statement (bounds memory per round trip).
     """
@@ -312,14 +378,14 @@ async def project(
     node_count = 0
     edge_count = 0
     async with client.session() as session:
-        for label, node_set in _node_sets(nodes):
+        for label, node_set in _node_sets(nodes, dns):
             rows = _node_rows(label, node_set, projected_at)
             node_count += len(rows)
             cypher = _node_upsert_cypher(label)
             for batch in _chunks(rows, batch_size):
                 await session.run(cypher, rows=batch)
 
-        for rel_type, label_a, label_b, rows in _edge_groups(edges, projected_at):
+        for rel_type, label_a, label_b, rows in _edge_groups(edges, dns, projected_at):
             edge_count += len(rows)
             cypher = _edge_upsert_cypher(rel_type, label_a, label_b)
             for batch in _chunks(rows, batch_size):
@@ -346,12 +412,13 @@ async def full_rebuild(
     edges: DerivedEdges,
     projected_at: datetime,
     *,
+    dns: DerivedDns | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> None:
     """Drop and re-project the whole topology subgraph (ADR-0005 invariant).
 
-    ``DETACH DELETE`` every node of the seven projected labels (their edges go
-    with them), re-assert the uniqueness constraints, then run a normal
+    ``DETACH DELETE`` every node of the projected labels (their edges go with
+    them), re-assert the uniqueness constraints, then run a normal
     :func:`project` pass. Labels outside the projection are never touched.
     """
     async with client.session() as session:
@@ -359,4 +426,4 @@ async def full_rebuild(
             await session.run(_wipe_label_cypher(label))
     logger.info("topology_projection_wiped", labels=list(PROJECTED_NODE_LABELS))
     await ensure_constraints(client)
-    await project(client, nodes, edges, projected_at, batch_size=batch_size)
+    await project(client, nodes, edges, projected_at, dns=dns, batch_size=batch_size)

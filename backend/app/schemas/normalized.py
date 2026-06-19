@@ -36,6 +36,8 @@ from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 __all__ = [
     "AclAction",
     "BgpPeerState",
+    "DhcpLeaseState",
+    "DiscoveredObjectKind",
     "DnsRecordType",
     "InterfaceAdminStatus",
     "InterfaceDuplex",
@@ -45,8 +47,12 @@ __all__ = [
     "NormalizedAclEntry",
     "NormalizedArpEntry",
     "NormalizedBgpPeer",
+    "NormalizedDhcpLease",
+    "NormalizedDhcpRange",
+    "NormalizedDiscoveredObject",
     "NormalizedDnsRecord",
     "NormalizedInterface",
+    "NormalizedNetwork",
     "NormalizedNeighbor",
     "NormalizedOspfNeighbor",
     "NormalizedRecord",
@@ -186,6 +192,34 @@ class DnsRecordType(StrEnum):
     OTHER = "other"
 
 
+class DhcpLeaseState(StrEnum):
+    """Lifecycle state of a DHCP lease, unified across DDI platforms."""
+
+    ACTIVE = "active"
+    FREE = "free"
+    EXPIRED = "expired"
+    ABANDONED = "abandoned"
+    OFFERED = "offered"
+    STATIC = "static"
+    BACKUP = "backup"
+    OTHER = "other"
+
+
+class DiscoveredObjectKind(StrEnum):
+    """Kind of object returned by an API-based discovery pass (ADR-0022 §2).
+
+    The categories an appliance/cloud discovery surfaces — networks, DNS
+    zones, and infrastructure members (grid members, appliances) — feeding the
+    discovery engine. ``OTHER`` covers the long tail so a new WAPI object type
+    never breaks normalization.
+    """
+
+    NETWORK = "network"
+    DNS_ZONE = "dns_zone"
+    MEMBER = "member"
+    OTHER = "other"
+
+
 # ---------------------------------------------------------------------------
 # Records
 # ---------------------------------------------------------------------------
@@ -314,3 +348,83 @@ class NormalizedDnsRecord(NormalizedRecord):
     value: str = Field(min_length=1)
     ttl: int | None = Field(default=None, ge=0)
     zone: str | None = None
+    object_ref: str | None = Field(
+        default=None,
+        description="Opaque DDI handle (Infoblox WAPI _ref) identifying the source object; "
+        "carried through so a later mutation targets the exact record (ADR-0022 §1). "
+        "Never a secret.",
+    )
+
+
+class NormalizedDhcpLease(NormalizedRecord):
+    """A DHCP lease as reported by a DDI/DHCP platform (ADR-0022 §2)."""
+
+    ip_address: IPv4Address | IPv6Address
+    state: DhcpLeaseState
+    mac_address: MacAddress | None = None
+    hostname: str | None = None
+    network: IPv4Network | IPv6Network | None = None
+    starts_at: AwareDatetime | None = None
+    ends_at: AwareDatetime | None = None
+    object_ref: str | None = Field(
+        default=None,
+        description="Opaque DDI handle (Infoblox WAPI _ref) for the source lease object. "
+        "Never a secret.",
+    )
+
+
+class NormalizedDhcpRange(NormalizedRecord):
+    """A DHCP range (address pool) within a network (ADR-0022 §2)."""
+
+    start_address: IPv4Address | IPv6Address
+    end_address: IPv4Address | IPv6Address
+    network: IPv4Network | IPv6Network | None = None
+    name: str | None = None
+    member: str | None = Field(
+        default=None, description="Serving DHCP member/server, when reported."
+    )
+    object_ref: str | None = Field(
+        default=None,
+        description="Opaque DDI handle (Infoblox WAPI _ref) for the source range object. "
+        "Never a secret.",
+    )
+
+
+class NormalizedNetwork(NormalizedRecord):
+    """An IPAM network/subnet with utilization, as reported by a DDI platform.
+
+    The IPAM currency (ADR-0022 §2): ``DDI_IPAM`` read methods return these and
+    ``DISCOVERY_API`` surfaces the same subnets as discovered objects.
+    """
+
+    network: IPv4Network | IPv6Network
+    comment: str | None = None
+    network_view: str | None = Field(
+        default=None, description="Infoblox network view (default view when None)."
+    )
+    utilization_percent: float | None = Field(default=None, ge=0, le=100)
+    object_ref: str | None = Field(
+        default=None,
+        description="Opaque DDI handle (Infoblox WAPI _ref) for the source network object. "
+        "Never a secret.",
+    )
+
+
+class NormalizedDiscoveredObject(NormalizedRecord):
+    """An object surfaced by an API-based discovery pass (ADR-0022 §2).
+
+    The first API-based discovery currency: ``DISCOVERY_API`` returns these
+    (networks, DNS zones, grid members) so the discovery engine stays
+    vendor-agnostic. ``identifier`` is the object's natural key (the network
+    CIDR, the zone FQDN, the member hostname); ``attributes`` carries a flat,
+    secret-free map of extra fields for engines that want them.
+    """
+
+    kind: DiscoveredObjectKind
+    identifier: str = Field(min_length=1)
+    display_name: str | None = None
+    attributes: tuple[tuple[str, str], ...] = ()
+    object_ref: str | None = Field(
+        default=None,
+        description="Opaque DDI handle (Infoblox WAPI _ref) for the source object. Never a secret.",
+    )

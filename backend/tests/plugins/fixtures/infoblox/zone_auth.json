@@ -1,0 +1,9 @@
+[
+  {
+    "_ref": "zone_auth/ZG5zLnpvbmUkLl9kZWZhdWx0LmV4YW1wbGUuY29t:example.com/default",
+    "fqdn": "example.com",
+    "view": "default",
+    "zone_format": "FORWARD",
+    "comment": "primary forward zone"
+  }
+]

@@ -63,14 +63,15 @@ async def get_graph(
     _user: Viewer,
     site: Annotated[str | None, Query(max_length=255)] = None,
     vrf: Annotated[str | None, Query(max_length=255)] = None,
-    layer: Annotated[str, Query(pattern="^(l2|l3|all)$")] = LAYER_ALL,
+    layer: Annotated[str, Query(pattern="^(l2|l3|dns|all)$")] = LAYER_ALL,
 ) -> GraphResponse:
     """Return the projected subgraph as of the latest projection pass.
 
     ``site`` / ``vrf`` scope the subgraph; ``layer`` selects the relationship
-    families (``l2`` neighbors, ``l3`` adjacency/routing, or ``all``).
-    ``projected_at`` is the most recent ``last_projected_at`` across the
-    returned nodes (``null`` when the filtered subgraph is empty).
+    families (``l2`` neighbors, ``l3`` adjacency/routing, ``dns`` zone/record
+    dependencies, or ``all``).  ``projected_at`` is the most recent
+    ``last_projected_at`` across the returned nodes (``null`` when the filtered
+    subgraph is empty).
     """
     # ``layer`` is constrained by the pattern above; this guards the contract.
     if layer not in LAYERS:  # pragma: no cover - pattern enforces the set

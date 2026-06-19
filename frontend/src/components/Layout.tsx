@@ -17,6 +17,8 @@ interface NavItem {
   end?: boolean;
   /** Shown only to admins (defense-in-depth; the backend RBAC is canonical). */
   adminOnly?: boolean;
+  /** Shown only to engineer+ (defense-in-depth; the backend RBAC is canonical). */
+  engineerOnly?: boolean;
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -25,8 +27,10 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/config", label: "Config", abbr: "CF" },
   { to: "/documents", label: "Documents", abbr: "DC" },
   { to: "/topology", label: "Topology", abbr: "TP" },
+  { to: "/packet", label: "Packet", abbr: "PK", engineerOnly: true },
+  { to: "/incidents", label: "Incidents", abbr: "IR" },
   { to: "/chat", label: "Chat", abbr: "CH" },
-  { to: "/changes", label: "Changes", abbr: "CR" },
+  { to: "/changes", label: "Changes", abbr: "CR", engineerOnly: true },
   { to: "/audit", label: "Audit", abbr: "AU" },
   { to: "/users", label: "Users", abbr: "US", adminOnly: true },
   { to: "/profile", label: "Profile", abbr: "PR" },
@@ -56,7 +60,11 @@ export function Layout() {
   const navigate = useNavigate();
 
   const isAdmin = hasMinimumRole(user?.role, "admin");
-  const navItems = NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin);
+  const isEngineer = hasMinimumRole(user?.role, "engineer");
+  const navItems = NAV_ITEMS.filter(
+    (item) =>
+      (!item.adminOnly || isAdmin) && (!item.engineerOnly || isEngineer),
+  );
   // Prefer the human-friendly name, fall back to the login username.
   const displayName = user?.display_name ?? user?.username ?? "";
 

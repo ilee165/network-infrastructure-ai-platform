@@ -1301,3 +1301,315 @@ class TestDocumentationRegistration:
     def test_tool_list_exported(self) -> None:
         names = {t.name for t in DOCUMENTATION_TOOLS}
         assert "generate_inventory" in names
+
+
+# ---------------------------------------------------------------------------
+# generate_incident_report — grounded, redacted LLM incident narrative (M5 T12)
+# ---------------------------------------------------------------------------
+
+
+from app.agents.documentation.tools import (  # noqa: E402
+    generate_incident_report,
+    render_incident_report,
+)
+
+# ---------------------------------------------------------------------------
+# Fixture troubleshooting session data
+# ---------------------------------------------------------------------------
+
+_SESSION_ID = "sess-001"
+_TS_BASE = "2026-06-18T20:00:00Z"
+
+_FIXTURE_SESSION: dict[str, Any] = {
+    "session_id": _SESSION_ID,
+    "title": "BGP session flap on edge-1",
+    "started_at": _TS_BASE,
+    "resolved_at": "2026-06-18T20:45:00Z",
+    "timeline": [
+        {
+            "ts": "2026-06-18T20:00:00Z",
+            "step": "BGP neighbour 10.0.0.2 went down",
+            "evidence": "show bgp summary",
+        },
+        {
+            "ts": "2026-06-18T20:15:00Z",
+            "step": "Route withdrawal observed on WAN uplink",
+            "evidence": "show ip route 0.0.0.0/0",
+        },
+        {
+            "ts": "2026-06-18T20:40:00Z",
+            "step": "BGP session re-established after MTU correction",
+            "evidence": "show bgp summary",
+        },
+    ],
+    "findings": "MTU mismatch on GigabitEthernet0/0 caused BGP hold-timer expiry.",
+    "affected_devices": [DEVICE_A],
+    "evidence_refs": ["show bgp summary", "show ip route 0.0.0.0/0"],
+}
+
+_FIXTURE_CHANGE_REQUESTS: list[dict[str, Any]] = [
+    {
+        "id": "cr-001",
+        "kind": "config",
+        "state": "completed",
+        "description": "Set MTU 9000 on GigabitEthernet0/0",
+        "target_refs": {"device_id": DEVICE_A},
+    }
+]
+
+_SECRET_FINDING = "snmp-server community MyS3cretComm RO — check BGP config"
+_SESSION_WITH_SECRET: dict[str, Any] = {
+    **_FIXTURE_SESSION,
+    "findings": _SECRET_FINDING,
+}
+
+
+class TestGenerateIncidentReportContract:
+    """Tool registration, classification, and payload shape."""
+
+    def test_tool_is_registered(self) -> None:
+        names = {t.name for t in _AgentImpl().tools}
+        assert "generate_incident_report" in names
+
+    def test_tool_is_read_only(self) -> None:
+        assert generate_incident_report.classification is ToolClassification.READ_ONLY
+
+    def test_tool_is_netops_tool(self) -> None:
+        assert isinstance(generate_incident_report, NetOpsTool)
+
+    def test_tool_exported_in_list(self) -> None:
+        names = {t.name for t in DOCUMENTATION_TOOLS}
+        assert "generate_incident_report" in names
+
+    async def test_returns_incident_report_document_payload(self) -> None:
+        payload = await render_incident_report(
+            _FIXTURE_SESSION,
+            _FIXTURE_CHANGE_REQUESTS,
+            model=_RecordingChatModel(),
+        )
+        assert payload["kind"] == "incident_report"
+        assert payload["format"] == "md"
+        assert payload["title"].startswith("Incident Report:")
+        assert "content" in payload
+        assert payload["source_refs"]["session_id"] == _SESSION_ID
+
+
+class TestIncidentReportTimeline:
+    """Timeline and evidence refs appear in content (task T12 requirement)."""
+
+    async def test_timeline_section_present(self) -> None:
+        payload = await render_incident_report(
+            _FIXTURE_SESSION,
+            _FIXTURE_CHANGE_REQUESTS,
+            model=_RecordingChatModel(),
+        )
+        assert "## Timeline" in payload["content"]
+
+    async def test_timeline_steps_present(self) -> None:
+        payload = await render_incident_report(
+            _FIXTURE_SESSION,
+            _FIXTURE_CHANGE_REQUESTS,
+            model=_RecordingChatModel(),
+        )
+        assert "BGP neighbour 10.0.0.2 went down" in payload["content"]
+        assert "MTU correction" in payload["content"]
+
+    async def test_evidence_refs_appear_in_content(self) -> None:
+        payload = await render_incident_report(
+            _FIXTURE_SESSION,
+            _FIXTURE_CHANGE_REQUESTS,
+            model=_RecordingChatModel(),
+        )
+        assert "show bgp summary" in payload["content"]
+        assert "show ip route 0.0.0.0/0" in payload["content"]
+
+    async def test_change_requests_section_present(self) -> None:
+        payload = await render_incident_report(
+            _FIXTURE_SESSION,
+            _FIXTURE_CHANGE_REQUESTS,
+            model=_RecordingChatModel(),
+        )
+        assert "## Remediation" in payload["content"]
+        assert "cr-001" in payload["content"]
+
+    async def test_empty_change_requests_still_renders(self) -> None:
+        payload = await render_incident_report(
+            _FIXTURE_SESSION,
+            [],
+            model=_RecordingChatModel(),
+        )
+        assert "## Remediation" in payload["content"]
+
+
+class TestIncidentReportGrounding:
+    """The narrative is grounded in the session facts (ADR-0019 §4)."""
+
+    async def test_model_receives_session_facts(self) -> None:
+        model = _RecordingChatModel()
+        await render_incident_report(
+            _FIXTURE_SESSION,
+            _FIXTURE_CHANGE_REQUESTS,
+            model=model,
+        )
+        prompt_text = "\n".join(model.seen)
+        assert "BGP session flap on edge-1" in prompt_text
+        assert "MTU mismatch" in prompt_text
+
+    async def test_narrative_appears_in_content(self) -> None:
+        reply = "BGP session on edge-1 was disrupted by an MTU mismatch."
+        model = _RecordingChatModel(reply=reply)
+        payload = await render_incident_report(
+            _FIXTURE_SESSION,
+            _FIXTURE_CHANGE_REQUESTS,
+            model=model,
+        )
+        assert reply in payload["content"]
+
+
+class TestIncidentReportSecretRedaction:
+    """SECURITY-CRITICAL: secret patterns never reach the model (A9 / ADR-0019 §4)."""
+
+    async def test_secret_never_reaches_the_model(self) -> None:
+        _secret_token = "MyS3cretComm"
+        model = _RecordingChatModel()
+        await render_incident_report(
+            _SESSION_WITH_SECRET,
+            [],
+            model=model,
+        )
+        for text in model.seen:
+            assert _secret_token not in text, "secret value reached the model prompt"
+
+    async def test_secret_redacted_in_report_content(self) -> None:
+        _secret_token = "MyS3cretComm"
+        payload = await render_incident_report(
+            _SESSION_WITH_SECRET,
+            [],
+            model=_RecordingChatModel(),
+        )
+        assert _secret_token not in payload["content"]
+        assert "<<REDACTED:snmp_community>>" in payload["content"]
+
+    async def test_secret_in_cr_target_refs_never_reaches_model(self) -> None:
+        """Secret nested inside CR target_refs dict must be redacted before the model sees it."""
+        _secret_token = "SECRET"
+        cr_with_nested_secret = {
+            "id": "cr-x",
+            "kind": "config",
+            "state": "pending",
+            "description": "fix",
+            "target_refs": {"creds": f"snmp-server community {_secret_token} RO"},
+        }
+        model = _RecordingChatModel()
+        await render_incident_report(
+            _FIXTURE_SESSION,
+            [cr_with_nested_secret],
+            model=model,
+        )
+        for text in model.seen:
+            assert _secret_token not in text, (
+                f"secret value inside CR target_refs reached the model prompt: {text!r}"
+            )
+
+    async def test_tool_resolves_default_provider_and_redacts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``generate_incident_report`` resolves the D9 provider and never leaks a secret."""
+        _secret_token = "MyS3cretComm"
+        model = _RecordingChatModel()
+
+        def _fake_get_chat_model(*_args: Any, **_kwargs: Any) -> BaseChatModel:
+            return model
+
+        import app.agents.documentation.tools as tools_mod
+
+        monkeypatch.setattr(tools_mod, "get_chat_model", _fake_get_chat_model, raising=False)
+        import app.llm.providers as providers_mod
+
+        monkeypatch.setattr(providers_mod, "get_chat_model", _fake_get_chat_model)
+
+        raw = await generate_incident_report.ainvoke(
+            {
+                "session": _SESSION_WITH_SECRET,
+                "change_requests": [],
+            }
+        )
+        payload = json.loads(raw)
+        assert payload["kind"] == "incident_report"
+        for text in model.seen:
+            assert _secret_token not in text
+        assert _secret_token not in payload["content"]
+
+
+class TestIncidentReportEmbedding:
+    """A generated incident report is embeddable via the T8 pipeline (ADR-0019 §5)."""
+
+    async def test_generated_incident_report_is_embedded(self) -> None:
+        import hashlib
+        from collections.abc import Sequence as _Seq
+
+        from sqlalchemy import event, select
+        from sqlalchemy.ext.asyncio import (
+            async_sessionmaker,
+            create_async_engine,
+        )
+
+        from app.knowledge.embedding import embed_document
+        from app.models import Base, Document, DocumentFormat, DocumentKind, Embedding
+        from app.models.config_mgmt import EMBEDDING_DIM
+
+        class _FakeEmbedder:
+            async def embed(self, texts: _Seq[str]) -> list[list[float]]:
+                out: list[list[float]] = []
+                for text in texts:
+                    digest = hashlib.sha256(text.encode("utf-8")).digest()
+                    vector = [0.0] * EMBEDDING_DIM
+                    for i in range(min(len(digest), EMBEDDING_DIM)):
+                        vector[i] = digest[i] / 255.0
+                    out.append(vector)
+                return out
+
+        engine = create_async_engine("sqlite+aiosqlite://")
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def _fk(dbapi_connection: Any, _record: Any) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        payload = await render_incident_report(
+            _FIXTURE_SESSION,
+            _FIXTURE_CHANGE_REQUESTS,
+            model=_RecordingChatModel(),
+        )
+
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with maker() as session:
+                document = Document(
+                    kind=DocumentKind(payload["kind"]),
+                    title=payload["title"],
+                    format=DocumentFormat(payload["format"]),
+                    content=payload["content"],
+                )
+                session.add(document)
+                await session.flush()
+
+                rows = await embed_document(session, document, embedder=_FakeEmbedder())
+                assert rows, "the incident report produced no embedding rows"
+
+                persisted = (
+                    (
+                        await session.execute(
+                            select(Embedding).where(Embedding.document_id == document.id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                assert len(persisted) == len(rows)
+        finally:
+            await engine.dispose()

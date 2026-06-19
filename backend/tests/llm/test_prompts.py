@@ -64,10 +64,10 @@ class TestRoutingPromptV3:
 
 
 class TestRoutingPromptV4:
-    def test_v4_is_the_latest_routing_prompt(self) -> None:
-        # The supervisor auto-selects the latest; v4 is the 5-way prompt (T13).
-        latest = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)
-        assert latest.version == 4
+    def test_v4_is_registered_as_the_five_way_prompt(self) -> None:
+        # v4 is the 5-way prompt (T13); T14 supersedes it with v5 (8-way) but v4
+        # stays registered and immutable for reproducibility.
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 4).version == 4
 
     def test_v4_keeps_specialists_placeholder(self) -> None:
         # The supervisor fills {specialists}; losing it would break routing.
@@ -104,6 +104,69 @@ class TestRoutingPromptV4:
         assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 1).version == 1
         assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 2).version == 2
         assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).version == 3
+
+
+class TestRoutingPromptV5:
+    def test_v5_is_the_latest_routing_prompt(self) -> None:
+        # The supervisor auto-selects the latest; v5 is the 8-way prompt (T14).
+        latest = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)
+        assert latest.version == 5
+
+    def test_v5_keeps_specialists_placeholder(self) -> None:
+        assert "{specialists}" in get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 5).text
+
+    def test_v5_covers_all_eight_specialists(self) -> None:
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 5).text.lower()
+        for specialist in (
+            "discovery",
+            "troubleshooting",
+            "consultant",
+            "configuration",
+            "documentation",
+            "automation",
+            "ddi",
+            "packet",
+        ):
+            assert specialist in text
+
+    def test_v5_adds_wave4_decision_rules(self) -> None:
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 5).text.lower()
+        # DDI => DNS/DHCP records + drafting a change request.
+        assert "dns" in text
+        assert "dhcp" in text
+        # Packet analysis => capture / pcap.
+        assert "capture" in text
+        # Automation => execute an APPROVED change request only.
+        assert "approved" in text
+
+    def test_v5_enforces_change_drafts_not_executes_invariant(self) -> None:
+        # The critical M5 routing invariant: a request to CHANGE the network
+        # routes to the draft-a-CR path, NOT to direct execution.
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 5).text.lower()
+        assert "change request" in text
+        # The prompt must distinguish drafting/proposing a change from executing
+        # an already-approved one (the automation boundary).
+        assert "approved" in text
+        assert "execut" in text
+
+    def test_v5_preserves_v4_and_v3_rules(self) -> None:
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 5).text.lower()
+        # v3 diagnosis-vs-enumeration rules retained.
+        assert "why" in text
+        assert "enumerat" in text
+        assert "routing table" in text
+        # v4 config/documentation boundaries retained.
+        assert "drift" in text
+        assert "complian" in text
+        assert "inventory" in text
+        assert "diagram" in text
+        assert "runbook" in text
+
+    def test_v1_through_v4_still_registered_immutable(self) -> None:
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 1).version == 1
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 2).version == 2
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).version == 3
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 4).version == 4
 
 
 class TestRegistryBehavior:

@@ -27,6 +27,10 @@ services:
     env_file: ../../.env
     ports:
       - "8000:8000"
+    volumes:
+      # pcap artifact volume (ADR-0013 §3 / ADR-0023 §3): the API streams
+      # downloads from here; the capture/retention workers write/purge it.
+      - pcaps:/data/pcaps
     depends_on:
       postgres:
         condition: service_healthy
@@ -47,6 +51,10 @@ services:
     image: netops-backend:dev
     command: celery -A app.workers.celery_app worker -Q discovery,config,packet,docs,system
     env_file: ../../.env
+    volumes:
+      # pcap artifact volume: the packet capture worker writes captures here and
+      # the retention beat (packet.purge_expired) deletes expired files (ADR-0023).
+      - pcaps:/data/pcaps
     depends_on:
       postgres:
         condition: service_healthy
@@ -148,9 +156,12 @@ services:
       retries: 5
     restart: unless-stopped
 
-# Named volumes per ADR-0013 (the `pcaps` volume lands with packet analysis, M5).
+# Named volumes per ADR-0013 §3.
 volumes:
   pgdata:
   neo4jdata:
   redisdata:
   ollama-models:
+  # pcap capture artifacts (ADR-0023): written by the capture worker, read by
+  # the API for downloads, purged by the retention beat.
+  pcaps:

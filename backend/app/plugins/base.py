@@ -29,6 +29,7 @@ FastAPI event loop (ADR-0007 §3, ADR-0008).
 from __future__ import annotations
 
 import re
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -42,8 +43,13 @@ from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     NormalizedAclEntry,
     NormalizedBgpPeer,
+    NormalizedDhcpLease,
+    NormalizedDhcpRange,
+    NormalizedDiscoveredObject,
+    NormalizedDnsRecord,
     NormalizedInterface,
     NormalizedNeighbor,
+    NormalizedNetwork,
     NormalizedOspfNeighbor,
     NormalizedRoute,
 )
@@ -52,9 +58,21 @@ __all__ = [
     "AclCapability",
     "BgpCapability",
     "Capability",
+    "ChangeOutcome",
+    "ChangePlan",
+    "ChangeRequestDraft",
+    "ChangeResult",
     "CommandTransport",
     "ConfigBackupCapability",
+    "ConfigDeployCapability",
+    "ConfigRestoreCapability",
+    "ConfigSnapshotRef",
+    "ConfigWriteTransport",
     "ConnectionParams",
+    "DdiDhcpCapability",
+    "DdiDnsCapability",
+    "DdiIpamCapability",
+    "DiscoveryApiCapability",
     "DiscoverySnmpCapability",
     "DiscoverySshCapability",
     "InterfacesCapability",
@@ -62,10 +80,12 @@ __all__ = [
     "OspfCapability",
     "PluginCapability",
     "RawOutput",
+    "RollbackResult",
     "RoutesCapability",
     "SnmpReadTransport",
     "TransportKind",
     "VendorPlugin",
+    "WapiVerb",
 ]
 
 _VENDOR_ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -174,6 +194,170 @@ class SnmpReadTransport(Protocol):
     def get(self, oids: Sequence[str]) -> dict[str, str]:
         """SNMP GET for *oids*; returns ``{dotted_oid: pretty_value}``."""
         ...
+
+
+@runtime_checkable
+class ConfigWriteTransport(CommandTransport, Protocol):
+    """A CLI session that can both read (``send_command``) and **write** config.
+
+    The write surface for ``CONFIG_RESTORE``/``CONFIG_DEPLOY`` (ADR-0021 §4):
+
+    - :meth:`send_config` is the netmiko ``send_config_set`` family — it enters
+      ``configure terminal``, sends the lines, and exits. This is a **MERGE**
+      into the running config: it adds/overrides lines but cannot *remove* a
+      line that is not mentioned. It is the apply surface for an additive
+      ``CONFIG_DEPLOY`` fragment.
+    - :meth:`replace_config` is the vendor-native config-**replace** primitive
+      (``configure replace`` on IOS): it makes the running config become exactly
+      the supplied lines, including removing device-only lines absent from the
+      target. This is the apply surface for ``CONFIG_RESTORE`` and the rollback
+      surface for both, because only a replace can re-establish *equality* with a
+      captured baseline (ADR-0021 §4: "configure replace ... otherwise replay of
+      the captured pre-change baseline as the inverse"). A merge cannot satisfy
+      the symmetric equal-to-baseline predicate of §3.
+
+    ``send_command`` (inherited) is used to capture/verify the running config
+    around the write. Both are satisfied by
+    :class:`app.plugins.transport.ssh.SshTransport`; tests use in-memory fakes.
+    Implementations return device output verbatim.
+    """
+
+    def send_config(self, lines: Sequence[str]) -> str:
+        """Merge *lines* into the running config (``configure terminal``); verbatim output."""
+        ...
+
+    def replace_config(self, lines: Sequence[str]) -> str:
+        """Replace the running config so it becomes exactly *lines* (configure replace).
+
+        The vendor-native config-replace primitive (ADR-0021 §4): unlike
+        :meth:`send_config`, this removes any running line not present in *lines*,
+        so a post-replace re-capture can normalize **equal** to the supplied
+        target — the precondition for the symmetric rollback/restore equality
+        predicate (§3). Returns the device output verbatim.
+        """
+        ...
+
+
+@runtime_checkable
+class ConfigSnapshotRef(Protocol):
+    """Read-only view of a stored config snapshot a restore replays (ADR-0021 §1).
+
+    The persisted ``app.models.ConfigSnapshot`` row structurally satisfies this
+    protocol (it exposes ``content`` and ``content_hash``). Declaring the
+    capability against the protocol — not the ORM model — keeps the plugin layer
+    free of any ``app.models`` import (plugins are stateless transport-only
+    descriptors); the executor (Wave 4) passes the real snapshot row.
+    """
+
+    @property
+    def content(self) -> str:
+        """The verbatim configuration text captured in the snapshot."""
+        ...
+
+    @property
+    def content_hash(self) -> str:
+        """The content-address (SHA-256) identifying the snapshot."""
+        ...
+
+
+class ChangeOutcome(StrEnum):
+    """Terminal classification of one config write attempt (ADR-0021 §3).
+
+    Maps onto the ChangeRequest lifecycle the executor drives: ``applied`` /
+    ``no_op`` -> ``completed``; ``rolled_back`` -> ``failed -> rolled_back``;
+    ``rollback_failed`` -> CR stays ``failed`` + operator alert (never silently
+    closed, never reported ``rolled_back``).
+    """
+
+    APPLIED = "applied"
+    NO_OP = "no_op"
+    ROLLED_BACK = "rolled_back"
+    ROLLBACK_FAILED = "rollback_failed"
+
+
+class ChangePlan(BaseModel):
+    """Execution context handed to a config-write capability (ADR-0021 §1/§2).
+
+    Carries the originating ``change_request_id``, the attested CR lifecycle
+    state, and the captured pre-change baseline reference / idempotency
+    metadata. The capability **never self-authorizes**: it refuses to run unless
+    ``cr_state`` attests ``executing`` (the state the Automation-Agent executor
+    claims from ``approved`` before constructing the plan, ADR-0020 §1). The plan
+    is data the executor builds *after* the four-eyes-approved CR is claimed; the
+    plugin verifies the attestation but does not — and cannot — grant it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    change_request_id: uuid.UUID = Field(
+        description="The approved ChangeRequest this write executes (ADR-0020 §2)."
+    )
+    cr_state: str = Field(
+        description="Attested CR lifecycle state; must be 'executing' or the write is refused."
+    )
+    baseline_content_hash: str | None = Field(
+        default=None,
+        description="Content-address of the CR's rollback_plan baseline reference (audit only; "
+        "the authoritative baseline is captured fresh at apply time, ADR-0021 §3).",
+    )
+
+    #: The single CR state in which a config write may execute (ADR-0021 §2).
+    EXECUTING_STATE: ClassVar[str] = "executing"
+
+    @property
+    def is_executing(self) -> bool:
+        """Whether the plan attests an ``executing`` CR (apply-time precondition)."""
+        return self.cr_state == self.EXECUTING_STATE
+
+
+class RollbackResult(BaseModel):
+    """Outcome of the structured per-change rollback step (ADR-0021 §3).
+
+    A first-class return value, not a side effect: ``succeeded`` is True only
+    when the post-rollback re-capture normalizes **equal to the captured
+    pre-change baseline** (the asserted equality criterion, symmetric with the
+    restore exit criterion). A rollback that cannot reach the device or whose
+    re-capture does not normalize equal to the baseline is ``succeeded=False`` —
+    surfaced by the caller as ``ChangeOutcome.ROLLBACK_FAILED``, never
+    ``rolled_back``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    attempted: bool = Field(description="Whether a rollback was attempted (apply/verify failed).")
+    succeeded: bool = Field(description="Whether the device was restored to the baseline.")
+    verified: bool = Field(
+        description="Whether the post-rollback re-capture normalized equal to the baseline."
+    )
+    detail: str | None = Field(
+        default=None, description="Human-readable rollback note (never carries config secrets)."
+    )
+
+
+class ChangeResult(BaseModel):
+    """Structured outcome of a ``CONFIG_RESTORE``/``CONFIG_DEPLOY`` execution.
+
+    ADR-0021 §1: both capabilities return this — the applied diff summary, the
+    verify-after outcome, and the structured rollback outcome when one ran. The
+    executor maps ``outcome`` onto the CR lifecycle (ADR-0020). ``applied_diff``
+    is a redaction-safe summary (line counts / changed-line markers), not raw
+    config text, so a ``ChangeResult`` never carries config secrets.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    change_request_id: uuid.UUID
+    outcome: ChangeOutcome
+    verified: bool = Field(
+        description="Whether verify-after confirmed the intended end-state on the device."
+    )
+    applied_diff: tuple[str, ...] = Field(
+        default=(),
+        description="Redaction-safe summary of what the apply changed (empty for a no-op).",
+    )
+    rollback: RollbackResult | None = Field(
+        default=None, description="Structured rollback outcome when apply/verify failed; else None."
+    )
 
 
 class PluginCapability(ABC):
@@ -311,6 +495,232 @@ class ConfigBackupCapability(PluginCapability):
     @abstractmethod
     def fetch_running_config(self) -> str:
         """Return the device running configuration verbatim."""
+
+
+class ConfigRestoreCapability(PluginCapability):
+    """``Capability.CONFIG_RESTORE`` — replay a stored snapshot onto a device.
+
+    The first device-write path (ADR-0021). Restores the device's running
+    configuration to an existing M4 ``config_snapshot`` as the execution step of
+    an ``executing`` ChangeRequest: capture a fresh pre-change baseline, compute
+    the diff (empty => idempotent no-op), apply, verify-after (the re-captured
+    config normalizes equal to the snapshot), and on failure replay the captured
+    baseline and verify the rollback. The method **never self-authorizes** — it
+    refuses unless the :class:`ChangePlan` attests an ``executing`` CR (§2).
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.CONFIG_RESTORE})
+
+    @abstractmethod
+    def restore(self, snapshot: ConfigSnapshotRef, *, plan: ChangePlan) -> ChangeResult:
+        """Restore the device to *snapshot* under the approved-CR *plan* (ADR-0021)."""
+
+
+class ConfigDeployCapability(PluginCapability):
+    """``Capability.CONFIG_DEPLOY`` — merge a supplied config fragment onto a device.
+
+    The first device-write path (ADR-0021). Applies a config fragment as the
+    execution step of an ``executing`` ChangeRequest with the same
+    capture-before -> apply -> verify-after -> rollback-on-failure contract as
+    restore: the deploy verify-after predicate (every fragment line present, no
+    unintended residual diff) and the rollback-success criterion are symmetric
+    with restore. The method **never self-authorizes** — it refuses unless the
+    :class:`ChangePlan` attests an ``executing`` CR (§2).
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.CONFIG_DEPLOY})
+
+    @abstractmethod
+    def deploy(self, config_fragment: str, *, plan: ChangePlan) -> ChangeResult:
+        """Apply *config_fragment* under the approved-CR *plan* (ADR-0021)."""
+
+
+# ---------------------------------------------------------------------------
+# DDI + API-discovery capability interfaces (ADR-0022)
+# ---------------------------------------------------------------------------
+
+
+class WapiVerb(StrEnum):
+    """The mutation verb a :class:`ChangeRequestDraft` would apply to a DDI object.
+
+    Maps onto the REST methods an Infoblox-style WAPI exposes (ADR-0022 §3):
+    ``create`` (POST a new object), ``update`` (PUT onto an existing ``_ref``),
+    ``delete`` (DELETE an existing ``_ref``).
+    """
+
+    CREATE = "create"
+    UPDATE = "update"
+    DELETE = "delete"
+
+
+class ChangeRequestDraft(BaseModel):
+    """A proposed DDI mutation — data only, never an executed write (ADR-0022 §3).
+
+    A DDI capability's mutation method returns one of these instead of calling
+    the appliance: it carries the target object handle (``object_ref`` — ``None``
+    for a create), the exact WAPI verb + object type + body to apply, and an
+    ``inverse`` draft that undoes the change (delete-the-added-record, or restore
+    the prior object state). The DDI Agent hands the draft to the ChangeRequest
+    service (ADR-0020); only the Automation Agent — for an ``approved`` CR — turns
+    a draft into an actual write. Making mutations drafts means the capability
+    layer *cannot* write, so there is no DDI write path that skips the CR spine
+    (ADR-0022 §3 / alternative 2).
+
+    The model is frozen and forbids extra fields. ``body`` carries DDI record
+    fields (names, IPs, TTLs) — never credentials; the WAPI auth secret lives
+    only inside the transport, never in a draft.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    verb: WapiVerb = Field(description="The WAPI mutation to apply (create/update/delete).")
+    wapi_object: str = Field(
+        min_length=1,
+        description="WAPI object type the verb targets (e.g. 'record:a', 'network').",
+    )
+    object_ref: str | None = Field(
+        default=None,
+        description="Opaque WAPI _ref of the existing target object; None for a create. "
+        "Never a secret.",
+    )
+    body: tuple[tuple[str, str], ...] = Field(
+        default=(),
+        description="Object fields to send, as a flat secret-free (key, value) sequence.",
+    )
+    inverse: ChangeRequestDraft | None = Field(
+        default=None,
+        description="The draft that reverses this change (structured rollback spec, ADR-0022 §3).",
+    )
+    summary: str = Field(
+        min_length=1,
+        description="Human-readable, secret-free description of the intended change.",
+    )
+
+
+class DiscoveryApiCapability(PluginCapability):
+    """``Capability.DISCOVERY_API`` — read-only API-based discovery (ADR-0022 §2).
+
+    The first API-based discovery path: implementations query an appliance/cloud
+    REST API (Infoblox WAPI) and return :class:`NormalizedDiscoveredObject`
+    records (networks, DNS zones, members) for the discovery engine. Read-only —
+    it never mutates the source.
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DISCOVERY_API})
+
+    @abstractmethod
+    def discover(self) -> list[NormalizedDiscoveredObject]:
+        """Return the objects observed over the management API as normalized records."""
+
+
+class DdiDnsCapability(PluginCapability):
+    """``Capability.DDI_DNS`` — DNS read + draft-only mutations (ADR-0022 §2/§3).
+
+    Reads return normalized records; mutations return a
+    :class:`ChangeRequestDraft` and **never** write to the appliance (the write
+    is the Automation Agent's job, only for an ``approved`` CR).
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DDI_DNS})
+
+    @abstractmethod
+    def get_zones(self) -> list[str]:
+        """Return the authoritative DNS zones (FQDNs) as normalized identifiers (ADR-0022 §2)."""
+
+    @abstractmethod
+    def get_records(self, zone: str | None = None) -> list[NormalizedDnsRecord]:
+        """Return DNS resource records, optionally scoped to *zone*, as normalized records."""
+
+    @abstractmethod
+    def add_record(self, record: NormalizedDnsRecord) -> ChangeRequestDraft:
+        """Draft the addition of *record* (no write performed)."""
+
+    @abstractmethod
+    def modify_record(
+        self,
+        object_ref: str,
+        changes: NormalizedDnsRecord,
+        current: NormalizedDnsRecord | None = None,
+    ) -> ChangeRequestDraft:
+        """Draft a modification of the object at *object_ref* (no write performed).
+
+        *current* is the pre-image (prior record state); when supplied the draft's
+        ``inverse`` carries the prior field values so an approved rollback restores
+        them (ADR-0022 §3). When omitted, no blind empty-body restore is emitted.
+        """
+
+    @abstractmethod
+    def delete_record(
+        self, object_ref: str, current: NormalizedDnsRecord | None = None
+    ) -> ChangeRequestDraft:
+        """Draft the deletion of the object at *object_ref* (no write performed).
+
+        *current* is the pre-image; when supplied the draft's ``inverse`` re-creates
+        the deleted record from its full state (ADR-0022 §3). Without it the delete
+        is non-reversible and no misleading re-create draft is emitted.
+        """
+
+
+class DdiDhcpCapability(PluginCapability):
+    """``Capability.DDI_DHCP`` — DHCP read + draft-only mutations (ADR-0022 §2/§3)."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DDI_DHCP})
+
+    @abstractmethod
+    def get_ranges(self) -> list[NormalizedDhcpRange]:
+        """Return the configured DHCP ranges as normalized records."""
+
+    @abstractmethod
+    def get_leases(self) -> list[NormalizedDhcpLease]:
+        """Return the current DHCP leases as normalized records."""
+
+    @abstractmethod
+    def add_range(self, dhcp_range: NormalizedDhcpRange) -> ChangeRequestDraft:
+        """Draft the addition of *dhcp_range* (no write performed)."""
+
+    @abstractmethod
+    def delete_range(
+        self, object_ref: str, current: NormalizedDhcpRange | None = None
+    ) -> ChangeRequestDraft:
+        """Draft the deletion of the range at *object_ref* (no write performed).
+
+        *current* is the pre-image; when supplied the draft's ``inverse`` re-creates
+        the deleted range from its full state (ADR-0022 §3). Without it the delete
+        is non-reversible and no misleading re-create draft is emitted.
+        """
+
+
+class DdiIpamCapability(PluginCapability):
+    """``Capability.DDI_IPAM`` — IPAM read + draft-only mutations (ADR-0022 §2/§3)."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.DDI_IPAM})
+
+    @abstractmethod
+    def get_networks(self) -> list[NormalizedNetwork]:
+        """Return the IPAM networks/subnets as normalized records."""
+
+    @abstractmethod
+    def get_next_available_ip(self, network: str) -> str:
+        """Return the next free IP address within *network* (ADR-0022 §2 read interface).
+
+        Read-only: resolves the network's WAPI handle and calls the appliance's
+        ``next_available_ip`` function. Never mutates the source.
+        """
+
+    @abstractmethod
+    def add_network(self, network: NormalizedNetwork) -> ChangeRequestDraft:
+        """Draft the allocation of *network* (no write performed)."""
+
+    @abstractmethod
+    def delete_network(
+        self, object_ref: str, current: NormalizedNetwork | None = None
+    ) -> ChangeRequestDraft:
+        """Draft the deletion of the network at *object_ref* (no write performed).
+
+        *current* is the pre-image; when supplied the draft's ``inverse`` re-creates
+        the deleted network from its full state (ADR-0022 §3). Without it the delete
+        is non-reversible and no misleading re-create draft is emitted.
+        """
 
 
 class VendorPlugin(ABC):

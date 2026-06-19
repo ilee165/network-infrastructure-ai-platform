@@ -19,6 +19,9 @@ export const LABEL_COLOR: Record<string, string> = {
   Vlan: "#f472b6", // pink
   VRF: "#fb923c", // orange
   Site: "#9ca3af", // grey
+  // DNS layer (T13 DnsZone / DnsRecord nodes)
+  DnsZone: "#c084fc", // purple
+  DnsRecord: "#86efac", // light-green
 };
 
 export const DEFAULT_NODE_COLOR = "#71717a";

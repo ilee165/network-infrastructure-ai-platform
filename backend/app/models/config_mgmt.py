@@ -83,6 +83,7 @@ class DocumentKind(StrEnum):
     INVENTORY = "inventory"
     DIAGRAM = "diagram"
     RUNBOOK = "runbook"
+    INCIDENT_REPORT = "incident_report"
 
 
 class DocumentFormat(StrEnum):

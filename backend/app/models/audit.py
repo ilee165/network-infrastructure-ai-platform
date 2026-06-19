@@ -28,6 +28,14 @@ class AuditLog(Base):
     partitioned table must include the partition key — the same design used for
     ``raw_artifact_id`` (see ``app.models.inventory``). Linkage integrity is
     enforced by tests, and the column is nullable for non-agent audit entries.
+
+    ``request_id`` is the inbound request/correlation id of the call that
+    produced the audited action (ADR-0020 §4 names ``request id`` as a required
+    dimension of every transition audit entry). It is a plain indexed UUID with
+    no FK — a free-standing correlation handle, captured at the route layer and
+    threaded down to :func:`app.services.audit.record`. It is ``None`` for
+    actions raised outside an HTTP request (e.g. background/agent-driven
+    handoffs that carry no inbound correlation id).
     """
 
     __tablename__ = "audit_log"
@@ -41,3 +49,4 @@ class AuditLog(Base):
     target_id: Mapped[str | None] = mapped_column(String(255))
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSON_VARIANT)
     reasoning_trace_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(index=True)

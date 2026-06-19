@@ -26,6 +26,9 @@ EXPECTED_TABLES = {
     "compliance_policies",
     "documents",
     "embeddings",
+    "change_requests",
+    "approvals",
+    "pcap_metadata",
 }
 
 PARTITIONED_TABLES = (

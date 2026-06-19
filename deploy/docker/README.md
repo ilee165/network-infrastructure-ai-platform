@@ -109,6 +109,39 @@ Without the profile there is **no working LLM** until you opt into an external
 provider via `NETOPS_LLM_PROFILE` (ADR-0009); no traffic leaves the deployment
 unless you do.
 
+## TLS at the edge (optional overlay)
+
+By default the base stack serves plaintext HTTP on `:8000` (api) and `:8080`
+(frontend) for local development. To terminate TLS at the compose edge — so no
+plaintext HTTP crosses the host boundary (ADR-0013 §3, M5 hardening) — apply the
+`docker-compose.tls.yml` **overlay**. It adds an `edge` reverse proxy
+(`nginx:1.27-alpine`) in front of `frontend` + `api` and never alters the base
+file, so the plain `up -d` bring-up above is unchanged.
+
+```bash
+# 1. one-time: generate a DEV self-signed cert into deploy/docker/tls/certs/
+bash deploy/docker/tls/generate-dev-cert.sh        # optional: pass a CN, default "localhost"
+
+# 2. bring the stack up with TLS terminated at the edge (base FIRST, overlay SECOND):
+docker compose --env-file .env \
+  -f deploy/docker/docker-compose.yml \
+  -f deploy/docker/docker-compose.tls.yml up -d
+```
+
+Then browse <https://localhost> (HTTP on `:80` 301-redirects to HTTPS). The dev
+cert is **self-signed**, so the browser shows a trust warning on first visit —
+expected for dev. The generated `certs/` directory is git-ignored; the key and
+cert bytes are never committed.
+
+- **Dev:** the self-signed cert above. No identity assurance — accept the
+  browser warning, or import the cert into your local trust store.
+- **Production:** do **not** use this edge or the self-signed cert. Production
+  terminates TLS at the Kubernetes `Ingress` with a CA-issued certificate
+  (ADR-0013 §4, [deploy/kubernetes/](../kubernetes/README.md)).
+
+For a hardened compose deployment, drop the `:8000`/`:8080` host port mappings
+from the base file so the platform is reachable only through the TLS edge.
+
 ## Operations
 
 ```bash

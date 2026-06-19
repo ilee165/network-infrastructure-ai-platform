@@ -8,11 +8,14 @@
  *    outside ``ProtectedRoute`` (``ProtectedRoute`` itself redirects a flagged
  *    user *to* it).
  *  - Everything else sits under ``ProtectedRoute`` (auth + forced-change gate)
- *    and then the ``Layout`` shell. Admin-only surfaces — ``/users`` and the LLM
- *    section of ``/settings`` (``/settings/llm``) — are additionally wrapped in
- *    ``RoleRoute("admin")`` as defense-in-depth; the backend ``require_role``
- *    remains the source of truth. The Appearance section of ``/settings`` stays
- *    reachable by any authenticated user.
+ *    and then the ``Layout`` shell. Sensitive surfaces are additionally wrapped
+ *    in ``RoleRoute`` as defense-in-depth; the backend ``require_role`` remains
+ *    the source of truth. ``/incidents`` uses ``RoleRoute("viewer")`` (matching
+ *    the backend viewer+ RBAC on GET /docs). ``/packet`` and ``/changes`` use
+ *    ``RoleRoute("engineer")``. Admin-only surfaces — ``/users`` and the LLM
+ *    section of ``/settings`` (``/settings/llm``) — use ``RoleRoute("admin")``.
+ *    The Appearance section of ``/settings`` stays reachable by any authenticated
+ *    user.
  *
  * The existing M0 pages keep their paths; unknown paths redirect to the
  * dashboard.
@@ -30,7 +33,9 @@ import { ConfigPage } from "./pages/ConfigPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DocumentsPage } from "./pages/DocumentsPage";
 import { DevicesPage } from "./pages/DevicesPage";
+import { IncidentReportsPage } from "./pages/IncidentReportsPage";
 import { LoginPage } from "./pages/LoginPage";
+import { PacketPage } from "./pages/PacketPage";
 import { ProfilePage } from "./pages/ProfilePage";
 import { SettingsLlmSection, SettingsPage } from "./pages/SettingsPage";
 import { TopologyPage } from "./pages/TopologyPage";
@@ -52,8 +57,28 @@ export function App() {
           <Route path="config" element={<ConfigPage />} />
           <Route path="documents" element={<DocumentsPage />} />
           <Route path="topology" element={<TopologyPage />} />
+
+          {/* /incidents: viewer+ (incident reports contain agent-generated
+              network-failure evidence; defense-in-depth over the backend
+              viewer+ RBAC on GET /docs — ADR-0019). */}
+          <Route element={<RoleRoute minimum="viewer" />}>
+            <Route path="incidents" element={<IncidentReportsPage />} />
+          </Route>
+
           <Route path="chat" element={<ChatPage />} />
-          <Route path="changes" element={<ChangesPage />} />
+
+          {/* /packet: engineer+ (capture launch requires engineer+ RBAC) */}
+          <Route element={<RoleRoute minimum="engineer" />}>
+            <Route path="packet" element={<PacketPage />} />
+          </Route>
+
+          {/* /changes: the ChangeRequest approval queue is an engineer+
+              capability (operator/viewer are not on the change surface;
+              defense-in-depth over the backend RBAC). */}
+          <Route element={<RoleRoute minimum="engineer" />}>
+            <Route path="changes" element={<ChangesPage />} />
+          </Route>
+
           <Route path="audit" element={<AuditPage />} />
           <Route path="profile" element={<ProfilePage />} />
 
