@@ -61,7 +61,9 @@ function renderLayout(role = "viewer", display_name: string | null = null) {
 
 describe("Layout", () => {
   it("renders a navigation link for every page", () => {
-    renderLayout();
+    // Render at engineer so the engineer+ gated "Changes" link is visible
+    // alongside the always-on links (Users remains admin-only and is excluded).
+    renderLayout("engineer");
     for (const label of NAV_LABELS) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
@@ -106,6 +108,16 @@ describe("Layout — user menu", () => {
   it("shows the Users link for an admin", () => {
     renderLayout("admin");
     expect(screen.getByRole("link", { name: "Users" })).toBeInTheDocument();
+  });
+
+  it("hides the Changes link for a sub-engineer (operator/viewer)", () => {
+    renderLayout("operator");
+    expect(screen.queryByRole("link", { name: "Changes" })).not.toBeInTheDocument();
+  });
+
+  it("shows the Changes link for an engineer", () => {
+    renderLayout("engineer");
+    expect(screen.getByRole("link", { name: "Changes" })).toBeInTheDocument();
   });
 
   it("logs out, marks the store anon, and redirects to /login", async () => {

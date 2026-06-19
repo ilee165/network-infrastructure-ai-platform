@@ -53,7 +53,14 @@ export function App() {
           <Route path="documents" element={<DocumentsPage />} />
           <Route path="topology" element={<TopologyPage />} />
           <Route path="chat" element={<ChatPage />} />
-          <Route path="changes" element={<ChangesPage />} />
+
+          {/* /changes: the ChangeRequest approval queue is an engineer+
+              capability (operator/viewer are not on the change surface;
+              defense-in-depth over the backend RBAC). */}
+          <Route element={<RoleRoute minimum="engineer" />}>
+            <Route path="changes" element={<ChangesPage />} />
+          </Route>
+
           <Route path="audit" element={<AuditPage />} />
           <Route path="profile" element={<ProfilePage />} />
 
