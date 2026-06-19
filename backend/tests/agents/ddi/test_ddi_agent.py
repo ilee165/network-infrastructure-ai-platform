@@ -430,6 +430,109 @@ class TestDhcpReadTools:
         conflict_ips = {c["ip_address"] for c in payload["conflicts"]}
         assert "10.0.0.5" in conflict_ips
 
+    async def test_scope_utilization_bad_range_ip_reports_zero_not_global_count(self) -> None:
+        """Finding 4 — unparsable start/end IP must yield active_leases=0, not global count.
+
+        When _pool_size returns None because a range address is unparsable,
+        the fallback must NOT attribute all global active leases to that range.
+        In a multi-range scenario with several bad-IP ranges every bad range
+        would otherwise report the same inflated active-lease count.
+        Tools consume plain dicts, so we can inject an unparsable address
+        directly without going through the schema validator.
+        """
+        # Three active leases exist globally (valid IPs via schema).
+        leases = _leases_payload(
+            [
+                _lease("10.0.0.5", DhcpLeaseState.ACTIVE),
+                _lease("10.0.0.6", DhcpLeaseState.ACTIVE),
+                _lease("10.0.0.7", DhcpLeaseState.ACTIVE),
+            ]
+        )
+        # Inject a range dict with unparsable addresses directly (bypassing
+        # NormalizedDhcpRange validation) — _pool_size returns None for these.
+        bad_ranges = [
+            {
+                "device_id": str(_DEVICE_UUID),
+                "collected_at": datetime.now(tz=UTC).isoformat(),
+                "source_vendor": "infoblox",
+                "start_address": "NOT_AN_IP",
+                "end_address": "ALSO_NOT_AN_IP",
+                "network": "10.0.0.0/24",
+                "name": "bad-pool",
+                "object_ref": "range/abc:bad",
+            }
+        ]
+        raw = await scope_utilization.ainvoke(
+            {"device_id": DEVICE, "ranges": bad_ranges, "leases": leases}
+        )
+        payload = json.loads(raw)
+        scope = payload["scopes"][0]
+        # Must be 0, not 3 (total active leases).
+        assert scope["active_leases"] == 0
+        assert scope["pool_size"] is None
+        assert scope["utilization_percent"] is None
+
+    async def test_scope_utilization_bad_lease_ip_within_valid_range_skips_not_inflates(
+        self,
+    ) -> None:
+        """Finding 4 — unparsable lease IP inside a valid range must be skipped, not inflated.
+
+        When the range parses fine but an individual active-lease ip_address
+        string is not a valid IP, the inner ip_address() call raises ValueError.
+        The except branch must skip that lease (contributing 0 to in_pool), not
+        fall back to len(active_ips) which would count ALL leases for this range.
+        Lease dicts are consumed as plain dicts so we can inject a garbage IP
+        string directly without triggering schema validation.
+        """
+        prov = {
+            "device_id": str(_DEVICE_UUID),
+            "collected_at": datetime.now(tz=UTC).isoformat(),
+            "source_vendor": "infoblox",
+            "network": "10.0.0.0/24",
+            "object_ref": "lease/abc:x",
+        }
+        # Two raw lease dicts: one with a valid IP in-range, one with garbage.
+        leases = [
+            {**prov, "ip_address": "10.0.0.5", "state": "active"},
+            {**prov, "ip_address": "GARBAGE_IP", "state": "active"},
+        ]
+        ranges = _ranges_payload([_range("10.0.0.1", "10.0.0.10")])
+        raw = await scope_utilization.ainvoke(
+            {"device_id": DEVICE, "ranges": ranges, "leases": leases}
+        )
+        payload = json.loads(raw)
+        scope = payload["scopes"][0]
+        # Only the parsable in-range lease (10.0.0.5) should count; GARBAGE_IP
+        # must be skipped, not cause a fallback to len(active_ips)=2.
+        assert scope["active_leases"] == 1
+        assert scope["pool_size"] == 10
+
+    async def test_dhcp_hostname_content_is_redacted(self) -> None:
+        """A9 oracle — a secret-bearing hostname is scrubbed before reaching the LLM.
+
+        The hostname field of a DHCP lease is free-text and can carry a secret
+        (e.g. an operator who set the hostname to a config blob, or a
+        misconfigured device that leaks a Cisco type-9 hash in its client-id
+        string). _redact_record must scrub it; this test proves the wiring is in
+        place and that removing _redact_record from lookup_dhcp_lease would break it.
+        """
+        # A DHCP hostname that embeds a bare Cisco type-9 hash fragment — one of
+        # the patterns the redaction layer recognises and must strip.
+        secret_hostname = "device-$9$nhEmQVczB7dqsO$X.NN.5KTHc.PmGwiL.S6/mQ.GW21Ek1dNXLm6F"
+        leases = _leases_payload(
+            [_lease("10.0.0.10", DhcpLeaseState.ACTIVE, hostname=secret_hostname)]
+        )
+        raw = await lookup_dhcp_lease.ainvoke(
+            {"device_id": DEVICE, "ip_address": "10.0.0.10", "leases": leases}
+        )
+        # The raw secret value must not appear in tool output.
+        assert "$9$nhEmQVczB7dqsO$X.NN.5KTHc.PmGwiL.S6/mQ.GW21Ek1dNXLm6F" not in raw, (
+            "Cisco type-9 secret in DHCP hostname leaked into lookup_dhcp_lease output"
+        )
+        # The redaction sentinel must be present so the model sees that a secret
+        # existed, mirroring the DNS redaction oracle (test_dns_content_is_redacted).
+        assert REDACTION_TOKENS["cisco_type89"] in raw
+
     async def test_check_dhcp_conflicts_clean_when_unique(self) -> None:
         leases = _leases_payload(
             [
@@ -616,6 +719,41 @@ class TestMutatingToolsCreateChangeRequest:
         assert len(crs) == 1
         assert crs[0].kind is ChangeRequestKind.DDI_RECORD
         assert crs[0].payload["start_address"] == "10.0.0.100"
+
+    async def test_delete_dhcp_range_creates_ddi_cr_and_does_not_execute(
+        self,
+        service: ChangeRequestService,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """delete_dhcp_range must create a ddi_record CR in DRAFT state, never execute inline."""
+        from app.agents.ddi.tools import delete_dhcp_range
+
+        engineer_id = await _seed_engineer(sessionmaker)
+        with (
+            agent_run_context(role=Role.ENGINEER, user_id=engineer_id),
+            change_request_gate_context(_gate_factory(service)),
+        ):
+            result = await delete_dhcp_range.ainvoke(
+                {
+                    "device_id": DEVICE,
+                    "object_ref": "range/abc:10.0.0.100-10.0.0.150",
+                }
+            )
+        assert isinstance(result, ChangeRequestCreated)
+        assert result.change_request_state == ChangeRequestState.DRAFT.value
+        assert uuid.UUID(result.change_request_id)
+
+        crs = await _all_crs(sessionmaker)
+        assert len(crs) == 1
+        cr = crs[0]
+        assert cr.state is ChangeRequestState.DRAFT
+        assert cr.kind is ChangeRequestKind.DDI_RECORD
+        assert cr.requester_id == engineer_id
+        # Payload carries the range ref that was proposed for deletion.
+        assert cr.payload["object_ref"] == "range/abc:10.0.0.100-10.0.0.150"
+        # target_refs contains device_id (and the WAPI ref if present).
+        assert cr.target_refs is not None
+        assert cr.target_refs.get("device_id") == DEVICE
 
     async def test_mutating_tool_below_engineer_creates_no_cr(
         self,

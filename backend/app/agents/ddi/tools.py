@@ -305,11 +305,23 @@ async def scope_utilization(
         if pool_size is not None:
             try:
                 lo, hi = int(ip_address(start)), int(ip_address(end))
-                in_pool = sum(1 for ip in active_ips if lo <= int(ip_address(ip)) <= hi)
+                for ip in active_ips:
+                    try:
+                        if lo <= int(ip_address(ip)) <= hi:
+                            in_pool += 1
+                    except ValueError:
+                        # Unparsable lease IP string — skip this lease rather
+                        # than falling back to the global active-lease count,
+                        # which would over-attribute leases to this range.
+                        pass
             except ValueError:
-                in_pool = len(active_ips)
-        else:
-            in_pool = len(active_ips)
+                # Range start/end failed ip_address() after _pool_size passed
+                # (should not occur in practice); keep in_pool=0, no fallback
+                # to global count.
+                pass
+        # When pool_size is None the range addresses are unparsable; in_pool
+        # stays 0.  Attributing len(active_ips) here would inflate every
+        # bad-IP range in a multi-range scenario with the same global count.
         utilization = (
             round(100.0 * in_pool / pool_size, 2) if pool_size else None
         )
