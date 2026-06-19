@@ -1490,6 +1490,27 @@ class TestIncidentReportSecretRedaction:
         assert _secret_token not in payload["content"]
         assert "<<REDACTED:snmp_community>>" in payload["content"]
 
+    async def test_secret_in_cr_target_refs_never_reaches_model(self) -> None:
+        """Secret nested inside CR target_refs dict must be redacted before the model sees it."""
+        _secret_token = "SECRET"
+        cr_with_nested_secret = {
+            "id": "cr-x",
+            "kind": "config",
+            "state": "pending",
+            "description": "fix",
+            "target_refs": {"creds": f"snmp-server community {_secret_token} RO"},
+        }
+        model = _RecordingChatModel()
+        await render_incident_report(
+            _FIXTURE_SESSION,
+            [cr_with_nested_secret],
+            model=model,
+        )
+        for text in model.seen:
+            assert _secret_token not in text, (
+                f"secret value inside CR target_refs reached the model prompt: {text!r}"
+            )
+
     async def test_tool_resolves_default_provider_and_redacts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

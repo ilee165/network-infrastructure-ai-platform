@@ -973,8 +973,25 @@ def _redact_session(session: dict[str, Any]) -> dict[str, Any]:
 
 
 def _redact_change_requests(change_requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Redact every string value in the change request list (A9 boundary)."""
-    return _redact_rows(change_requests)
+    """Redact every string value in the change request list (A9 boundary).
+
+    Uses the same recursive ``_redact_value`` walk as :func:`_redact_session`
+    so that nested dict values (e.g. ``target_refs``) are fully redacted rather
+    than passed through by the flat :func:`_redact_rows` helper.
+    """
+
+    def _redact_value(v: Any) -> Any:
+        if isinstance(v, str):
+            return redact_prompt(v)
+        if isinstance(v, list):
+            return [_redact_value(i) for i in v]
+        if isinstance(v, dict):
+            return {k: _redact_value(val) for k, val in v.items()}
+        return v
+
+    return [
+        {k: _redact_value(val) for k, val in cr.items()} for cr in change_requests
+    ]
 
 
 async def render_incident_report(
@@ -1045,7 +1062,7 @@ async def render_incident_report(
         "format": "md",
         "title": title,
         "content": content,
-        "source_refs": {"session_id": session.get("session_id")},
+        "source_refs": {"session_id": red_session.get("session_id")},
     }
 
 
