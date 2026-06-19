@@ -92,12 +92,22 @@ exit-table criteria that depend on live systems.
 
 ### Lab-deferred manual pre-merge checklist
 
-1. **Golden path on a real Infoblox grid (E2E write-path).** DDI Agent finds a
-   stale DNS record on a **real Infoblox** WAPI grid → opens a ChangeRequest →
-   a **different** user (four-eyes) approves → the Automation Agent executes the
-   record change via WAPI → re-query confirms the record is corrected → the full
-   audit chain (CR transitions + approval + reasoning-trace links) is intact.
-   (Exit-table row 1.)
+1. **Golden path on a real DDI backend (E2E write-path).** DDI Agent finds a
+   stale DNS record → opens a ChangeRequest → a **different** user (four-eyes)
+   approves → the Automation Agent executes the record change → re-query confirms
+   the record is corrected → the full audit chain (CR transitions + approval +
+   reasoning-trace links) is intact. (Exit-table row 1.)
+
+   **Live target: SpatiumDDI (self-hostable, now RUNNABLE — no appliance required).**
+   `spatiumddi` is registered in the built-in plugin group and the
+   `netops.plugins` entry-point group (ADR-0024, T7 — `spatiumddi-plugin` branch).
+   A self-hosted SpatiumDDI instance (`github.com/spatiumddi/spatiumddi`) can be
+   stood up via Docker Compose with zero appliance hardware, replacing the
+   previously-deferred real Infoblox grid requirement for this checklist item.
+   The Infoblox path (WAPI) remains a valid alternative for teams that have a grid.
+   SpatiumDDI open questions (ADR-0024 §6: default group_id bootstrapping,
+   view_id requiredness, restore 409 surface) must be confirmed against the live
+   instance before the E2E run.
 
 2. **Config restore on a real device.** Restore a prior `config_snapshots` entry
    to a **real** route/switch (cisco_ios / cisco_iosxe / eos) **through a

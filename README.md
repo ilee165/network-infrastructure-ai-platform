@@ -16,7 +16,7 @@ A self-hosted, AI-powered Network Operations Platform for enterprise infrastruct
 | `redis` | Redis 7 | Celery broker, cache |
 | `ollama` | Ollama (optional, `--profile local-llm`) | Local-first LLM inference |
 
-Agents are orchestrated with LangGraph (Master Architect supervisor + 9 specialists); vendors integrate through a capability-based plugin system. Full design:
+Agents are orchestrated with LangGraph (Master Architect supervisor + 9 specialists); vendors integrate through a capability-based plugin system. Supported DDI vendors: **Infoblox** (WAPI, ADR-0022) and **SpatiumDDI** (self-hostable OSS DDI backend, ADR-0024). Full design:
 
 - [Decisions brief (D1–D16)](docs/architecture/DECISIONS-BRIEF.md) · [ADRs](docs/adr/README.md) · [Diagrams](docs/architecture/DIAGRAMS.md) · [Repo structure](docs/architecture/REPO-STRUCTURE.md)
 - [MVP roadmap](docs/roadmap/MVP.md) · [Production roadmap](docs/roadmap/PRODUCTION.md)
