@@ -205,6 +205,45 @@ class TestDdiDns:
         assert draft.inverse.verb is ChangeVerb.DELETE
         assert draft.inverse.resource == RESOURCE_DNS_RECORD
 
+    def test_add_record_embeds_zone_id_in_body_when_context_has_zone_id(self) -> None:
+        """zone_id must be present in the draft body so the executor can build the URL."""
+        ctx = SpatiumContext(
+            dns_group_ids=(_GROUP,),
+            zone_id=_ZONE,
+        )
+        cap = SpatiumDdiDns(_no_io_client(), uuid4(), ctx)
+        record = NormalizedDnsRecord(
+            device_id=uuid4(),
+            collected_at=_now(),
+            source_vendor=VENDOR_ID,
+            name="api",
+            record_type=DnsRecordType.A,
+            value="10.0.0.20",
+            zone="example.com",
+        )
+        draft = cap.add_record(record)
+        body = dict(draft.body)
+        assert body.get("zone_id") == _ZONE, (
+            "zone_id must be embedded in the draft body for the executor to construct "
+            "/dns/groups/{group_id}/zones/{zone_id}/records"
+        )
+        assert body.get("group_id") == _GROUP
+
+    def test_modify_record_embeds_zone_id_in_body_when_context_has_zone_id(self) -> None:
+        ctx = SpatiumContext(dns_group_ids=(_GROUP,), zone_id=_ZONE)
+        cap = SpatiumDdiDns(_no_io_client(), uuid4(), ctx)
+        changes = _dns_record("www", DnsRecordType.A, "10.0.0.99")
+        draft = cap.modify_record(_RECORD, changes)
+        body = dict(draft.body)
+        assert body.get("zone_id") == _ZONE
+
+    def test_delete_record_embeds_zone_id_in_body_when_context_has_zone_id(self) -> None:
+        ctx = SpatiumContext(dns_group_ids=(_GROUP,), zone_id=_ZONE)
+        cap = SpatiumDdiDns(_no_io_client(), uuid4(), ctx)
+        draft = cap.delete_record(_RECORD)
+        body = dict(draft.body)
+        assert body.get("zone_id") == _ZONE
+
     def test_modify_record_inverse_restores_prior_value(self) -> None:
         cap = SpatiumDdiDns(_no_io_client(), uuid4(), _CONTEXT)
         prior = _dns_record("www", DnsRecordType.A, "10.0.0.10")

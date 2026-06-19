@@ -157,6 +157,11 @@ class SpatiumContext:
     block_id: str | None = None
     #: A scope id used when drafting an ``add_range`` (PoolCreate is scope-child).
     scope_id: str | None = None
+    #: A zone id used when drafting DNS record mutations (RecordCreate/Update/Delete
+    #: require the full path /dns/groups/{group_id}/zones/{zone_id}/records).
+    #: When set, ``_record_parents`` embeds it in every DNS mutation draft body so
+    #: the executor can reconstruct the URL without an extra zone-lookup round-trip.
+    zone_id: str | None = None
     _extra: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
 
@@ -401,10 +406,19 @@ class SpatiumDdiDns(_SpatiumCapability, DdiDnsCapability):
         )
 
     def _record_parents(self, zone: str | None) -> tuple[str | None, str | None]:
-        # group_id is the single configured DNS group when there is exactly one;
-        # zone_id is left to the executor when it cannot be resolved from context.
+        """Return ``(group_id, zone_id)`` for embedding in a DNS mutation draft body.
+
+        ``group_id`` is taken from the single configured DNS group when exactly one
+        is present. ``zone_id`` comes from :attr:`SpatiumContext.zone_id` — the
+        operator must supply it in the device connection config so the executor can
+        construct the full REST path
+        ``/dns/groups/{group_id}/zones/{zone_id}/records/{record_id}`` (ADR-0024 §1).
+        The ``zone`` argument (a zone name from :class:`NormalizedDnsRecord`) is
+        kept for future zone-name→id caching; the id takes precedence when present.
+        """
         group_id = self._ctx.dns_group_ids[0] if len(self._ctx.dns_group_ids) == 1 else None
-        return group_id, None
+        zone_id = self._ctx.zone_id
+        return group_id, zone_id
 
 
 class SpatiumDdiDhcp(_SpatiumCapability, DdiDhcpCapability):
@@ -630,6 +644,25 @@ def _restore_inverse(resource: str, object_ref: str) -> ChangeRequestDraft:
 
     ``resource`` is one of :data:`SOFT_DELETE_RESOURCE_TYPES`; the executor routes
     a ``POST /admin/trash/{resource}/{object_ref}/restore`` (ADR-0024 §3).
+
+    **Executor routing convention.** Because :class:`~app.plugins.base.ChangeVerb`
+    has no ``RESTORE`` value, this draft uses ``verb=CREATE`` together with a
+    sentinel body entry ``("restore", "true")`` and a non-``None`` ``object_ref``.
+    The :class:`~app.agents.automation.executors.DdiChangeExecutor` implementation
+    MUST distinguish a restore from a plain create by checking for this sentinel
+    **before** dispatching:
+
+    .. code-block:: python
+
+        body_dict = dict(draft.body)
+        if draft.object_ref and body_dict.get("restore") == "true":
+            # route to POST /admin/trash/{resource}/{object_ref}/restore
+        else:
+            # route to POST /{resource} (plain create)
+
+    A plain create never has ``object_ref`` set (it is ``None`` until the write
+    commits); a restore always targets an existing id.  Both conditions together
+    uniquely identify a restore draft.
     """
     assert resource in SOFT_DELETE_RESOURCE_TYPES  # noqa: S101 — invariant guard
     return ChangeRequestDraft(
