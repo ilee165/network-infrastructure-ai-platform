@@ -834,21 +834,294 @@ async def generate_runbook(
 
 
 # ---------------------------------------------------------------------------
+# generate_incident_report — grounded + A9-redacted incident narrative (M5 T12)
+# ---------------------------------------------------------------------------
+
+#: System prompt for the incident-report LLM narrative sections.
+#: Mirrors _RUNBOOK_SYSTEM_PROMPT but scoped to incident investigation.
+_INCIDENT_SYSTEM_PROMPT = (
+    "You are a network operations engineer writing a formal incident report. "
+    "Write concisely and professionally. Ground every claim in the provided "
+    "GROUNDING FACTS — do not invent details not present in those facts. "
+    "Cite the evidence references supplied. "
+    "Output only the section prose, no section headings."
+)
+
+#: (heading, brief) pairs the LLM writes for the incident report narrative.
+_INCIDENT_NARRATIVE_SECTIONS: list[tuple[str, str]] = [
+    (
+        "Summary",
+        "Write a concise executive summary of the incident, its impact, and resolution.",
+    ),
+    (
+        "Root Cause",
+        "Describe the root cause identified, grounded in the findings and timeline evidence.",
+    ),
+]
+
+
+def _render_timeline_table(timeline: list[dict[str, Any]]) -> str:
+    """Render the timeline as a GFM table with timestamp, step, and evidence columns."""
+    cols = ["ts", "step", "evidence"]
+    header = "| " + " | ".join(cols) + " |"
+    separator = "| " + " | ".join("---" for _ in cols) + " |"
+    lines = [header, separator]
+    for entry in timeline:
+        cells = [_cell(entry.get(col)) for col in cols]
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def _render_cr_table(change_requests: list[dict[str, Any]]) -> str:
+    """Render the remediation ChangeRequests as a GFM table."""
+    cols = ["id", "kind", "state", "description"]
+    header = "| " + " | ".join(cols) + " |"
+    separator = "| " + " | ".join("---" for _ in cols) + " |"
+    lines = [header, separator]
+    for cr in change_requests:
+        cells = [_cell(cr.get(col)) for col in cols]
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def _render_incident_markdown(
+    session: dict[str, Any],
+    change_requests: list[dict[str, Any]],
+    *,
+    title: str,
+    narratives: dict[str, str],
+) -> str:
+    """Assemble the incident report Markdown: narrative sections + deterministic tables.
+
+    Structure (ADR-0019 §1 / M5 T12):
+    - Summary narrative (LLM, grounded)
+    - Timeline table (deterministic, verbatim from session facts)
+    - Evidence References (deterministic list)
+    - Root Cause narrative (LLM, grounded)
+    - Findings (verbatim session fact)
+    - Remediation ChangeRequests table (deterministic)
+    All inputs are already A9-redacted before this function is called.
+    """
+    timeline: list[dict[str, Any]] = session.get("timeline") or []
+    evidence_refs: list[str] = session.get("evidence_refs") or []
+    findings: str = str(session.get("findings") or "")
+
+    parts: list[str] = [f"# {title}", ""]
+
+    # LLM narrative — Summary
+    parts += ["## Summary", "", narratives.get("Summary", "").strip(), ""]
+
+    # Deterministic timeline table
+    parts += ["## Timeline", "", _render_timeline_table(timeline), ""]
+
+    # Deterministic evidence references
+    parts += ["## Evidence References", ""]
+    if evidence_refs:
+        for ref in evidence_refs:
+            parts.append(f"- {_cell(ref)}")
+    else:
+        parts.append("_No evidence references recorded._")
+    parts.append("")
+
+    # LLM narrative — Root Cause
+    parts += ["## Root Cause", "", narratives.get("Root Cause", "").strip(), ""]
+
+    # Verbatim findings
+    parts += ["## Findings", "", findings.strip(), ""]
+
+    # Deterministic remediation table
+    parts += ["## Remediation", "", _render_cr_table(change_requests), ""]
+
+    return "\n".join(parts)
+
+
+def _session_facts_block(session: dict[str, Any], change_requests: list[dict[str, Any]]) -> str:
+    """Render the (already-redacted) session facts as compact text for the LLM."""
+    lines = [
+        "Session:",
+        json.dumps(
+            {
+                k: v
+                for k, v in session.items()
+                if k not in ("timeline", "evidence_refs")
+            },
+            sort_keys=True,
+        ),
+        "Timeline:",
+        json.dumps(session.get("timeline") or [], sort_keys=True),
+        "Evidence refs:",
+        json.dumps(session.get("evidence_refs") or [], sort_keys=True),
+        "Change requests:",
+        json.dumps(change_requests, sort_keys=True),
+    ]
+    return "\n".join(lines)
+
+
+def _redact_session(session: dict[str, Any]) -> dict[str, Any]:
+    """Redact every string value in the session dict (A9 boundary)."""
+
+    def _redact_value(v: Any) -> Any:
+        if isinstance(v, str):
+            return redact_prompt(v)
+        if isinstance(v, list):
+            return [_redact_value(i) for i in v]
+        if isinstance(v, dict):
+            return {k: _redact_value(val) for k, val in v.items()}
+        return v
+
+    return {k: _redact_value(v) for k, v in session.items()}
+
+
+def _redact_change_requests(change_requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Redact every string value in the change request list (A9 boundary)."""
+    return _redact_rows(change_requests)
+
+
+async def render_incident_report(
+    session: dict[str, Any],
+    change_requests: list[dict[str, Any]],
+    *,
+    model: BaseChatModel,
+) -> dict[str, Any]:
+    """Build a grounded, redacted incident report from a troubleshooting session.
+
+    The implementation behind :func:`generate_incident_report`, factored out
+    with an injectable *model* so it is fully testable offline with a fake chat
+    model (mirrors :func:`render_runbook`).
+
+    Steps:
+
+    1. **Redact every grounding fact (A9).** The session dict and change
+       requests are passed through :func:`~app.llm.redaction.redact_prompt`
+       BEFORE either the template or the model sees them — secret-bearing fields
+       (SNMP communities, passwords, API keys) never leave this function in the
+       clear (ADR-0017 §3 / ADR-0019 §4).
+    2. **LLM narrative.** For each narrative section the (already-redacted)
+       session facts are placed in the prompt and the model writes grounded
+       prose. *model* is the D9-registry chat model (``local`` default), itself
+       redaction-wrapped as a second line of defence.
+    3. **Template assembly.** The narrative is interleaved with deterministic,
+       verbatim tables (timeline, evidence refs, change requests) into a single
+       Markdown body.
+
+    Returns a dict with the ``Document`` fields (ADR-0019 §1): ``kind``
+    (``"incident_report"``), ``format`` (``"md"``), ``title``, ``content``,
+    and ``source_refs`` recording the session id.
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    # 1. Redact all grounding facts at the LLM boundary (A9) before any use.
+    red_session = _redact_session(session)
+    red_crs = _redact_change_requests(change_requests)
+
+    session_title = str(red_session.get("title") or red_session.get("session_id") or "incident")
+    title = f"Incident Report: {session_title}"
+
+    facts = _session_facts_block(red_session, red_crs)
+
+    # 2. LLM writes each narrative section from the redacted facts only.
+    narratives: dict[str, str] = {}
+    for heading, brief in _INCIDENT_NARRATIVE_SECTIONS:
+        prompt = f"GROUNDING FACTS (redacted):\n{facts}\n\nWrite the '{heading}' section. {brief}"
+        response = await model.ainvoke(
+            [
+                SystemMessage(content=_INCIDENT_SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ]
+        )
+        content = response.content
+        narratives[heading] = content if isinstance(content, str) else str(content)
+
+    # 3. Assemble the template with deterministic, verbatim (redacted) tables.
+    content = _render_incident_markdown(
+        red_session,
+        red_crs,
+        title=title,
+        narratives=narratives,
+    )
+
+    return {
+        "kind": "incident_report",
+        "format": "md",
+        "title": title,
+        "content": content,
+        "source_refs": {"session_id": session.get("session_id")},
+    }
+
+
+@netops_tool(classification=ToolClassification.READ_ONLY)
+async def generate_incident_report(
+    session: Annotated[
+        dict[str, Any],
+        Field(
+            description=(
+                "Troubleshooting session dict. Must contain at minimum: "
+                "session_id, title, started_at, findings. "
+                "Optional: resolved_at, timeline (list of {ts, step, evidence} dicts), "
+                "evidence_refs (list of command/log refs), affected_devices (list of device ids)."
+            )
+        ),
+    ],
+    change_requests: Annotated[
+        list[dict[str, Any]],
+        Field(
+            description=(
+                "ChangeRequest dicts linked to the remediation. Each dict may contain: "
+                "id, kind, state, description, target_refs. Pass an empty list if none."
+            )
+        ),
+    ] = [],  # noqa: B006 — pydantic default, not shared state
+) -> str:
+    """Generate an incident report from a troubleshooting session (M5 T12).
+
+    Produces a Markdown incident report with timeline, evidence references,
+    findings, and remediation ChangeRequests. The LLM writes only the Summary
+    and Root Cause narrative sections, grounded in the session facts.
+
+    **SECURITY-CRITICAL (A9 / ADR-0017 §3 / ADR-0019 §4).** Every grounding
+    fact — session fields, timeline entries, findings, and CR descriptions —
+    is redacted via the A9 layer (:func:`~app.llm.redaction.redact_prompt`)
+    before use, so no secret value reaches the provider. The provider is
+    resolved from the D9 registry (:func:`~app.llm.providers.get_chat_model`,
+    ``local`` default), itself wrapped in the redacting model as a second
+    line of defence.
+
+    Returns a JSON string with the ``Document`` fields (ADR-0019 §1): ``kind``
+    (``"incident_report"``), ``format`` (``"md"``), ``title``, ``content``,
+    and ``source_refs`` (the session id). The caller persists it as a
+    ``documents`` row and embeds it via the T8 pgvector pipeline. Read-only —
+    no device or DB write.
+    """
+    from app.llm.providers import get_chat_model
+
+    model = get_chat_model()
+    payload = await render_incident_report(
+        session,
+        change_requests,
+        model=model,
+    )
+    return json.dumps(payload)
+
+
+# ---------------------------------------------------------------------------
 # Public surface for the agent package
 # ---------------------------------------------------------------------------
 
 #: All Documentation Agent tools registered for M4 (T10 inventory, T11 diagram,
-#: T12 runbook).
+#: T12 runbook) and M5 T12 (incident report).
 DOCUMENTATION_TOOLS = [
     generate_inventory,
     generate_diagram,
     generate_runbook,
+    generate_incident_report,
 ]
 
 __all__ = [
     "DOCUMENTATION_TOOLS",
     "generate_diagram",
+    "generate_incident_report",
     "generate_inventory",
     "generate_runbook",
+    "render_incident_report",
     "render_runbook",
 ]
