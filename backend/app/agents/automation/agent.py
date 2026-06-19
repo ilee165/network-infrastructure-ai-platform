@@ -585,8 +585,26 @@ def _draft_from_payload(payload: dict[str, Any] | None) -> ChangeRequestDraft | 
 
 
 def _coerce_draft(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalize a JSON draft payload's ``body`` lists into tuple pairs, recursively."""
+    """Normalize a JSON draft payload's ``body`` lists into tuple pairs, recursively.
+
+    Also accepts legacy pre-D-SP1 payloads that used ``wapi_object`` instead of
+    ``resource`` (the field was renamed when the model became vendor-neutral).
+    ``wapi_object`` is silently aliased to ``resource`` so persisted CRs from
+    before the rename remain executable.  Any other unrecognised keys are left in
+    place; ``ChangeRequestDraft.model_validate`` (``extra="forbid"``) will reject
+    them with a ``ValueError``, which ``_draft_from_payload`` catches and converts
+    to a ``None`` (fail-closed).
+    """
     coerced = dict(payload)
+    # Backward-compat alias: pre-D-SP1 payloads stored the resource type under
+    # ``wapi_object`` (the Infoblox WAPI terminology).  Prefer the current key;
+    # only fall back to the legacy one when the current key is absent.  Always
+    # drop ``wapi_object`` from the coerced dict: ChangeRequestDraft uses
+    # ``extra="forbid"``, so any unrecognised key causes model_validate to raise.
+    if "wapi_object" in coerced:
+        if "resource" not in coerced:
+            coerced["resource"] = coerced["wapi_object"]
+        del coerced["wapi_object"]
     body = coerced.get("body")
     if isinstance(body, list):
         coerced["body"] = tuple(tuple(pair) for pair in body)

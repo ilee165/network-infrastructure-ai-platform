@@ -75,6 +75,7 @@ _CONTEXT = SpatiumContext(
     scope_id=_SCOPE,
     space_id=_SPACE,
     block_id=_BLOCK,
+    zone_id=_ZONE,
 )
 
 
@@ -93,6 +94,9 @@ def _handle(request: httpx.Request) -> httpx.Response:
         body = _load("records.json") if f"/zones/{_ZONE}/" in path else []
     elif path.endswith("/zones"):
         body = _load("zones.json")
+    elif path.endswith("/scopes"):
+        # DHCP scope fan-out used by DISCOVERY_API._discover (Finding #4).
+        body = _load("scopes.json")
     elif path.endswith("/pools"):
         body = _load("pools.json")
     elif path.endswith("/leases"):
@@ -145,12 +149,26 @@ class TestDiscoveryApi:
         assert net.object_ref == _SUBNET
         assert all(o.source_vendor == VENDOR_ID for o in objects)
 
+    def test_discover_includes_dhcp_scopes(self) -> None:
+        """DHCP scope fan-out: _discover must include DHCP scope objects (Finding #4)."""
+        cap = SpatiumDiscoveryApi(_client(), uuid4(), _CONTEXT)
+        objects = cap.discover()
+        # DHCP scopes are recorded as DiscoveredObjectKind.OTHER (no DHCP_SCOPE enum member).
+        dhcp_objects = [o for o in objects if o.object_ref == _SCOPE]
+        assert dhcp_objects, (
+            "_discover must fan out over DHCP scopes and include them in the result; "
+            "the scope from scopes.json (id=_SCOPE) was not found"
+        )
+        assert dhcp_objects[0].kind is DiscoveredObjectKind.OTHER
+
     def test_discover_records_raw_before_parsing(self) -> None:
         cap = SpatiumDiscoveryApi(_client(), uuid4(), _CONTEXT)
         cap.discover()
         commands = [raw.command for raw in cap.raw_outputs]
         assert "GET /ipam/subnets" in commands
         assert any(c.endswith("/zones") for c in commands)
+        # DHCP scope fan-out must also be recorded raw-first (Finding #4).
+        assert any(c.endswith("/scopes") for c in commands)
         assert all(raw.output for raw in cap.raw_outputs)
 
 
@@ -283,6 +301,24 @@ class TestDdiDns:
         cap = SpatiumDdiDns(_no_io_client(), uuid4(), _CONTEXT)
         draft = cap.delete_record(_RECORD)
         assert draft.inverse is not None
+
+    def test_add_record_raises_when_group_id_unresolved(self) -> None:
+        """Finding #5: _record_parents must raise rather than emit an incomplete draft."""
+        # No dns_group_ids -> group_id is None -> PluginError at draft-build time.
+        ctx = SpatiumContext(zone_id=_ZONE)  # empty dns_group_ids
+        cap = SpatiumDdiDns(_no_io_client(), uuid4(), ctx)
+        record = _dns_record("api", DnsRecordType.A, "10.0.0.20")
+        with pytest.raises(PluginError, match="dns_group_ids"):
+            cap.add_record(record)
+
+    def test_add_record_raises_when_zone_id_unresolved(self) -> None:
+        """Finding #5: missing zone_id must raise at draft-build time."""
+        # One dns_group_id but no zone_id -> zone_id is None -> PluginError.
+        ctx = SpatiumContext(dns_group_ids=(_GROUP,))  # zone_id=None
+        cap = SpatiumDdiDns(_no_io_client(), uuid4(), ctx)
+        record = _dns_record("api", DnsRecordType.A, "10.0.0.20")
+        with pytest.raises(PluginError, match="zone_id"):
+            cap.add_record(record)
 
 
 # ---------------------------------------------------------------------------

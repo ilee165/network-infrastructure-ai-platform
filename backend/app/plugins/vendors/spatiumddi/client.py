@@ -145,7 +145,15 @@ class SpatiumClient:
 
         if not expect_json or response.status_code == httpx.codes.NO_CONTENT:
             return None
-        return response.json()
+        try:
+            return response.json()
+        except Exception:
+            # A malformed (non-JSON) body must never surface the raw bytes or the
+            # bearer token (which the response could theoretically echo).  Raise
+            # the same sanitized PluginError that non-2xx paths produce.
+            raise PluginError(
+                f"spatiumddi: {op} returned a non-JSON body (status {response.status_code})"
+            ) from None
 
     async def _get_list(self, path: str, *, params: Mapping[str, Any] | None = None) -> list[Any]:
         """GET a bare-list endpoint; reject a non-list payload (ADR-0024 §2)."""
@@ -233,8 +241,9 @@ class SpatiumClient:
 
         DISCOVERY_API fan-out root — enumerates scopes under a DHCP server
         group (``GET /dhcp/server-groups/{group_id}/scopes``, ADR-0024 §1
-        DISCOVERY_API). The ``group_id`` comes from :meth:`get_dhcp_server_groups`
-        (or a configuration constant) during fan-out discovery.
+        DISCOVERY_API). The ``group_id`` comes from :meth:`get_dns_groups`-style
+        enumeration via ``SpatiumContext.dhcp_group_ids`` (or a configuration
+        constant) during fan-out discovery.
         """
         return await self._get_list(f"/dhcp/server-groups/{group_id}/scopes")
 

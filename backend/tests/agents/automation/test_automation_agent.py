@@ -755,3 +755,105 @@ class TestRedaction:
         await agent.execute(cr.id)
         for row in await _audit_rows(sessionmaker, cr.id):
             assert _SECRET_LITERAL not in repr(row.detail)
+
+
+# ---------------------------------------------------------------------------
+# 7. Legacy payload backward-compat (D-SP1 rename: wapi_object → resource)
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyPayloadCoercion:
+    """Unit tests for ``_coerce_draft`` backward-compat (Finding #1 / D-SP1).
+
+    ``ChangeRequestDraft`` renamed ``wapi_object`` → ``resource`` in D-SP1.
+    A CR submitted before the rename carries ``wapi_object`` in its persisted
+    ``payload``.  ``_coerce_draft`` must silently alias the legacy key so
+    ``_draft_from_payload`` can still reconstruct a valid draft — instead of
+    returning ``None`` (fail-closed) and leaving the CR permanently stuck.
+
+    These tests operate directly on the module-level helpers (no DB required).
+    """
+
+    def test_legacy_wapi_object_key_is_accepted(self) -> None:
+        """A payload with ``wapi_object`` round-trips into a valid ChangeRequestDraft."""
+        from app.agents.automation.agent import _draft_from_payload
+        from app.plugins.base import ChangeVerb
+
+        legacy_payload = {
+            "verb": "create",
+            "wapi_object": "record:a",  # pre-D-SP1 spelling
+            "object_ref": None,
+            "body": [["name", "web"], ["ipv4addr", "10.0.0.5"]],
+            "summary": "add A record web",
+            "inverse": None,
+        }
+        draft = _draft_from_payload(legacy_payload)
+        assert draft is not None, (
+            "_draft_from_payload must accept a legacy wapi_object payload and return a "
+            "valid ChangeRequestDraft, not None"
+        )
+        assert draft.verb is ChangeVerb.CREATE
+        assert draft.resource == "record:a"
+        assert dict(draft.body)["name"] == "web"
+
+    def test_current_resource_key_still_works(self) -> None:
+        """The current-shape payload (``resource`` key) round-trips unchanged."""
+        from app.agents.automation.agent import _draft_from_payload
+        from app.plugins.base import ChangeVerb
+
+        current_payload = {
+            "verb": "delete",
+            "resource": "dns_record",
+            "object_ref": "abc-123",
+            "body": [["group_id", "g1"], ["zone_id", "z1"]],
+            "summary": "soft-delete DNS record abc-123",
+            "inverse": None,
+        }
+        draft = _draft_from_payload(current_payload)
+        assert draft is not None
+        assert draft.verb is ChangeVerb.DELETE
+        assert draft.resource == "dns_record"
+        assert draft.object_ref == "abc-123"
+
+    def test_resource_takes_precedence_over_legacy_wapi_object(self) -> None:
+        """When both keys coexist ``resource`` wins (no accidental downgrade)."""
+        from app.agents.automation.agent import _draft_from_payload
+
+        payload = {
+            "verb": "update",
+            "resource": "dns_record",
+            "wapi_object": "record:a",  # legacy key present alongside current
+            "object_ref": "id-1",
+            "body": [],
+            "summary": "modify record",
+            "inverse": None,
+        }
+        draft = _draft_from_payload(payload)
+        assert draft is not None
+        assert draft.resource == "dns_record"  # current key wins
+
+    def test_legacy_payload_with_nested_inverse_coerced(self) -> None:
+        """The backward-compat alias is applied recursively to the inverse draft."""
+        from app.agents.automation.agent import _draft_from_payload
+        from app.plugins.base import ChangeVerb
+
+        legacy_payload = {
+            "verb": "create",
+            "wapi_object": "record:a",
+            "object_ref": None,
+            "body": [["name", "web"]],
+            "summary": "add A record",
+            "inverse": {
+                "verb": "delete",
+                "wapi_object": "record:a",  # legacy in the inverse too
+                "object_ref": None,
+                "body": [["group_id", "g1"]],
+                "summary": "soft-delete the added record",
+                "inverse": None,
+            },
+        }
+        draft = _draft_from_payload(legacy_payload)
+        assert draft is not None
+        assert draft.inverse is not None
+        assert draft.inverse.verb is ChangeVerb.DELETE
+        assert draft.inverse.resource == "record:a"

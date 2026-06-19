@@ -295,6 +295,23 @@ class TestErrorSanitization:
         with pytest.raises(PluginError, match="non-list"):
             await client.get_subnets()
 
+    async def test_malformed_json_body_raises_plugin_error_without_token(self) -> None:
+        """Finding #2: a 200 with a non-JSON body must raise a sanitized PluginError."""
+
+        def malformed_handler(request: httpx.Request) -> httpx.Response:
+            # Return a 200 with raw bytes that are not valid JSON.
+            return httpx.Response(200, content=b"not-json <html>gateway error</html>")
+
+        client = _client(malformed_handler)
+        with pytest.raises(PluginError) as excinfo:
+            await client.get_zones(_GROUP)
+        message = str(excinfo.value)
+        # Must name the operation and status — never the bearer token or raw body.
+        assert "spatiumddi:" in message
+        assert _FAKE_TOKEN not in message
+        # The raw malformed body bytes must not appear in the error message.
+        assert "html" not in message.lower()
+
 
 class TestDiscoveryApiEndpoints:
     """DISCOVERY_API fan-out root endpoints (ADR-0024 §1).

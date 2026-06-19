@@ -27,14 +27,21 @@ services:
   # different image name/topology, prefer cloning their repo and using their
   # compose directly (README.md "Option B"); this service is the minimal stand-in.
   spatiumddi:
-    image: ${SPATIUMDDI_IMAGE:-ghcr.io/spatiumddi/spatiumddi:latest}
+    image: ${SPATIUMDDI_IMAGE:-ghcr.io/spatiumddi/spatiumddi:v0.1.0}
     environment:
       # SpatiumDDI bootstrap admin — a LAB secret, supplied from .env (never
       # committed). Used ONCE to log in and mint the resource-scoped API token
       # the live test actually authenticates with (see README.md).
       SPATIUMDDI_ADMIN_EMAIL: ${SPATIUMDDI_ADMIN_EMAIL:-admin@spatiumddi.lab}
       SPATIUMDDI_ADMIN_PASSWORD: ${SPATIUMDDI_ADMIN_PASSWORD:?set a lab admin password in .env}
-      SPATIUMDDI_DATABASE_URL: postgresql+psycopg://spatium:${SPATIUMDDI_DB_PASSWORD:?set a lab db password in .env}@db:5432/spatiumddi
+      # Discrete DB credentials — NOT spliced into a URI so passwords containing
+      # '@', ':', '/' or '#' do not break the connection string (Finding #7).
+      # SpatiumDDI assembles its own DSN from these vars server-side.
+      SPATIUMDDI_DB_HOST: db
+      SPATIUMDDI_DB_PORT: "5432"
+      SPATIUMDDI_DB_NAME: ${SPATIUMDDI_DB_NAME:-spatiumddi}
+      SPATIUMDDI_DB_USER: ${SPATIUMDDI_DB_USER:-spatium}
+      SPATIUMDDI_DB_PASSWORD: ${SPATIUMDDI_DB_PASSWORD:?set a lab db password in .env}
     ports:
       # Published on the host so the live test (and you) can reach it. Lab-only;
       # bind to 127.0.0.1 to avoid exposing the appliance beyond the host.
@@ -47,11 +54,11 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: spatium
+      POSTGRES_USER: ${SPATIUMDDI_DB_USER:-spatium}
       POSTGRES_PASSWORD: ${SPATIUMDDI_DB_PASSWORD:?set a lab db password in .env}
-      POSTGRES_DB: spatiumddi
+      POSTGRES_DB: ${SPATIUMDDI_DB_NAME:-spatiumddi}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U spatium -d spatiumddi"]
+      test: ["CMD-SHELL", "pg_isready -U ${SPATIUMDDI_DB_USER:-spatium} -d ${SPATIUMDDI_DB_NAME:-spatiumddi}"]
       interval: 5s
       timeout: 3s
       retries: 10

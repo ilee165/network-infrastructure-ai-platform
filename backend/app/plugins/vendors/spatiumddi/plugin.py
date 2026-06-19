@@ -261,6 +261,31 @@ class SpatiumDiscoveryApi(_SpatiumCapability, DiscoveryApiCapability):
                         attributes=_attrs(zone, ("group_id", "zone_type", "kind")),
                     )
                 )
+
+        # DHCP scope fan-out (DDI_DHCP capability context, ADR-0024 §1).
+        # Uses the same dhcp_group_ids already wired for SpatiumDdiDhcp so the
+        # discovery pass surfaces DHCP scopes alongside subnets + DNS zones.
+        # DHCP scopes map to DiscoveredObjectKind.OTHER (no DHCP_SCOPE member in
+        # the shared enum); the raw payload is recorded verbatim before parsing.
+        for dhcp_group_id in self._ctx.dhcp_group_ids:
+            scopes = await self._client.get_dhcp_scopes(dhcp_group_id)
+            self._record_json(f"GET /dhcp/server-groups/{dhcp_group_id}/scopes", scopes)
+            for scope in scopes:
+                scope_name = scope.get("name") or scope.get("network")
+                scope_ref = _opt_str(scope.get("id"))
+                if not scope_ref and not scope_name:
+                    continue
+                objects.append(
+                    NormalizedDiscoveredObject(
+                        **provenance,
+                        kind=DiscoveredObjectKind.OTHER,
+                        identifier=str(scope_ref or scope_name),
+                        display_name=str(scope_name) if scope_name else None,
+                        object_ref=scope_ref,
+                        attributes=_attrs(scope, ("group_id", "network", "status")),
+                    )
+                )
+
         return objects
 
     async def _dns_group_ids(self) -> Sequence[str]:
@@ -405,7 +430,7 @@ class SpatiumDdiDns(_SpatiumCapability, DdiDnsCapability):
             inverse=inverse,
         )
 
-    def _record_parents(self, zone: str | None) -> tuple[str | None, str | None]:
+    def _record_parents(self, zone: str | None) -> tuple[str, str]:
         """Return ``(group_id, zone_id)`` for embedding in a DNS mutation draft body.
 
         ``group_id`` is taken from the single configured DNS group when exactly one
@@ -415,9 +440,25 @@ class SpatiumDdiDns(_SpatiumCapability, DdiDnsCapability):
         ``/dns/groups/{group_id}/zones/{zone_id}/records/{record_id}`` (ADR-0024 §1).
         The ``zone`` argument (a zone name from :class:`NormalizedDnsRecord`) is
         kept for future zone-name→id caching; the id takes precedence when present.
+
+        :raises PluginError: if either parent id is unresolved — emitting a draft
+            with a missing ``group_id`` or ``zone_id`` would push a structurally
+            invalid body into the CR approval/execution pipeline (ADR-0024 §1).
         """
         group_id = self._ctx.dns_group_ids[0] if len(self._ctx.dns_group_ids) == 1 else None
         zone_id = self._ctx.zone_id
+        if group_id is None:
+            raise PluginError(
+                "spatiumddi: cannot build DNS mutation draft — dns_group_ids must contain "
+                "exactly one group id in SpatiumContext (got "
+                f"{len(self._ctx.dns_group_ids)}); set it in the device connection config"
+            )
+        if zone_id is None:
+            raise PluginError(
+                "spatiumddi: cannot build DNS mutation draft — SpatiumContext.zone_id is "
+                f"unset (zone={zone!r}); set zone_id in the device connection config so "
+                "the executor can construct /dns/groups/{group_id}/zones/{zone_id}/records"
+            )
         return group_id, zone_id
 
 
