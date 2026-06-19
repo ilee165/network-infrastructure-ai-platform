@@ -138,12 +138,18 @@ class AutomationAgent(BaseSpecialistAgent):
     def __init__(
         self,
         *,
-        change_request_service: ChangeRequestService,
+        change_request_service: ChangeRequestService | None = None,
         config_executor: ConfigChangeExecutor | None = None,
         ddi_executor: DdiChangeExecutor | None = None,
         trace_recorder: TraceRecorder | None = None,
         principal: AutomationPrincipal = AUTOMATION_PRINCIPAL,
     ) -> None:
+        # ``change_request_service`` is REQUIRED to execute (the write path), but
+        # OPTIONAL for the routing surface. The composition root
+        # (:func:`app.agents.build_default_registry`) builds a routing-only agent
+        # — its name/description/system_prompt/read-only tools — with no service
+        # and no DB, exactly as the deterministic test suite does. ``execute``
+        # guards a missing service so a routing-only agent can never write.
         self._service = change_request_service
         self._config_executor = config_executor
         self._ddi_executor = ddi_executor
@@ -216,7 +222,17 @@ class AutomationAgent(BaseSpecialistAgent):
         executor port, then map its structured outcome onto ``completed`` or
         ``failed -> rolled_back`` (or ``failed`` + operator alert on
         rollback-failure). Returns the terminal state and the run's reasoning trace.
+
+        Raises :class:`ChangeExecutionRefused` if this agent was built without a
+        :class:`ChangeRequestService` (a routing-only instance from the
+        composition root) — such an instance has no write path and refuses
+        before touching any state.
         """
+        if self._service is None:
+            raise ChangeExecutionRefused(
+                "this Automation Agent has no ChangeRequestService and cannot execute "
+                "(it was built for routing only); construct it with a service to execute"
+            )
         cr = await self._service.get(cr_id)
         trace = await self._trace_recorder.start(self.name)
         await self._trace_recorder.record_step(

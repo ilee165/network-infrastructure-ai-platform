@@ -1,4 +1,4 @@
-"""Real-LLM supervisor routing eval (manual gate) — FIVE-way roster (M4 T17).
+"""Real-LLM supervisor routing eval (manual gate) — EIGHT-way roster (M5 T14).
 
 Validates that the Master Architect routes each intent to the correct specialist
 across the FULL M4 roster — troubleshooting (fault diagnosis), discovery
@@ -146,12 +146,50 @@ _CASES = [
         "health checks.",
         "documentation",
     ),
+    # Held-out DDI — DNS/DHCP analysis and DNS/DHCP record change DRAFTING (M5
+    # T14). Worded apart from the v5 demonstrations. The change case must route
+    # to ddi (it DRAFTS a change request), never to automation (M5-PLAN risk #4).
+    (
+        "Which IP does the host record for billing-app.corp.example resolve to right now?",
+        "ddi",
+    ),
+    (
+        "Is the DHCP pool for the guest-wifi VLAN close to exhausting its leases?",
+        "ddi",
+    ),
+    (
+        "Please create an A record for printer-09.corp.example pointing at 10.2.3.40.",
+        "ddi",
+    ),
+    # Held-out PACKET_ANALYSIS — summarize/query a FINISHED capture (M5 T14).
+    (
+        "From the capture we pulled off span-port-2, who were the busiest talkers?",
+        "packet_analysis",
+    ),
+    (
+        "In that pcap from this morning, how many TCP retransmissions did you see?",
+        "packet_analysis",
+    ),
+    # Held-out AUTOMATION — EXECUTE an ALREADY-APPROVED change request only.
+    (
+        "Change request CR-1009 has been approved — go ahead and run it.",
+        "automation",
+    ),
 ]
 
-#: The five specialists the supervisor routes over in M4 (every routable agent in
-#: the production registry except the supervisor). Each expected label below must
-#: be one of these — a guard so a typo in a case can never silently pass.
-_ROUTABLE_SPECIALISTS = {"troubleshooting", "discovery", "configuration", "documentation"}
+#: The seven non-consultant specialists the supervisor routes over in M5 (every
+#: routable agent in the production registry except the supervisor and the
+#: consultant escalation target). Each expected label below must be one of these
+#: — a guard so a typo in a case can never silently pass.
+_ROUTABLE_SPECIALISTS = {
+    "troubleshooting",
+    "discovery",
+    "configuration",
+    "documentation",
+    "ddi",
+    "packet_analysis",
+    "automation",
+}
 
 
 def _routable_roster() -> str:
@@ -167,8 +205,8 @@ def _routable_roster() -> str:
     return "\n".join(f"- {agent.name}: {agent.description}" for agent in agents)
 
 
-def test_roster_exposes_the_full_five_way_set() -> None:
-    """Sanity: the production roster the eval routes over holds all five M4 specialists.
+def test_roster_exposes_the_full_eight_way_set() -> None:
+    """Sanity: the production roster the eval routes over holds all eight M5 specialists.
 
     A guard so the eval can never silently shrink: if a specialist were dropped
     from the composition root, its held-out cases would have no valid target.
@@ -177,7 +215,7 @@ def test_roster_exposes_the_full_five_way_set() -> None:
     registry = build_default_registry()
     routable = {agent.name for agent in registry.list() if agent.name != SUPERVISOR_NAME}
     assert _ROUTABLE_SPECIALISTS.union({"consultant"}) <= routable, (
-        f"roster {routable} is missing one of the M4 specialists"
+        f"roster {routable} is missing one of the M5 specialists"
     )
     expected_labels = {expected for _, expected in _CASES}
     assert expected_labels <= _ROUTABLE_SPECIALISTS, (
@@ -189,7 +227,7 @@ def test_roster_exposes_the_full_five_way_set() -> None:
 async def test_routing_picks_expected_specialist(intent: str, expected: str) -> None:
     settings = Settings()  # reads NETOPS_LLM_LOCAL_MODEL / profile from env
     llm = get_chat_model("local", settings)
-    prompt = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)  # latest registered (v4, five-way)
+    prompt = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)  # latest registered (v5, eight-way)
     system = SystemMessage(content=prompt.text.format(specialists=_routable_roster()))
     router = llm.with_structured_output(RoutingDecision)
     decision = await router.ainvoke([system, HumanMessage(content=intent)])
