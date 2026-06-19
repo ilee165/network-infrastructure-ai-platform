@@ -263,6 +263,34 @@ class TestSpatiumddiRegistration:
         plugin = SpatiumddiPlugin()
         assert plugin.vendor_id == "spatiumddi"
 
+    def test_load_entry_points_discovers_spatiumddi(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """load_entry_points registers SpatiumddiPlugin when the package is installed.
+
+        This exercises surface 3 from the class docstring: the entry-point path
+        that runs when the package is installed (``pip install -e .``).  A
+        _FakeEntryPoint named 'spatiumddi' is injected so the test is hermetic
+        and does not require the package to be physically installed.
+        """
+        monkeypatch.setattr(
+            registry_module,
+            "entry_points",
+            lambda group: [_FakeEntryPoint("spatiumddi", SpatiumddiPlugin)],
+        )
+        registry = PluginRegistry()
+        count = registry.load_entry_points()
+        assert count == 1, (
+            "load_entry_points should register exactly one plugin "
+            f"for the spatiumddi entry point; got {count}"
+        )
+        assert "spatiumddi" in registry.vendor_ids(), (
+            "spatiumddi must appear in registry.vendor_ids() after "
+            "load_entry_points — entry-point discovery path is broken"
+        )
+        plugin = registry.get_plugin("spatiumddi")
+        assert isinstance(plugin, SpatiumddiPlugin), (
+            f"Expected SpatiumddiPlugin instance, got {type(plugin)!r}"
+        )
+
     def test_ddi_agent_requires_no_code_change_to_operate_over_spatiumddi(self) -> None:
         """The DDI Agent is vendor-agnostic: it resolves capabilities from the registry.
 
