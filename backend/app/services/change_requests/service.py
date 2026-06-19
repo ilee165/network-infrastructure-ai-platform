@@ -137,6 +137,18 @@ class ChangeRequestService:
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
+    @property
+    def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
+        """The session factory this service commits each transition through.
+
+        Exposed for collaborators that must write their *own* audit rows in the
+        same audit trail and DB as the CR lifecycle — notably the Automation
+        Agent executor (M5 task #9), which audits each apply/rollback/refusal
+        alongside the ``change_request.*`` transitions this service writes. Read
+        access only: the service remains the sole mutator of ``change_requests``.
+        """
+        return self._sessionmaker
+
     # -- reads ---------------------------------------------------------------
 
     async def get(self, cr_id: uuid.UUID) -> ChangeRequest:

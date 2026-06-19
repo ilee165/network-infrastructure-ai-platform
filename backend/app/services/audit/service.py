@@ -87,6 +87,21 @@ CHANGE_REQUEST_APPROVED_TO_EXECUTING: Final = "change_request.approved_to_execut
 CHANGE_REQUEST_EXECUTING_TO_COMPLETED: Final = "change_request.executing_to_completed"
 CHANGE_REQUEST_EXECUTING_TO_FAILED: Final = "change_request.executing_to_failed"
 CHANGE_REQUEST_FAILED_TO_ROLLED_BACK: Final = "change_request.failed_to_rolled_back"
+# M5 Automation Agent audit vocabulary (M5 task #9; ADR-0020 §1/§4, ADR-0021 §3).
+# The Automation Agent is the sole executor of approved ChangeRequests: each
+# device/DDI write step, each structured rollback, and every refusal of a
+# non-``approved`` CR is audited here — distinct from the CR *lifecycle*
+# transitions above so the executor's own actions (apply / rollback / refusal)
+# are first-class in the audit chain. ``detail`` references the CR / target by id
+# and carries only redaction-safe summaries (applied-diff line counts, rollback
+# notes) — never the secret-bearing CR ``payload`` (config fragment / DDI body).
+AUTOMATION_CHANGE_APPLIED: Final = "automation.change_applied"
+AUTOMATION_ROLLBACK: Final = "automation.rollback"
+AUTOMATION_ROLLBACK_FAILED: Final = "automation.rollback_failed"
+# An executor that is handed a CR not in ``approved`` refuses it (no device/DDI
+# write, CR state left untouched) and audits the refusal — the executor never
+# acts on a draft/pending/rejected/in-flight/terminal CR (M5-PLAN risk #1).
+AUTOMATION_EXECUTION_REFUSED: Final = "automation.execution_refused"
 
 
 async def record(
