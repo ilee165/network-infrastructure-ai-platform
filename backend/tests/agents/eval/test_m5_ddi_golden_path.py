@@ -73,7 +73,7 @@ from app.models import (
     User,
 )
 from app.models import Role as RoleRow
-from app.plugins.base import ChangeRequestDraft, WapiVerb
+from app.plugins.base import ChangeRequestDraft, ChangeVerb
 from app.plugins.vendors.infoblox.wapi import WapiClient, WapiCredentials
 from app.schemas.normalized import DnsRecordType, NormalizedDnsRecord
 from app.services.audit import service as audit
@@ -292,7 +292,7 @@ class TestDdiGoldenPath:
                 tool_name="modify_dns_record",
                 arguments={
                     "verb": "update",
-                    "wapi_object": "record:a",
+                    "resource": "record:a",
                     "object_ref": _RECORD_REF,
                     "body": [["ipv4addr", _CORRECT_IP]],
                     "summary": f"correct {_RECORD_NAME} A record to {_CORRECT_IP}",
@@ -325,7 +325,7 @@ class TestDdiGoldenPath:
         assert len(executor.applied) == 1
         # The draft reconstructed from the CR payload carried the correction.
         applied_draft = executor.applied[0]
-        assert applied_draft.verb is WapiVerb.UPDATE
+        assert applied_draft.verb is ChangeVerb.UPDATE
         assert ("ipv4addr", _CORRECT_IP) in applied_draft.body
 
         # --- 5. The full audit chain is reconstructable.
@@ -388,7 +388,7 @@ class TestDdiGoldenPath:
                 tool_name="modify_dns_record",
                 arguments={
                     "verb": "update",
-                    "wapi_object": "record:a",
+                    "resource": "record:a",
                     "object_ref": _RECORD_REF,
                     "body": [["ipv4addr", _CORRECT_IP]],
                     "summary": "correct billing record",

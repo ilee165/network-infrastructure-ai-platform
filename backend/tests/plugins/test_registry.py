@@ -11,6 +11,13 @@ from app.plugins import registry as registry_module
 from app.plugins.base import Capability, InterfacesCapability, PluginCapability, VendorPlugin
 from app.plugins.registry import ENTRY_POINT_GROUP, PluginRegistry, get_default_registry
 from app.plugins.vendors.cisco_ios.plugin import CiscoIosInterfaces, CiscoIosPlugin
+from app.plugins.vendors.spatiumddi.plugin import (
+    SpatiumDdiDhcp,
+    SpatiumDdiDns,
+    SpatiumDdiIpam,
+    SpatiumddiPlugin,
+    SpatiumDiscoveryApi,
+)
 from app.schemas.normalized import NormalizedInterface
 
 
@@ -180,3 +187,136 @@ class TestDefaultRegistry:
 
     def test_default_registry_is_cached_per_process(self) -> None:
         assert get_default_registry() is get_default_registry()
+
+
+# ---------------------------------------------------------------------------
+# T7 — spatiumddi registration + DDI-Agent vendor-agnosticism
+# ---------------------------------------------------------------------------
+
+
+class TestSpatiumddiRegistration:
+    """ADR-0024 T7: spatiumddi is discoverable via iter_builtin_plugins and the
+    default registry; all four DDI capability ABCs resolve to the correct
+    implementation classes without any DDI-Agent code change.
+
+    The tests exercise three registration surfaces:
+    1. ``iter_builtin_plugins`` — the fallback path used when the package is
+       run from source without ``pip install -e .`` (no entry-point metadata).
+    2. ``get_default_registry`` — the process-wide singleton that first loads
+       built-ins then discovers entry points; spatiumddi must appear in both.
+    3. ``PluginRegistry.load_entry_points`` — the entry-point path that runs
+       when the package *is* installed (both paths must agree).
+    """
+
+    def test_iter_builtin_plugins_includes_spatiumddi(self) -> None:
+        """spatiumddi is yielded by iter_builtin_plugins (source-run path, ADR-0006)."""
+        from app.plugins.vendors import iter_builtin_plugins
+
+        vendor_ids = [p.vendor_id for p in iter_builtin_plugins()]
+        assert "spatiumddi" in vendor_ids, (
+            "SpatiumddiPlugin must be yielded by iter_builtin_plugins so the "
+            "default registry contains it even without pip install -e ."
+        )
+
+    def test_default_registry_contains_spatiumddi(self) -> None:
+        """spatiumddi is in the process-wide default registry."""
+        registry = get_default_registry()
+        assert "spatiumddi" in registry.vendor_ids()
+
+    def test_spatiumddi_plugin_instance_type(self) -> None:
+        """The registered plugin is a SpatiumddiPlugin instance."""
+        registry = get_default_registry()
+        plugin = registry.get_plugin("spatiumddi")
+        assert isinstance(plugin, SpatiumddiPlugin)
+
+    def test_spatiumddi_declares_all_four_ddi_capabilities(self) -> None:
+        """spatiumddi declares DISCOVERY_API + DDI_DNS + DDI_DHCP + DDI_IPAM."""
+        registry = get_default_registry()
+        caps = registry.capabilities_for("spatiumddi")
+        assert caps == frozenset(
+            {
+                Capability.DISCOVERY_API,
+                Capability.DDI_DNS,
+                Capability.DDI_DHCP,
+                Capability.DDI_IPAM,
+            }
+        )
+
+    def test_spatiumddi_resolves_ddi_dns_capability(self) -> None:
+        registry = get_default_registry()
+        assert registry.resolve("spatiumddi", Capability.DDI_DNS) is SpatiumDdiDns
+
+    def test_spatiumddi_resolves_ddi_dhcp_capability(self) -> None:
+        registry = get_default_registry()
+        assert registry.resolve("spatiumddi", Capability.DDI_DHCP) is SpatiumDdiDhcp
+
+    def test_spatiumddi_resolves_ddi_ipam_capability(self) -> None:
+        registry = get_default_registry()
+        assert registry.resolve("spatiumddi", Capability.DDI_IPAM) is SpatiumDdiIpam
+
+    def test_spatiumddi_resolves_discovery_api_capability(self) -> None:
+        registry = get_default_registry()
+        assert registry.resolve("spatiumddi", Capability.DISCOVERY_API) is SpatiumDiscoveryApi
+
+    def test_spatiumddi_vendor_id_matches_entry_point_name(self) -> None:
+        """vendor_id == entry-point name is the ADR-0006 invariant; assert it directly."""
+        plugin = SpatiumddiPlugin()
+        assert plugin.vendor_id == "spatiumddi"
+
+    def test_load_entry_points_discovers_spatiumddi(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """load_entry_points registers SpatiumddiPlugin when the package is installed.
+
+        This exercises surface 3 from the class docstring: the entry-point path
+        that runs when the package is installed (``pip install -e .``).  A
+        _FakeEntryPoint named 'spatiumddi' is injected so the test is hermetic
+        and does not require the package to be physically installed.
+        """
+        monkeypatch.setattr(
+            registry_module,
+            "entry_points",
+            lambda group: [_FakeEntryPoint("spatiumddi", SpatiumddiPlugin)],
+        )
+        registry = PluginRegistry()
+        count = registry.load_entry_points()
+        assert count == 1, (
+            "load_entry_points should register exactly one plugin "
+            f"for the spatiumddi entry point; got {count}"
+        )
+        assert "spatiumddi" in registry.vendor_ids(), (
+            "spatiumddi must appear in registry.vendor_ids() after "
+            "load_entry_points — entry-point discovery path is broken"
+        )
+        plugin = registry.get_plugin("spatiumddi")
+        assert isinstance(plugin, SpatiumddiPlugin), (
+            f"Expected SpatiumddiPlugin instance, got {type(plugin)!r}"
+        )
+
+    def test_ddi_agent_requires_no_code_change_to_operate_over_spatiumddi(self) -> None:
+        """The DDI Agent is vendor-agnostic: it resolves capabilities from the registry.
+
+        No DDI-Agent code change is required to support a new DDI vendor — the
+        agent calls ``registry.resolve(vendor_id, capability)`` and the capability
+        layer is the only vendor-specific code. This test asserts the invariant:
+        all four DDI capability ABCs from the registry for 'spatiumddi' are the
+        same classes the DDI Agent would instantiate, and resolving them requires
+        zero agent-level code change (the registry is the sole indirection point,
+        ADR-0006 §3).
+        """
+        registry = get_default_registry()
+
+        # The DDI Agent dispatches by (vendor_id, capability) pairs — assert the
+        # registry resolves each pair to a concrete class without knowing the
+        # vendor-specific module.  If this test passes without importing anything
+        # from app.agents.ddi, the agent is truly vendor-agnostic at the
+        # capability-resolution level.
+        for cap, expected_cls in (
+            (Capability.DDI_DNS, SpatiumDdiDns),
+            (Capability.DDI_DHCP, SpatiumDdiDhcp),
+            (Capability.DDI_IPAM, SpatiumDdiIpam),
+            (Capability.DISCOVERY_API, SpatiumDiscoveryApi),
+        ):
+            resolved = registry.resolve("spatiumddi", cap)
+            assert resolved is expected_cls, (
+                f"registry.resolve('spatiumddi', {cap!r}) returned {resolved!r}; "
+                f"expected {expected_cls!r} — DDI Agent would dispatch to the wrong class"
+            )

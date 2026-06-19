@@ -1,0 +1,14 @@
+[
+  {
+    "id": "77777777-7777-7777-7777-777777777777",
+    "space_id": "99999999-9999-9999-9999-999999999999",
+    "block_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "network": "10.0.0.0/24",
+    "name": "lan",
+    "gateway": "10.0.0.1",
+    "status": "active",
+    "utilization_percent": 42.5,
+    "total_ips": 254,
+    "allocated_ips": 108
+  }
+]

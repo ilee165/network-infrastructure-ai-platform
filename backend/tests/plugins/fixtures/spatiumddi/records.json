@@ -1,0 +1,93 @@
+[
+  {
+    "id": "33333333-3333-3333-3333-333333333333",
+    "zone_id": "22222222-2222-2222-2222-222222222222",
+    "view_id": null,
+    "name": "www",
+    "fqdn": "www.example.com",
+    "record_type": "A",
+    "value": "10.0.0.10",
+    "ttl": 3600,
+    "priority": null,
+    "weight": null,
+    "port": null
+  },
+  {
+    "id": "33333333-3333-3333-3333-3333aaaaaaaa",
+    "zone_id": "22222222-2222-2222-2222-222222222222",
+    "view_id": null,
+    "name": "www6",
+    "fqdn": "www6.example.com",
+    "record_type": "AAAA",
+    "value": "2001:db8::10",
+    "ttl": 3600,
+    "priority": null,
+    "weight": null,
+    "port": null
+  },
+  {
+    "id": "33333333-3333-3333-3333-3333bbbbbbbb",
+    "zone_id": "22222222-2222-2222-2222-222222222222",
+    "view_id": null,
+    "name": "alias",
+    "fqdn": "alias.example.com",
+    "record_type": "CNAME",
+    "value": "www.example.com",
+    "ttl": 3600,
+    "priority": null,
+    "weight": null,
+    "port": null
+  },
+  {
+    "id": "33333333-3333-3333-3333-3333cccccccc",
+    "zone_id": "22222222-2222-2222-2222-222222222222",
+    "view_id": null,
+    "name": "@",
+    "fqdn": "example.com",
+    "record_type": "MX",
+    "value": "mail.example.com",
+    "ttl": 3600,
+    "priority": 10,
+    "weight": null,
+    "port": null
+  },
+  {
+    "id": "33333333-3333-3333-3333-3333dddddddd",
+    "zone_id": "22222222-2222-2222-2222-222222222222",
+    "view_id": null,
+    "name": "_sip._tcp",
+    "fqdn": "_sip._tcp.example.com",
+    "record_type": "SRV",
+    "value": "sipserver.example.com",
+    "ttl": 3600,
+    "priority": 10,
+    "weight": 60,
+    "port": 5060
+  },
+  {
+    "id": "33333333-3333-3333-3333-3333eeeeeeee",
+    "zone_id": "22222222-2222-2222-2222-222222222222",
+    "view_id": null,
+    "name": "@",
+    "fqdn": "example.com",
+    "record_type": "TXT",
+    "value": "v=spf1 -all",
+    "ttl": 3600,
+    "priority": null,
+    "weight": null,
+    "port": null
+  },
+  {
+    "id": "33333333-3333-3333-3333-3333ffffffff",
+    "zone_id": "22222222-2222-2222-2222-222222222222",
+    "view_id": null,
+    "name": "_dns",
+    "fqdn": "_dns.example.com",
+    "record_type": "HTTPS",
+    "value": "1 . alpn=h2",
+    "ttl": 3600,
+    "priority": 1,
+    "weight": null,
+    "port": null
+  }
+]

@@ -27,13 +27,13 @@ from app.core.errors import PluginError
 from app.plugins.base import (
     Capability,
     ChangeRequestDraft,
+    ChangeVerb,
     DdiDhcpCapability,
     DdiDnsCapability,
     DdiIpamCapability,
     DiscoveryApiCapability,
     PluginCapability,
     VendorPlugin,
-    WapiVerb,
 )
 from app.plugins.vendors.infoblox.wapi import WapiClient, join_raw
 from app.schemas.normalized import (
@@ -216,16 +216,16 @@ class InfobloxDdiDns(_InfobloxCapability, DdiDnsCapability):
         return records
 
     def add_record(self, record: NormalizedDnsRecord) -> ChangeRequestDraft:
-        wapi_object = f"record:{record.record_type.value}"
+        resource = f"record:{record.record_type.value}"
         body = (("name", record.name), (_dns_value_field(record.record_type), record.value))
         return ChangeRequestDraft(
-            verb=WapiVerb.CREATE,
-            wapi_object=wapi_object,
+            verb=ChangeVerb.CREATE,
+            resource=resource,
             body=body,
             summary=f"add {record.record_type.value.upper()} record {record.name}",
             inverse=ChangeRequestDraft(
-                verb=WapiVerb.DELETE,
-                wapi_object=wapi_object,
+                verb=ChangeVerb.DELETE,
+                resource=resource,
                 object_ref=None,
                 summary=f"delete the newly-added {record.record_type.value.upper()} "
                 f"record {record.name}",
@@ -238,15 +238,15 @@ class InfobloxDdiDns(_InfobloxCapability, DdiDnsCapability):
         changes: NormalizedDnsRecord,
         current: NormalizedDnsRecord | None = None,
     ) -> ChangeRequestDraft:
-        wapi_object = f"record:{changes.record_type.value}"
+        resource = f"record:{changes.record_type.value}"
         value_field = _dns_value_field(changes.record_type)
         body = ((value_field, changes.value),)
         # The inverse can only restore the prior value if we have the pre-image.
         # Without it we must NOT emit a blind empty-body "restore" (ADR-0022 §3).
         if current is not None:
             inverse = ChangeRequestDraft(
-                verb=WapiVerb.UPDATE,
-                wapi_object=f"record:{current.record_type.value}",
+                verb=ChangeVerb.UPDATE,
+                resource=f"record:{current.record_type.value}",
                 object_ref=object_ref,
                 body=((_dns_value_field(current.record_type), current.value),),
                 summary=f"restore prior {current.record_type.value.upper()} "
@@ -260,8 +260,8 @@ class InfobloxDdiDns(_InfobloxCapability, DdiDnsCapability):
                 "(rollback needs a fresh pre-image — none captured at draft time)"
             )
         return ChangeRequestDraft(
-            verb=WapiVerb.UPDATE,
-            wapi_object=wapi_object,
+            verb=ChangeVerb.UPDATE,
+            resource=resource,
             object_ref=object_ref,
             body=body,
             summary=summary,
@@ -275,8 +275,8 @@ class InfobloxDdiDns(_InfobloxCapability, DdiDnsCapability):
         # pre-image; otherwise delete is non-reversible (ADR-0022 §3).
         if current is not None:
             inverse = ChangeRequestDraft(
-                verb=WapiVerb.CREATE,
-                wapi_object=f"record:{current.record_type.value}",
+                verb=ChangeVerb.CREATE,
+                resource=f"record:{current.record_type.value}",
                 body=(
                     ("name", current.name),
                     (_dns_value_field(current.record_type), current.value),
@@ -292,8 +292,8 @@ class InfobloxDdiDns(_InfobloxCapability, DdiDnsCapability):
                 "(non-reversible — no pre-image captured at draft time)"
             )
         return ChangeRequestDraft(
-            verb=WapiVerb.DELETE,
-            wapi_object=f"record:{current.record_type.value}" if current else "record",
+            verb=ChangeVerb.DELETE,
+            resource=f"record:{current.record_type.value}" if current else "record",
             object_ref=object_ref,
             summary=summary,
             inverse=inverse,
@@ -353,13 +353,13 @@ class InfobloxDdiDhcp(_InfobloxCapability, DdiDhcpCapability):
             ("end_addr", str(dhcp_range.end_address)),
         )
         return ChangeRequestDraft(
-            verb=WapiVerb.CREATE,
-            wapi_object=_WAPI_RANGE,
+            verb=ChangeVerb.CREATE,
+            resource=_WAPI_RANGE,
             body=body,
             summary=f"add DHCP range {dhcp_range.start_address}-{dhcp_range.end_address}",
             inverse=ChangeRequestDraft(
-                verb=WapiVerb.DELETE,
-                wapi_object=_WAPI_RANGE,
+                verb=ChangeVerb.DELETE,
+                resource=_WAPI_RANGE,
                 summary="delete the newly-added DHCP range",
             ),
         )
@@ -371,8 +371,8 @@ class InfobloxDdiDhcp(_InfobloxCapability, DdiDhcpCapability):
         # delete is non-reversible and we emit no misleading draft (ADR-0022 §3).
         if current is not None:
             inverse = ChangeRequestDraft(
-                verb=WapiVerb.CREATE,
-                wapi_object=_WAPI_RANGE,
+                verb=ChangeVerb.CREATE,
+                resource=_WAPI_RANGE,
                 body=(
                     ("start_addr", str(current.start_address)),
                     ("end_addr", str(current.end_address)),
@@ -388,8 +388,8 @@ class InfobloxDdiDhcp(_InfobloxCapability, DdiDhcpCapability):
                 "(non-reversible — no pre-image captured at draft time)"
             )
         return ChangeRequestDraft(
-            verb=WapiVerb.DELETE,
-            wapi_object=_WAPI_RANGE,
+            verb=ChangeVerb.DELETE,
+            resource=_WAPI_RANGE,
             object_ref=object_ref,
             summary=summary,
             inverse=inverse,
@@ -439,13 +439,13 @@ class InfobloxDdiIpam(_InfobloxCapability, DdiIpamCapability):
         if network.comment:
             body = (*body, ("comment", network.comment))
         return ChangeRequestDraft(
-            verb=WapiVerb.CREATE,
-            wapi_object=_WAPI_NETWORK,
+            verb=ChangeVerb.CREATE,
+            resource=_WAPI_NETWORK,
             body=body,
             summary=f"add network {network.network}",
             inverse=ChangeRequestDraft(
-                verb=WapiVerb.DELETE,
-                wapi_object=_WAPI_NETWORK,
+                verb=ChangeVerb.DELETE,
+                resource=_WAPI_NETWORK,
                 summary=f"delete the newly-added network {network.network}",
             ),
         )
@@ -460,8 +460,8 @@ class InfobloxDdiIpam(_InfobloxCapability, DdiIpamCapability):
             if current.comment:
                 body = (*body, ("comment", current.comment))
             inverse = ChangeRequestDraft(
-                verb=WapiVerb.CREATE,
-                wapi_object=_WAPI_NETWORK,
+                verb=ChangeVerb.CREATE,
+                resource=_WAPI_NETWORK,
                 body=body,
                 summary=f"re-create the deleted network {current.network}",
             )
@@ -473,8 +473,8 @@ class InfobloxDdiIpam(_InfobloxCapability, DdiIpamCapability):
                 "(non-reversible — no pre-image captured at draft time)"
             )
         return ChangeRequestDraft(
-            verb=WapiVerb.DELETE,
-            wapi_object=_WAPI_NETWORK,
+            verb=ChangeVerb.DELETE,
+            resource=_WAPI_NETWORK,
             object_ref=object_ref,
             summary=summary,
             inverse=inverse,

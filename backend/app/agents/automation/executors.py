@@ -42,14 +42,15 @@ from app.plugins.base import ChangePlan, ChangeRequestDraft, ChangeResult
 
 
 class DdiChangeResult(BaseModel):
-    """Structured outcome of one DDI (Infoblox WAPI) write attempt (ADR-0022 §3).
+    """Structured outcome of one DDI write attempt (ADR-0022 §3).
 
     The DDI analogue of :class:`~app.plugins.base.ChangeResult`: it records whether
     the post-write re-read verified the intended end-state, the (non-secret) object
-    ``_ref`` the write produced/targeted, and — when the apply/verify failed and
+    reference the write produced/targeted, and — when the apply/verify failed and
     the draft's ``inverse`` was applied — whether the structured rollback restored
-    the prior state. Frozen and secret-free: ``object_ref`` is an opaque WAPI
-    handle, never a credential.
+    the prior state. Frozen and secret-free: ``object_ref`` is an opaque vendor
+    handle (e.g. a WAPI ``_ref`` for Infoblox or a UUID for SpatiumDDI REST),
+    never a credential.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -59,7 +60,10 @@ class DdiChangeResult(BaseModel):
     )
     object_ref: str | None = Field(
         default=None,
-        description="Opaque WAPI _ref of the written/targeted object; never a secret.",
+        description=(
+            "Opaque vendor handle of the written/targeted object "
+            "(e.g. WAPI _ref for Infoblox, UUID for SpatiumDDI); never a secret."
+        ),
     )
     rolled_back: bool = Field(
         default=False,
@@ -104,14 +108,25 @@ class ConfigChangeExecutor(Protocol):
 
 @runtime_checkable
 class DdiChangeExecutor(Protocol):
-    """Applies a DDI CR to the appliance via a ``WapiClient`` write (ADR-0022 §3).
+    """Applies a DDI CR to the appliance via the vendor's client (ADR-0022 §3).
 
-    The implementation (Wave 5) materializes the WAPI credentials in-process,
-    applies the draft's ``verb``/``body`` against the target ``_ref``, re-reads to
-    verify, and on failure applies the draft's ``inverse`` as the structured
-    rollback. It is handed the persisted :class:`ChangeRequest` and the
+    The implementation materializes the vendor credentials in-process, applies
+    the draft's ``verb``/``body`` against the target ``object_ref`` via the
+    appropriate vendor client (e.g. a WAPI client for Infoblox, a REST
+    :class:`~app.plugins.vendors.spatiumddi.client.SpatiumClient` for SpatiumDDI),
+    re-reads to verify, and on failure applies the draft's ``inverse`` as the
+    structured rollback. It is handed the persisted :class:`ChangeRequest` and the
     :class:`~app.plugins.base.ChangeRequestDraft` reconstructed from the CR's
     approved ``payload`` (frozen at submit), returning a :class:`DdiChangeResult`.
+
+    **Restore-draft routing.** A soft-delete inverse produced by SpatiumDDI (and
+    any future soft-delete vendor) uses ``verb=CREATE`` with a non-``None``
+    ``object_ref`` and ``body`` containing ``("restore", "true")``.  Implementations
+    MUST detect this sentinel before dispatching — a draft matching all three
+    conditions routes to the trash-restore endpoint
+    (``POST /admin/trash/{resource}/{object_ref}/restore`` for SpatiumDDI), NOT to
+    a plain object-create.  A plain create always has ``object_ref=None`` at draft
+    time; a restore always targets an existing id.
     """
 
     async def apply(self, cr: ChangeRequest, draft: ChangeRequestDraft) -> DdiChangeResult:

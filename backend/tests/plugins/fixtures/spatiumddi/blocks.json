@@ -1,0 +1,8 @@
+[
+  {
+    "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "space_id": "99999999-9999-9999-9999-999999999999",
+    "cidr": "10.0.0.0/16",
+    "comment": "source-derived, not live-recorded (ADR-0024 §5)"
+  }
+]
