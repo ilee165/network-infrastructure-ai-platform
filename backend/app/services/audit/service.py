@@ -102,6 +102,13 @@ AUTOMATION_ROLLBACK_FAILED: Final = "automation.rollback_failed"
 # write, CR state left untouched) and audits the refusal — the executor never
 # acts on a draft/pending/rejected/in-flight/terminal CR (M5-PLAN risk #1).
 AUTOMATION_EXECUTION_REFUSED: Final = "automation.execution_refused"
+# M5 packet-capture API audit vocabulary (M5 task #15; ADR-0023 §2/§3): an
+# engineer launching a capture through the API enqueues the worker-side capture
+# task — the request itself is audited at the route (who requested a capture on
+# which interface/device), distinct from the worker's ``packet.capture_completed``
+# entry. ``detail`` references the device by id and carries no packet payload or
+# credential material (the BPF filter is whitelist-validated, never secret).
+PACKET_CAPTURE_REQUESTED: Final = "packet.capture_requested"
 
 
 async def record(

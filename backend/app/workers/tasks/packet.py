@@ -300,6 +300,7 @@ def capture_segment(
     capture_filter: str | None = None,
     duration_seconds: int | None = None,
     size_bytes: int | None = None,
+    capture_id: str | None = None,
 ) -> dict[str, Any]:
     """Capture a reachable segment with worker-side ``tcpdump`` (no device).
 
@@ -307,9 +308,14 @@ def capture_segment(
     hashes the resulting pcap, and persists ``pcap_metadata`` with
     ``device_id=None``. Returns a JSON-safe summary. A validation/capture failure
     is audited and returned as ``ok=False`` (no exception escapes to the caller).
+
+    ``capture_id`` is optional: the API launch path (M5-T15) allocates the id up
+    front so the launch response, the status endpoint, and the persisted metadata
+    all share one capture reference; when omitted (beat/other callers) a fresh id
+    is generated.
     """
     settings = _settings()
-    capture_id = uuid.uuid4()
+    capture_id = uuid.UUID(capture_id) if capture_id else uuid.uuid4()
     storage_path = pcap_path_for(capture_id, pcap_dir=settings.pcap_dir)
     started_at = utcnow()
     try:
@@ -372,6 +378,7 @@ def capture_device(
     capture_filter: str | None = None,
     duration_seconds: int | None = None,
     size_bytes: int | None = None,
+    capture_id: str | None = None,
 ) -> dict[str, Any]:
     """Capture on an ``eos`` device via a monitor session, retrieve the pcap.
 
@@ -380,9 +387,13 @@ def capture_device(
     retrieves the pcap to the volume, hashes it, and persists ``pcap_metadata``.
     The EOS retrieval mechanics run through the ``_open_ssh`` seam; only the
     metadata path is exercised in unit tests (transport faked).
+
+    ``capture_id`` is optional: the API launch path (M5-T15) allocates it up
+    front so the launch response and the persisted metadata share one reference;
+    when omitted a fresh id is generated.
     """
     settings = _settings()
-    capture_id = uuid.uuid4()
+    capture_id = uuid.UUID(capture_id) if capture_id else uuid.uuid4()
     device_uuid = uuid.UUID(device_id)
     storage_path = pcap_path_for(capture_id, pcap_dir=settings.pcap_dir)
     started_at = utcnow()

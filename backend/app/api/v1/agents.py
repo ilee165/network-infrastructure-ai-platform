@@ -30,12 +30,13 @@ import inspect
 import secrets
 import time
 import uuid
-from typing import Annotated
+from collections.abc import Callable
+from typing import Annotated, Final
 
-from fastapi import APIRouter, Depends, WebSocket
+from fastapi import APIRouter, Depends, Query, WebSocket
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import db
@@ -45,15 +46,29 @@ from app.agents.framework.traces import ReasoningTrace, TraceStep
 from app.api.deps import (
     TOKEN_TYPE_ACCESS,
     get_app_settings,
+    get_db,
     get_sessionmaker,
     require_role,
 )
 from app.core.config import Settings
-from app.core.errors import AuthError, NotFoundError
+from app.core.errors import (
+    AuthError,
+    ForbiddenError,
+    NotFoundError,
+    UnprocessableEntityError,
+)
 from app.core.security import Role, decode_access_token
+from app.engines.packet import PacketFindings, analyze_pcap, pcap_path_for, validate_capture_filter
+from app.engines.packet.filters import FilterValidationError
 from app.llm.providers import get_chat_model
 from app.llm.runtime_settings import effective_profile_for_role
-from app.models import AgentSession, AgentSessionStatus, ReasoningTraceRow, User
+from app.models import (
+    AgentSession,
+    AgentSessionStatus,
+    PcapMetadata,
+    ReasoningTraceRow,
+    User,
+)
 from app.schemas.agents_api import (
     AgentSessionRead,
     AgentStreamEnd,
@@ -63,13 +78,36 @@ from app.schemas.agents_api import (
     StartSessionResponse,
     StreamTicketResponse,
 )
+from app.schemas.changes_api import (
+    ChangeDecisionRequest,
+    ChangeRequestListResponse,
+    ChangeRequestRead,
+)
+from app.schemas.packet_api import (
+    CaptureLaunchRequest,
+    CaptureLaunchResponse,
+    CaptureStatus,
+    CaptureStatusResponse,
+)
 from app.services import audit
 from app.services.agent_session import AgentSessionService
+from app.services.change_requests import ChangeRequestService
+from app.workers.celery_app import QUEUE_PACKET, celery_app
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 Viewer = Annotated[User, Depends(require_role("viewer"))]
+Engineer = Annotated[User, Depends(require_role("engineer"))]
+DbSession = Annotated[AsyncSession, Depends(get_db)]
 SessionMaker = Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)]
+
+#: Celery task name of the worker-side segment capture (app/workers/tasks/packet.py).
+SEGMENT_CAPTURE_TASK: Final = "packet.capture_segment"
+#: Celery task name of the device-side ``eos`` monitor-session capture.
+DEVICE_CAPTURE_TASK: Final = "packet.capture_device"
+
+#: Target type for the capture-request audit entry.
+_CAPTURE_TARGET_TYPE: Final = "pcap_capture"
 
 #: Target type used for every agent-session audit entry.
 _TARGET_TYPE = "agent_session"
@@ -105,6 +143,52 @@ _TICKET_TTL_SECONDS = 30
 # API contracts.
 # ---------------------------------------------------------------------------
 _ticket_store: dict[str, tuple[uuid.UUID, uuid.UUID, float]] = {}
+
+
+def get_change_request_service(sessionmaker: SessionMaker) -> ChangeRequestService:
+    """Build the :class:`ChangeRequestService` over the process sessionmaker (DI seam).
+
+    The service owns its own commit boundary (one short transaction + audit row
+    per transition), so it takes the :class:`async_sessionmaker`, not a
+    request-scoped session — mirroring the agent-session lifecycle service. Tests
+    override :func:`get_sessionmaker` (the underlying seam) to bind an isolated
+    in-memory engine; nothing here reaches a real Postgres.
+    """
+    return ChangeRequestService(sessionmaker)
+
+
+ChangeService = Annotated[ChangeRequestService, Depends(get_change_request_service)]
+
+
+#: A pcap analyzer is ``(capture_id, display_filter) -> PacketFindings``. The
+#: default resolves the on-disk pcap path and runs the sandboxed tshark analysis;
+#: tests override :func:`get_pcap_analyzer` so no real pcap/subprocess is touched.
+PcapAnalyzer = Callable[[uuid.UUID, str | None], PacketFindings]
+
+
+def get_pcap_analyzer(
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> PcapAnalyzer:
+    """Return the sandboxed pcap analyzer (overridable DI seam).
+
+    Production resolves the capture's on-disk pcap path from settings and runs
+    :func:`app.engines.packet.analyze_pcap` — argv-only, ``shell=False``, ``-n``,
+    whitelisted display filter, hard timeout (ADR-0023 §1). The analyzer returns
+    only normalized :class:`PacketFindings` (top talkers, protocol hierarchy, TCP
+    anomalies), never raw packet bytes (ADR-0023 §1). Tests override this seam so
+    the API contract is exercised without a real capture file.
+    """
+
+    def _analyze(capture_id: uuid.UUID, display_filter: str | None) -> PacketFindings:
+        path = pcap_path_for(capture_id, pcap_dir=settings.pcap_dir)
+        return analyze_pcap(
+            path,
+            display_filter=display_filter,
+            tshark_bin=settings.tshark_bin,
+            timeout_seconds=settings.packet_analysis_timeout_seconds,
+        )
+
+    return _analyze
 
 
 SupervisorGraph = CompiledStateGraph[SupervisorState, None, SupervisorState, SupervisorState]
@@ -333,13 +417,19 @@ async def start_session(
     )
 
 
-@router.get("/{session_id}", response_model=StartSessionResponse)
+@router.get("/{session_id:uuid}", response_model=StartSessionResponse)
 async def get_session(
     session_id: uuid.UUID,
     _user: Viewer,
     sessionmaker: SessionMaker,
 ) -> StartSessionResponse:
-    """Return one persisted session and its full reasoning trace (404 if unknown)."""
+    """Return one persisted session and its full reasoning trace (404 if unknown).
+
+    The ``:uuid`` path convertor constrains this single-segment route to valid
+    UUIDs only, so the sibling static sub-resources on this router (``/changes``,
+    ``/captures``) fall through to their own handlers instead of being parsed as
+    a session id.
+    """
     row = await _load_session_or_404(sessionmaker, session_id)
     traces = await _load_traces(sessionmaker, session_id)
     answer = _final_answer_from_traces(traces)
@@ -506,3 +596,281 @@ async def _audit(
         if reasoning_trace_id is not None:
             entry.reasoning_trace_id = reasoning_trace_id
         await session.commit()
+
+
+# ===========================================================================
+# ChangeRequest + approvals surface (M5-T15; ADR-0020).
+#
+# The CR lifecycle (draft -> pending_approval -> approved -> ... ) is owned by
+# the ChangeRequestService (T3) — the *only* mutator of ``change_requests``.
+# These endpoints are thin: they authenticate, enforce engineer+ RBAC, apply the
+# server-side four-eyes guard a SECOND time at the endpoint layer (defence in
+# depth, in addition to the service's PRIMARY guard), and delegate every
+# transition to the service. There is deliberately **no** execute/mark-* edge on
+# this surface: the ``approved -> executing`` handoff requires the verified
+# Automation Agent service principal (ADR-0020 §2), never a holder of an HTTP
+# token, so a non-approved CR can never be driven to execute through the API.
+# ===========================================================================
+
+
+@router.get("/changes", response_model=ChangeRequestListResponse)
+async def list_change_requests(
+    session: DbSession,
+    _user: Engineer,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ChangeRequestListResponse:
+    """List ChangeRequests, newest first, paginated (engineer+; ADR-0020 §5).
+
+    The CR lifecycle is an engineer+ capability (operator/viewer are not on the
+    change surface). ``payload`` is never surfaced — only lifecycle metadata and
+    the id-only ``target_refs`` (ADR-0020 §4 data minimization).
+    """
+    from app.models import ChangeRequest  # local import: avoid widening module surface
+
+    total = (await session.execute(select(func.count()).select_from(ChangeRequest))).scalar_one()
+    rows = (
+        (
+            await session.execute(
+                select(ChangeRequest)
+                .order_by(ChangeRequest.created_at.desc(), ChangeRequest.id.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return ChangeRequestListResponse(
+        items=[ChangeRequestRead.model_validate(row) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/changes/{cr_id}", response_model=ChangeRequestRead)
+async def get_change_request(
+    cr_id: uuid.UUID,
+    _user: Engineer,
+    service: ChangeService,
+) -> ChangeRequestRead:
+    """One ChangeRequest by id (engineer+; 404 problem when unknown)."""
+    cr = await service.get(cr_id)
+    return ChangeRequestRead.model_validate(cr)
+
+
+@router.post("/changes/{cr_id}/submit", response_model=ChangeRequestRead)
+async def submit_change_request(
+    cr_id: uuid.UUID,
+    body: ChangeDecisionRequest,
+    user: Engineer,
+    service: ChangeService,
+) -> ChangeRequestRead:
+    """``draft -> pending_approval`` (engineer+; ADR-0020 §1)."""
+    cr = await service.submit(cr_id, actor_id=user.id, actor_role=_role_of(user))
+    return ChangeRequestRead.model_validate(cr)
+
+
+@router.post("/changes/{cr_id}/approve", response_model=ChangeRequestRead)
+async def approve_change_request(
+    cr_id: uuid.UUID,
+    body: ChangeDecisionRequest,
+    user: Engineer,
+    service: ChangeService,
+) -> ChangeRequestRead:
+    """``pending_approval -> approved`` — engineer+ with an endpoint four-eyes guard.
+
+    Defence in depth (ADR-0020 §3): the four-eyes predicate (``approver !=
+    requester`` when ``four_eyes_required``) is re-checked **here at the endpoint**
+    before delegating, in addition to the PRIMARY guard inside the
+    ChangeRequestService. A self-approval is rejected with 403 and no transition
+    is attempted — the CR never leaves ``pending_approval`` and no ``approved``
+    audit row is written.
+    """
+    cr = await service.get(cr_id)
+    if cr.four_eyes_required and cr.requester_id == user.id:
+        raise ForbiddenError(
+            "four-eyes violation: the approver must differ from the requester "
+            f"for change request '{cr_id}'"
+        )
+    approved = await service.approve(
+        cr_id, actor_id=user.id, actor_role=_role_of(user), comment=body.comment
+    )
+    return ChangeRequestRead.model_validate(approved)
+
+
+@router.post("/changes/{cr_id}/reject", response_model=ChangeRequestRead)
+async def reject_change_request(
+    cr_id: uuid.UUID,
+    body: ChangeDecisionRequest,
+    user: Engineer,
+    service: ChangeService,
+) -> ChangeRequestRead:
+    """``pending_approval -> draft`` (engineer+; ADR-0020 §1).
+
+    Four-eyes constrains *approve*, not *reject* — the requester may withdraw
+    their own CR, so there is no four-eyes guard on this edge.
+    """
+    cr = await service.reject(
+        cr_id, actor_id=user.id, actor_role=_role_of(user), comment=body.comment
+    )
+    return ChangeRequestRead.model_validate(cr)
+
+
+def _role_of(user: User) -> Role:
+    """The verified principal's RBAC role (never spoofed from the request body)."""
+    return Role.from_name(user.role.name) or Role.VIEWER
+
+
+# ===========================================================================
+# Packet capture / analysis surface (M5-T15; ADR-0023).
+#
+# A capture LAUNCH is asynchronous and never inline-blocking: the route validates
+# + whitelist-checks the BPF filter, then enqueues the worker-side capture task on
+# the ``packet`` queue and returns the capture id + ``queued`` status (mirrors the
+# discovery run surface). The status endpoint reads the persisted pcap metadata,
+# and the analysis endpoint returns the NORMALIZED findings (top talkers, protocol
+# hierarchy, TCP anomalies) — never raw packet bytes (ADR-0023 §1).
+# ===========================================================================
+
+
+@router.post("/captures", response_model=CaptureLaunchResponse, status_code=202)
+async def launch_capture(
+    body: CaptureLaunchRequest,
+    session: DbSession,
+    user: Engineer,
+) -> CaptureLaunchResponse:
+    """Launch a packet capture asynchronously (engineer+; ADR-0023 §2/§3).
+
+    The BPF filter is whitelist-validated **before** anything is enqueued (a
+    dash-prefixed/injection token is rejected 422, nothing queued). The capture
+    request is audited, committed, and only then is the worker task enqueued — so
+    the worker never races the audit. 202: the capture runs on the ``packet``
+    queue; poll ``GET /captures/{capture_id}`` for completion.
+    """
+    try:
+        validate_capture_filter(body.capture_filter)
+    except FilterValidationError as exc:
+        raise UnprocessableEntityError(str(exc)) from exc
+
+    capture_id = uuid.uuid4()
+    await audit.record(
+        session,
+        actor=f"user:{user.username}",
+        action=audit.PACKET_CAPTURE_REQUESTED,
+        target_type=_CAPTURE_TARGET_TYPE,
+        target_id=str(capture_id),
+        detail={
+            "interface": body.interface,
+            "device_id": str(body.device_id) if body.device_id is not None else None,
+            # The filter is whitelist-validated, never secret; recording only its
+            # presence keeps the trail terse and avoids echoing attacker input.
+            "has_filter": body.capture_filter is not None,
+        },
+    )
+    await session.commit()
+
+    if body.device_id is not None:
+        celery_app.send_task(
+            DEVICE_CAPTURE_TASK,
+            args=[
+                str(user.id),
+                str(body.device_id),
+                body.interface,
+                body.capture_filter,
+                body.duration_seconds,
+                body.size_bytes,
+                str(capture_id),
+            ],
+            queue=QUEUE_PACKET,
+        )
+    else:
+        celery_app.send_task(
+            SEGMENT_CAPTURE_TASK,
+            args=[
+                str(user.id),
+                body.interface,
+                body.capture_filter,
+                body.duration_seconds,
+                body.size_bytes,
+                str(capture_id),
+            ],
+            queue=QUEUE_PACKET,
+        )
+    return CaptureLaunchResponse(
+        capture_id=capture_id,
+        status=CaptureStatus.QUEUED,
+        interface=body.interface,
+        device_id=body.device_id,
+    )
+
+
+async def _get_capture_or_404(session: AsyncSession, capture_id: uuid.UUID) -> PcapMetadata:
+    """Reload one capture's metadata row or raise :class:`NotFoundError`."""
+    row = (
+        await session.execute(
+            select(PcapMetadata).where(PcapMetadata.capture_id == capture_id)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise NotFoundError(f"capture {capture_id} does not exist")
+    return row
+
+
+def _capture_status(row: PcapMetadata) -> CaptureStatus:
+    """Lifecycle of a persisted capture row (tombstoned > completed)."""
+    if row.tombstoned_at is not None:
+        return CaptureStatus.TOMBSTONED
+    return CaptureStatus.COMPLETED
+
+
+@router.get("/captures/{capture_id}", response_model=CaptureStatusResponse)
+async def get_capture(
+    capture_id: uuid.UUID,
+    session: DbSession,
+    _user: Engineer,
+) -> CaptureStatusResponse:
+    """One capture's metadata + lifecycle status (engineer+; no raw pcap content)."""
+    row = await _get_capture_or_404(session, capture_id)
+    return CaptureStatusResponse(
+        capture_id=row.capture_id,
+        status=_capture_status(row),
+        interface=row.interface,
+        device_id=row.device_id,
+        byte_count=row.byte_count,
+        packet_count=row.packet_count,
+        sha256=row.sha256,
+        started_at=row.started_at,
+        ended_at=row.ended_at,
+        retention_expires_at=row.retention_expires_at,
+        tombstoned_at=row.tombstoned_at,
+    )
+
+
+@router.get("/captures/{capture_id}/analysis", response_model=PacketFindings)
+async def get_capture_analysis(
+    capture_id: uuid.UUID,
+    session: DbSession,
+    _user: Engineer,
+    analyzer: Annotated[PcapAnalyzer, Depends(get_pcap_analyzer)],
+    display_filter: Annotated[str | None, Query(max_length=1024)] = None,
+) -> PacketFindings:
+    """Return the normalized analysis findings for a stored capture (engineer+).
+
+    Runs the sandboxed tshark analysis (argv-only, ``-n``, whitelisted filter,
+    hard timeout — ADR-0023 §1) over the capture's pcap and returns only the
+    normalized :class:`PacketFindings` (top talkers, protocol hierarchy, TCP
+    anomalies). Raw packet bytes never leave the sandbox (ADR-0023 §1). 404 when
+    the capture is unknown or its pcap has been tombstoned by retention.
+    """
+    row = await _get_capture_or_404(session, capture_id)
+    if row.tombstoned_at is not None:
+        raise NotFoundError(
+            f"capture {capture_id} has been purged by retention; its pcap no longer exists"
+        )
+    try:
+        validate_capture_filter(display_filter)
+    except FilterValidationError as exc:
+        raise UnprocessableEntityError(str(exc)) from exc
+    return analyzer(capture_id, display_filter)

@@ -71,6 +71,20 @@ class BadRequestError(NetOpsError):
     slug = "bad-request"
 
 
+class UnprocessableEntityError(NetOpsError):
+    """The request is syntactically valid but fails a domain validation rule.
+
+    Used where the input parsed fine as JSON/types but is rejected by a
+    domain-specific guard the schema cannot express on its own (e.g. a BPF
+    capture filter that fails the injection whitelist). Surfaces as 422 — a
+    client error to fix the input, not a 502 gateway/plugin failure.
+    """
+
+    status_code = 422
+    title = "Unprocessable Entity"
+    slug = "unprocessable-entity"
+
+
 class NotFoundError(NetOpsError):
     """A requested resource does not exist."""
 
