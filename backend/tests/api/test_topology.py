@@ -33,6 +33,7 @@ from app.knowledge.schema import (
     REL_RESOLVES_TO,
     REL_ROUTES_TO,
 )
+from app.knowledge.topology_read import _DNS_REL_TYPES
 from app.models import DiscoveryRun, TopologySnapshot
 
 PROJECTED_AT = "2026-06-12T22:00:00+00:00"
@@ -73,8 +74,12 @@ class _FakeTx:
         for rec in self._records:
             if rec["rel_type"] not in selected:
                 continue
-            if site is not None and not (
-                rec["a_props"].get("site") == site or rec["b_props"].get("site") == site
+            if (
+                site is not None
+                and rec["rel_type"] not in _DNS_REL_TYPES
+                and not (
+                    rec["a_props"].get("site") == site or rec["b_props"].get("site") == site
+                )
             ):
                 continue
             if (
@@ -340,6 +345,44 @@ class TestGraph:
         assert edge["target"] == "if-1"
         assert edge["properties"]["value"] == "10.0.0.9"
 
+    async def test_layer_dns_with_site_still_returns_dns_edges(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        """layer=dns combined with a non-null site must NOT silently drop DNS edges.
+
+        DnsZone / DnsRecord / IPAddress nodes carry no .site property; the site
+        predicate must be bypassed for the DNS relationship family so that the
+        full DNS layer is returned regardless of which site is requested.
+        """
+        response = await graph_client.get(
+            "/api/v1/topology/graph",
+            params={"layer": "dns", "site": "nyc"},
+            headers=auth_headers("viewer"),
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        # Both DNS edges must survive — site filter must not silently empty them.
+        assert {e["type"] for e in body["edges"]} == {REL_IN_ZONE, REL_RESOLVES_TO}
+        labels = sorted(n["label"] for n in body["nodes"])
+        assert labels == ["DnsRecord", "DnsZone", "IPAddress"]
+
+    async def test_layer_dns_with_unknown_site_still_returns_dns_edges(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        """Even a site that matches no Device must not drop DNS-layer edges."""
+        response = await graph_client.get(
+            "/api/v1/topology/graph",
+            params={"layer": "dns", "site": "nonexistent-site"},
+            headers=auth_headers("viewer"),
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert {e["type"] for e in body["edges"]} == {REL_IN_ZONE, REL_RESOLVES_TO}
+
     async def test_site_filter_scopes_subgraph(
         self,
         graph_client: httpx.AsyncClient,
@@ -352,9 +395,16 @@ class TestGraph:
         )
         assert response.status_code == 200, response.text
         body = response.json()
-        # Only the lon<->nyc CONNECTED_TO edge touches site=lon.
-        assert len(body["edges"]) == 1
-        assert {n["key"] for n in body["nodes"]} == {"dev-c", "dev-a"}
+        # L2/L3 edges: only the lon<->nyc CONNECTED_TO edge touches site=lon.
+        # DNS edges (IN_ZONE, RESOLVES_TO) always pass through — DnsZone /
+        # DnsRecord / IPAddress nodes carry no .site property, so the site
+        # predicate is bypassed for the DNS relationship family.
+        l2l3_edges = [e for e in body["edges"] if e["type"] not in {REL_IN_ZONE, REL_RESOLVES_TO}]
+        dns_edges = [e for e in body["edges"] if e["type"] in {REL_IN_ZONE, REL_RESOLVES_TO}]
+        assert len(l2l3_edges) == 1
+        assert l2l3_edges[0]["type"] == REL_CONNECTED_TO
+        assert len(dns_edges) == 2
+        assert {n["key"] for n in body["nodes"] if n["label"] == "Device"} == {"dev-c", "dev-a"}
 
     async def test_vrf_filter_scopes_routes(
         self,

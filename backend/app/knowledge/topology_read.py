@@ -167,15 +167,23 @@ async def _read_graph(
     # Relationship types are validated module constants — safe to interpolate
     # into the type pattern (the driver cannot parameterize a rel-type literal).
     rel_pattern = "|".join(rel_types)
+    # DNS-family edges (IN_ZONE, RESOLVES_TO) connect DnsZone/DnsRecord/IPAddress
+    # nodes which carry no .site property; Neo4j evaluates a missing property as
+    # null, so `null = $site` is always false and would silently drop every DNS
+    # edge whenever site is non-null.  The guard `OR type(r) IN $dns_rel_types`
+    # short-circuits the site predicate for those relationship types, mirroring
+    # the existing VRF guard for ROUTES_TO.
+    dns_rel_types = list(_DNS_REL_TYPES)
     cypher = (
         f"MATCH (a)-[r:{rel_pattern}]->(b) "
-        "WHERE ($site IS NULL OR a.site = $site OR b.site = $site) "
+        "WHERE ($site IS NULL OR a.site = $site OR b.site = $site "
+        "       OR type(r) IN $dns_rel_types) "
         "  AND ($vrf IS NULL OR r.vrf = $vrf OR NOT type(r) = 'ROUTES_TO') "
         "RETURN labels(a) AS a_labels, properties(a) AS a_props, "
         "       labels(b) AS b_labels, properties(b) AS b_props, "
         "       type(r) AS rel_type, properties(r) AS rel_props"
     )
-    result = await tx.run(cypher, site=site, vrf=vrf)
+    result = await tx.run(cypher, site=site, vrf=vrf, dns_rel_types=dns_rel_types)
 
     nodes: dict[tuple[str, Any], dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
