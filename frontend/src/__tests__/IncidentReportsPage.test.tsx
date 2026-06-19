@@ -18,7 +18,7 @@ const DOC_ID_2 = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 
 const INCIDENT_1: DocumentRead = {
   id: DOC_ID_1,
-  kind: "runbook", // backend returns incident_report but our type is constrained
+  kind: "incident_report",
   title: "Incident 2026-06-18 — BGP flap core-rtr-01",
   format: "md",
   content:
@@ -32,7 +32,7 @@ const INCIDENT_1: DocumentRead = {
 
 const INCIDENT_2: DocumentRead = {
   id: DOC_ID_2,
-  kind: "runbook",
+  kind: "incident_report",
   title: "Incident 2026-06-17 — DNS resolution failure",
   format: "md",
   content: "# Incident Report\n\nDNS failure on zone corp.example.com",

@@ -109,11 +109,9 @@ export function IncidentReportsPage() {
   const { data, isPending, error } = useQuery({
     queryKey: ["incident-reports"],
     // "incident_report" is the M5-T12 document kind stored by the Documentation
-    // Agent. The api/docs.ts DocumentKind union covers only the M4 kinds;
-    // we pass the literal through a cast so the URLSearchParams is built
-    // correctly without widening the public API type.
+    // Agent (ADR-0019). DocumentKind includes "incident_report" so no cast is needed.
     queryFn: () =>
-      listDocuments({ kind: "incident_report" as "runbook", limit: 50 }),
+      listDocuments({ kind: "incident_report", limit: 50 }),
   });
 
   async function handleDownload(doc: DocumentRead): Promise<void> {

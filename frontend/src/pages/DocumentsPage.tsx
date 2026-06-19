@@ -35,6 +35,7 @@ const KIND_STYLES: Record<DocumentKind, string> = {
   inventory: "border-accent/40 bg-accent/10 text-accent",
   diagram: "border-status-ok/40 bg-status-ok/10 text-status-ok",
   runbook: "border-status-warn/40 bg-status-warn/10 text-status-warn",
+  incident_report: "border-status-error/40 bg-status-error/10 text-status-error",
 };
 
 function KindBadge({
