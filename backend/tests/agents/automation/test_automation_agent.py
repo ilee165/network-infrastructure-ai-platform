@@ -233,6 +233,44 @@ async def _approved_config_cr(
     return await service.get(cr.id)
 
 
+async def _approved_ddi_cr(
+    service: ChangeRequestService,
+    maker: async_sessionmaker[AsyncSession],
+    *,
+    payload: dict[str, Any] | None = None,
+) -> ChangeRequest:
+    """Author -> submit -> approve (by a *different* engineer) a DDI_RECORD CR.
+
+    Defaults to a well-formed ``record:a`` create draft (with the ``inverse`` the
+    structured rollback needs); pass *payload* to author a malformed draft.
+    """
+    requester = await _seed_user(maker, role_name="engineer")
+    approver = await _seed_user(maker, role_name="engineer")
+    if payload is None:
+        payload = {
+            "verb": "create",
+            "wapi_object": "record:a",
+            "body": [["name", "host.example.com"], ["ipv4addr", "10.0.0.5"]],
+            "summary": "add A record host.example.com",
+            "inverse": {
+                "verb": "delete",
+                "wapi_object": "record:a",
+                "object_ref": "record:a/ZG5z:host",
+                "summary": "delete A record host.example.com",
+            },
+        }
+    cr = await service.create_draft(
+        requester_id=requester,
+        actor_role=Role.ENGINEER,
+        kind=ChangeRequestKind.DDI_RECORD,
+        payload=payload,
+        target_refs={"object_ref": "record:a/ZG5z:host"},
+    )
+    await service.submit(cr.id, actor_id=requester, actor_role=Role.ENGINEER)
+    await service.approve(cr.id, actor_id=approver, actor_role=Role.ENGINEER)
+    return await service.get(cr.id)
+
+
 # ---------------------------------------------------------------------------
 # 1. Definition / registration / read-only tool contract
 # ---------------------------------------------------------------------------
@@ -498,6 +536,114 @@ class TestFailurePath:
         assert audit_service.CHANGE_REQUEST_EXECUTING_TO_FAILED in actions
         assert audit_service.AUTOMATION_ROLLBACK_FAILED in actions
         assert audit_service.CHANGE_REQUEST_FAILED_TO_ROLLED_BACK not in actions
+
+    async def test_ddi_failure_rolls_back(
+        self,
+        service: ChangeRequestService,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A DDI apply whose post-write re-read fails but whose structured inverse
+        restored the prior state maps (``_ddi_outcome``) to ``ROLLED_BACK`` and drives
+        ``approved -> executing -> failed -> rolled_back`` — never completed."""
+
+        def _ddi_rolled_back(cr: ChangeRequest, draft: ChangeRequestDraft) -> DdiChangeResult:
+            # The inverse draft must coerce on the failure branch too (recursive
+            # tuple coercion of ``inverse.body`` in _coerce_draft).
+            assert draft.inverse is not None
+            assert draft.inverse.verb is WapiVerb.DELETE
+            return DdiChangeResult(
+                verified=False,
+                object_ref="record:a/ZG5z:host",
+                rolled_back=True,
+                rollback_attempted=True,
+                rollback_verified=True,
+            )
+
+        cr = await _approved_ddi_cr(service, sessionmaker)
+        ddi_exec = _ScriptedDdiExecutor(_ddi_rolled_back)
+        agent = _config_agent(service, ddi_executor=ddi_exec)
+
+        result = await agent.execute(cr.id)
+
+        final = await service.get(cr.id)
+        assert final.state is ChangeRequestState.ROLLED_BACK
+        assert result.state is ChangeRequestState.ROLLED_BACK
+        assert len(ddi_exec.calls) == 1
+
+        actions = [row.action for row in await _audit_rows(sessionmaker, cr.id)]
+        assert audit_service.CHANGE_REQUEST_EXECUTING_TO_FAILED in actions
+        assert audit_service.CHANGE_REQUEST_FAILED_TO_ROLLED_BACK in actions
+        assert audit_service.AUTOMATION_ROLLBACK in actions
+        # Never completed.
+        assert audit_service.CHANGE_REQUEST_EXECUTING_TO_COMPLETED not in actions
+
+    async def test_ddi_rollback_failed_stays_failed(
+        self,
+        service: ChangeRequestService,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """ADR-0021 §3 for DDI: a write whose inverse could not restore the baseline
+        (``rolled_back`` false or ``rollback_verified`` false) maps to
+        ``ROLLBACK_FAILED``, leaves the CR ``failed``, and raises the operator alert —
+        never reported ``rolled_back``."""
+
+        def _ddi_rollback_failed(cr: ChangeRequest, draft: ChangeRequestDraft) -> DdiChangeResult:
+            return DdiChangeResult(
+                verified=False,
+                object_ref="record:a/ZG5z:host",
+                rolled_back=False,
+                rollback_attempted=True,
+                rollback_verified=False,
+                detail="inverse could not restore prior state",
+            )
+
+        cr = await _approved_ddi_cr(service, sessionmaker)
+        ddi_exec = _ScriptedDdiExecutor(_ddi_rollback_failed)
+        agent = _config_agent(service, ddi_executor=ddi_exec)
+
+        result = await agent.execute(cr.id)
+
+        final = await service.get(cr.id)
+        assert final.state is ChangeRequestState.FAILED
+        assert result.state is ChangeRequestState.FAILED
+        assert len(ddi_exec.calls) == 1
+
+        actions = [row.action for row in await _audit_rows(sessionmaker, cr.id)]
+        assert audit_service.CHANGE_REQUEST_EXECUTING_TO_FAILED in actions
+        assert audit_service.AUTOMATION_ROLLBACK_FAILED in actions
+        assert audit_service.CHANGE_REQUEST_FAILED_TO_ROLLED_BACK not in actions
+
+    async def test_malformed_ddi_payload_fails_no_executor(
+        self,
+        service: ChangeRequestService,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A DDI CR whose payload is not a well-formed draft (``_draft_from_payload``
+        returns ``None``) fails closed via ``_fail_no_executor``: the executor is never
+        called, the CR is left ``failed``, and the failure is audited — no half-run."""
+        cr = await _approved_ddi_cr(
+            service,
+            sessionmaker,
+            payload={"summary": "missing verb/wapi_object — not a draft"},
+        )
+        ddi_exec = _ScriptedDdiExecutor(
+            lambda cr, draft: DdiChangeResult(verified=True, object_ref="x")
+        )
+        agent = _config_agent(service, ddi_executor=ddi_exec)
+
+        result = await agent.execute(cr.id)
+
+        final = await service.get(cr.id)
+        assert final.state is ChangeRequestState.FAILED
+        assert result.state is ChangeRequestState.FAILED
+        # The malformed payload never reached the executor (fail closed).
+        assert ddi_exec.calls == []
+
+        actions = [row.action for row in await _audit_rows(sessionmaker, cr.id)]
+        assert audit_service.CHANGE_REQUEST_EXECUTING_TO_FAILED in actions
+        assert audit_service.AUTOMATION_ROLLBACK_FAILED in actions
+        assert audit_service.CHANGE_REQUEST_FAILED_TO_ROLLED_BACK not in actions
+        assert audit_service.CHANGE_REQUEST_EXECUTING_TO_COMPLETED not in actions
 
 
 # ---------------------------------------------------------------------------
