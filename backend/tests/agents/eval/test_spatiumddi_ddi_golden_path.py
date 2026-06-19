@@ -546,9 +546,15 @@ class TestSpatiumDdiGoldenPath:
         """A soft-delete golden path: the four-eyes-approved DELETE removes the row,
         then its RESTORE inverse (the soft-delete delete-inverse, ADR-0024 §3) is
         executed and the ORIGINAL row (same id) comes back — proving the inverse is
-        a trash RESTORE, not a re-create that would mint a new id."""
+        a trash RESTORE, not a re-create that would mint a new id.
+
+        The full audit chain (all 6 lifecycle actions) and four-eyes actor identity
+        (requester != approver != executor) are verified for BOTH the delete CR and
+        the restore CR, and no bearer token appears in any audit-detail blob.
+        """
         requester = await _seed_user(sessionmaker, role_name="engineer")
         approver = await _seed_user(sessionmaker, role_name="engineer")
+        trace_id = uuid.uuid4()
         mock = _SpatiumMock()
         client = _spatium_client(mock)
 
@@ -557,7 +563,7 @@ class TestSpatiumDdiGoldenPath:
             _RECORD_ID, current=_normalized(_RECORD_NAME, _STALE_IP)
         )
         delete_cr = await _draft_to_approved_cr(
-            service, sessionmaker, delete_draft, requester, approver
+            service, sessionmaker, delete_draft, requester, approver, trace_id=trace_id
         )
         agent = AutomationAgent(
             change_request_service=service, ddi_executor=_SpatiumDdiExecutor(client)
@@ -568,13 +574,42 @@ class TestSpatiumDdiGoldenPath:
         assert _RECORD_ID not in mock.records
         assert _RECORD_ID in mock.trash
 
+        # --- Audit chain for the DELETE CR. ------------------------------------
+        del_rows = await _audit_rows(sessionmaker, delete_cr)
+        del_actions = [r.action for r in del_rows]
+        assert audit.CHANGE_REQUEST_CREATED in del_actions
+        assert audit.CHANGE_REQUEST_DRAFT_TO_PENDING in del_actions
+        assert audit.CHANGE_REQUEST_PENDING_TO_APPROVED in del_actions
+        assert audit.CHANGE_REQUEST_APPROVED_TO_EXECUTING in del_actions
+        assert audit.AUTOMATION_CHANGE_APPLIED in del_actions
+        assert audit.CHANGE_REQUEST_EXECUTING_TO_COMPLETED in del_actions
+
+        del_created = next(r for r in del_rows if r.action == audit.CHANGE_REQUEST_CREATED)
+        del_approved = next(
+            r for r in del_rows if r.action == audit.CHANGE_REQUEST_PENDING_TO_APPROVED
+        )
+        del_executed = next(
+            r for r in del_rows if r.action == audit.CHANGE_REQUEST_APPROVED_TO_EXECUTING
+        )
+        # Four-eyes: requester != approver != executor.
+        assert del_created.actor == f"user:{requester}"
+        assert del_approved.actor == f"user:{approver}"
+        assert del_created.actor != del_approved.actor
+        assert del_executed.actor == "agent:automation"
+        # Every transition carries the originating reasoning-trace link.
+        for row in (del_created, del_approved, del_executed):
+            assert row.reasoning_trace_id == trace_id
+        # No bearer token in any audit-detail blob (secret hygiene).
+        del_blob = json.dumps([str(r.detail) for r in del_rows])
+        assert _FAKE_TOKEN not in del_blob
+
         # --- Now execute the RESTORE inverse as its own approved CR. -----------
         restore_draft = delete_draft.inverse
         assert restore_draft is not None
         assert restore_draft.verb is ChangeVerb.CREATE
         assert dict(restore_draft.body).get("restore") == "true"  # the sentinel
         restore_cr = await _draft_to_approved_cr(
-            service, sessionmaker, restore_draft, requester, approver
+            service, sessionmaker, restore_draft, requester, approver, trace_id=trace_id
         )
         restore_executor = _SpatiumDdiExecutor(client)
         agent2 = AutomationAgent(change_request_service=service, ddi_executor=restore_executor)
@@ -591,6 +626,35 @@ class TestSpatiumDdiGoldenPath:
             p.endswith(f"/admin/trash/{RESOURCE_DNS_RECORD}/{_RECORD_ID}/restore")
             for p in restore_paths
         )
+
+        # --- Audit chain for the RESTORE CR. -----------------------------------
+        restore_rows = await _audit_rows(sessionmaker, restore_cr)
+        restore_actions = [r.action for r in restore_rows]
+        assert audit.CHANGE_REQUEST_CREATED in restore_actions
+        assert audit.CHANGE_REQUEST_DRAFT_TO_PENDING in restore_actions
+        assert audit.CHANGE_REQUEST_PENDING_TO_APPROVED in restore_actions
+        assert audit.CHANGE_REQUEST_APPROVED_TO_EXECUTING in restore_actions
+        assert audit.AUTOMATION_CHANGE_APPLIED in restore_actions
+        assert audit.CHANGE_REQUEST_EXECUTING_TO_COMPLETED in restore_actions
+
+        rest_created = next(r for r in restore_rows if r.action == audit.CHANGE_REQUEST_CREATED)
+        rest_approved = next(
+            r for r in restore_rows if r.action == audit.CHANGE_REQUEST_PENDING_TO_APPROVED
+        )
+        rest_executed = next(
+            r for r in restore_rows if r.action == audit.CHANGE_REQUEST_APPROVED_TO_EXECUTING
+        )
+        # Four-eyes: requester != approver != executor.
+        assert rest_created.actor == f"user:{requester}"
+        assert rest_approved.actor == f"user:{approver}"
+        assert rest_created.actor != rest_approved.actor
+        assert rest_executed.actor == "agent:automation"
+        # Every transition carries the originating reasoning-trace link.
+        for row in (rest_created, rest_approved, rest_executed):
+            assert row.reasoning_trace_id == trace_id
+        # No bearer token in any audit-detail blob (secret hygiene).
+        restore_blob = json.dumps([str(r.detail) for r in restore_rows])
+        assert _FAKE_TOKEN not in restore_blob
 
 
 # ---------------------------------------------------------------------------
@@ -619,9 +683,20 @@ async def _draft_to_approved_cr(
     draft: ChangeRequestDraft,
     requester: uuid.UUID,
     approver: uuid.UUID,
+    *,
+    trace_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
-    """Persist *draft* as a CR, submit it, and four-eyes-approve it (approver != requester)."""
-    gate = ChangeRequestGate(service, requester_id=requester, actor_role=Role.ENGINEER)
+    """Persist *draft* as a CR, submit it, and four-eyes-approve it (approver != requester).
+
+    *trace_id* is stored on the CR (and propagated to every audit row) so callers
+    can assert the reasoning_trace -> CR -> audit_log linkage required by the spec.
+    """
+    gate = ChangeRequestGate(
+        service,
+        requester_id=requester,
+        actor_role=Role.ENGINEER,
+        reasoning_trace_id=trace_id,
+    )
     decision = await gate.authorize(
         _approval_request_from_draft(draft, tool_name="ddi_record_change")
     )
