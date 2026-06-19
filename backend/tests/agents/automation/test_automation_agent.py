@@ -726,6 +726,23 @@ class TestRedaction:
         assert _SECRET_LITERAL not in raw
         assert "<<REDACTED:" in raw
 
+    async def test_summary_tool_redacts_summary_field(self) -> None:
+        """The ``summary`` field is also redacted at the A9 boundary — the tool
+        does not trust the caller's "secret-free" contract (defense in depth).
+        A summary that accidentally carries a secret must not reach the model."""
+        from app.agents.automation.tools import summarize_change_request
+
+        raw = await summarize_change_request.ainvoke(
+            {
+                "change_request_id": "cr-1",
+                "kind": "config",
+                "summary": f"rotate {_SECRET_FRAGMENT}",
+                "content": "",
+            }
+        )
+        assert _SECRET_LITERAL not in raw
+        assert "<<REDACTED:" in raw
+
     async def test_audit_detail_carries_no_secret(
         self,
         service: ChangeRequestService,
