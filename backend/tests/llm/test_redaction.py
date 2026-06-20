@@ -99,6 +99,28 @@ SECRET_CASES: list[tuple[str, str, str, str]] = [
         "aaa_shared_key",
         "tacacs-server key",
     ),
+    # Per-host server forms: the shared key follows `key` *after* the host/ports
+    # on the same line. These are standard IOS and were previously NOT redacted
+    # (the pattern required `radius-server`/`tacacs-server` immediately before
+    # `key`), so a live config leaked the key — A9 gap found by the live probe.
+    (
+        "radius_host_key_plain",
+        "radius-server host 10.0.0.5 auth-port 1812 acct-port 1813 key R4diusShar3dKey",
+        "aaa_shared_key",
+        "radius-server host 10.0.0.5 auth-port 1812 acct-port 1813 key",
+    ),
+    (
+        "radius_host_key7",
+        "radius-server host 10.0.0.5 key 7 060506324F41",
+        "aaa_shared_key",
+        "radius-server host 10.0.0.5 key",
+    ),
+    (
+        "tacacs_host_key_plain",
+        "tacacs-server host 10.0.0.5 key MyTacacsHostSecret",
+        "aaa_shared_key",
+        "tacacs-server host 10.0.0.5 key",
+    ),
     (
         "ipsec_psk",
         "crypto isakmp key MyPreSharedKey address 10.0.0.2",
