@@ -127,14 +127,20 @@ _PATTERNS: Final[list[tuple[str, re.Pattern[str]]]] = [
             re.IGNORECASE,
         ),
     ),
-    # RADIUS / TACACS shared keys: `radius-server key [7] <secret>`,
-    # `tacacs-server key [7] <secret>`. The optional `7` encoding number is
-    # consumed as part of the value prefix (never matched as the value itself),
-    # which keeps redaction idempotent.
+    # RADIUS / TACACS shared keys. Both the global form
+    # (`radius-server key [7] <secret>`) and the per-host form, where the key
+    # follows the host/ports on the SAME line
+    # (`radius-server host <ip> [auth-port N] [acct-port N] key [7] <secret>`,
+    # `tacacs-server host <ip> key [7] <secret>`). `[^\n]*?` lazily consumes any
+    # intervening same-line tokens up to `key` (empty for the global form) and is
+    # newline-bounded so it never crosses into another line. The trailing `\s+`
+    # after `key` prevents false matches on `key-chain`/`keychain`. The optional
+    # `7` encoding number is consumed as a value prefix (never matched as the
+    # value), keeping redaction idempotent.
     (
         "aaa_shared_key",
         re.compile(
-            rf"\b((?:radius-server|tacacs-server)\s+key)\s+(?:7\s+)?{_VALUE}",
+            rf"\b((?:radius-server|tacacs-server)\b[^\n]*?\bkey)\s+(?:7\s+)?{_VALUE}",
             re.IGNORECASE,
         ),
     ),
