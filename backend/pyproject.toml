@@ -66,6 +66,7 @@ dev = [
 [project.entry-points."netops.plugins"]
 cisco_ios = "app.plugins.vendors.cisco_ios.plugin:CiscoIosPlugin"
 cisco_iosxe = "app.plugins.vendors.cisco_iosxe.plugin:CiscoIosXePlugin"
+cisco_nxos = "app.plugins.vendors.cisco_nxos.plugin:CiscoNxosPlugin"
 eos = "app.plugins.vendors.eos.plugin:EosPlugin"
 infoblox = "app.plugins.vendors.infoblox.plugin:InfobloxPlugin"
 spatiumddi = "app.plugins.vendors.spatiumddi.plugin:SpatiumddiPlugin"

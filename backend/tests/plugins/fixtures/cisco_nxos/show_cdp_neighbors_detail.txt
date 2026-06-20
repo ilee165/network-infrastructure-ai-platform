@@ -1,0 +1,34 @@
+
+Device ID:core-rtr01.example.net
+System Name: core-rtr01
+
+Platform: cisco ISR4331/K9,  Capabilities: Router Switch IGMP
+Interface: Ethernet1/1,  Port ID (outgoing port): GigabitEthernet0/1
+Holdtime: 166 sec
+
+Version:
+Cisco IOS Software, Version 15.7(3)M4
+
+Interface address(es):
+    IPv4 Address: 10.0.0.2
+Mgmt address(es):
+    IPv4 Address: 192.0.2.100
+
+advertisement version: 2
+
+Device ID:access-sw01.example.net
+System Name: access-sw01
+
+Platform: cisco WS-C2960X-48FPD-L,  Capabilities: Switch IGMP
+Interface: Ethernet1/2,  Port ID (outgoing port): GigabitEthernet0/1
+Holdtime: 148 sec
+
+Version:
+Cisco IOS Software, Version 15.2(7)E3
+
+Interface address(es):
+    IPv4 Address: 10.3.0.2
+Mgmt address(es):
+    IPv4 Address: 192.0.2.101
+
+advertisement version: 2

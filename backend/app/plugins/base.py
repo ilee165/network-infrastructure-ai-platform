@@ -47,6 +47,7 @@ from app.schemas.normalized import (
     NormalizedDhcpRange,
     NormalizedDiscoveredObject,
     NormalizedDnsRecord,
+    NormalizedHaStatus,
     NormalizedInterface,
     NormalizedNeighbor,
     NormalizedNetwork,
@@ -76,6 +77,7 @@ __all__ = [
     "DiscoveryApiCapability",
     "DiscoverySnmpCapability",
     "DiscoverySshCapability",
+    "HaStatusCapability",
     "InterfacesCapability",
     "NeighborsCapability",
     "OspfCapability",
@@ -730,6 +732,23 @@ class DdiIpamCapability(PluginCapability):
         the deleted network from its full state (ADR-0022 §3). Without it the delete
         is non-reversible and no misleading re-create draft is emitted.
         """
+
+
+class HaStatusCapability(PluginCapability):
+    """``Capability.HA_STATUS`` — high-availability peer state (vPC/HA) (ADR-0025 §8).
+
+    First implemented by ``cisco_nxos`` (vPC); reused by PAN-OS/FortiOS/F5 in
+    later waves. Returns :class:`~app.schemas.normalized.NormalizedHaStatus`
+    records — vendor-neutral lowest-common-denominator HA state. Adding one
+    HA implementation (``cisco_nxos``) requires no change to existing plugins
+    (ADR-0006 §6).
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.HA_STATUS})
+
+    @abstractmethod
+    def get_ha_status(self) -> list[NormalizedHaStatus]:
+        """Return high-availability peer state (vPC/HA) as normalized records."""
 
 
 class VendorPlugin(ABC):

@@ -11,6 +11,7 @@ from app.plugins import registry as registry_module
 from app.plugins.base import Capability, InterfacesCapability, PluginCapability, VendorPlugin
 from app.plugins.registry import ENTRY_POINT_GROUP, PluginRegistry, get_default_registry
 from app.plugins.vendors.cisco_ios.plugin import CiscoIosInterfaces, CiscoIosPlugin
+from app.plugins.vendors.cisco_nxos.plugin import CiscoNxosPlugin
 from app.plugins.vendors.spatiumddi.plugin import (
     SpatiumDdiDhcp,
     SpatiumDdiDns,
@@ -185,8 +186,60 @@ class TestDefaultRegistry:
         assert "cisco_ios" in registry.vendor_ids()
         assert registry.resolve("cisco_ios", Capability.INTERFACES) is CiscoIosInterfaces
 
+    def test_default_registry_contains_builtin_cisco_nxos(self) -> None:
+        registry = get_default_registry()
+        assert "cisco_nxos" in registry.vendor_ids()
+
     def test_default_registry_is_cached_per_process(self) -> None:
         assert get_default_registry() is get_default_registry()
+
+
+# ---------------------------------------------------------------------------
+# cisco_nxos registration (ADR-0025)
+# ---------------------------------------------------------------------------
+
+
+class TestCiscoNxosRegistration:
+    """ADR-0025: cisco_nxos is discoverable via iter_builtin_plugins and the
+    default registry; all capability ABCs including HA_STATUS resolve correctly.
+    """
+
+    def test_iter_builtin_plugins_includes_cisco_nxos(self) -> None:
+        from app.plugins.vendors import iter_builtin_plugins
+
+        vendor_ids = [p.vendor_id for p in iter_builtin_plugins()]
+        assert "cisco_nxos" in vendor_ids, "CiscoNxosPlugin must be yielded by iter_builtin_plugins"
+
+    def test_default_registry_contains_cisco_nxos(self) -> None:
+        registry = get_default_registry()
+        assert "cisco_nxos" in registry.vendor_ids()
+
+    def test_cisco_nxos_plugin_instance_type(self) -> None:
+        registry = get_default_registry()
+        plugin = registry.get_plugin("cisco_nxos")
+        assert isinstance(plugin, CiscoNxosPlugin)
+
+    def test_cisco_nxos_declares_ha_status_capability(self) -> None:
+        registry = get_default_registry()
+        caps = registry.capabilities_for("cisco_nxos")
+        assert Capability.HA_STATUS in caps
+
+    def test_cisco_nxos_vendor_id_matches_entry_point_name(self) -> None:
+        plugin = CiscoNxosPlugin()
+        assert plugin.vendor_id == "cisco_nxos"
+
+    def test_load_entry_points_discovers_cisco_nxos(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            registry_module,
+            "entry_points",
+            lambda group: [_FakeEntryPoint("cisco_nxos", CiscoNxosPlugin)],
+        )
+        registry = PluginRegistry()
+        count = registry.load_entry_points()
+        assert count == 1
+        assert "cisco_nxos" in registry.vendor_ids()
+        plugin = registry.get_plugin("cisco_nxos")
+        assert isinstance(plugin, CiscoNxosPlugin)
 
 
 # ---------------------------------------------------------------------------

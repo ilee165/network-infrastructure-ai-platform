@@ -1,0 +1,5 @@
+IP access list MGMT-IN
+        statistics per-entry
+        10 permit tcp 192.0.2.0/24 any eq 22
+        20 permit icmp any any
+        30 deny ip any any

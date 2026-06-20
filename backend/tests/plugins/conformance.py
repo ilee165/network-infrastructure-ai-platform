@@ -68,6 +68,7 @@ from app.plugins.base import (
     DiscoveryApiCapability,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
+    HaStatusCapability,
     InterfacesCapability,
     NeighborsCapability,
     OspfCapability,
@@ -83,6 +84,7 @@ from app.schemas.normalized import (
     NormalizedDhcpLease,
     NormalizedDiscoveredObject,
     NormalizedDnsRecord,
+    NormalizedHaStatus,
     NormalizedInterface,
     NormalizedNeighbor,
     NormalizedNetwork,
@@ -178,6 +180,9 @@ _INTERFACE_SPECS: dict[Capability, _InterfaceSpec] = {
     Capability.DDI_DNS: _InterfaceSpec(DdiDnsCapability, "get_records", NormalizedDnsRecord),
     Capability.DDI_DHCP: _InterfaceSpec(DdiDhcpCapability, "get_leases", NormalizedDhcpLease),
     Capability.DDI_IPAM: _InterfaceSpec(DdiIpamCapability, "get_networks", NormalizedNetwork),
+    # HA status (ADR-0025 §8). First implemented by cisco_nxos (vPC); reused by
+    # PAN-OS/FortiOS/F5 in later waves.
+    Capability.HA_STATUS: _InterfaceSpec(HaStatusCapability, "get_ha_status", NormalizedHaStatus),
 }
 
 

@@ -39,6 +39,8 @@ __all__ = [
     "DhcpLeaseState",
     "DiscoveredObjectKind",
     "DnsRecordType",
+    "HaPeerRole",
+    "HaPeerLinkState",
     "InterfaceAdminStatus",
     "InterfaceDuplex",
     "InterfaceOperStatus",
@@ -51,6 +53,7 @@ __all__ = [
     "NormalizedDhcpRange",
     "NormalizedDiscoveredObject",
     "NormalizedDnsRecord",
+    "NormalizedHaStatus",
     "NormalizedInterface",
     "NormalizedNetwork",
     "NormalizedNeighbor",
@@ -205,6 +208,29 @@ class DhcpLeaseState(StrEnum):
     OTHER = "other"
 
 
+class HaPeerRole(StrEnum):
+    """Role of this device in a high-availability pair (vPC/FHRP/active-standby).
+
+    Vendor-neutral: vPC uses ``PRIMARY``/``SECONDARY``; active/standby HA
+    platforms (PAN-OS, FortiOS, F5) use ``ACTIVE``/``STANDBY``.
+    ``UNKNOWN`` is the safe default when the device does not report a role.
+    """
+
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
+    ACTIVE = "active"
+    STANDBY = "standby"
+    UNKNOWN = "unknown"
+
+
+class HaPeerLinkState(StrEnum):
+    """Operational state of the HA peer-link or keepalive channel."""
+
+    UP = "up"
+    DOWN = "down"
+    UNKNOWN = "unknown"
+
+
 class DiscoveredObjectKind(StrEnum):
     """Kind of object returned by an API-based discovery pass (ADR-0022 §2).
 
@@ -305,6 +331,7 @@ class NormalizedOspfNeighbor(NormalizedRecord):
     area: str | None = None
     priority: int | None = Field(default=None, ge=0, le=255)
     dead_time_seconds: int | None = Field(default=None, ge=0)
+    vrf: str | None = None
 
 
 class NormalizedAclEntry(NormalizedRecord):
@@ -428,3 +455,30 @@ class NormalizedDiscoveredObject(NormalizedRecord):
         default=None,
         description="Opaque DDI handle (Infoblox WAPI _ref) for the source object. Never a secret.",
     )
+
+
+class NormalizedHaStatus(NormalizedRecord):
+    """High-availability peer state for a device (vPC, FHRP, active/standby).
+
+    Lowest-common-denominator HA model covering vPC (NX-OS), PAN-OS HA,
+    FortiOS HA, and F5 DSC (ADR-0025 §8). ``peer_role`` is the role this
+    device holds in the HA pair; ``peer_link_state`` is the operational
+    state of the control-plane peer-link or keepalive channel. For vPC on
+    NX-OS these correspond to the vPC domain role and the peer-link/keepalive
+    status reported by ``show vpc``. ``consistency_check_ok`` reflects the
+    vendor's consistency-parameter agreement state; ``None`` means the
+    platform does not report it.
+    """
+
+    ha_domain: str | None = Field(
+        default=None,
+        description="HA domain identifier (vPC domain ID, HA group, etc.). Never a secret.",
+    )
+    peer_role: HaPeerRole = HaPeerRole.UNKNOWN
+    peer_link_state: HaPeerLinkState = HaPeerLinkState.UNKNOWN
+    keepalive_state: HaPeerLinkState = HaPeerLinkState.UNKNOWN
+    consistency_check_ok: bool | None = Field(
+        default=None,
+        description="Whether the HA consistency parameters agree across peers; None if unreported.",
+    )
+    peer_address: IPv4Address | IPv6Address | None = None

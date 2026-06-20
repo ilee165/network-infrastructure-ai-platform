@@ -1,0 +1,15 @@
+BGP summary information for VRF default, address family IPv4 Unicast
+BGP router identifier 10.0.0.1, local AS number 65001
+BGP table version is 10, IPv4 Unicast config peers 1, capable peers 1
+1 network entries and 1 paths using 136 bytes of memory
+BGP attribute entries [1/136], BGP AS path entries [1/16]
+BGP community entries [0/0], BGP clusterlist entries [0/0]
+
+Neighbor        V    AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd
+10.0.0.2        4 65002      85      87       10    0    0 01:00:15          1
+
+BGP summary information for VRF management, address family IPv4 Unicast
+BGP router identifier 192.0.2.10, local AS number 65001
+BGP table version is 1, IPv4 Unicast config peers 0, capable peers 0
+0 network entries and 0 paths using 0 bytes of memory
+
