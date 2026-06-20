@@ -1,70 +1,124 @@
 # SpatiumDDI lab stack — for the opt-in LIVE DDI golden-path test (T6).
 #
-# This is a LAB / TEST-ONLY convenience profile. It stands up a self-hosted
-# SpatiumDDI (an open-source FastAPI DDI backend, github.com/spatiumddi/spatiumddi)
-# so the env-guarded live test
+# LAB / TEST-ONLY. Stands up a self-hosted SpatiumDDI (open-source FastAPI DDI
+# backend, github.com/spatiumddi/spatiumddi) so the env-guarded live test
 # (backend/tests/agents/eval/test_spatiumddi_live_golden_path.py) has a real REST
-# surface to drive: discover -> ChangeRequest -> four-eyes approve -> Automation
-# executes -> verify -> audit, against a genuine appliance.
+# surface to drive: seed -> ChangeRequest -> four-eyes approve -> Automation
+# executes -> verify -> audit, plus the soft-delete -> RESTORE inverse.
 #
-# It is NOT part of the NetOps `name: netops` stack and is NOT used in CI. Run it
-# only on a lab host when you want to execute the live test. The canonical source
-# of truth for SpatiumDDI's own services/versions is their upstream compose at
-# https://github.com/spatiumddi/spatiumddi — this file is a thin, pinnable wrapper
-# documenting the minimum surface our test needs. See README.md for the full
-# runbook (bring up -> mint a least-privilege token -> export env -> run test).
+# This is a faithful MIRROR of the UPSTREAM compose
+# (https://github.com/spatiumddi/spatiumddi/blob/main/docker-compose.yml),
+# pinned and trimmed to the services the live test needs. **Upstream is the
+# canonical source of truth** for service versions/topology — if it drifts,
+# prefer cloning upstream and using their compose directly (README.md). The
+# image is the real published one (`spatiumddi-api`, CalVer tags) — verified
+# working against release `2026.06.19-1` on 2026-06-20.
+#
+# NOT part of the NetOps `name: netops` stack; NOT used in CI. See README.md for
+# the full runbook (bring up -> bootstrap a group/zone -> mint a token -> run).
 #
 # Usage (from this directory):
-#   cp .env.example .env            # set SPATIUMDDI_IMAGE tag + a lab admin secret
-#   docker compose up -d
-#   # then follow README.md "Mint a least-privilege token" before running the test.
+#   cp .env.example .env            # set POSTGRES_PASSWORD + SECRET_KEY
+#   docker compose run --rm migrate # alembic upgrade head
+#   docker compose up -d            # postgres + redis + api + worker + beat
+#   # then follow README.md "Bootstrap" before running the test.
 
 name: spatiumddi-lab
 
-services:
-  # SpatiumDDI API (FastAPI; serves /api/v1). Pin SPATIUMDDI_IMAGE to a known tag
-  # in .env — do NOT float :latest for a reproducible lab. If upstream ships a
-  # different image name/topology, prefer cloning their repo and using their
-  # compose directly (README.md "Option B"); this service is the minimal stand-in.
-  spatiumddi:
-    image: ${SPATIUMDDI_IMAGE:-ghcr.io/spatiumddi/spatiumddi:v0.1.0}
-    environment:
-      # SpatiumDDI bootstrap admin — a LAB secret, supplied from .env (never
-      # committed). Used ONCE to log in and mint the resource-scoped API token
-      # the live test actually authenticates with (see README.md).
-      SPATIUMDDI_ADMIN_EMAIL: ${SPATIUMDDI_ADMIN_EMAIL:-admin@spatiumddi.lab}
-      SPATIUMDDI_ADMIN_PASSWORD: ${SPATIUMDDI_ADMIN_PASSWORD:?set a lab admin password in .env}
-      # Discrete DB credentials — NOT spliced into a URI so passwords containing
-      # '@', ':', '/' or '#' do not break the connection string (Finding #7).
-      # SpatiumDDI assembles its own DSN from these vars server-side.
-      SPATIUMDDI_DB_HOST: db
-      SPATIUMDDI_DB_PORT: "5432"
-      SPATIUMDDI_DB_NAME: ${SPATIUMDDI_DB_NAME:-spatiumddi}
-      SPATIUMDDI_DB_USER: ${SPATIUMDDI_DB_USER:-spatium}
-      SPATIUMDDI_DB_PASSWORD: ${SPATIUMDDI_DB_PASSWORD:?set a lab db password in .env}
-    ports:
-      # Published on the host so the live test (and you) can reach it. Lab-only;
-      # bind to 127.0.0.1 to avoid exposing the appliance beyond the host.
-      - "127.0.0.1:8088:8000"
-    depends_on:
-      db:
-        condition: service_healthy
-    restart: unless-stopped
+x-api-env: &api-env
+  DATABASE_URL: postgresql+asyncpg://spatiumddi:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/spatiumddi
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  VERSION: ${SPATIUMDDI_VERSION:-latest}
 
-  db:
+services:
+  postgres:
     image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: ${SPATIUMDDI_DB_USER:-spatium}
-      POSTGRES_PASSWORD: ${SPATIUMDDI_DB_PASSWORD:?set a lab db password in .env}
-      POSTGRES_DB: ${SPATIUMDDI_DB_NAME:-spatiumddi}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${SPATIUMDDI_DB_USER:-spatium} -d ${SPATIUMDDI_DB_NAME:-spatiumddi}"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    volumes:
-      - spatiumddi-db:/var/lib/postgresql/data
     restart: unless-stopped
+    networks: [spatiumddi]
+    environment:
+      POSTGRES_USER: spatiumddi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: spatiumddi
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spatiumddi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:8.6-alpine
+    restart: unless-stopped
+    networks: [spatiumddi]
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # One-shot alembic migration. Run explicitly before `up`:
+  #   docker compose run --rm migrate
+  migrate:
+    image: ghcr.io/spatiumddi/spatiumddi-api:${SPATIUMDDI_VERSION:-latest}
+    networks: [spatiumddi]
+    command: alembic upgrade head
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://spatiumddi:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/spatiumddi
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: ghcr.io/spatiumddi/spatiumddi-api:${SPATIUMDDI_VERSION:-latest}
+    restart: unless-stopped
+    networks: [spatiumddi]
+    ports:
+      # Lab-only: bind to localhost so the appliance is not exposed beyond the
+      # host. The API serves /api/v1 (the OpenAPI doc is at /api/openapi.json;
+      # health at /health/live). Default login admin/admin (forced change).
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    env_file: .env
+    environment: *api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: ghcr.io/spatiumddi/spatiumddi-api:${SPATIUMDDI_VERSION:-latest}
+    restart: unless-stopped
+    networks: [spatiumddi]
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q ipam,dns,dhcp,default
+    env_file: .env
+    environment: *api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    image: ghcr.io/spatiumddi/spatiumddi-api:${SPATIUMDDI_VERSION:-latest}
+    restart: unless-stopped
+    networks: [spatiumddi]
+    command: celery -A app.celery_app beat --loglevel=info
+    env_file: .env
+    environment: *api-env
+    depends_on:
+      - redis
+
+networks:
+  spatiumddi:
 
 volumes:
-  spatiumddi-db:
+  postgres_data:
+  redis_data:
