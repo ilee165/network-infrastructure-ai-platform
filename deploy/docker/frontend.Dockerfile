@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 # AI Network Operations Platform - frontend image (ADR-0012 / ADR-0013).
 #
-# Multi-stage: node:20 builds the Vite SPA, nginx:alpine serves the static
+# Multi-stage: node:22 builds the Vite SPA, nginx:alpine serves the static
 # bundle on the unprivileged port 8080 and proxies /api/ to the `api`
 # compose service (deploy/docker/nginx.conf).
 #
@@ -13,7 +13,7 @@
 # ---------------------------------------------------------------------------
 
 # ---- build: Vite production bundle -----------------------------------------
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 
 WORKDIR /build
 
