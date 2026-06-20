@@ -20,6 +20,29 @@ updates:
     labels:
       - dependencies
       - frontend
+    # Group interdependent toolchains so peer-linked packages bump together in a
+    # single PR (a lone major bump breaks `npm ci` via ERESOLVE — see PR #12, #32,
+    # #34, #36). Majors are ignored: they require a coordinated, human-driven
+    # migration rather than an automated PR.
+    groups:
+      frontend-build:
+        patterns:
+          - "vite"
+          - "@vitejs/*"
+          - "vitest"
+          - "@vitest/*"
+          - "jsdom"
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+          - "@testing-library/*"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
 
   # GitHub Actions used by .github/workflows/.
   - package-ecosystem: github-actions
