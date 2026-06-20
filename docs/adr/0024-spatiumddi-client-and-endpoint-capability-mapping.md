@@ -118,6 +118,45 @@ To drive a **deterministic mock** without a live instance, the plugin ships JSON
 4. **Restore `409` conflict surface** — the precise conflict payload from `default_conflict_check` (which fields collide) needs a live restore-after-recreate to pin the retry/abort branch in the Automation executor.
 5. **Token scope vocabulary** — the exact `scopes` strings accepted by `validate_scopes` (e.g. a `dns:read`/`ipam:write` taxonomy) needed to mint a true least-privilege token are best confirmed against `GET`/`POST /api/v1/api-tokens` on a live build.
 
+### 6.1 Live validation results (2026-06-20, T6)
+
+The opt-in live test (`backend/tests/agents/eval/test_spatiumddi_live_golden_path.py`)
+was run against a real self-hosted SpatiumDDI (upstream Docker Compose, image
+`ghcr.io/spatiumddi/spatiumddi-api`, release `2026.06.19-1`). **Both cases pass**
+(update-with-audit-chain and delete→RESTORE inverse). Resolutions to §6:
+
+1. **Default `group_id`/`space_id` bootstrap** — a fresh install does **not**
+   auto-seed a usable DNS server-group/zone for an external integration; create
+   them via `POST /api/v1/dns/groups` then `POST .../groups/{id}/zones` (IPAM
+   spaces analogously). `scripts/seed_demo.py` is the upstream demo seeder.
+2. **`view_id` requiredness** — **optional / nullable** on both zone-create and
+   record-create. Our record body `{name, record_type, value, ttl}` is accepted
+   as-is; no view handling required for the single-view golden path.
+3. **Live lease endpoint shape** — **not exercised** (DNS-only golden path);
+   remains open for the DHCP capability.
+4. **Restore conflict surface** — restore succeeds with body
+   `{"batch_id": <uuid>, "restored": <int count>}` (the executor's
+   `bool(resp.get("restored"))` is compatible). The recreate-collision `409` was
+   not triggered by the golden path and stays open. **However — see the
+   privilege finding below, which is the material result for §4.**
+5. **Token scope vocabulary** — accepted `scopes` are exactly
+   `read`, `dns:write`, `dhcp:write`, `ipam:write`, `agent` (`*` is **rejected**
+   with `Unknown scope(s)`). The create-token response returns the full secret in
+   field **`token`** (shown once); `prefix` is only the short display id.
+
+**Material finding — soft-delete RESTORE requires an admin session, not an API
+token.** `POST /api/v1/admin/trash/{type}/{row_id}/restore` returns **401 "Token
+scope insufficient for this request" for *every* API-token scope** (verified up to
+an all-scopes token), while an admin **user session JWT** restores successfully.
+The soft-delete→RESTORE inverse (§3) is therefore semantically correct and the
+mechanism works, but it **cannot be executed with the resource-scoped DDI API
+token** the plugin uses for record CRUD — it needs an admin/session credential.
+This qualifies alternative #4 below: bearer API tokens remain correct for the
+read/CRUD path, but the **production SpatiumDDI change-executor must hold an
+admin-privileged credential to apply a delete-rollback (restore)** — tracked as a
+follow-up for the Wave-5 executor credential model. (The live test passes the
+restore case only when `SPATIUMDDI_TOKEN` is an admin session token.)
+
 ## Consequences
 
 **Positive**
