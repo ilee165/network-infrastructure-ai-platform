@@ -376,7 +376,16 @@ def parse_routes(
         if not isinstance(table, dict):
             continue
         table_name = _first([table], "table-name")
-        vrf = table_name.split(".")[0] if table_name else None
+        # JunOS global/default tables have the form "<af>.<n>" (e.g. "inet.0",
+        # "inet6.0", "mpls.0") — exactly two dot-separated tokens.  VRF-specific
+        # tables carry an instance prefix: "<instance>.<af>.<n>" (e.g.
+        # "BLUE.inet.0"), i.e. three or more tokens.  Only extract a VRF name
+        # when the table name has at least three parts.
+        if table_name:
+            parts = table_name.split(".")
+            vrf = parts[0] if len(parts) >= 3 else None
+        else:
+            vrf = None
         for rt in table.get("rt", []):
             if not isinstance(rt, dict):
                 continue

@@ -140,6 +140,88 @@ async def test_validate_rejects_wrong_audience(idp: FakeIdp, primed_cache: oidc.
         )
 
 
+async def test_validate_rejects_multi_aud_without_matching_azp(
+    idp: FakeIdp, primed_cache: oidc.JwksCache
+) -> None:
+    """Multi-audience ID token whose azp != our client_id is rejected (OIDC §3.1.3.7).
+
+    aud contains our client_id (containment passes), but with >1 audience an azp
+    bound to us is mandatory; here azp names another party, so we must reject.
+    """
+    token = idp.id_token(aud=[CLIENT_ID, "other-client"], azp="other-client", nonce="N1")
+    with pytest.raises(oidc.OidcError):
+        await oidc.validate_id_token(
+            token,
+            jwks_cache=primed_cache,
+            issuer=ISSUER,
+            jwks_uri=f"{ISSUER}/jwks",
+            client_id=CLIENT_ID,
+            nonce="N1",
+        )
+
+
+async def test_validate_rejects_multi_aud_with_missing_azp(
+    idp: FakeIdp, primed_cache: oidc.JwksCache
+) -> None:
+    """Multi-audience ID token with NO azp claim at all is rejected (fail-closed)."""
+    token = idp.id_token(aud=[CLIENT_ID, "other-client"], nonce="N1")
+    with pytest.raises(oidc.OidcError):
+        await oidc.validate_id_token(
+            token,
+            jwks_cache=primed_cache,
+            issuer=ISSUER,
+            jwks_uri=f"{ISSUER}/jwks",
+            client_id=CLIENT_ID,
+            nonce="N1",
+        )
+
+
+async def test_validate_accepts_multi_aud_with_matching_azp(
+    idp: FakeIdp, primed_cache: oidc.JwksCache
+) -> None:
+    """Multi-audience ID token with azp == our client_id is accepted."""
+    token = idp.id_token(aud=[CLIENT_ID, "other-client"], azp=CLIENT_ID, nonce="N1")
+    claims = await oidc.validate_id_token(
+        token,
+        jwks_cache=primed_cache,
+        issuer=ISSUER,
+        jwks_uri=f"{ISSUER}/jwks",
+        client_id=CLIENT_ID,
+        nonce="N1",
+    )
+    assert claims["sub"] == "idp-subject-123"
+
+
+async def test_validate_single_aud_without_azp_unchanged(
+    idp: FakeIdp, primed_cache: oidc.JwksCache
+) -> None:
+    """Single-audience tokens never require azp — behaviour is unchanged."""
+    # Scalar aud, no azp.
+    scalar = idp.id_token(aud=CLIENT_ID, nonce="N1")
+    assert (
+        await oidc.validate_id_token(
+            scalar,
+            jwks_cache=primed_cache,
+            issuer=ISSUER,
+            jwks_uri=f"{ISSUER}/jwks",
+            client_id=CLIENT_ID,
+            nonce="N1",
+        )
+    )["sub"] == "idp-subject-123"
+    # Single-element list aud, no azp: still single-audience ⇒ no azp required.
+    single_list = idp.id_token(aud=[CLIENT_ID], nonce="N1")
+    assert (
+        await oidc.validate_id_token(
+            single_list,
+            jwks_cache=primed_cache,
+            issuer=ISSUER,
+            jwks_uri=f"{ISSUER}/jwks",
+            client_id=CLIENT_ID,
+            nonce="N1",
+        )
+    )["sub"] == "idp-subject-123"
+
+
 async def test_validate_rejects_expired_token(idp: FakeIdp, primed_cache: oidc.JwksCache) -> None:
     now = int(time.time())
     token = idp.id_token(exp=now - 3600, iat=now - 7200, nonce="N1")

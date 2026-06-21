@@ -9,6 +9,7 @@ live-recorded" per ADR-0024 §5 convention.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC
 from ipaddress import IPv4Address, IPv4Interface, IPv4Network
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -330,6 +331,97 @@ class TestRoutes:
         assert len(cap.raw_outputs) == 1
         assert cap.raw_outputs[0].command == SHOW_ROUTE
         assert cap.raw_outputs[0].output == _fixture("show_route_display_json.txt")
+
+    def test_global_default_table_has_no_vrf(self, device_id: UUID) -> None:
+        """inet.0 is the global/default routing table — vrf must be None, not 'inet'."""
+
+        collected_at = __import__("datetime").datetime(2026, 1, 1, tzinfo=UTC)
+        raw = """{
+            "route-information": [{
+                "route-table": [{
+                    "table-name": [{"data": "inet.0"}],
+                    "rt": [{
+                        "rt-destination": [{"data": "0.0.0.0/0"}],
+                        "rt-entry": [{
+                            "protocol-name": [{"data": "Static"}],
+                            "preference": [{"data": "5"}],
+                            "metric": [{"data": "1"}],
+                            "nh": [{"to": [{"data": "10.0.0.1"}], "via": [{"data": "ge-0/0/0.0"}]}]
+                        }]
+                    }]
+                }]
+            }]
+        }"""
+        routes = parsers.parse_routes(raw, device_id=device_id, collected_at=collected_at)
+        assert len(routes) == 1
+        assert routes[0].vrf is None, (
+            f"inet.0 is a global table — expected vrf=None, got {routes[0].vrf!r}"
+        )
+
+    def test_inet6_global_table_has_no_vrf(self, device_id: UUID) -> None:
+        """inet6.0 is the global IPv6 routing table — vrf must be None, not 'inet6'."""
+
+        collected_at = __import__("datetime").datetime(2026, 1, 1, tzinfo=UTC)
+        raw = """{
+            "route-information": [{
+                "route-table": [{
+                    "table-name": [{"data": "inet6.0"}],
+                    "rt": [{
+                        "rt-destination": [{"data": "2001:db8::/32"}],
+                        "rt-entry": [{
+                            "protocol-name": [{"data": "Static"}],
+                            "preference": [{"data": "5"}],
+                            "metric": [{"data": "1"}],
+                            "nh": [{
+                                "to": [{"data": "2001:db8::1"}],
+                                "via": [{"data": "ge-0/0/0.0"}]
+                            }]
+                        }]
+                    }]
+                }]
+            }]
+        }"""
+        routes = parsers.parse_routes(raw, device_id=device_id, collected_at=collected_at)
+        assert len(routes) == 1
+        assert routes[0].vrf is None, (
+            f"inet6.0 is a global table — expected vrf=None, got {routes[0].vrf!r}"
+        )
+
+    def test_vrf_instance_table_sets_vrf(self, device_id: UUID) -> None:
+        """BLUE.inet.0 is a VRF-specific table — vrf must be 'BLUE'."""
+
+        collected_at = __import__("datetime").datetime(2026, 1, 1, tzinfo=UTC)
+        raw = """{
+            "route-information": [{
+                "route-table": [{
+                    "table-name": [{"data": "BLUE.inet.0"}],
+                    "rt": [{
+                        "rt-destination": [{"data": "10.1.0.0/24"}],
+                        "rt-entry": [{
+                            "protocol-name": [{"data": "Static"}],
+                            "preference": [{"data": "5"}],
+                            "metric": [{"data": "1"}],
+                            "nh": [{"to": [{"data": "10.1.0.1"}], "via": [{"data": "ge-0/0/1.0"}]}]
+                        }]
+                    }]
+                }]
+            }]
+        }"""
+        routes = parsers.parse_routes(raw, device_id=device_id, collected_at=collected_at)
+        assert len(routes) == 1
+        assert routes[0].vrf == "BLUE", (
+            f"BLUE.inet.0 is a VRF table — expected vrf='BLUE', got {routes[0].vrf!r}"
+        )
+
+    def test_existing_fixture_routes_have_no_vrf(
+        self, transport: FakeTransport, device_id: UUID
+    ) -> None:
+        """The existing show_route fixture uses inet.0 — all routes must have vrf=None."""
+        routes = JunosRoutes(transport, device_id).get_routes()
+        for route in routes:
+            assert route.vrf is None, (
+                f"Route {route.destination} from inet.0 must have vrf=None, got {route.vrf!r}"
+            )
 
 
 # ---------------------------------------------------------------------------

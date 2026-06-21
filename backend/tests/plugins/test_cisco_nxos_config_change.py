@@ -29,6 +29,7 @@ from app.plugins.vendors.cisco_nxos.plugin import (
     SHOW_RUNNING_CONFIG,
     CiscoNxosConfigDeploy,
     CiscoNxosConfigRestore,
+    _management_path_hits,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "cisco_nxos"
@@ -157,3 +158,49 @@ def test_restore_rollback_uses_configure_replace_not_checkpoint(device_id: UUID)
     assert result.rollback.succeeded is True
     assert transport.replace_batches, "rollback must issue a configure replace"
     assert _no_checkpoint_command_issued(transport)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: management-path guardrail — removed child under unchanged
+# section header must still be detected (ADR-0021 §4.2).
+# ---------------------------------------------------------------------------
+
+
+def test_mgmt_path_hits_detects_removed_ip_address_under_unchanged_interface_header() -> None:
+    """Removing 'ip address' under an unchanged 'interface mgmt0' header must be detected.
+
+    Regression test for the guardrail bug where removed_lines did not include
+    the unchanged parent section header, so in_mgmt_interface context was never
+    set and the child ip-address removal bypassed rejection.
+    """
+    baseline = (
+        "hostname nxos-spine01\ninterface mgmt0\n  ip address 192.168.1.1/24\n  no shutdown\n"
+    )
+    # Remove the ip address line, leave the interface mgmt0 header unchanged.
+    end_state = "hostname nxos-spine01\ninterface mgmt0\n  no shutdown\n"
+    hits = _management_path_hits(baseline, end_state)
+    assert hits, "removing 'ip address' under 'interface mgmt0' must be a management-path hit"
+    assert any("ip address" in h for h in hits), (
+        f"expected an 'ip address' reason in hits, got: {hits!r}"
+    )
+
+
+def test_mgmt_path_hits_unchanged_child_not_flagged() -> None:
+    """A child line present in both baseline and end_state is not flagged.
+
+    Sanity-check: an interface mgmt0 block that is entirely unchanged produces
+    no management-path hits (the delta is empty).
+    """
+    config = "hostname nxos-spine01\ninterface mgmt0\n  ip address 192.168.1.1/24\n  no shutdown\n"
+    hits = _management_path_hits(config, config)
+    assert hits == (), f"identical baseline and end_state must yield no hits, got: {hits!r}"
+
+
+def test_mgmt_path_hits_vrf_management_removal_detected() -> None:
+    """Removing a route inside 'vrf context management' is a management-path hit."""
+    baseline = "vrf context management\n  ip route 0.0.0.0/0 192.168.1.254\n"
+    end_state = "vrf context management\n"
+    hits = _management_path_hits(baseline, end_state)
+    assert hits, (
+        "removing a child line under 'vrf context management' must be a management-path hit"
+    )

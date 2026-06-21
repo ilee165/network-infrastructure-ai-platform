@@ -338,14 +338,24 @@ def _management_path_hits(baseline: str, end_state: str) -> tuple[str, ...]:
     management VRF context block (``vrf context management``) and the mgmt0
     interface are the NX-OS management-path equivalents of the IOS
     ``line vty`` / mgmt interface pattern. Only lines in the delta are flagged.
+
+    For removals the scan walks the **full baseline** (not just the removed
+    lines) so that unchanged parent section headers (e.g. ``interface mgmt0``)
+    still set the in_mgmt_interface / in_mgmt_vrf context before any removed
+    child line is evaluated.  A line is flagged only when it is absent from
+    end_state (i.e. it is actually removed); unchanged lines are skipped as
+    context providers.
     """
     end_set = set(end_state.splitlines())
     end_lines = end_state.splitlines()
-    removed_lines = [line for line in baseline.splitlines() if line not in end_set]
+    baseline_lines = baseline.splitlines()
 
     hits: list[str] = []
-    baseline_set = set(baseline.splitlines())
-    for sequence, changed_against in ((end_lines, baseline_set), (removed_lines, end_set)):
+    baseline_set = set(baseline_lines)
+    # First pass: end_state lines — flag additions (lines not in baseline).
+    # Second pass: full baseline lines — flag removals (lines not in end_state),
+    # while still tracking section-header context from unchanged headers.
+    for sequence, changed_against in ((end_lines, baseline_set), (baseline_lines, end_set)):
         in_mgmt_interface = False
         in_mgmt_vrf = False
         for raw in sequence:

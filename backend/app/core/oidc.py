@@ -378,6 +378,12 @@ async def validate_id_token(
     aud_values = aud if isinstance(aud, list) else [aud]
     if client_id not in aud_values:
         raise OidcError("id_token_aud_mismatch")
+    # Multi-audience ID tokens (aud is a list with >1 entry) MUST carry an azp
+    # (authorized party) equal to our client_id (OIDC Core §3.1.3.7 step 4/5).
+    # Containment alone is insufficient here: another audience could replay a
+    # token minted for itself. Single-audience behaviour is unchanged. Fail-closed.
+    if isinstance(aud, list) and len(aud) > 1 and claims.get("azp") != client_id:
+        raise OidcError("id_token_azp_mismatch")
     if claims.get("nonce") != nonce:
         raise OidcError("id_token_nonce_mismatch")
     if claims.get("iss") != issuer:

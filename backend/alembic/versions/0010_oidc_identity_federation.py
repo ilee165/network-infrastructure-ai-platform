@@ -35,19 +35,35 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.add_column("users", sa.Column("idp_iss", sa.String(length=512), nullable=True))
     op.add_column("users", sa.Column("idp_subject", sa.String(length=255), nullable=True))
+    # Pair-nullability invariant: the federated anchor is either FULLY present
+    # (both non-NULL) or FULLY absent (both NULL) — never half-set (ADR-0028 §6).
+    # This closes the NULL-distinct gap where (NULL, 'x') rows would evade the
+    # UNIQUE index (NULLs compare distinct), letting one IdP subject map to two
+    # rows and breaking the one-identity ⇒ one-user invariant.
+    # Name is the convention *suffix* only; MetaData's "ck_%(table_name)s_..."
+    # convention renders the full "ck_users_idp_identity_pair" (REPO §4.2).
+    op.create_check_constraint(
+        "idp_identity_pair",
+        "users",
+        "(idp_iss IS NULL AND idp_subject IS NULL) "
+        "OR (idp_iss IS NOT NULL AND idp_subject IS NOT NULL)",
+    )
     # Partial UNIQUE index: one federated identity ⇒ one row (ADR-0028 §6). The
-    # predicate exempts local users (idp_subject NULL) so they are unconstrained.
+    # predicate now requires BOTH fields non-NULL so the indexed tuple never
+    # contains a NULL (which would otherwise compare distinct and admit dupes);
+    # local users (both NULL, enforced by the CHECK above) stay unconstrained.
     op.create_index(
         "uq_users_idp_identity",
         "users",
         ["idp_iss", "idp_subject"],
         unique=True,
-        postgresql_where=sa.text("idp_subject IS NOT NULL"),
-        sqlite_where=sa.text("idp_subject IS NOT NULL"),
+        postgresql_where=sa.text("idp_iss IS NOT NULL AND idp_subject IS NOT NULL"),
+        sqlite_where=sa.text("idp_iss IS NOT NULL AND idp_subject IS NOT NULL"),
     )
 
 
 def downgrade() -> None:
     op.drop_index("uq_users_idp_identity", table_name="users")
+    op.drop_constraint("idp_identity_pair", "users", type_="check")
     op.drop_column("users", "idp_subject")
     op.drop_column("users", "idp_iss")

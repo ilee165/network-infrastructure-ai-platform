@@ -59,13 +59,31 @@ def test_offline_sql_adds_idp_anchor_columns() -> None:
 def test_offline_sql_creates_partial_unique_index() -> None:
     sql = _offline_sql("upgrade")
     assert "CREATE UNIQUE INDEX uq_users_idp_identity" in sql
-    # Partial predicate exempts local users (NULL anchor) — the 1:1 backstop.
-    assert "WHERE idp_subject IS NOT NULL" in sql
+    # The partial predicate must require BOTH anchor fields non-NULL so the
+    # indexed tuple never contains a NULL (NULLs compare distinct and would
+    # otherwise admit duplicate (NULL, 'x') anchors — ADR-0028 §6).
+    normalized = " ".join(sql.split())
+    assert "WHERE idp_iss IS NOT NULL AND idp_subject IS NOT NULL" in normalized
+    # The pre-fix one-sided predicate must be gone (it left the NULL-dup gap).
+    assert "WHERE idp_subject IS NOT NULL\n" not in sql
+    assert "(idp_subject IS NOT NULL)" not in normalized
+
+
+@pytest.mark.usefixtures("_postgres_dialect_env")
+def test_offline_sql_adds_pair_nullability_check() -> None:
+    """A CHECK forces the anchor pair to be BOTH NULL or BOTH non-NULL (§6)."""
+    sql = _offline_sql("upgrade")
+    normalized = " ".join(sql.split())
+    assert "ck_users_idp_identity_pair" in normalized
+    assert "idp_iss IS NULL AND idp_subject IS NULL" in normalized
+    assert "idp_iss IS NOT NULL AND idp_subject IS NOT NULL" in normalized
 
 
 @pytest.mark.usefixtures("_postgres_dialect_env")
 def test_offline_downgrade_reverses_upgrade() -> None:
     sql = _offline_sql("downgrade")
     assert "DROP INDEX uq_users_idp_identity" in sql
+    # The pair CHECK is dropped on downgrade too (full reversal).
+    assert "ck_users_idp_identity_pair" in " ".join(sql.split())
     for column in NEW_USER_COLUMNS:
         assert f"ALTER TABLE users DROP COLUMN {column}" in sql, f"downgrade must drop {column}"

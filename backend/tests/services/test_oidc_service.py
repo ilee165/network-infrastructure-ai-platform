@@ -8,12 +8,15 @@ sticky), and the 1:1 anchor (re-login reuses the same row, never a second).
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.security import Role as RoleEnum
-from app.models import AuditLog, Role, User
+from app.models import AuditLog, Base, Role, User
 from app.services import oidc as oidc_service
 from app.services.oidc import map_groups_to_role
 from app.services.oidc.mapping import RoleMappingError
@@ -185,6 +188,84 @@ async def test_unique_constraint_blocks_duplicate_anchor(
     )
     with pytest.raises(IntegrityError):
         await session.flush()
+
+
+async def test_concurrent_first_login_race_recovers_via_integrity_error() -> None:
+    """Two callbacks for one (iss, sub) race the unique anchor; the loser recovers.
+
+    Uses a shared-cache SQLite DB so a SEPARATE connection can act as the
+    concurrent "winner". The loser's pre-insert lookup misses, then — inside the
+    flush — the winner commits its anchor on the other connection, so the loser's
+    flush raises IntegrityError. The service must roll back, re-select the
+    winner, update it, and return it: one identity ⇒ one row, login still works.
+    """
+    # A named shared-cache in-memory DB: every connection sees the same data.
+    dsn = f"sqlite+aiosqlite:///file:race_{uuid.uuid4().hex}?mode=memory&cache=shared&uri=true"
+    engine = create_async_engine(dsn)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        async with maker() as setup:
+            viewer = Role(name="viewer")
+            # 'engineer' must exist so the recovery path's role re-derivation can
+            # resolve RoleEnum.ENGINEER for the winning row.
+            setup.add_all([viewer, Role(name="engineer")])
+            await setup.commit()
+            viewer_id = viewer.id
+
+        state = {"raised": False}
+        winner_holder: dict[str, object] = {}
+
+        async with maker() as loser:
+            real_flush = loser.flush
+
+            async def flaky_flush(*args: object, **kwargs: object) -> None:
+                # First flush = our losing INSERT. Mimic the concurrent winner
+                # committing its anchor in the race window (separate session),
+                # then raise IntegrityError as the real unique collision would.
+                if not state["raised"]:
+                    state["raised"] = True
+                    async with maker() as winner_session:
+                        win = User(
+                            username="oidc_winner",
+                            password_hash="!oidc",
+                            role_id=viewer_id,
+                            idp_iss="https://idp",
+                            idp_subject="race-sub",
+                        )
+                        winner_session.add(win)
+                        await winner_session.flush()
+                        winner_holder["id"] = win.id
+                        await winner_session.commit()
+                    raise IntegrityError("INSERT users", {}, Exception("unique"))
+                await real_flush(*args, **kwargs)
+
+            loser.flush = flaky_flush  # type: ignore[method-assign]
+            user = await oidc_service.provision_or_link_user(
+                loser,
+                idp_iss="https://idp",
+                idp_subject="race-sub",
+                role=RoleEnum.ENGINEER,
+                email="raced@x.com",
+                display_name="Raced",
+            )
+            loser.flush = real_flush  # type: ignore[method-assign]
+            await loser.commit()
+
+            # Recovered onto the winner row (same id); role re-derived, claims set.
+            assert user.id == winner_holder["id"]
+            assert user.role.name == "engineer"
+            assert user.email == "raced@x.com"
+            rows = (
+                (await loser.execute(select(User).where(User.idp_subject == "race-sub")))
+                .scalars()
+                .all()
+            )
+            assert len(rows) == 1
+    finally:
+        await engine.dispose()
 
 
 async def test_local_users_with_null_anchor_coexist(

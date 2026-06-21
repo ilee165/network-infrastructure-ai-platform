@@ -314,6 +314,11 @@ class BluecatDdiDns(_BamCapability, DdiDnsCapability):
         inverse re-applies the prior field values (ADR-0027 §3 update-inverse).
         """
         rtype = changes.record_type.value.upper()
+        if current is not None and changes.record_type != current.record_type:
+            raise ValueError(
+                f"bluecat: record_type is immutable on BAM update — "
+                f"cannot change from {current.record_type.value!r} to {changes.record_type.value!r}"
+            )
         body = _record_update_body(changes, rtype)
         if current is not None:
             inverse: ChangeRequestDraft | None = ChangeRequestDraft(
@@ -385,7 +390,7 @@ class BluecatDdiDns(_BamCapability, DdiDnsCapability):
         rtype_str = current.record_type.value.upper() if current else "resourceRecord"
         return ChangeRequestDraft(
             verb=ChangeVerb.DELETE,
-            resource=f"bluecat:{rtype_str}",
+            resource=f"bluecat:resourceRecord:{rtype_str}",
             object_ref=object_ref,
             summary=summary,
             inverse=inverse,

@@ -20,6 +20,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import NetOpsError
@@ -93,21 +94,16 @@ async def provision_or_link_user(
     ).scalar_one_or_none()
 
     if existing is not None:
-        # Re-derive role + refresh display claims on every login (never sticky).
-        existing.role = role_row
-        existing.email = email
-        existing.display_name = display_name
-        await session.flush()
-        await audit.record(
+        return await _refresh_existing(
             session,
+            existing,
+            role_row=role_row,
+            role=role,
+            email=email,
+            display_name=display_name,
             actor=actor,
-            action=audit.AUTH_OIDC_ROLE_MAPPED,
-            target_type="user",
-            target_id=str(existing.id),
-            detail={"role": role.value},
             request_id=request_id,
         )
-        return existing
 
     user = User(
         username=_synthetic_username(idp_iss, idp_subject),
@@ -122,7 +118,35 @@ async def provision_or_link_user(
         must_change_password=False,
     )
     session.add(user)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError:
+        # Concurrent first-login race (ADR-0028 §6): a second callback for the
+        # same (idp_iss, idp_subject) passed the pre-insert lookup and raced us
+        # to the unique anchor index. The other transaction is the JIT-provision
+        # winner — roll back our losing INSERT, re-select the winner's row, and
+        # reuse/update it so this login still succeeds (no spurious 500/failed
+        # login). Fail-closed: if the row is somehow absent, re-raise.
+        await session.rollback()
+        # rollback() expires/detaches role_row; reload it in the fresh tx.
+        role_row = await _role_row(session, role)
+        winner = (
+            await session.execute(
+                select(User).where(User.idp_iss == idp_iss, User.idp_subject == idp_subject)
+            )
+        ).scalar_one_or_none()
+        if winner is None:  # pragma: no cover - integrity error without a winner row
+            raise
+        return await _refresh_existing(
+            session,
+            winner,
+            role_row=role_row,
+            role=role,
+            email=email,
+            display_name=display_name,
+            actor=actor,
+            request_id=request_id,
+        )
     await audit.record(
         session,
         actor=actor,
@@ -142,6 +166,38 @@ async def provision_or_link_user(
         request_id=request_id,
     )
     return user
+
+
+async def _refresh_existing(
+    session: AsyncSession,
+    existing: User,
+    *,
+    role_row: Role,
+    role: RoleEnum,
+    email: str | None,
+    display_name: str | None,
+    actor: str,
+    request_id: uuid.UUID | None,
+) -> User:
+    """Re-derive role + refresh display claims on an already-anchored row.
+
+    Shared by the normal re-login path and the concurrent-race recovery path:
+    roles are never sticky, so every login refreshes them (ADR-0028 §2/§4).
+    """
+    existing.role = role_row
+    existing.email = email
+    existing.display_name = display_name
+    await session.flush()
+    await audit.record(
+        session,
+        actor=actor,
+        action=audit.AUTH_OIDC_ROLE_MAPPED,
+        target_type="user",
+        target_id=str(existing.id),
+        detail={"role": role.value},
+        request_id=request_id,
+    )
+    return existing
 
 
 def _oidc_actor(idp_iss: str, idp_subject: str) -> str:

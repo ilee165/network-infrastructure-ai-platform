@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, String, column
+from sqlalchemy import CheckConstraint, ForeignKey, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -32,24 +32,34 @@ class User(UuidPkMixin, TimestampMixin, Base):
     Local accounts authenticate with username + bcrypt hash. Federated (OIDC)
     accounts are anchored on the immutable ``(idp_iss, idp_subject)`` pair —
     never email/username, which are mutable at the IdP (ADR-0028 §2). A
-    partial UNIQUE index over that pair (where ``idp_subject IS NOT NULL``)
-    guarantees one federated identity maps to exactly one row, which is what
+    partial UNIQUE index over that pair (where both fields are non-NULL),
+    backed by an all-or-nothing pair CHECK, guarantees one federated identity
+    maps to exactly one row, which is what
     keeps the ADR-0020 four-eyes ``user.id`` comparison a faithful 1:1 proxy
     for the IdP subject (ADR-0028 §6). Local users leave both columns NULL.
     """
 
     __tablename__ = "users"
     __table_args__ = (
-        # One federated identity ⇒ exactly one user row (ADR-0028 §6). Partial
-        # so local users (both columns NULL) are exempt; SQLite honours the same
-        # WHERE-qualified unique index, so the unit suite enforces it too.
+        # One federated identity ⇒ exactly one user row (ADR-0028 §6). The
+        # (idp_iss, idp_subject) pair is all-or-nothing: the CHECK keeps both
+        # NULL (local users) or both set (federated), and the partial UNIQUE
+        # index requires BOTH non-NULL so a NULL idp_iss cannot admit duplicate
+        # subjects. Mirrors migration 0010 (ck_users_idp_identity_pair +
+        # uq_users_idp_identity); SQLite honours both, so the unit suite enforces
+        # them too.
+        CheckConstraint(
+            "(idp_iss IS NULL AND idp_subject IS NULL) "
+            "OR (idp_iss IS NOT NULL AND idp_subject IS NOT NULL)",
+            name="idp_identity_pair",
+        ),
         Index(
             "uq_users_idp_identity",
             "idp_iss",
             "idp_subject",
             unique=True,
-            sqlite_where=column("idp_subject").isnot(None),
-            postgresql_where=column("idp_subject").isnot(None),
+            sqlite_where=text("idp_iss IS NOT NULL AND idp_subject IS NOT NULL"),
+            postgresql_where=text("idp_iss IS NOT NULL AND idp_subject IS NOT NULL"),
         ),
     )
 

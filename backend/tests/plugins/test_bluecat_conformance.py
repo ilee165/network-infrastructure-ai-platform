@@ -727,6 +727,131 @@ class TestBluecatMutatorValidation:
             ipam.add_network(network)
 
 
+class TestBluecatModifyRecordImmutableType:
+    """modify_record must reject record_type changes (BAM type is immutable on update)."""
+
+    def _dns(self) -> BluecatDdiDns:
+        http = httpx.Client(transport=httpx.MockTransport(_handle))
+        client = BamClient(
+            base_url="https://bam.example.com",
+            credentials=_FAKE_CREDS,
+            client=http,
+            session_token=_FAKE_TOKEN,
+        )
+        return BluecatDdiDns(client, uuid4())
+
+    def test_modify_record_raises_when_record_type_changes(self) -> None:
+        """Changing record_type on modify must raise ValueError (BAM type is immutable)."""
+        import datetime
+
+        dns = self._dns()
+        now = datetime.datetime.now(datetime.UTC)
+        base = dict(
+            device_id=uuid4(),
+            collected_at=now,
+            source_vendor="bluecat",
+            name="www.example.com",
+            zone="example.com",
+            ttl=300,
+            object_ref=str(400001),
+        )
+        current = NormalizedDnsRecord(**base, record_type=DnsRecordType.A, value="10.0.0.1")
+        changes = NormalizedDnsRecord(**base, record_type=DnsRecordType.AAAA, value="::1")
+        with pytest.raises(ValueError, match="record_type"):
+            dns.modify_record(str(400001), changes, current=current)
+
+    def test_modify_record_same_type_does_not_raise(self) -> None:
+        """Updating a value without changing record_type must NOT raise."""
+        import datetime
+
+        dns = self._dns()
+        now = datetime.datetime.now(datetime.UTC)
+        base = dict(
+            device_id=uuid4(),
+            collected_at=now,
+            source_vendor="bluecat",
+            name="www.example.com",
+            record_type=DnsRecordType.A,
+            zone="example.com",
+            ttl=300,
+            object_ref=str(400001),
+        )
+        current = NormalizedDnsRecord(**base, value="10.0.0.1")
+        changes = NormalizedDnsRecord(**base, value="10.0.0.2")
+        draft = dns.modify_record(str(400001), changes, current=current)
+        assert draft.verb == ChangeVerb.UPDATE
+
+
+class TestBluecatDeleteRecordResourceScheme:
+    """delete_record resource must match the create/update scheme.
+
+    i.e. ``bluecat:resourceRecord:<TYPE>``, not ``bluecat:<TYPE>``.
+    """
+
+    def _dns(self) -> BluecatDdiDns:
+        http = httpx.Client(transport=httpx.MockTransport(_handle))
+        client = BamClient(
+            base_url="https://bam.example.com",
+            credentials=_FAKE_CREDS,
+            client=http,
+            session_token=_FAKE_TOKEN,
+        )
+        return BluecatDdiDns(client, uuid4())
+
+    def test_delete_record_resource_matches_create_update_scheme_with_preimage(self) -> None:
+        """delete_record with current= emits bluecat:resourceRecord:<TYPE>, not bluecat:<TYPE>."""  # noqa: E501
+        import datetime
+
+        dns = self._dns()
+        now = datetime.datetime.now(datetime.UTC)
+        current = NormalizedDnsRecord(
+            device_id=uuid4(),
+            collected_at=now,
+            source_vendor="bluecat",
+            name="www.example.com",
+            record_type=DnsRecordType.A,
+            value="10.0.0.1",
+            ttl=300,
+            zone="example.com",
+            object_ref=str(400001),
+        )
+        draft = dns.delete_record(str(400001), current=current, zone_id=_ZONE_ID)
+        assert draft.resource == "bluecat:resourceRecord:A", (
+            f"Expected 'bluecat:resourceRecord:A', got {draft.resource!r}"
+        )
+
+    def test_delete_record_resource_matches_create_update_scheme_without_preimage(self) -> None:
+        """delete_record without current= must also emit bluecat:resourceRecord:<TYPE> scheme."""
+        dns = self._dns()
+        draft = dns.delete_record(str(400001), current=None, zone_id=None)
+        # Without current, falls back to generic but must still use the resourceRecord prefix.
+        assert draft.resource.startswith("bluecat:resourceRecord"), (
+            f"Expected resource starting with 'bluecat:resourceRecord', got {draft.resource!r}"
+        )
+
+    def test_delete_record_aaaa_resource_scheme(self) -> None:
+        """delete_record for AAAA type must emit bluecat:resourceRecord:AAAA."""
+        import datetime
+
+        dns = self._dns()
+        now = datetime.datetime.now(datetime.UTC)
+        current = NormalizedDnsRecord(
+            device_id=uuid4(),
+            collected_at=now,
+            source_vendor="bluecat",
+            name="www.example.com",
+            record_type=DnsRecordType.AAAA,
+            value="::1",
+            ttl=300,
+            zone="example.com",
+            object_ref=str(400001),
+        )
+        draft = dns.delete_record(str(400001), current=current, zone_id=_ZONE_ID)
+        assert draft.resource == "bluecat:resourceRecord:AAAA", (
+            f"Expected 'bluecat:resourceRecord:AAAA', got {draft.resource!r}"
+        )
+
+
 class TestBluecatGetLeasesFilter:
     """get_leases() must send the ADR-0027 §2 DHCP-state filter, not fetch every IP."""
 
