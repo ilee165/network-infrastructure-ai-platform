@@ -1,6 +1,6 @@
 # NetOps Console — frontend
 
-React 18 + TypeScript (strict) + Vite SPA for the AI Network Operations Platform
+React 19 + TypeScript (strict) + Vite SPA for the AI Network Operations Platform
 (ADR-0012, M0 scaffold). Dark, dense operations-console aesthetic built with
 Tailwind CSS — no component library.
 

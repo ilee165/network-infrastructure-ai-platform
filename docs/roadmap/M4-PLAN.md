@@ -1,6 +1,6 @@
 # M4 Build Plan — Config Management + Documentation Agent
 
-**Status:** PLANNED (2026-06-14). Not started.
+**Status:** COMPLETE — shipped 2026-06-14 (PR #24, `f40f7f6 M4 — Config Management + Documentation Agent`).
 **Authority:** Implements `docs/roadmap/MVP.md` §6. Bound by `CLAUDE.md`, decisions D1–D16, and `ARCHITECTURE/REPO-STRUCTURE.md`. Build executed via the orchestrated wf-* workflow roster (`.claude/agents/`), mirroring the M1/M3 pattern.
 
 ## Goal
@@ -64,4 +64,4 @@ Cx = complexity (S/M/L). Every task also runs dual review → `wf-fixer` (if fin
 
 ## Next step
 
-Execute Wave 0 (ADRs + spec), then launch the orchestrated build workflow for Waves 1–5. Update vault `00-STATUS` / `03-TASKS` as work progresses (vault = execution hub).
+Execute Wave 0 (ADRs + spec), then launch the orchestrated build workflow for Waves 1–5. Update vault `00-STATUS` / `03-TASKS` as work progresses (vault = execution hub). Note: the vault is an **external Obsidian vault**, not tracked in this repo — only the `tools/obsidian-mcp` dev tooling lives in-tree.

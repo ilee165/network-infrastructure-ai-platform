@@ -18,7 +18,7 @@ network-infrastructure-ai-platform/
 ├── LICENSE                          # PROPOSED: license file (license choice routed to Consultant Agent)
 ├── .gitignore                       # Python, Node, IDE, pcap/artifact volumes, .env files
 ├── backend/                         # Modular-monolith Python backend — one deployable, api + worker entrypoints (D1)
-├── frontend/                        # React 18 + TypeScript + Vite SPA, served by nginx (D12)
+├── frontend/                        # React 19 + TypeScript + Vite SPA, served by nginx (D12)
 ├── deploy/
 │   ├── docker/                      # Dockerfiles + docker-compose.yml (MVP/dev, optional `ollama` profile) (D13)
 │   │   ├── backend.Dockerfile       # Single backend image; `api` and `worker` containers differ by command (D1, D13)
@@ -283,7 +283,7 @@ backend/
 
 ```
 frontend/
-├── package.json                     # React 18, TypeScript, Vite, TanStack Query, Zustand, Tailwind, Cytoscape.js (D12)
+├── package.json                     # React 19, TypeScript, Vite, TanStack Query, Zustand, Tailwind, Cytoscape.js (D12)
 ├── vite.config.ts                   # Vite build config; dev proxy → api container
 ├── tsconfig.json                    # "strict": true mandatory (D12)
 ├── tailwind.config.ts               # Tailwind setup (D12)
