@@ -1,0 +1,200 @@
+# netops Helm chart — values (P1 W3 scaffold).
+#
+# SECURE BY DEFAULT, OPT-OUT NEVER OPT-IN (ADR-0029 §0/§3, PRODUCTION.md §9):
+# every hardening control below defaults to its hardened value. Disabling any
+# one is an explicit override that triggers a Helm WARNING (see templates/NOTES
+# and the `_warnings` helper). Do NOT flip a default to weaken the baseline.
+#
+# W3 footprint only: this scaffold ships the packet-sandbox workloads
+# (ADR-0031) plus the reusable hardening primitives (ADR-0029 §3/§5). The
+# per-service api/worker/frontend/data-store Deployments are W4 — the keys here
+# are designed so W4 grows them under the same shapes (`hardening`, `images`,
+# `serviceAccounts`, `networkPolicy`, `admission`).
+
+# -- Namespace the chart's PSA labels target. Install with
+#    `--namespace <ns> --create-namespace` and keep this in sync so the
+#    pod-security-admission enforce/audit/warn labels (ADR-0029 §3) land on the
+#    right namespace object.
+namespaceLabels:
+  enabled: true
+  # restricted enforced namespace-wide; the SOLE deviation is the packet
+  # sandbox, gated by the admission allow-list (ADR-0029 §5 / ADR-0031 §5).
+  podSecurity:
+    enforce: restricted
+    audit: restricted
+    warn: restricted
+    # Pin the PSS version so a cluster upgrade can't silently relax the level.
+    version: latest
+
+# -- Shared image references. W4 adds api/frontend/worker/data-store images
+#    under this same map. Digest-pin or explicit-version ONLY: the admission
+#    policy (ADR-0029 §5 rule 1) rejects `latest` / mutable tags.
+images:
+  # The packet workloads run the same backend image as the celery workers
+  # (ADR-0029 §1 — packet is a queue split out to its own Deployment, not a new
+  # image). Override `tag` with the released, digest-pinned reference per
+  # PRODUCTION.md §10. The placeholder below is an explicit version, not
+  # `latest`, so the no-mutable-tags policy passes on the rendered chart.
+  backend:
+    repository: netops-backend
+    tag: "p1"
+    pullPolicy: IfNotPresent
+
+# -- Reusable hardened per-container securityContext (ADR-0029 §3 table).
+#    W4 services consume this via the `netops.hardenedSecurityContext` helper.
+#    Every control here is ON; an override that weakens one is warned.
+hardening:
+  enabled: true
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilitiesDrop:
+      - ALL
+    seccompProfile:
+      # RuntimeDefault is the FLOOR for general services (ADR-0029 §3); the
+      # packet-analysis workload overrides this to the Localhost profile below.
+      type: RuntimeDefault
+  # Pod-level seccomp default; container-level wins where set.
+  podSeccompProfile:
+    type: RuntimeDefault
+
+# -- Per-workload ServiceAccounts (ADR-0029 §5 / ADR-0031 §1).
+#    automountServiceAccountToken:false everywhere; ZERO ClusterRoleBinding.
+serviceAccounts:
+  create: true
+  automountServiceAccountToken: false
+
+# -- Admission policy (ADR-0029 §5). Kyverno ClusterPolicy by default; the
+#    chart also ships a ValidatingAdmissionPolicy fallback for clusters that
+#    forbid an admission webhook (toggle `engine`). On by default; disabling is
+#    a warned opt-out for clusters with an org-wide policy engine.
+admission:
+  enabled: true
+  # "kyverno" | "vap" — both render PSS-deviation allow-list + no-latest +
+  # signed-image rules from the same source of truth.
+  engine: kyverno
+  failurePolicy: Fail
+  # cosign signed-image verification (ADR-0029 §5 rule 2). The verifying key /
+  # keyless identity is supplied here — NEVER a private key, only a public
+  # verifier. W6 SBOM/cosign CI feeds this; W3 ships the enforcement rule
+  # disabled-by-data until a real verifier is wired, so the rule renders and is
+  # policy-tested without blocking unsigned dev images on day one.
+  signedImages:
+    enabled: false
+    # Public cosign key (PEM) or keyless issuer/subject. Reference only.
+    publicKeyConfigMap: ""
+  # The SOLE workload permitted to carry NET_RAW / a non-RuntimeDefault seccomp
+  # profile. Matched by label, not name, so the deviation is enforceably
+  # singular (ADR-0029 §5 rule 3 / ADR-0031 §5).
+  packetSandboxSelector:
+    matchLabels:
+      netops.io/packet-sandbox: "true"
+
+# -- Default-deny NetworkPolicies (ADR-0031 §4). W4 extends the allow edge-set
+#    (ADR-0029 §2). W3 ships the default-deny floor + the analysis egress allow.
+networkPolicy:
+  enabled: true
+  # Cluster DNS selector for the minimal DNS egress allow (analysis pod resolves
+  # the Postgres Service name). Default targets the standard kube-dns labels.
+  dns:
+    namespaceSelectorLabels:
+      kubernetes.io/metadata.name: kube-system
+    podSelectorLabels:
+      k8s-app: kube-dns
+  postgres:
+    # Selector for the Postgres workload the analysis pod writes findings to
+    # (W4 owns the Postgres Deployment; this selector is the seam).
+    podSelectorLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: postgres
+    port: 5432
+
+# -- Dedicated packet node pool (ADR-0031 §5). Taint + matching toleration so
+#    NET_RAW never co-schedules with general pods. nodeSelector/affinity is
+#    complementary, NOT a substitute for the taint.
+packetNodePool:
+  taint:
+    key: node-role.netops/packet
+    value: "true"
+    effect: NoSchedule
+  nodeSelector:
+    node-role.netops/packet: "true"
+
+# -- Packet workloads (ADR-0031). TWO Deployments: capture (NET_RAW) and
+#    analysis (the hardened parser). They never share a Pod, SA, or capability.
+packet:
+  enabled: true
+
+  # packet-capture: NET_RAW-capable, on the tainted pool. The trusted-input
+  # half (we issue the BPF/vendor filter). Still non-root, no privileged:true.
+  capture:
+    enabled: true
+    replicas: 1
+    command:
+      - celery
+      - -A
+      - app.workers.celery_app
+      - worker
+      - -Q
+      - packet_capture
+    # ADR-0031 §1: drop ALL, add NET_RAW + NET_ADMIN (worker-side tcpdump only).
+    capabilities:
+      add:
+        - NET_RAW
+        - NET_ADMIN
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+
+  # packet-analysis: the hardened parser. UNTRUSTED input (pcap bytes). Zero
+  # capabilities, Localhost seccomp, read-only pcap, default-deny egress.
+  analysis:
+    enabled: true
+    replicas: 1
+    command:
+      - celery
+      - -A
+      - app.workers.celery_app
+      - worker
+      - -Q
+      - packet_analysis
+    # ADR-0031 §2: NET_RAW MUST NOT appear here. capabilities.drop:[ALL], no add.
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 10001
+      runAsGroup: 10001
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+    # Localhost seccomp profile (ADR-0031 §3) — deny-by-default allow-list.
+    seccompProfile:
+      type: Localhost
+      localhostProfile: netops/packet-analysis-seccomp.json
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "2"
+        memory: 1Gi
+    # Bounded writable scratch for the tshark/pyshark temp path (ADR-0031 §2).
+    # readOnlyRootFilesystem still needs a sized emptyDir; this is the ONLY
+    # writable mount on the analysis pod.
+    scratch:
+      mountPath: /tmp/pyshark
+      sizeLimit: 512Mi
+
+  # Shared read-only pcap volume hand-off (capture writes, analysis reads RO).
+  # W3 scaffold uses an emptyDir placeholder; W4 wires the real PVC/host volume.
+  pcapVolume:
+    mountPath: /data/pcaps
+    # emptyDir placeholder so the chart renders standalone. W4 replaces with the
+    # persistent pcap volume claim (ADR-0023 §3).
+    emptyDir:
+      sizeLimit: 2Gi

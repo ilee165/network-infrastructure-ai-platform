@@ -1,0 +1,24 @@
+{{- /*
+Pod Security Admission labels on the install namespace (ADR-0029 §3).
+enforce=restricted blocks any non-compliant pod; audit+warn=restricted surface
+drift. The SOLE deviation (packet-capture NET_RAW) is granted by the admission
+allow-list (templates/policy), NOT by relaxing this level.
+
+This renders a Namespace object only when namespaceLabels.enabled is true. For
+installs that pre-create the namespace, apply these same labels out-of-band; the
+admission policy still enforces the deviation allow-list regardless.
+*/ -}}
+{{- if .Values.namespaceLabels.enabled }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: {{ .Values.namespaceLabels.podSecurity.enforce }}
+    pod-security.kubernetes.io/enforce-version: {{ .Values.namespaceLabels.podSecurity.version }}
+    pod-security.kubernetes.io/audit: {{ .Values.namespaceLabels.podSecurity.audit }}
+    pod-security.kubernetes.io/audit-version: {{ .Values.namespaceLabels.podSecurity.version }}
+    pod-security.kubernetes.io/warn: {{ .Values.namespaceLabels.podSecurity.warn }}
+    pod-security.kubernetes.io/warn-version: {{ .Values.namespaceLabels.podSecurity.version }}
+{{- end }}

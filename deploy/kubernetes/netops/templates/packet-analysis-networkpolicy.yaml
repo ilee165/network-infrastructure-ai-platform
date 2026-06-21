@@ -1,0 +1,58 @@
+{{- /*
+Default-deny ingress+egress NetworkPolicy for the packet-analysis pod
+(ADR-0031 §4). The analysis pod is the highest-risk workload and gets the
+tightest policy on the platform:
+- default-deny: no ingress from outside the namespace, no egress by default.
+- egress allows ONLY: cluster DNS (resolve the Postgres Service name) and
+  Postgres (write normalized findings + pcap_metadata).
+- NO route to device-management subnets, NO internet egress.
+tshark is invoked with -n (ADR-0023 §1) so the DNS allow is the backstop, not a
+relied-on path. Two independent layers: -n primary, NetworkPolicy backstop.
+
+The capture pod's policy (broader, management-subnet egress) is W4/separate —
+egress lives with capture (trusted input), parsing lives with analysis (none).
+*/ -}}
+{{- if and .Values.networkPolicy.enabled .Values.packet.enabled .Values.packet.analysis.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: packet-analysis-default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: packet-analysis
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "netops.name" . }}
+      app.kubernetes.io/component: packet-analysis
+  # Both directions enumerated => default-deny: with these types listed and no
+  # rule matching, all other traffic is denied.
+  policyTypes:
+    - Ingress
+    - Egress
+  # Ingress: none. (No ingress rules => deny all inbound.)
+  ingress: []
+  egress:
+    # Cluster DNS only (UDP+TCP 53) — resolve the Postgres Service name.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceSelectorLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Postgres only — write findings + pcap_metadata. No other egress.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+{{- end }}

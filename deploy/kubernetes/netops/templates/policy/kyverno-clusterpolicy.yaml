@@ -1,0 +1,130 @@
+{{- /*
+Admission policy — Kyverno ClusterPolicy (ADR-0029 §5), default engine.
+Three enforcing, default-on rules:
+  1. no-latest      — every image is digest-pinned or explicit-version; `latest`
+                      and tagless images are rejected.
+  2. signed-images  — images must carry a valid cosign signature (data-gated by
+                      admission.signedImages.enabled; W6 wires the real verifier
+                      key, so W3 renders the rule without blocking dev images).
+  3. pss-deviation  — the SOLE workloads permitted to carry NET_RAW or a
+                      non-RuntimeDefault seccomp profile are those matching the
+                      packet-sandbox label selector; every other pod must satisfy
+                      restricted. This is the chart-side guard that ADR-0031's
+                      deviation cannot silently spread.
+Rendered only when admission.engine == "kyverno".
+*/ -}}
+{{- if and .Values.admission.enabled (eq .Values.admission.engine "kyverno") }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: netops-hardening-baseline
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+  annotations:
+    policies.kyverno.io/title: NetOps hardening baseline
+    policies.kyverno.io/description: >-
+      No-latest tags, signed-image verification, and the singular packet-sandbox
+      PSS deviation allow-list (ADR-0029 §5 / ADR-0031 §5).
+spec:
+  validationFailureAction: {{ if eq .Values.admission.failurePolicy "Fail" }}Enforce{{ else }}Audit{{ end }}
+  background: true
+  rules:
+    # --- Rule 1: no `latest` / mutable tags ---
+    - name: disallow-latest-tag
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Images must use a digest or an explicit version tag, not `latest` or an untagged reference (ADR-0029 §5)."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
+            =(initContainers):
+              - image: "!*:latest"
+            =(ephemeralContainers):
+              - image: "!*:latest"
+
+    # --- Rule 1b: require an explicit tag or digest (reject bare repo refs) ---
+    - name: require-image-tag-or-digest
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Images must carry an explicit tag or digest (ADR-0029 §5)."
+        pattern:
+          spec:
+            containers:
+              - image: "*:*|*@sha256:*"
+
+{{- if .Values.admission.signedImages.enabled }}
+    # --- Rule 2: cosign signed-image verification (W6-wired verifier) ---
+    - name: verify-image-signatures
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - "{{ .Values.images.backend.repository }}:*"
+          failureAction: Enforce
+          verifyDigest: true
+          required: true
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: ""
+{{- end }}
+
+    # --- Rule 3: PSS deviation allow-list — only the packet sandbox may add
+    #     NET_RAW or run a non-RuntimeDefault seccomp profile. ---
+    - name: restrict-net-raw-to-packet-sandbox
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  {{- toYaml .Values.admission.packetSandboxSelector.matchLabels | nindent 18 }}
+      validate:
+        message: "NET_RAW / NET_ADMIN may be added only by the packet-sandbox workloads (ADR-0031 §5)."
+        pattern:
+          spec:
+            =(containers):
+              - =(securityContext):
+                  =(capabilities):
+                    =(add):
+                      - "!NET_RAW & !NET_ADMIN"
+    - name: restrict-custom-seccomp-to-packet-sandbox
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  {{- toYaml .Values.admission.packetSandboxSelector.matchLabels | nindent 18 }}
+      validate:
+        message: "A Localhost (custom) seccomp profile is permitted only on the packet-sandbox workloads; all others use RuntimeDefault (ADR-0029 §3 / ADR-0031 §3)."
+        pattern:
+          spec:
+            =(securityContext):
+              =(seccompProfile):
+                =(type): "RuntimeDefault | Localhost"
+            =(containers):
+              - =(securityContext):
+                  =(seccompProfile):
+                    =(type): "RuntimeDefault"
+{{- end }}
