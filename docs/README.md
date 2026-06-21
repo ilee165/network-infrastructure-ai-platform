@@ -15,8 +15,9 @@
 
 | Document | Description |
 |---|---|
-| [README.md](adr/README.md) | Index of ADR-0001..0016 (one per binding decision D1–D16), all currently Accepted. |
-| `0001`–`0016` | One ADR per decision: monorepo, backend stack, LangGraph orchestration, Postgres+pgvector, Neo4j projection, plugin system, device connectivity, Celery jobs, multi-LLM abstraction, authn/z, security model, frontend stack, deployment, packet analysis, observability, testing/CI-CD. |
+| [README.md](adr/README.md) | Index of ADR-0001..0032. ADRs 0001–0016 are the binding D1–D16 decisions (Accepted); 0017–0024 are M4/M5 milestone-feature ADRs (Accepted); 0025–0032 are P1 wave ADRs (Proposed). |
+| `0001`–`0016` | One ADR per binding decision: monorepo, backend stack, LangGraph orchestration, Postgres+pgvector, Neo4j projection, plugin system, device connectivity, Celery jobs, multi-LLM abstraction, authn/z, security model, frontend stack, deployment, packet analysis, observability, testing/CI-CD. |
+| `0017`–`0032` | Milestone-feature and P1 wave ADRs: config snapshot/drift, compliance rules, doc generation/RAG, ChangeRequest workflow, config deploy/restore, Infoblox/SpatiumDDI DDI plugins, packet sandbox, NX-OS/JunOS/BlueCat plugins, OIDC/SSO, K8s/Helm GA, backup/DR, packet OS-isolation, KMS-backed master key. |
 
 ## roadmap/
 

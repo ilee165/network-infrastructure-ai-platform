@@ -15,7 +15,7 @@ A self-hosted, multi-vendor AI Network Operations Platform that acts as an AI Ne
 
 | Container | Technology | Responsibility |
 |---|---|---|
-| `frontend` | React 18 + TypeScript + Vite, served by nginx | Chat console, topology visualization, inventory, change approvals, audit views |
+| `frontend` | React 19 + TypeScript + Vite, served by nginx | Chat console, topology visualization, inventory, change approvals, audit views |
 | `api` | Python 3.11+ / FastAPI | REST + WebSocket API, authn/z, agent session orchestration |
 | `worker` | Celery workers (same codebase as `api`) | Long-running jobs: discovery runs, config backups, packet captures, doc generation |
 | `postgres` | PostgreSQL 16 + pgvector | System of record: inventory, credentials (encrypted), change requests, audit log, embeddings |
@@ -38,7 +38,7 @@ A self-hosted, multi-vendor AI Network Operations Platform that acts as an AI Ne
 | D9 | Multi-LLM abstraction | LangChain chat-model interface behind an internal `llm/` provider registry; profiles: `local` (Ollama, default), `anthropic`, `openai`, `azure`; all prompts versioned in-repo; structured outputs via Pydantic | 0009 |
 | D10 | AuthN/AuthZ | Local users + OIDC (pluggable); short-lived JWT access tokens; RBAC roles: `viewer`, `operator`, `engineer`, `admin` | 0010 |
 | D11 | Security model | Device credentials in an encrypted vault table (AES-256-GCM envelope encryption, master key from env/file/KMS); append-only audit log; every state-changing action goes through a ChangeRequest with human approval; agent reasoning traces stored and linked to audit entries | 0011 |
-| D12 | Frontend stack | React 18, TypeScript strict, Vite, TanStack Query, Zustand, Tailwind CSS; topology rendering with Cytoscape.js | 0012 |
+| D12 | Frontend stack | React 19, TypeScript strict, Vite, TanStack Query, Zustand, Tailwind CSS; topology rendering with Cytoscape.js | 0012 |
 | D13 | Deployment | Docker Compose for MVP/dev (with optional `ollama` profile); Kubernetes via Helm chart for production; one image per container | 0013 |
 | D14 | Packet analysis | tshark/pyshark executed in sandboxed worker context; pcap artifacts stored on disk volume with metadata + retention policy in Postgres; capture orchestration on devices via plugin capability | 0014 |
 | D15 | Observability | structlog JSON logging, Prometheus `/metrics`, OpenTelemetry tracing (optional collector); health/readiness endpoints on every container | 0015 |
@@ -79,7 +79,7 @@ network-infrastructure-ai-platform/
 │   ├── docker/                  # Dockerfiles, docker-compose.yml
 │   └── kubernetes/              # Helm chart
 ├── docs/
-│   ├── adr/                     # ADR-0001..0016 + index
+│   ├── adr/                     # ADR-0001..0032 + index
 │   ├── architecture/            # this brief, DIAGRAMS.md, REPO-STRUCTURE.md
 │   ├── roadmap/                 # MVP.md, PRODUCTION.md
 │   └── consultant/              # GAP-ANALYSIS.md, QUESTIONS.md, ASSUMPTIONS.md

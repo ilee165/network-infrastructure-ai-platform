@@ -1,6 +1,6 @@
 # M5 Build Plan — ChangeRequest workflow, DDI (Infoblox), packet analysis, Automation Agent
 
-**Status:** PLANNED (2026-06-17). Not started.
+**Status:** COMPLETE — shipped 2026-06-17 (PR #25, `abe390c M5: ChangeRequest write-path + Automation/DDI/Packet agents`).
 **Authority:** Implements `docs/roadmap/MVP.md` §7 (final MVP milestone). Bound by `CLAUDE.md`, decisions D1–D16, and `ARCHITECTURE/REPO-STRUCTURE.md`. Build executed via the orchestrated wf-* workflow roster (`.claude/agents/`), mirroring M1/M3/M4.
 
 ## Goal
@@ -81,4 +81,4 @@ Cx = complexity (S/M/L). Every task also runs dual review → `wf-fixer` (if fin
 
 ## Next step
 
-Execute Wave 0 (ADRs 0020–0023) inline as the first workflow task, then launch the orchestrated build workflow for Waves 1–6 on branch `release/m5`. Update vault `00-STATUS` / `03-TASKS` as work progresses (vault = execution hub).
+Execute Wave 0 (ADRs 0020–0023) inline as the first workflow task, then launch the orchestrated build workflow for Waves 1–6 on branch `release/m5`. Update vault `00-STATUS` / `03-TASKS` as work progresses (vault = execution hub). Note: the vault is an **external Obsidian vault**, not tracked in this repo — only the `tools/obsidian-mcp` dev tooling lives in-tree.

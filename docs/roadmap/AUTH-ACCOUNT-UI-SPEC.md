@@ -1,7 +1,7 @@
 # Milestone Spec — Auth & Account UI
 
-**Status:** Approved design, ready to plan + build. Inserted milestone (between M3 and MVP M4).
-**Driver:** M3 live test — the SPA boots straight to the dashboard; the frontend has **no auth code at all** (no login, route gate, or token handling) and no account/settings/profile area. Backend auth is `login` + `refresh` (HttpOnly cookie) only.
+**Status:** DELIVERED. Inserted milestone (between M3 and MVP M4); implemented in `frontend/src/` — `pages/LoginPage.tsx`, `ProfilePage.tsx`, `SettingsPage.tsx`, `UsersPage.tsx`, `ChangePasswordPage.tsx`, plus `stores/auth.ts` and `api/auth.ts` (with tests under `frontend/src/__tests__/`).
+**Driver (historical):** M3 live test — at the time the SPA booted straight to the dashboard; the frontend had **no auth code at all** (no login, route gate, or token handling) and no account/settings/profile area. Backend auth was `login` + `refresh` (HttpOnly cookie) only. This gap has since been closed (see Status above).
 **Stack:** React+TS+Vite, TanStack Query, Zustand, Tailwind; FastAPI, async SQLAlchemy, JWT, RBAC `viewer<operator<engineer<admin`, append-only `audit_log`.
 
 ## Scope

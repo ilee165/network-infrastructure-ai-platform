@@ -10,7 +10,7 @@ A self-hosted, AI-powered Network Operations Platform for enterprise infrastruct
 |---|---|---|
 | `api` | Python 3.11+ / FastAPI | REST + WebSocket API, authn/z, agent sessions |
 | `worker` | Celery (queues: discovery, config, packet, docs) | Long-running jobs |
-| `frontend` | React 18 + TypeScript + Vite | Ops console: chat, topology, inventory, approvals, audit |
+| `frontend` | React 19 + TypeScript + Vite | Ops console: chat, topology, inventory, approvals, audit |
 | `postgres` | PostgreSQL 16 + pgvector | System of record + embeddings |
 | `neo4j` | Neo4j 5 | Topology & knowledge graph (rebuildable projection) |
 | `redis` | Redis 7 | Celery broker, cache |

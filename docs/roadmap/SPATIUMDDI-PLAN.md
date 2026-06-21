@@ -1,6 +1,6 @@
 # SpatiumDDI plugin + DDI golden-path validation — plan
 
-**Status:** PLANNED (2026-06-19; reviewed + accepted). Build not started.
+**Status:** COMPLETE — shipped 2026-06-18 (PR #28, `0a23a6a feat(ddi): SpatiumDDI vendor plugin + DDI golden-path validation`).
 **Decisions locked at review:** D-SP1 = **(A) generalize the draft**; scope = **full
 plugin** (all four DDI capabilities, conformance); validation = **CI mock + opt-in
 live** integration test.
