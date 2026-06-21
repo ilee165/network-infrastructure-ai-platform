@@ -117,6 +117,42 @@ class Settings(BaseSettings):
     raw_artifact_retention_hour: int = 4
     raw_artifact_retention_minute: int = 0
 
+    #: OIDC / SSO identity federation (ADR-0028). OIDC is opt-in: with no
+    #: configured issuer the platform stays local-only (CLAUDE.md local-first).
+    #: Enabling it (a non-empty ``oidc_issuer``) fences the local-login path to
+    #: break-glass admin only (ADR-0028 §5). Every field below is a
+    #: per-deployment, admin-managed knob; the client secret and any IdP refresh
+    #: token are vault ``credential_ref`` handles, NEVER inlined here (§6).
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    #: Vault credential_ref (NOT the value) of the confidential-client secret.
+    oidc_client_secret_ref: str | None = None
+    #: Redirect URI registered with the IdP (the platform callback endpoint).
+    oidc_redirect_uri: str = "https://localhost/api/v1/auth/oidc/callback"
+    #: Least scope set that still yields role-mapping group claims (§7).
+    oidc_scopes: str = "openid profile email groups"
+    #: Claim carrying the user's group/role membership (§4; Entra ``groups``).
+    oidc_groups_claim: str = "groups"
+    #: ``group -> platform role`` map (§4). Deny-default: a group absent from
+    #: this map grants nothing; an empty map denies every federated user.
+    oidc_group_role_map: dict[str, str] = Field(default_factory=dict)
+    #: Opt-in for OIDC to grant ``admin`` (§4). Default false caps OIDC at
+    #: ``engineer`` so production admin stays break-glass-only unless federated.
+    oidc_allow_admin: bool = False
+    #: JWKS cache TTL (seconds); one forced refresh on an unknown ``kid`` (§3).
+    oidc_jwks_cache_ttl_secs: int = 600
+    #: Bounded ``exp``/``iat``/``nbf`` leeway for IdP tokens (seconds, §3).
+    oidc_clock_skew_secs: int = 120
+
+    @property
+    def oidc_enabled(self) -> bool:
+        """OIDC is active only when an issuer + client id + secret-ref are set.
+
+        With OIDC disabled the platform is purely local (ADR-0010); enabling it
+        flips on the break-glass fence (ADR-0028 §5).
+        """
+        return bool(self.oidc_issuer and self.oidc_client_id and self.oidc_client_secret_ref)
+
     def llm_profile_for_role(self, role: str) -> str:
         """Resolve an LLM *role* (``reasoning``/``fast``) to a configured profile.
 

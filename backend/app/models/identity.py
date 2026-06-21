@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import ForeignKey, Index, String, column
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -27,9 +27,31 @@ class Role(UuidPkMixin, TimestampMixin, Base):
 
 
 class User(UuidPkMixin, TimestampMixin, Base):
-    """A local platform account; authentication is username + bcrypt hash."""
+    """A local *or* federated platform account (ADR-0010, ADR-0028).
+
+    Local accounts authenticate with username + bcrypt hash. Federated (OIDC)
+    accounts are anchored on the immutable ``(idp_iss, idp_subject)`` pair —
+    never email/username, which are mutable at the IdP (ADR-0028 §2). A
+    partial UNIQUE index over that pair (where ``idp_subject IS NOT NULL``)
+    guarantees one federated identity maps to exactly one row, which is what
+    keeps the ADR-0020 four-eyes ``user.id`` comparison a faithful 1:1 proxy
+    for the IdP subject (ADR-0028 §6). Local users leave both columns NULL.
+    """
 
     __tablename__ = "users"
+    __table_args__ = (
+        # One federated identity ⇒ exactly one user row (ADR-0028 §6). Partial
+        # so local users (both columns NULL) are exempt; SQLite honours the same
+        # WHERE-qualified unique index, so the unit suite enforces it too.
+        Index(
+            "uq_users_idp_identity",
+            "idp_iss",
+            "idp_subject",
+            unique=True,
+            sqlite_where=column("idp_subject").isnot(None),
+            postgresql_where=column("idp_subject").isnot(None),
+        ),
+    )
 
     username: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -38,6 +60,11 @@ class User(UuidPkMixin, TimestampMixin, Base):
     email: Mapped[str | None] = mapped_column(String(255), unique=True)
     display_name: Mapped[str | None] = mapped_column(String(255))
     must_change_password: Mapped[bool] = mapped_column(nullable=False, default=False)
+    #: Immutable IdP issuer (``iss``) for a federated account; NULL for local.
+    idp_iss: Mapped[str | None] = mapped_column(String(512))
+    #: Immutable IdP subject (``sub``) for a federated account; NULL for local.
+    #: ``(idp_iss, idp_subject)`` is the stable federated identity (ADR-0028 §2).
+    idp_subject: Mapped[str | None] = mapped_column(String(255))
 
     role: Mapped[Role] = relationship(lazy="joined")
 
