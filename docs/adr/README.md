@@ -37,5 +37,6 @@
 | [0030](0030-backup-and-disaster-recovery-baseline.md) | Backup and Disaster Recovery Baseline | Proposed | P1 W0 |
 | [0031](0031-packet-sandbox-os-isolation.md) | Packet Capture Sandbox OS-Level Isolation | Proposed | P1 W0 |
 | [0032](0032-kms-backed-master-key-and-rotation.md) | KMS-Backed Master Key and Rotation | Proposed | P1 W0 |
+| [0033](0033-prompt-injection-eval-suite.md) | Prompt-Injection Eval Suite | Proposed | P1 W7 |
 
 **Conventions:** every binding decision D1–D16 has a current ADR; any deviation requires a superseding ADR (no silent drift — see `PRODUCTION.md` gate G-MNT). New capabilities, normalized models, agents, or vendors beyond the CLAUDE.md lists require an ADR *before* implementation (`REPO-STRUCTURE.md` §6–§7).
