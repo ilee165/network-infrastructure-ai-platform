@@ -1,0 +1,100 @@
+# W5-T5 — Full-Platform DR Drill Wiring + Runbook + G-REL Evidence
+
+| | |
+|---|---|
+| **Wave** | P1 W5 — Backup / DR baseline |
+| **Owner** | `wf-infra` (drill orchestration + evidence) with Documentation Agent for the runbook |
+| **Review tier** | sonnet spec + strong quality |
+| **Depends on** | W5-T1, W5-T2, W5-T3, W5-T4 (composes all four) |
+| **ADRs** | ADR-0030 §5.3, §6; ADR-0005 (rebuild chain); ADR-0011 (separation) |
+| **PRODUCTION.md** | §8 (full DR drill ≥ twice yearly; DR runbook by Documentation Agent), §11 G-REL |
+| **Status** | Proposed |
+
+## Objective
+
+Compose the three tiers into the **full-platform DR drill** (ADR-0030 §5.3): restore Postgres from
+object storage **alone** onto a clean cluster, rebuild Neo4j from the restored Postgres, spot-restore
+pcaps; assert end-to-end **RPO ≤ 5 min and RTO ≤ 1 h (PROPOSED)** — the G-REL "DR drill from backups
+alone" gate. Generate the DR runbook (Documentation Agent, dogfooding) and the G-REL evidence doc.
+Built P1; executed ≥ twice yearly from P2.
+
+## Scope
+
+**In**
+- A `full-platform-dr-drill` orchestration (Helm `Job` / runbook-driven sequence) chaining:
+  W5-T2 Postgres PITR restore → W5-T3 Neo4j rebuild over the **restored** Postgres → W5-T4 pcap
+  spot-restore — against a clean target namespace/cluster, **from object storage alone**.
+- End-to-end timing + assertion of **RPO ≤ 5 min / RTO ≤ 1 h** (PROPOSED), aggregating the per-tier
+  structured `DRILL …` outputs from T2/T3/T4.
+- **DR runbook** for all four drills (PITR, Neo4j rebuild, full-platform, pcap spot-restore),
+  generated and kept current by the **Documentation Agent** (ADR-0030 §5, PRODUCTION.md §8 dogfooding).
+- **G-REL evidence doc** under `docs/security/` (or `docs/roadmap/evidence/`) collecting drill
+  pass/fail + measured RPO/RTO/topology-RTO, with the PROPOSED targets explicitly flagged for the
+  Consultant §12 confirmation (ADR-0030 §6).
+- Schedule wiring: full-platform drill ≥ twice yearly (suspended CronJob; P2 execution).
+
+**Out**
+- The per-tier mechanics (owned by T1–T4) — this task only *orchestrates and proves end-to-end*.
+- KEK escrow / key-recovery drill (separate, PRODUCTION.md §8).
+- HA / streaming replication that tightens RPO (P2, ADR-0030 §6).
+
+## Requirements (grounded in ADR-0030 §5.3, §6)
+
+1. **From backups alone, onto a clean cluster** (ADR-0030 §5.3 / G-REL): the drill must not depend
+   on surviving live state — Postgres from object storage, Neo4j rebuilt from the restored Postgres
+   (not a dump), pcaps spot-restored. This proves the D5 "one authoritative thing to restore + one
+   thing to rebuild" story end-to-end.
+2. **Aggregate, don't re-implement** the per-tier assertions — consume the structured `DRILL …`
+   outputs from T2/T3/T4 so the evidence doc is a single source of measured numbers.
+3. **Targets are PROPOSED** (ADR-0030 §6): RPO ≤ 5 min, RTO ≤ 1 h, topology-RTO < 30 min @ 5,000
+   devices. The evidence doc records measured-vs-target and **flags re-base on the Consultant §12
+   answer** (PRODUCTION.md §11 G-REL "PROPOSED targets per A2/Q2 until Consultant answer").
+4. **Runbook is generated, not hand-maintained** (ADR-0030 §5, dogfooding): the Documentation Agent
+   produces it and keeps it current; runbook freshness ≤ 90 days (G-OBS) once drills run in P2.
+5. **Built P1, executed P2** (P1-PLAN.md §6): P1 ships the orchestration + a green dry-run at small
+   seeded scale + the runbook + the evidence-doc skeleton with the P1 dry-run numbers; the twice-yearly
+   clean-cluster run is P2.
+
+## Contracts / artifacts
+
+- `deploy/kubernetes/<chart>/templates/backup/full-platform-dr-drill-job.yaml` (suspended CronJob),
+  behind `backup.drills.fullPlatform.enabled`.
+- `docs/runbooks/dr-*.md` (Documentation-Agent-generated) — the four drill runbooks.
+- `docs/roadmap/evidence/P1-W5-G-REL-evidence.md` — drill results table (measured RPO/RTO/
+  topology-RTO vs PROPOSED targets), PROPOSED-target flag, links to the per-tier drill outputs.
+- An evidence collector that parses the `DRILL …` lines from T2/T3/T4 into the table.
+
+## Test & gate plan
+
+- Dry-run the full chain over the seeded fixtures from T1–T4: Postgres restore → Neo4j rebuild over
+  restored Postgres → pcap spot-restore all PASS; aggregated RPO/RTO recorded under the PROPOSED
+  targets at the seeded scale.
+- Assert the runbook renders and the evidence doc is generated with the dry-run numbers + the
+  PROPOSED-target flag.
+- Infra gates: `helm lint` / `kubeconform` / `conftest` — drill writes only to a throwaway target,
+  all credentials external-secret refs, no live-prod target.
+
+## Exit criteria
+
+- [ ] Full-platform drill restores Postgres from object storage alone → rebuilds Neo4j from it →
+      spot-restores pcaps, end-to-end, on a clean target (G-REL).
+- [ ] Aggregated RPO ≤ 5 min / RTO ≤ 1 h asserted at seeded scale; numbers recorded vs PROPOSED
+      targets with the Consultant-§12 re-base flag.
+- [ ] DR runbook generated by the Documentation Agent for all four drills.
+- [ ] G-REL evidence doc produced; P2-execution flagged.
+- [ ] Infra gates green; per-tier `DRILL …` outputs consumed into the evidence table.
+
+## Workflow (P1-PLAN.md §3)
+
+`wf-infra` (strong) implements the orchestration + evidence collector; the runbook is produced via
+the Documentation Agent and committed in the same atomic unit. → `wf-spec-reviewer` (sonnet) +
+`wf-quality-reviewer` (strong) in parallel → `wf-fixer` if findings → `wf-verifier` → **one atomic
+commit**.
+
+## Risks
+
+- End-to-end numbers at seeded scale do not prove production scale — the clean-cluster, certified-scale
+  run is explicitly P2 (ADR-0030 §6 / PRODUCTION.md §3); the evidence doc must say so, not imply the
+  gate is fully closed.
+- The whole baseline is gated on PROPOSED targets pending the Consultant §12 answer; the evidence doc
+  is the single place that flag is surfaced for re-base.
