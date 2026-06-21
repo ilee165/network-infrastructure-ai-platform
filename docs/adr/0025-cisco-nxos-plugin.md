@@ -12,7 +12,7 @@ NX-OS is materially unlike IOS in four ways that force decisions: (1) it can emi
 
 ## Decision
 
-**Ship `cisco_nxos` as a netmiko + ntc-templates plugin that mirrors `cisco_ios` (ADR-0006/0007 reference), differing only in NX-OS command text, NX-OS TextFSM templates, VRF-scoped collection, and feature-gate tolerance. SSH is the primary and only P1 transport (parity with `cisco_ios`); structured `| json` output and NX-API are evaluated, scoped, and explicitly deferred as documented below. The config write path reuses the ADR-0021 capture→apply→verify-after→rollback engine, upgraded on NX-OS by `checkpoint`/`rollback` (NX-OS has a native config-rollback primitive IOS lacks). `HA_STATUS` (vPC) is delivered against a new typed `HaStatusCapability` ABC.**
+**Ship `cisco_nxos` as a netmiko + ntc-templates plugin that mirrors `cisco_ios` (ADR-0006/0007 reference), differing only in NX-OS command text, NX-OS TextFSM templates, VRF-scoped collection, and feature-gate tolerance. SSH is the primary and only P1 transport (parity with `cisco_ios`); structured `| json` output and NX-API are evaluated, scoped, and explicitly deferred as documented below. The config write path reuses the ADR-0021 capture→apply→verify-after→rollback engine unchanged: rollback is a `configure replace` replay of the captured pre-change baseline — the same tier as `cisco_ios`. The `ConfigWriteTransport` exposes no NX-OS named-checkpoint primitive, so `rollback running-config checkpoint` is not used; restoring equality with the captured baseline via configure-replace is the rollback inverse. `HA_STATUS` (vPC) is delivered against a new typed `HaStatusCapability` ABC.**
 
 ### 1. Capability map — what `cisco_nxos` declares
 
@@ -30,9 +30,9 @@ NX-OS is materially unlike IOS in four ways that force decisions: (1) it can emi
 | `OSPF` | `show ip ospf neighbor vrf all` | `list[NormalizedOspfNeighbor]` | requires `feature ospf`; **VRF-scoped** |
 | `ACL` | `show ip access-lists` | `list[NormalizedAclEntry]` | NX-OS ACL syntax → same `NormalizedAclEntry` |
 | `CONFIG_BACKUP` | `show running-config` | `str` (verbatim) | identical posture (ADR-0017) |
-| `CONFIG_RESTORE` | `configure replace` / checkpoint-rollback | `ChangeResult` | NX-OS native rollback — see §5 |
+| `CONFIG_RESTORE` | `configure replace` baseline replay | `ChangeResult` | same tier as `cisco_ios` — see §5 |
 | `CONFIG_DEPLOY` | `configure terminal` merge | `ChangeResult` | same merge surface; same guardrail — see §5 |
-| `HA_STATUS` | `show vpc` (+ `| json`) | `list[NormalizedHaStatus]` | **new ABC** — see §6 |
+| `HA_STATUS` | `show vpc` (+ `\| json`) | `list[NormalizedHaStatus]` | **new ABC** — see §6 |
 
 The `NeighborsCapability` ABC already serves both LLDP and CDP (`backend/app/plugins/base.py`); `cisco_nxos` declares both members and maps them to one `CiscoNxosNeighbors` class, exactly as `cisco_ios` does. Command text lives in `SHOW_*` module constants (the `cisco_ios` convention) so the command surface is auditable in one place.
 
@@ -79,14 +79,14 @@ NX-OS differs from classic IOS in one decisive way that **improves** the write p
 | Aspect | `cisco_ios` (ADR-0021 §4) | `cisco_nxos` (this ADR) |
 |---|---|---|
 | Apply (deploy) | `configure terminal` merge | same — `configure terminal` merge |
-| Apply (restore) | `configure replace` (where available) | `configure replace <checkpoint>` (native) |
-| Native rollback primitive | replay captured baseline (no transactional commit) | **`checkpoint` + `rollback running-config checkpoint`** — a native, atomic config-rollback engine |
-| Dead-man auto-revert | only on images with `commit timer`; else mgmt-path guardrail | **`configure replace … commit-timeout`** rollback timer available on NX-OS |
+| Apply (restore) | `configure replace` baseline replay | `configure replace` baseline replay (same tier) |
+| Rollback primitive | replay captured baseline via `configure replace` | same — `configure replace` replay of the captured pre-change baseline; no named-checkpoint primitive used |
+| Dead-man auto-revert | only on images with `commit timer`; else mgmt-path guardrail | mgmt-path guardrail as defence-in-depth (NX-OS `configure replace … commit-timeout` noted as a future option) |
 
-**Decision: on NX-OS the executor takes a named `checkpoint` of the captured baseline before apply and rolls back via `rollback running-config checkpoint <name>` on failure** — the stronger primitive `cisco_iosxe` enjoys (ADR-0021 §4 commit-confirm tier), not the bare baseline-replay that classic `cisco_ios` is stuck with. This means:
+**Decision: on NX-OS the rollback path reuses the ADR-0021 configure-replace baseline-replay engine, the same tier as `cisco_ios`.** The `ConfigWriteTransport` abstraction exposes no NX-OS named-checkpoint primitive, so the executor does **not** issue `checkpoint` / `rollback running-config checkpoint`; instead it replaces the running config with the captured pre-change baseline via `configure replace`. This means:
 
-- Rollback success is still an **asserted equality** (re-capture normalizes equal to the captured baseline) — the §3 ADR-0021 criterion is unchanged; NX-OS just has a cleaner mechanism to reach it.
-- The §4.2 **management-path guardrail is still implemented** as defense-in-depth (reject a change touching the mgmt VRF interface / vty `access-class` / management default-route when no dead-man timer is armed), because a connectivity-severing change can still strand the worker mid-apply before the rollback fires. Where the NX-OS `configure replace … commit-timeout` dead-man timer *is* armed, a connectivity-breaking change auto-reverts even if the worker loses the session — the IOS-XE/EOS-equivalent safety ADR-0021 §4 prefers. The guardrail's NX-OS specifics (mgmt VRF, `vrf context management`) are the only delta from the `cisco_ios` `_MGMT_*` patterns.
+- Rollback success is still an **asserted equality** (re-captured config normalizes equal to the captured baseline) — the ADR-0021 §3 criterion is unchanged.
+- The §4.2 **management-path guardrail is still implemented** as defense-in-depth (reject a change touching the mgmt VRF interface / management default-route), because a connectivity-severing change can still strand the worker mid-apply before any rollback fires. The guardrail's NX-OS specifics (mgmt VRF, `vrf context management`) are the only delta from the `cisco_ios` `_MGMT_*` patterns.
 
 `cisco_ios` is certified first against the conformance suite (ADR-0021); `cisco_nxos` mirrors it the way ADR-0021 §4 already anticipated NX-OS would ("NX-OS/JunOS/PAN-OS are production-roadmap").
 
@@ -143,7 +143,7 @@ On NX-OS the implementation runs `show vpc` (with `| json` applied per the §3 p
 
 1. **ntc-templates NX-OS coverage gaps** — which NX-OS `show` commands lack a current TextFSM template (forcing a per-command `| json` switch under §3) is only knowable against real release output; resolve when a `n9000v` sandbox is available.
 2. **`vrf all` section-header stability** — the exact section delimiter the parser keys on for VRF tagging (§3) varies by release; confirm against ≥2 NX-OS releases.
-3. **`checkpoint`/`rollback` semantics under partial apply** (§5) — whether NX-OS `rollback running-config checkpoint` cleanly reverses an order-sensitive fragment, and the precise `commit-timeout` dead-man behavior, need a live apply-fail test (mirrors ADR-0021 §3's deploy-rollback edge).
+3. **`configure replace` baseline-replay under partial apply** (§5) — whether NX-OS `configure replace` cleanly reverses an order-sensitive fragment under the same edge conditions tested for `cisco_ios`, and the precise `commit-timeout` dead-man behaviour when available, need a live apply-fail test (mirrors ADR-0021 §3's deploy-rollback edge).
 4. **`show vpc` JSON shape** (§8) — the `| json` schema for vPC state across releases, to pin the `NormalizedHaStatus` mapper.
 5. **NX-API parity** (§2) — if/when NX-API is adopted, whether its `cli_show` JSON matches the SSH `| json` shape closely enough to share mappers.
 
@@ -152,7 +152,7 @@ On NX-OS the implementation runs `show vpc` (with `| json` applied per the §3 p
 **Positive**
 
 - `cisco_nxos` is a near-pure mirror of `cisco_ios` — same plugin contract (ADR-0006), same connectivity stack (ADR-0007), same config write/rollback engine and four-eyes gate (ADR-0020/0021), same conformance suite — so it lands as a template-following `wf-implementer-light` task with maximal reuse and minimal new surface (`P1-PLAN.md` §3).
-- NX-OS's native `checkpoint`/`rollback` and `configure replace … commit-timeout` give the write path a **stronger** rollback primitive than classic IOS — `cisco_nxos` sits in the IOS-XE/EOS commit-confirm tier (ADR-0021 §4), not the bare-replay tier.
+- The config write path is a faithful mirror of `cisco_ios`: `configure replace` baseline-replay rollback with asserted equality, the mgmt-path guardrail as defence-in-depth, and the same `ChangeResult` contract — zero net-new write-path surface to audit or maintain.
 - Treating each VDC as a discrete inventory device keeps the one-session = one-config = one-rollback-baseline invariant intact, so the ADR-0021 verify-after equality stays meaningful with zero new machinery.
 - `cisco_nxos` is the first plugin to exercise the normalized models' **VRF dimension** (multi-VRF route/BGP/OSPF tagging) and the new `HA_STATUS` interface, validating two new normalized surfaces ahead of the firewall/ADC waves that will reuse `HA_STATUS`.
 - Raw-first verbatim recording (`_record_raw`) is preserved for CLI text exactly as for JSON, so deferring `| json` costs no auditability.
@@ -171,4 +171,4 @@ On NX-OS the implementation runs `show vpc` (with `| json` applied per the §3 p
 3. **Raise `PluginError` when a feature-gated command is unavailable.** *Rejected:* a Nexus legitimately may have BGP/OSPF/LLDP disabled — that is normal device state, not a plugin failure; erroring would make discovery of a perfectly healthy switch fail. **Chosen:** normalize "feature disabled"/empty to `[]` for read capabilities (recording the verbatim sentinel for audit), reserving the empty-is-error rule for `CONFIG_BACKUP`, where a switch must always have a running config.
 4. **Drive multiple VDCs from one session via `switchto vdc`.** *Rejected:* hopping VDCs mid-session changes the device identity, running config, and management reachability under the executor, breaking the ADR-0021 capture-baseline → verify-after equality (you would verify against a different VDC's config) and muddying the per-device audit trail. **Chosen:** model each VDC as its own inventory `device` (its own `credential_ref`); the plugin operates within the session's VDC only, preserving one-session = one-config = one-rollback-baseline.
 5. **Collect default-VRF only and add other VRFs later.** *Rejected:* on NX-OS the management VRF and tenant VRFs carry the operationally critical routes/peers; a default-only collection silently under-reports the device and would have to be re-collected (and re-normalized) when VRF support lands. **Chosen:** `vrf all` collection from the start, with each normalized record carrying its VRF — validating the normalized models' VRF dimension as the Wave-1 "new surface."
-6. **Reuse the classic-IOS bare-baseline-replay rollback unchanged.** *Rejected:* NX-OS ships a native `checkpoint`/`rollback running-config` engine and a `configure replace … commit-timeout` dead-man timer; ignoring them would needlessly keep NX-OS in the weakest (classic-IOS) rollback tier when it qualifies for the IOS-XE/EOS commit-confirm tier (ADR-0021 §4). **Chosen:** use NX-OS checkpoint-rollback + dead-man timer, keeping the §4.2 management-path guardrail as defense-in-depth.
+6. **Adopt NX-OS named checkpoints (`checkpoint` / `rollback running-config checkpoint`) as the rollback primitive.** *Rejected:* the `ConfigWriteTransport` abstraction (ADR-0021) exposes `send_config` and `replace_config` but no named-checkpoint primitive; adding checkpoint issuance inside the plugin would require either leaking transport-specific side-effects through the abstraction boundary or bypassing it entirely — against the ADR-0021 principle that write transport details are encapsulated. The `configure replace` baseline-replay path already satisfies the asserted-equality criterion (ADR-0021 §3) and keeps NX-OS transport behaviour consistent with `cisco_ios`. Named-checkpoint support is recorded as a possible future `ConfigWriteTransport` extension, not a P1 requirement. **Chosen:** `configure replace` baseline-replay rollback (same tier as `cisco_ios`), keeping the §4.2 management-path guardrail as defence-in-depth.
