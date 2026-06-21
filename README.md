@@ -2,7 +2,7 @@
 
 A self-hosted, AI-powered Network Operations Platform for enterprise infrastructure teams. It functions as an AI Network Engineer: discovery, troubleshooting, packet analysis, configuration management, DDI management, documentation generation, and automation execution across multi-vendor environments — local-first, secure by default, with a human approving every change and every AI decision explained and audited.
 
-> **Status:** Milestone **M1** (inventory, credential vault, discovery engine, first three vendor plugins) complete on `release/m1`. Milestone **M2** (topology engine: Postgres→Neo4j projection with incremental sync + full rebuild, L2/L3 builders, topology API, and the Cytoscape.js topology UI with L2/L3 layer toggle and run-to-run diff view) is **build-complete on `feature/m2-topology-engine`, pending lab validation + merge approval**; see the [MVP roadmap](docs/roadmap/MVP.md). Not yet feature-complete — M3 (agent framework + troubleshooting) is next.
+> **Status:** **MVP feature-complete** — milestones **M1–M5** all shipped: inventory + credential vault + discovery engine (M1), topology engine with Postgres→Neo4j projection and Cytoscape.js UI (M2), the LangGraph agent framework + Troubleshooting Agent + chat UI (M3), config management + Documentation Agent (M4), and the ChangeRequest write-path workflow + Automation/DDI/Packet Analysis agents (M5). Production hardening (**P1**) is **in progress**: Vendor Wave 1 plugins (Cisco NX-OS, Juniper JunOS, BlueCat), OIDC/SSO, and the Kubernetes/Helm + backup/DR track. See the [MVP roadmap](docs/roadmap/MVP.md) and [production roadmap](docs/roadmap/PRODUCTION.md). Live-lab validation gates per milestone remain a manual pre-release step.
 
 ## Architecture at a glance
 
@@ -16,7 +16,7 @@ A self-hosted, AI-powered Network Operations Platform for enterprise infrastruct
 | `redis` | Redis 7 | Celery broker, cache |
 | `ollama` | Ollama (optional, `--profile local-llm`) | Local-first LLM inference |
 
-Agents are orchestrated with LangGraph (Master Architect supervisor + 9 specialists); vendors integrate through a capability-based plugin system. Supported DDI vendors: **Infoblox** (WAPI, ADR-0022) and **SpatiumDDI** (self-hostable OSS DDI backend, ADR-0024). Full design:
+Agents are orchestrated with LangGraph (Master Architect supervisor + 9 specialists); vendors integrate through a capability-based plugin system. Certified vendor plugins: **Cisco IOS / IOS-XE / NX-OS**, **Juniper JunOS**, **Arista EOS** for route/switch, plus DDI backends **Infoblox** (WAPI, ADR-0022), **BlueCat** (Address Manager, ADR-0027), and **SpatiumDDI** (self-hostable OSS DDI backend, ADR-0024). Full design:
 
 - [Decisions brief (D1–D16)](docs/architecture/DECISIONS-BRIEF.md) · [ADRs](docs/adr/README.md) · [Diagrams](docs/architecture/DIAGRAMS.md) · [Repo structure](docs/architecture/REPO-STRUCTURE.md)
 - [MVP roadmap](docs/roadmap/MVP.md) · [Production roadmap](docs/roadmap/PRODUCTION.md)
