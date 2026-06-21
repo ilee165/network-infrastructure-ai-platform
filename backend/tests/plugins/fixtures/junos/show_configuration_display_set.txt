@@ -1,0 +1,21 @@
+# source-derived, not live-recorded (ADR-0026 §5, ADR-0024 §5 convention)
+# JunOS show configuration | display set — config backup format
+# The set-form is line-oriented, idempotent to re-apply, and is what the
+# restore/deploy path loads (ADR-0026 §1 CONFIG_BACKUP note).
+set version 23.1R1.8
+set system host-name juniper-mx01
+set system domain-name example.net
+set system time-zone UTC
+set interfaces ge-0/0/0 description uplink-to-core01
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/30
+set interfaces ge-0/0/1 description to-branch-office
+set interfaces fxp0 description oob-mgmt
+set interfaces fxp0 unit 0 family inet address 192.168.100.20/24
+set routing-options static route 0.0.0.0/0 next-hop 10.0.0.2
+set protocols ospf area 0.0.0.0 interface ge-0/0/0.0 interface-type p2p
+set protocols bgp group eBGP type external
+set protocols bgp group eBGP neighbor 172.16.0.1 peer-as 65000
+set firewall family inet filter ALLOW-MGMT term permit-ssh from protocol tcp
+set firewall family inet filter ALLOW-MGMT term permit-ssh from destination-port ssh
+set firewall family inet filter ALLOW-MGMT term permit-ssh then accept
+set firewall family inet filter ALLOW-MGMT term deny-rest then discard

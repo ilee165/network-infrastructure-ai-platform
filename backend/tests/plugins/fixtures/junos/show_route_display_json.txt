@@ -1,0 +1,82 @@
+# source-derived, not live-recorded (ADR-0026 §5, ADR-0024 §5 convention)
+# JunOS show route | display json
+{
+    "route-information" : [
+        {
+            "route-table" : [
+                {
+                    "table-name" : [{"data": "inet.0"}],
+                    "rt" : [
+                        {
+                            "rt-destination" : [{"data": "0.0.0.0/0"}],
+                            "rt-entry" : [
+                                {
+                                    "active-tag" : [{"data": "*"}],
+                                    "protocol-name" : [{"data": "Static"}],
+                                    "nh" : [
+                                        {
+                                            "to" : [{"data": "10.0.0.2"}],
+                                            "via" : [{"data": "ge-0/0/0.0"}]
+                                        }
+                                    ],
+                                    "preference" : [{"data": "5"}],
+                                    "metric" : [{"data": "1"}]
+                                }
+                            ]
+                        },
+                        {
+                            "rt-destination" : [{"data": "10.0.0.0/30"}],
+                            "rt-entry" : [
+                                {
+                                    "active-tag" : [{"data": "*"}],
+                                    "protocol-name" : [{"data": "Direct"}],
+                                    "nh" : [
+                                        {
+                                            "via" : [{"data": "ge-0/0/0.0"}]
+                                        }
+                                    ],
+                                    "preference" : [{"data": "0"}],
+                                    "metric" : [{"data": "0"}]
+                                }
+                            ]
+                        },
+                        {
+                            "rt-destination" : [{"data": "10.10.0.0/24"}],
+                            "rt-entry" : [
+                                {
+                                    "active-tag" : [{"data": "*"}],
+                                    "protocol-name" : [{"data": "OSPF"}],
+                                    "nh" : [
+                                        {
+                                            "to" : [{"data": "10.0.0.2"}],
+                                            "via" : [{"data": "ge-0/0/0.0"}]
+                                        }
+                                    ],
+                                    "preference" : [{"data": "10"}],
+                                    "metric" : [{"data": "2"}]
+                                }
+                            ]
+                        },
+                        {
+                            "rt-destination" : [{"data": "10.20.0.0/16"}],
+                            "rt-entry" : [
+                                {
+                                    "active-tag" : [{"data": "*"}],
+                                    "protocol-name" : [{"data": "BGP"}],
+                                    "nh" : [
+                                        {
+                                            "to" : [{"data": "172.16.0.1"}],
+                                            "via" : [{"data": "ge-0/0/0.0"}]
+                                        }
+                                    ],
+                                    "preference" : [{"data": "170"}],
+                                    "metric" : [{"data": "100"}]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

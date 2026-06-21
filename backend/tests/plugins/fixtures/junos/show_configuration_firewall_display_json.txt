@@ -1,0 +1,94 @@
+# source-derived, not live-recorded (ADR-0026 §5, ADR-0024 §5 convention)
+# JunOS show configuration firewall | display json
+# Firewall filters -> NormalizedAclEntry (ADR-0026 §1 notes)
+{
+    "configuration" : [
+        {
+            "firewall" : [
+                {
+                    "family" : [
+                        {
+                            "inet" : [
+                                {
+                                    "filter" : [
+                                        {
+                                            "name" : [{"data": "ALLOW-MGMT"}],
+                                            "term" : [
+                                                {
+                                                    "name" : [{"data": "permit-ssh"}],
+                                                    "from" : [
+                                                        {
+                                                            "protocol" : [{"data": "tcp"}],
+                                                            "destination-port" : [{"data": "ssh"}]
+                                                        }
+                                                    ],
+                                                    "then" : [
+                                                        {
+                                                            "accept" : [{"data": ""}]
+                                                        }
+                                                    ]
+                                                },
+                                                {
+                                                    "name" : [{"data": "permit-snmp"}],
+                                                    "from" : [
+                                                        {
+                                                            "protocol" : [{"data": "udp"}],
+                                                            "destination-port" : [{"data": "snmp"}]
+                                                        }
+                                                    ],
+                                                    "then" : [
+                                                        {
+                                                            "accept" : [{"data": ""}]
+                                                        }
+                                                    ]
+                                                },
+                                                {
+                                                    "name" : [{"data": "deny-rest"}],
+                                                    "then" : [
+                                                        {
+                                                            "discard" : [{"data": ""}]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        {
+                                            "name" : [{"data": "BLOCK-BOGONS"}],
+                                            "term" : [
+                                                {
+                                                    "name" : [{"data": "deny-rfc1918"}],
+                                                    "from" : [
+                                                        {
+                                                            "source-address" : [
+                                                                {"data": "10.0.0.0/8"},
+                                                                {"data": "172.16.0.0/12"},
+                                                                {"data": "192.168.0.0/16"}
+                                                            ]
+                                                        }
+                                                    ],
+                                                    "then" : [
+                                                        {
+                                                            "discard" : [{"data": ""}]
+                                                        }
+                                                    ]
+                                                },
+                                                {
+                                                    "name" : [{"data": "count-term"}],
+                                                    "then" : [
+                                                        {
+                                                            "count" : [{"data": "hit-counter"}]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

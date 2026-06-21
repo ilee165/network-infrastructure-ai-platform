@@ -27,8 +27,10 @@ def iter_builtin_plugins() -> Iterator[VendorPlugin]:
     # importing app.plugins.vendors itself.
     from app.plugins.vendors.cisco_ios.plugin import CiscoIosPlugin
     from app.plugins.vendors.cisco_nxos.plugin import CiscoNxosPlugin
+    from app.plugins.vendors.junos.plugin import JunosPlugin
     from app.plugins.vendors.spatiumddi.plugin import SpatiumddiPlugin
 
     yield CiscoIosPlugin()
     yield CiscoNxosPlugin()
+    yield JunosPlugin()
     yield SpatiumddiPlugin()

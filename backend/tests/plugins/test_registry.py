@@ -373,3 +373,74 @@ class TestSpatiumddiRegistration:
                 f"registry.resolve('spatiumddi', {cap!r}) returned {resolved!r}; "
                 f"expected {expected_cls!r} — DDI Agent would dispatch to the wrong class"
             )
+
+
+# ---------------------------------------------------------------------------
+# T8 — junos registration (ADR-0026)
+# ---------------------------------------------------------------------------
+
+
+class TestJunosRegistration:
+    """ADR-0026: junos is discoverable via iter_builtin_plugins and the
+    default registry; the Wave-1 capability set resolves correctly.
+    """
+
+    def test_iter_builtin_plugins_includes_junos(self) -> None:
+        from app.plugins.vendors import iter_builtin_plugins
+
+        vendor_ids = [p.vendor_id for p in iter_builtin_plugins()]
+        assert "junos" in vendor_ids, "JunosPlugin must be yielded by iter_builtin_plugins"
+
+    def test_default_registry_contains_junos(self) -> None:
+        registry = get_default_registry()
+        assert "junos" in registry.vendor_ids()
+
+    def test_junos_plugin_instance_type(self) -> None:
+        from app.plugins.vendors.junos.plugin import JunosPlugin
+
+        registry = get_default_registry()
+        plugin = registry.get_plugin("junos")
+        assert isinstance(plugin, JunosPlugin)
+
+    def test_junos_declares_wave1_capabilities(self) -> None:
+        registry = get_default_registry()
+        caps = registry.capabilities_for("junos")
+        # Wave-1 set (PRODUCTION.md §2.2, ADR-0026 §1)
+        assert Capability.DISCOVERY_SSH in caps
+        assert Capability.DISCOVERY_SNMP in caps
+        assert Capability.INTERFACES in caps
+        assert Capability.ROUTES in caps
+        assert Capability.NEIGHBORS_LLDP in caps
+        assert Capability.BGP in caps
+        assert Capability.OSPF in caps
+        assert Capability.ACL in caps
+        assert Capability.CONFIG_BACKUP in caps
+        assert Capability.CONFIG_RESTORE in caps
+        assert Capability.CONFIG_DEPLOY in caps
+
+    def test_junos_does_not_declare_cdp(self) -> None:
+        """JunOS does not speak CDP — NEIGHBORS_CDP must not be in capabilities."""
+        registry = get_default_registry()
+        caps = registry.capabilities_for("junos")
+        assert Capability.NEIGHBORS_CDP not in caps
+
+    def test_junos_vendor_id_matches_entry_point_name(self) -> None:
+        from app.plugins.vendors.junos.plugin import JunosPlugin
+
+        plugin = JunosPlugin()
+        assert plugin.vendor_id == "junos"
+
+    def test_load_entry_points_discovers_junos(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.plugins.vendors.junos.plugin import JunosPlugin
+
+        monkeypatch.setattr(
+            registry_module,
+            "entry_points",
+            lambda group: [_FakeEntryPoint("junos", JunosPlugin)],
+        )
+        registry = PluginRegistry()
+        count = registry.load_entry_points()
+        assert count == 1
+        assert "junos" in registry.vendor_ids()
+        plugin = registry.get_plugin("junos")
+        assert isinstance(plugin, JunosPlugin)
