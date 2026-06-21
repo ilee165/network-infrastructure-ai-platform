@@ -1,0 +1,91 @@
+{{- /*
+packet-analysis Deployment (ADR-0031 §2) — the UNTRUSTED-input parser, the
+highest-risk workload on the platform. Containment profile:
+- capabilities.drop:[ALL], NO add — NET_RAW MUST NOT appear here.
+- runAsNonRoot, runAsUser >= 10000, allowPrivilegeEscalation:false.
+- readOnlyRootFilesystem:true.
+- seccompProfile type Localhost referencing the §3 deny-by-default profile.
+- pcap volume mounted readOnly:true (parser cannot alter/delete evidence).
+- a single sized emptyDir scratch at the tshark/pyshark temp path.
+- resource requests + limits (OOM/CPU-bound an adversarial capture).
+- on the tainted packet pool (same taint; needs no NET_RAW).
+*/ -}}
+{{- if and .Values.packet.enabled .Values.packet.analysis.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: packet-analysis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: packet-analysis
+    # The analysis pod is restricted-compliant but carries a non-RuntimeDefault
+    # (Localhost) seccomp profile, so it is part of the named deviation
+    # allow-list together with capture.
+    netops.io/packet-sandbox: "true"
+spec:
+  replicas: {{ .Values.packet.analysis.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "netops.name" . }}
+      app.kubernetes.io/component: packet-analysis
+  template:
+    metadata:
+      labels:
+        {{- include "netops.labels" . | nindent 8 }}
+        app.kubernetes.io/component: packet-analysis
+        netops.io/packet-sandbox: "true"
+    spec:
+      serviceAccountName: packet-analysis-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        runAsNonRoot: {{ .Values.packet.analysis.securityContext.runAsNonRoot }}
+        runAsUser: {{ .Values.packet.analysis.securityContext.runAsUser }}
+        runAsGroup: {{ .Values.packet.analysis.securityContext.runAsGroup }}
+        fsGroup: {{ .Values.packet.analysis.securityContext.runAsGroup }}
+        seccompProfile:
+          type: {{ .Values.packet.analysis.seccompProfile.type }}
+          localhostProfile: {{ .Values.packet.analysis.seccompProfile.localhostProfile }}
+      tolerations:
+        {{- include "netops.packetToleration" . | nindent 8 }}
+      nodeSelector:
+        {{- toYaml .Values.packetNodePool.nodeSelector | nindent 8 }}
+      containers:
+        - name: packet-analysis
+          image: {{ include "netops.backendImage" . }}
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          command:
+            {{- toYaml .Values.packet.analysis.command | nindent 12 }}
+          securityContext:
+            runAsNonRoot: {{ .Values.packet.analysis.securityContext.runAsNonRoot }}
+            runAsUser: {{ .Values.packet.analysis.securityContext.runAsUser }}
+            runAsGroup: {{ .Values.packet.analysis.securityContext.runAsGroup }}
+            allowPrivilegeEscalation: {{ .Values.packet.analysis.securityContext.allowPrivilegeEscalation }}
+            readOnlyRootFilesystem: {{ .Values.packet.analysis.securityContext.readOnlyRootFilesystem }}
+            privileged: false
+            capabilities:
+              # drop ALL, NO add — the parser holds zero capabilities.
+              drop:
+                - ALL
+            seccompProfile:
+              type: {{ .Values.packet.analysis.seccompProfile.type }}
+              localhostProfile: {{ .Values.packet.analysis.seccompProfile.localhostProfile }}
+          resources:
+            {{- toYaml .Values.packet.analysis.resources | nindent 12 }}
+          volumeMounts:
+            # Read-ONLY pcap volume (ADR-0031 §2): the parser reads the bytes,
+            # never writes/deletes them.
+            - name: pcaps
+              mountPath: {{ .Values.packet.pcapVolume.mountPath }}
+              readOnly: true
+            # The SINGLE bounded writable scratch — the tshark/pyshark temp path.
+            - name: scratch
+              mountPath: {{ .Values.packet.analysis.scratch.mountPath }}
+      volumes:
+        - name: pcaps
+          emptyDir:
+            sizeLimit: {{ .Values.packet.pcapVolume.emptyDir.sizeLimit }}
+        - name: scratch
+          emptyDir:
+            sizeLimit: {{ .Values.packet.analysis.scratch.sizeLimit }}
+{{- end }}

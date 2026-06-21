@@ -1,0 +1,37 @@
+netops chart installed (release: {{ .Release.Name }}, namespace: {{ .Release.Namespace }}).
+
+P1 W3 scaffold: packet-sandbox OS-isolation (ADR-0031) + K8s hardening round 1
+primitives (ADR-0029 §3/§5). The full per-service GA chart is W4.
+
+Secure-by-default posture (every control below is ON):
+  - Namespace PSA: enforce/audit/warn = {{ .Values.namespaceLabels.podSecurity.enforce }}
+  - Packet-analysis: drop-ALL caps, non-root (uid {{ .Values.packet.analysis.securityContext.runAsUser }}),
+    readOnlyRootFS, Localhost seccomp ({{ .Values.packet.analysis.seccompProfile.localhostProfile }}),
+    read-only pcap, default-deny egress, resource limits.
+  - Packet-capture: NET_RAW/NET_ADMIN scoped to the tainted packet pool only.
+  - RBAC: own ServiceAccount per workload, automountServiceAccountToken=false, zero ClusterRoleBinding.
+  - Admission: {{ .Values.admission.engine }} policy enforcing no-latest + PSS-deviation allow-list.
+
+{{- $warn := list }}
+{{- if not .Values.namespaceLabels.enabled }}{{ $warn = append $warn "namespaceLabels.enabled=false — PSA restricted labels NOT applied; the namespace is unprotected." }}{{ end }}
+{{- if not .Values.hardening.enabled }}{{ $warn = append $warn "hardening.enabled=false — the reusable hardened securityContext is disabled." }}{{ end }}
+{{- if not .Values.networkPolicy.enabled }}{{ $warn = append $warn "networkPolicy.enabled=false — the packet-analysis default-deny egress policy is NOT applied; the parser has unrestricted egress." }}{{ end }}
+{{- if not .Values.admission.enabled }}{{ $warn = append $warn "admission.enabled=false — the no-latest + PSS-deviation allow-list is NOT enforced; the packet-sandbox NET_RAW deviation is no longer enforceably singular." }}{{ end }}
+{{- if not .Values.serviceAccounts.automountServiceAccountToken }}{{ else }}{{ $warn = append $warn "serviceAccounts.automountServiceAccountToken=true — workloads mount a K8s API token they do not need." }}{{ end }}
+{{- if not .Values.packet.analysis.securityContext.readOnlyRootFilesystem }}{{ $warn = append $warn "packet.analysis readOnlyRootFilesystem=false — the untrusted parser has a writable root filesystem." }}{{ end }}
+
+{{- if $warn }}
+
+############################################################
+# WARNING — secure-by-default controls have been opted out #
+############################################################
+{{- range $warn }}
+  ! {{ . }}
+{{- end }}
+  Opting out of a hardening control is supported but discouraged. Re-enable in
+  values.yaml unless you have an org-wide equivalent. (ADR-0029 §0: opt-out
+  never opt-in.)
+{{- else }}
+
+All hardening controls are at their secure defaults. No opt-outs detected.
+{{- end }}

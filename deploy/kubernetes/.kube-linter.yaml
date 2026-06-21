@@ -1,0 +1,24 @@
+# kube-linter config for the netops chart (P1 W3).
+#
+# We run kube-linter's curated DEFAULT check set (its security/hardening
+# baseline: drop-net-raw-capability, run-as-non-root, no-read-only-root-fs,
+# privilege-escalation-container, unset CPU/memory, privileged-container, etc.)
+# against the rendered chart. We do NOT use addAllBuiltIn — that turns on
+# opinionated non-security extras (required owner email label, dnsconfig,
+# node-affinity, probe-presence) that are not this wave's hardening gate.
+#
+# The ONLY tailoring is the single documented PSS deviation: the
+# `packet-capture` Deployment legitimately adds NET_RAW (ADR-0031 §1 — the
+# capture half opens a raw/packet socket worker-side). That finding is
+# suppressed at the OBJECT level via an
+# `ignore-check.kube-linter.io/drop-net-raw-capability` annotation on the
+# packet-capture template ONLY. The drop-net-raw-capability check stays ENABLED,
+# so the packet-analysis parser (un-annotated) is still guarded — a NET_RAW
+# regression on the parser fails the gate. The deviation is also scoped by the
+# node-pool taint (ADR-0031 §5) and gated singularly by the admission allow-list
+# (ADR-0029 §5).
+checks:
+  # Single-replica W3 scaffold: replica/anti-affinity guidance is W4/P2 scope
+  # (ADR-0029 §0), not a hardening control for this wave.
+  exclude:
+    - "minimum-three-replicas"
