@@ -64,6 +64,7 @@ dev = [
 # cisco_iosxe, eos) register here as
 #   <vendor_id> = "app.plugins.vendors.<vendor_id>.plugin:<Vendor>Plugin"
 [project.entry-points."netops.plugins"]
+bluecat = "app.plugins.vendors.bluecat.plugin:BluecatPlugin"
 cisco_ios = "app.plugins.vendors.cisco_ios.plugin:CiscoIosPlugin"
 cisco_iosxe = "app.plugins.vendors.cisco_iosxe.plugin:CiscoIosXePlugin"
 cisco_nxos = "app.plugins.vendors.cisco_nxos.plugin:CiscoNxosPlugin"

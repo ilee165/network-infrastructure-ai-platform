@@ -10,6 +10,13 @@ from app.core.errors import PluginError
 from app.plugins import registry as registry_module
 from app.plugins.base import Capability, InterfacesCapability, PluginCapability, VendorPlugin
 from app.plugins.registry import ENTRY_POINT_GROUP, PluginRegistry, get_default_registry
+from app.plugins.vendors.bluecat.plugin import (
+    BluecatDdiDhcp,
+    BluecatDdiDns,
+    BluecatDdiIpam,
+    BluecatDiscoveryApi,
+    BluecatPlugin,
+)
 from app.plugins.vendors.cisco_ios.plugin import CiscoIosInterfaces, CiscoIosPlugin
 from app.plugins.vendors.cisco_nxos.plugin import CiscoNxosPlugin
 from app.plugins.vendors.spatiumddi.plugin import (
@@ -444,3 +451,74 @@ class TestJunosRegistration:
         assert "junos" in registry.vendor_ids()
         plugin = registry.get_plugin("junos")
         assert isinstance(plugin, JunosPlugin)
+
+
+# ---------------------------------------------------------------------------
+# ADR-0027 — bluecat registration
+# ---------------------------------------------------------------------------
+
+
+class TestBluecatRegistration:
+    """ADR-0027: bluecat is discoverable via iter_builtin_plugins and the
+    default registry; all four DDI capability ABCs resolve correctly.
+    """
+
+    def test_iter_builtin_plugins_includes_bluecat(self) -> None:
+        from app.plugins.vendors import iter_builtin_plugins
+
+        vendor_ids = [p.vendor_id for p in iter_builtin_plugins()]
+        assert "bluecat" in vendor_ids, "BluecatPlugin must be yielded by iter_builtin_plugins"
+
+    def test_default_registry_contains_bluecat(self) -> None:
+        registry = get_default_registry()
+        assert "bluecat" in registry.vendor_ids()
+
+    def test_bluecat_plugin_instance_type(self) -> None:
+        registry = get_default_registry()
+        plugin = registry.get_plugin("bluecat")
+        assert isinstance(plugin, BluecatPlugin)
+
+    def test_bluecat_declares_all_four_ddi_capabilities(self) -> None:
+        registry = get_default_registry()
+        caps = registry.capabilities_for("bluecat")
+        assert caps == frozenset(
+            {
+                Capability.DISCOVERY_API,
+                Capability.DDI_DNS,
+                Capability.DDI_DHCP,
+                Capability.DDI_IPAM,
+            }
+        )
+
+    def test_bluecat_resolves_ddi_dns_capability(self) -> None:
+        registry = get_default_registry()
+        assert registry.resolve("bluecat", Capability.DDI_DNS) is BluecatDdiDns
+
+    def test_bluecat_resolves_ddi_dhcp_capability(self) -> None:
+        registry = get_default_registry()
+        assert registry.resolve("bluecat", Capability.DDI_DHCP) is BluecatDdiDhcp
+
+    def test_bluecat_resolves_ddi_ipam_capability(self) -> None:
+        registry = get_default_registry()
+        assert registry.resolve("bluecat", Capability.DDI_IPAM) is BluecatDdiIpam
+
+    def test_bluecat_resolves_discovery_api_capability(self) -> None:
+        registry = get_default_registry()
+        assert registry.resolve("bluecat", Capability.DISCOVERY_API) is BluecatDiscoveryApi
+
+    def test_bluecat_vendor_id_matches_entry_point_name(self) -> None:
+        plugin = BluecatPlugin()
+        assert plugin.vendor_id == "bluecat"
+
+    def test_load_entry_points_discovers_bluecat(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            registry_module,
+            "entry_points",
+            lambda group: [_FakeEntryPoint("bluecat", BluecatPlugin)],
+        )
+        registry = PluginRegistry()
+        count = registry.load_entry_points()
+        assert count == 1
+        assert "bluecat" in registry.vendor_ids()
+        plugin = registry.get_plugin("bluecat")
+        assert isinstance(plugin, BluecatPlugin)

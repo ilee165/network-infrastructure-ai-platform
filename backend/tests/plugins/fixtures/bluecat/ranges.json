@@ -1,0 +1,14 @@
+{
+  "_comment": "source-derived, not live-recorded — BAM RESTful v2 API 9.5 schema",
+  "count": 1,
+  "data": [
+    {
+      "id": 700001,
+      "name": "dynamic-pool",
+      "type": "DHCPv4Range",
+      "start": "10.0.0.100",
+      "end": "10.0.0.200",
+      "networkId": 600001
+    }
+  ]
+}

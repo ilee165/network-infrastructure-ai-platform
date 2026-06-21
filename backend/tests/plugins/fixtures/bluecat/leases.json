@@ -1,0 +1,24 @@
+{
+  "_comment": "source-derived, not live-recorded — BAM RESTful v2 API 9.5 schema; includes DHCP_ALLOCATED and DHCP_RESERVED (with MAC)",
+  "count": 2,
+  "data": [
+    {
+      "id": 800001,
+      "address": "10.0.0.101",
+      "state": "DHCP_ALLOCATED",
+      "macAddress": null,
+      "leaseTime": 86400,
+      "expiryTime": "2026-06-21T00:00:00Z",
+      "networkId": 600001
+    },
+    {
+      "id": 800002,
+      "address": "10.0.0.150",
+      "state": "DHCP_RESERVED",
+      "macAddress": "aa:bb:cc:dd:ee:ff",
+      "leaseTime": null,
+      "expiryTime": null,
+      "networkId": 600001
+    }
+  ]
+}

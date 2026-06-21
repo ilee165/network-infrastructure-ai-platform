@@ -25,11 +25,13 @@ def iter_builtin_plugins() -> Iterator[VendorPlugin]:
     """
     # Imports are local so a broken/optional vendor package never breaks
     # importing app.plugins.vendors itself.
+    from app.plugins.vendors.bluecat.plugin import BluecatPlugin
     from app.plugins.vendors.cisco_ios.plugin import CiscoIosPlugin
     from app.plugins.vendors.cisco_nxos.plugin import CiscoNxosPlugin
     from app.plugins.vendors.junos.plugin import JunosPlugin
     from app.plugins.vendors.spatiumddi.plugin import SpatiumddiPlugin
 
+    yield BluecatPlugin()
     yield CiscoIosPlugin()
     yield CiscoNxosPlugin()
     yield JunosPlugin()
