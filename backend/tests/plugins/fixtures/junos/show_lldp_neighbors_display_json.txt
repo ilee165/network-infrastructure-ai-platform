@@ -1,0 +1,28 @@
+# source-derived, not live-recorded (ADR-0026 §5, ADR-0024 §5 convention)
+# JunOS show lldp neighbors | display json
+{
+    "lldp-neighbors-information" : [
+        {
+            "lldp-neighbor-information" : [
+                {
+                    "lldp-local-port-id" : [{"data": "ge-0/0/0"}],
+                    "lldp-remote-system-name" : [{"data": "spine01.example.net"}],
+                    "lldp-remote-port-id" : [{"data": "xe-0/0/0"}],
+                    "lldp-remote-port-description" : [{"data": "to-mx01"}],
+                    "lldp-remote-system-description" : [{"data": "Juniper Networks MX480"}],
+                    "lldp-remote-management-address" : [{"data": "10.0.255.1"}],
+                    "lldp-remote-system-capabilities-supported" : [{"data": "B, R"}]
+                },
+                {
+                    "lldp-local-port-id" : [{"data": "ge-0/0/1"}],
+                    "lldp-remote-system-name" : [{"data": "spine02.example.net"}],
+                    "lldp-remote-port-id" : [{"data": "xe-0/0/0"}],
+                    "lldp-remote-port-description" : [{"data": "to-mx01"}],
+                    "lldp-remote-system-description" : [{"data": "Juniper Networks MX240"}],
+                    "lldp-remote-management-address" : [{"data": "10.0.255.2"}],
+                    "lldp-remote-system-capabilities-supported" : [{"data": "B, R"}]
+                }
+            ]
+        }
+    ]
+}

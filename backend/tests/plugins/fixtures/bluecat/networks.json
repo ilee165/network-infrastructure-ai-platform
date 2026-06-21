@@ -1,0 +1,20 @@
+{
+  "_comment": "source-derived, not live-recorded — BAM RESTful v2 API 9.5 schema",
+  "count": 1,
+  "data": [
+    {
+      "id": 600001,
+      "name": "lan",
+      "type": "IPv4Network",
+      "range": "10.0.0.0/24",
+      "gateway": "10.0.0.1",
+      "blockId": 500001,
+      "configurationId": 100001,
+      "utilization": {
+        "percentUsed": 42.5,
+        "totalCount": 254,
+        "usedCount": 108
+      }
+    }
+  ]
+}

@@ -47,6 +47,19 @@ AUTH_LOGOUT: Final = "auth.logout"
 AUTH_LOGIN_FAILED: Final = "auth.login_failed"
 AUTH_PASSWORD_CHANGED: Final = "auth.password_changed"
 AUTH_SESSION_REVOKED: Final = "auth.session_revoked"
+# ADR-0028 OIDC / SSO identity-federation audit vocabulary. Each event carries
+# the federated actor ``(idp_iss, idp_subject)`` (or ``user:<id>`` for local),
+# an outcome, and the request id — and NEVER any token/secret material. The
+# ``login_failed`` detail carries a coarse machine reason only, never raw claims
+# or tokens (ADR-0028 §3/§5). ``role_mapped`` may carry group *names* and the
+# resolved role (authorization decision), but no token material.
+AUTH_OIDC_LOGIN_SUCCEEDED: Final = "auth.oidc.login_succeeded"
+AUTH_OIDC_LOGIN_FAILED: Final = "auth.oidc.login_failed"
+AUTH_OIDC_USER_PROVISIONED: Final = "auth.oidc.user_provisioned"
+AUTH_OIDC_ROLE_MAPPED: Final = "auth.oidc.role_mapped"
+# Logging in via the fenced local path while OIDC is enabled is the audited,
+# alerted break-glass recovery action (ADR-0028 §5).
+AUTH_LOCAL_BREAKGLASS_LOGIN: Final = "auth.local.breakglass_login"
 USER_CREATED: Final = "user.created"
 USER_UPDATED: Final = "user.updated"
 USER_ROLE_CHANGED: Final = "user.role_changed"

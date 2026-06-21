@@ -36,11 +36,14 @@ invalidate the previous refresh token.
 from __future__ import annotations
 
 import secrets
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Annotated, Final, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,8 +54,13 @@ from app.api.deps import (
     get_app_settings,
     get_current_user,
     get_db,
+    get_jwks_cache,
+    get_pending_auth_store,
     require_role,
+    resolve_oidc_client_secret,
 )
+from app.api.v1.credentials import get_key_provider
+from app.core import crypto, oidc
 from app.core.config import Settings
 from app.core.errors import (
     AuthError,
@@ -71,8 +79,10 @@ from app.core.security import (
 )
 from app.llm.providers import KNOWN_PROFILES
 from app.models import Role, SystemSetting, User
+from app.services import oidc as oidc_service
 from app.services.audit import service as audit_service
 from app.services.auth_sessions import service as session_service
+from app.services.oidc import PendingAuthStore
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -88,6 +98,13 @@ REFRESH_COOKIE_PATH: Final = "/api/v1/auth"
 
 #: One generic detail for every login failure — usernames are not enumerable.
 _BAD_CREDENTIALS: Final = "Invalid username or password"
+
+#: One generic detail for every OIDC callback failure — the browser learns only
+#: "denied", never which validation/mapping branch failed (ADR-0028 §3).
+_INVALID_OIDC: Final = "OIDC authentication failed"
+
+#: Mirror of the deps-layer generic token detail (kept local to avoid a cycle).
+_INVALID_TOKEN_DETAIL: Final = "Invalid authentication credentials"
 
 #: bcrypt hash of an unguessable random value (matches no real credential).
 #: Verified against when the username is unknown so the response time matches
@@ -117,10 +134,17 @@ def _issue_tokens(user: User, sid: uuid.UUID, settings: Settings, response: Resp
     session survives a refresh, while the changing ``jti`` keeps every emitted
     token distinct. The access token is unchanged (``type=access`` + ``roles``).
     """
+    access_claims: dict[str, object] = {"type": TOKEN_TYPE_ACCESS, "roles": [user.role.name]}
+    # ADR-0028 §2: a federated session carries the IdP-anchored principal as
+    # first-class claims so downstream four-eyes/audit read it from the token
+    # without a DB round-trip. Local accounts have neither, and omit them.
+    if user.idp_subject is not None and user.idp_iss is not None:
+        access_claims["idp_iss"] = user.idp_iss
+        access_claims["idp_subject"] = user.idp_subject
     access_token = create_access_token(
         str(user.id),
         settings,
-        extra_claims={"type": TOKEN_TYPE_ACCESS, "roles": [user.role.name]},
+        extra_claims=access_claims,
     )
     refresh_token = create_access_token(
         str(user.id),
@@ -192,6 +216,13 @@ async def login(
     if not verify_password(body.password, user.password_hash) or not user.is_active:
         await _audit_login_failed(session, body.username)
         raise AuthError(_BAD_CREDENTIALS)
+    # ADR-0028 §5 break-glass: when OIDC is enabled the local-login path is
+    # fenced to the ``admin`` role only — it is the audited, alerted recovery
+    # path for an unreachable/misconfigured IdP. A non-admin local login is
+    # denied with the same generic 401 (no oracle for the fence).
+    if settings.oidc_enabled and user.role.name != RoleEnum.ADMIN.value:
+        await _audit_login_failed(session, body.username)
+        raise AuthError(_BAD_CREDENTIALS)
 
     refresh_session = await session_service.create_session(
         session,
@@ -200,10 +231,17 @@ async def login(
         ip=request.client.host if request.client else None,
     )
     access_token = _issue_tokens(user, refresh_session.id, settings, response)
+    # Normal local login when OIDC is off; a fenced admin login while OIDC is on
+    # is the alerted break-glass event (a distinct, reviewable audit action).
+    login_action = (
+        audit_service.AUTH_LOCAL_BREAKGLASS_LOGIN
+        if settings.oidc_enabled
+        else audit_service.AUTH_LOGIN
+    )
     await audit_service.record(
         session,
         actor=f"user:{user.username}",
-        action=audit_service.AUTH_LOGIN,
+        action=login_action,
         target_type="user",
         target_id=str(user.id),
         detail=None,
@@ -317,6 +355,235 @@ async def logout(
     )
     await session.commit()
     return {"revoked": True}
+
+
+# ---------------------------------------------------------------------------
+# OIDC / SSO identity federation (ADR-0028): Authorization-Code + PKCE relying
+# party that mints the SAME platform JWT after full ID-token validation. The
+# client secret is a vault credential_ref, materialized in-process only at the
+# token-exchange. Every failure mode is fail-closed (no token / bad claim / no
+# mapped role ⇒ no session) and audited without any token material.
+# ---------------------------------------------------------------------------
+
+_OIDC_DISABLED: Final = "OIDC is not enabled"
+
+
+def _oidc_actor(claims_iss: str, subject: str) -> str:
+    """Audit actor for an OIDC outcome — the anchor pair only, never a token."""
+    return f"oidc:{claims_iss}#{subject}"
+
+
+async def _audit_oidc_failed(
+    session: AsyncSession,
+    *,
+    reason: str,
+    request_id: uuid.UUID | None,
+    iss: str | None = None,
+) -> None:
+    """Audit ``auth.oidc.login_failed`` with a coarse reason — never token material."""
+    await audit_service.record(
+        session,
+        actor=f"oidc:{iss}" if iss else "oidc:unknown",
+        action=audit_service.AUTH_OIDC_LOGIN_FAILED,
+        target_type="oidc",
+        target_id=None,
+        detail={"reason": reason},
+        request_id=request_id,
+    )
+    await session.commit()
+
+
+def _request_id(request: Request) -> uuid.UUID | None:
+    """Best-effort inbound request id (for the audit trail), or ``None``."""
+    raw = request.headers.get("X-Request-ID")
+    if raw is None:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        return None
+
+
+@router.get("/oidc/login")
+async def oidc_login(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    pending_store: Annotated[PendingAuthStore, Depends(get_pending_auth_store)],
+) -> RedirectResponse:
+    """Begin Authorization-Code + PKCE: stash pending-auth, redirect to the IdP.
+
+    Generates a CSPRNG ``code_verifier`` / ``state`` / ``nonce`` (ADR-0028 §1),
+    persists the verifier+nonce server-side keyed by ``state`` (single-use,
+    short-TTL — never sent to the browser), and 307-redirects to the IdP
+    authorize URL. 404 when OIDC is not configured.
+    """
+    if not settings.oidc_enabled:
+        raise NotFoundError(_OIDC_DISABLED)
+    metadata = await oidc.fetch_discovery(str(settings.oidc_issuer))
+    pkce = oidc.generate_pkce()
+    state = oidc.generate_state()
+    nonce = oidc.generate_nonce()
+    await pending_store.put(
+        state,
+        oidc_service.PendingAuth(
+            verifier=pkce.verifier,
+            nonce=nonce,
+            redirect_uri=settings.oidc_redirect_uri,
+            created_at=time.monotonic(),
+        ),
+    )
+    url = oidc.build_authorize_url(
+        metadata,
+        client_id=str(settings.oidc_client_id),
+        redirect_uri=settings.oidc_redirect_uri,
+        scopes=settings.oidc_scopes,
+        state=state,
+        nonce=nonce,
+        challenge=pkce,
+    )
+    # 307 keeps the GET; the browser carries no verifier/nonce (server-held only).
+    return RedirectResponse(url, status_code=307)
+
+
+@router.get("/oidc/callback", response_model=TokenResponse)
+async def oidc_callback(
+    request: Request,
+    response: Response,
+    state: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    pending_store: Annotated[PendingAuthStore, Depends(get_pending_auth_store)],
+    jwks_cache: Annotated[oidc.JwksCache, Depends(get_jwks_cache)],
+    provider: Annotated[crypto.KeyProvider, Depends(get_key_provider)],
+    code: str | None = None,
+) -> TokenResponse:
+    """Complete the OIDC login: validate, JIT-provision, mint the platform JWT.
+
+    Fail-closed at every step (ADR-0028 §1/§3/§4): a missing/replayed ``state``,
+    any ID-token validation failure (bad signature/iss/aud/exp/nonce/alg:none),
+    or a groups claim that maps to no platform role all raise a generic 401 and
+    audit ``auth.oidc.login_failed`` with a coarse reason — never token material.
+    On success it mints the SAME platform JWT + refresh cookie as local login,
+    so ``require_role`` / four-eyes are unchanged.
+    """
+    if not settings.oidc_enabled:
+        raise NotFoundError(_OIDC_DISABLED)
+    request_id = _request_id(request)
+    issuer = str(settings.oidc_issuer)
+    client_id = str(settings.oidc_client_id)
+
+    pending = await pending_store.consume(state)
+    if pending is None or code is None:
+        # Absent/replayed state or no code ⇒ forged/expired callback (§3).
+        await _audit_oidc_failed(session, reason="state_invalid", request_id=request_id, iss=issuer)
+        raise AuthError(_INVALID_OIDC)
+
+    try:
+        metadata = await oidc.fetch_discovery(issuer)
+        client_secret = await resolve_oidc_client_secret(
+            session,
+            provider,
+            credential_ref=str(settings.oidc_client_secret_ref),
+            actor=f"oidc:{issuer}",
+        )
+        tokens = await oidc.exchange_code(
+            metadata,
+            code=code,
+            redirect_uri=pending.redirect_uri,
+            client_id=client_id,
+            client_secret=client_secret,
+            code_verifier=pending.verifier,
+        )
+        claims = await oidc.validate_id_token(
+            tokens.id_token,
+            jwks_cache=jwks_cache,
+            issuer=issuer,
+            jwks_uri=metadata.jwks_uri,
+            client_id=client_id,
+            nonce=pending.nonce,
+            clock_skew_secs=settings.oidc_clock_skew_secs,
+        )
+    except oidc.OidcError as exc:
+        await _audit_oidc_failed(session, reason=exc.reason, request_id=request_id, iss=issuer)
+        raise AuthError(_INVALID_OIDC) from exc
+
+    subject = str(claims["sub"])
+    groups = claims.get(settings.oidc_groups_claim)
+    role = oidc_service.map_groups_to_role(
+        groups if isinstance(groups, list) else None,
+        settings.oidc_group_role_map,
+        allow_admin=settings.oidc_allow_admin,
+    )
+    if role is None:
+        # Deny-default: authenticated but no mapped group ⇒ NO session (§4).
+        await _audit_oidc_failed(
+            session, reason="no_mapped_role", request_id=request_id, iss=issuer
+        )
+        raise AuthError(_INVALID_OIDC)
+
+    email, display_name = oidc_service.resolve_display_claims(claims)
+    user = await oidc_service.provision_or_link_user(
+        session,
+        idp_iss=issuer,
+        idp_subject=subject,
+        role=role,
+        email=email,
+        display_name=display_name,
+        request_id=request_id,
+    )
+    refresh_session = await session_service.create_session(
+        session,
+        user=user,
+        user_agent=request.headers.get("user-agent"),
+        ip=request.client.host if request.client else None,
+    )
+    access_token = _issue_tokens(user, refresh_session.id, settings, response)
+    await audit_service.record(
+        session,
+        actor=_oidc_actor(issuer, subject),
+        action=audit_service.AUTH_OIDC_LOGIN_SUCCEEDED,
+        target_type="user",
+        target_id=str(user.id),
+        detail=None,
+        request_id=request_id,
+    )
+    await session.commit()
+    return TokenResponse(access_token=access_token)
+
+
+@router.post("/oidc/logout")
+async def oidc_logout(
+    request: Request,
+    response: Response,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> dict[str, object]:
+    """Revoke the platform session and offer RP-initiated IdP logout (ADR-0028 §5).
+
+    Always revokes the cookie's server-side session and clears the cookie (the
+    bounded-revocation window is the ≤15-min access-token life), exactly like
+    :func:`logout`. Additionally, when the IdP advertises an
+    ``end_session_endpoint``, returns its ``logout_url`` (with ``id_token_hint``
+    omitted — P1 ships the redirect target; the hint is added when the IdP id
+    token is retained) so the caller can terminate the IdP session too. 404 when
+    OIDC is not enabled.
+    """
+    if not settings.oidc_enabled:
+        raise NotFoundError(_OIDC_DISABLED)
+    # Reuse the platform-side revoke + cookie-clear (idempotent, audited).
+    revoke_result = await logout(request, response, session, settings)
+    logout_url: str | None = None
+    try:
+        metadata = await oidc.fetch_discovery(str(settings.oidc_issuer))
+        if metadata.end_session_endpoint is not None:
+            params = httpx.QueryParams({"client_id": str(settings.oidc_client_id)})
+            logout_url = f"{metadata.end_session_endpoint}?{params}"
+    except oidc.OidcError:
+        # A discovery failure must not block the (already-done) platform revoke;
+        # the local session is gone regardless of IdP reachability (fail-closed
+        # for *access*, best-effort for the convenience IdP redirect).
+        logout_url = None
+    return {"revoked": revoke_result["revoked"], "logout_url": logout_url}
 
 
 # ---------------------------------------------------------------------------

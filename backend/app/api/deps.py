@@ -19,11 +19,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import db
+from app.core import crypto, oidc
 from app.core.config import Settings
 from app.core.errors import AuthError, ForbiddenError
 from app.core.security import Role, decode_access_token
 from app.knowledge import Neo4jClient, get_client
-from app.models import User
+from app.models import DeviceCredential, User
+from app.services import credentials as credentials_service
+from app.services.oidc import InMemoryPendingAuthStore, PendingAuthStore
 
 #: ADR-0010 RBAC rank order, derived from the canonical :class:`Role` enum so
 #: the API layer and the agent tool wrappers share one source of truth. Unknown
@@ -77,6 +80,66 @@ def get_knowledge_client() -> Neo4jClient:
     override a single dependency to swap in a fake graph client.
     """
     return get_client()
+
+
+def get_jwks_cache(request: Request) -> oidc.JwksCache:
+    """The process-wide per-issuer JWKS cache (ADR-0028 §3).
+
+    Lazily created once and stashed on ``app.state`` so the bounded-TTL +
+    one-forced-refresh rotation handling is shared across requests. Tests
+    override this dependency to inject a cache primed with a known key.
+    """
+    cache: oidc.JwksCache | None = getattr(request.app.state, "oidc_jwks_cache", None)
+    if cache is None:
+        settings: Settings = request.app.state.settings
+        cache = oidc.JwksCache(ttl_secs=float(settings.oidc_jwks_cache_ttl_secs))
+        request.app.state.oidc_jwks_cache = cache
+    return cache
+
+
+def get_pending_auth_store(request: Request) -> PendingAuthStore:
+    """The process-wide single-use pending-auth store (ADR-0028 §2).
+
+    Defaults to an in-process store (local-first); a Redis-backed store can be
+    bound on ``app.state`` at startup for multi-instance deployments. Tests
+    override this to share one store across the login + callback calls.
+    """
+    store: PendingAuthStore | None = getattr(request.app.state, "oidc_pending_store", None)
+    if store is None:
+        store = InMemoryPendingAuthStore()
+        request.app.state.oidc_pending_store = store
+    return store
+
+
+async def resolve_oidc_client_secret(
+    session: AsyncSession,
+    provider: crypto.KeyProvider,
+    *,
+    credential_ref: str,
+    actor: str,
+) -> str:
+    """Materialize the OIDC client secret in-process from the vault (ADR-0028 §6).
+
+    The secret is referenced by ``credential_ref`` (a vault handle, never the
+    value); it is decrypted only here, at the moment of a token-endpoint call,
+    and returned to the caller to pin onto the back-channel POST body. It is
+    never inlined in config, logged, or placed in a response/audit detail.
+
+    Raises:
+        AuthError: If the referenced credential does not exist (fail-closed —
+            an OIDC deployment with a dangling secret-ref cannot mint sessions).
+    """
+    credential = (
+        await session.execute(
+            select(DeviceCredential).where(DeviceCredential.name == credential_ref)
+        )
+    ).scalar_one_or_none()
+    if credential is None:
+        raise AuthError(_INVALID_TOKEN_DETAIL)
+    decrypted = await credentials_service.decrypt(
+        session, provider, credential, actor=actor, reason="oidc_token_exchange"
+    )
+    return decrypted.plaintext.decode("utf-8")
 
 
 async def get_current_user(

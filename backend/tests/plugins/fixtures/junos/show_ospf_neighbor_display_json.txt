@@ -1,0 +1,26 @@
+# source-derived, not live-recorded (ADR-0026 §5, ADR-0024 §5 convention)
+# JunOS show ospf neighbor | display json
+{
+    "ospf-neighbor-information" : [
+        {
+            "ospf-neighbor" : [
+                {
+                    "neighbor-address" : [{"data": "10.0.0.2"}],
+                    "interface-name" : [{"data": "ge-0/0/0.0"}],
+                    "ospf-neighbor-state" : [{"data": "Full"}],
+                    "neighbor-id" : [{"data": "10.255.0.2"}],
+                    "neighbor-priority" : [{"data": "128"}],
+                    "activity-timer" : [{"data": "31"}]
+                },
+                {
+                    "neighbor-address" : [{"data": "10.0.0.6"}],
+                    "interface-name" : [{"data": "ge-0/0/1.0"}],
+                    "ospf-neighbor-state" : [{"data": "Init"}],
+                    "neighbor-id" : [{"data": "10.255.0.3"}],
+                    "neighbor-priority" : [{"data": "1"}],
+                    "activity-timer" : [{"data": "38"}]
+                }
+            ]
+        }
+    ]
+}

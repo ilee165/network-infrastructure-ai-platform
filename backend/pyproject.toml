@@ -31,6 +31,11 @@ dependencies = [
     "cryptography",
     "pyjwt",
     "bcrypt>=4.1",
+    # OIDC/SSO relying party + JOSE (D10, ADR-0028): Authlib drives the
+    # Authorization-Code+PKCE flow, OIDC discovery, JWKS, and ID-token
+    # validation. ADR-0010 §1 / ADR-0028 §1 name it; PyJWT (above) still signs
+    # the platform-issued JWT.
+    "authlib>=1.6",
     # Agent orchestration + multi-LLM (D3, D9)
     "langgraph",
     "langchain-core",
@@ -64,10 +69,13 @@ dev = [
 # cisco_iosxe, eos) register here as
 #   <vendor_id> = "app.plugins.vendors.<vendor_id>.plugin:<Vendor>Plugin"
 [project.entry-points."netops.plugins"]
+bluecat = "app.plugins.vendors.bluecat.plugin:BluecatPlugin"
 cisco_ios = "app.plugins.vendors.cisco_ios.plugin:CiscoIosPlugin"
 cisco_iosxe = "app.plugins.vendors.cisco_iosxe.plugin:CiscoIosXePlugin"
+cisco_nxos = "app.plugins.vendors.cisco_nxos.plugin:CiscoNxosPlugin"
 eos = "app.plugins.vendors.eos.plugin:EosPlugin"
 infoblox = "app.plugins.vendors.infoblox.plugin:InfobloxPlugin"
+junos = "app.plugins.vendors.junos.plugin:JunosPlugin"
 spatiumddi = "app.plugins.vendors.spatiumddi.plugin:SpatiumddiPlugin"
 
 [tool.hatch.build.targets.wheel]
@@ -117,6 +125,7 @@ strict_equality = true
 # Vendor / third-party libraries without (complete) type stubs.
 module = [
     "asyncpg.*",
+    "authlib.*",
     "celery.*",
     "kombu.*",
     "langchain_anthropic.*",

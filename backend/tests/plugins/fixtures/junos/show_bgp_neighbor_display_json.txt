@@ -1,0 +1,35 @@
+# source-derived, not live-recorded (ADR-0026 §5, ADR-0024 §5 convention)
+# JunOS show bgp neighbor | display json
+{
+    "bgp-information" : [
+        {
+            "bgp-peer" : [
+                {
+                    "peer-address" : [{"data": "172.16.0.1+179"}],
+                    "peer-as" : [{"data": "65000"}],
+                    "local-as" : [{"data": "65001"}],
+                    "peer-state" : [{"data": "Established"}],
+                    "peer-type" : [{"data": "External"}],
+                    "bgp-rib" : [
+                        {
+                            "name" : [{"data": "inet.0"}],
+                            "received-prefix-count" : [{"data": "42"}],
+                            "accepted-prefix-count" : [{"data": "42"}],
+                            "active-prefix-count" : [{"data": "42"}],
+                            "suppressed-prefix-count" : [{"data": "0"}],
+                            "advertised-prefix-count" : [{"data": "10"}]
+                        }
+                    ]
+                },
+                {
+                    "peer-address" : [{"data": "192.168.1.2+179"}],
+                    "peer-as" : [{"data": "65002"}],
+                    "local-as" : [{"data": "65001"}],
+                    "peer-state" : [{"data": "Active"}],
+                    "peer-type" : [{"data": "External"}],
+                    "bgp-rib" : []
+                }
+            ]
+        }
+    ]
+}

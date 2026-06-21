@@ -66,6 +66,11 @@ class CredentialKind(StrEnum):
     SSH = "ssh"
     SNMP_V2C = "snmp_v2c"
     SNMP_V3 = "snmp_v3"
+    #: An OIDC confidential-client secret / IdP refresh token (ADR-0028 §6),
+    #: stored as a vault ``credential_ref`` and materialized in-process only at
+    #: the token-endpoint call. The enum column is ``native_enum=False``
+    #: (VARCHAR), so this value needs no DB migration.
+    OIDC = "oidc"
 
 
 class DiscoveryRunStatus(StrEnum):

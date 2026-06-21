@@ -1,0 +1,12 @@
+{
+  "_comment": "source-derived, not live-recorded — BAM RESTful v2 API 9.5 schema",
+  "count": 1,
+  "data": [
+    {
+      "id": 100001,
+      "name": "DefaultConfig",
+      "type": "Configuration",
+      "description": "Default enterprise configuration"
+    }
+  ]
+}

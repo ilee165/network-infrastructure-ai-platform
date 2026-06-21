@@ -32,7 +32,14 @@ FROM nginx:alpine AS runtime
 # HIGH CVEs (unfixed base-image CVEs are ignored via ignore-unfixed); this keeps
 # the shipped image current on patched packages (e.g. openssl, libxml2). Runs as
 # root — the default for nginx:alpine until the USER directive below.
-RUN apk upgrade --no-cache
+#
+# NOTE: the build uses GitHub Actions layer cache (cache-from/to type=gha,
+# scope=frontend in .github/workflows/ci.yml), so this layer is reused across
+# runs. When the CVE feed surfaces a NEW fixable base-image CVE, the cached
+# layer ships stale packages and the Trivy gate fails even though a patch
+# exists. Bump the cache-bust date below to invalidate this layer so
+# `apk upgrade` re-fetches the latest patched packages.
+RUN apk upgrade --no-cache  # cache-bust: 2026-06-21 (libexpat CVE-2026-45186)
 
 # Full nginx configuration (replaces the stock root-oriented config): SPA on
 # 8080, /api/ reverse proxy, pid + temp paths under /tmp so the non-root

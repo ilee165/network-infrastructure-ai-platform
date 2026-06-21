@@ -1,0 +1,94 @@
+{
+  "_comment": "source-derived, not live-recorded — BAM RESTful v2 API 9.5 schema; covers A, AAAA, CNAME, MX (priority), SRV (priority+weight+port), TXT, PTR",
+  "count": 7,
+  "data": [
+    {
+      "id": 400001,
+      "name": "www",
+      "absoluteName": "www.example.com",
+      "type": "A",
+      "ttl": 300,
+      "rdata": {
+        "address": "10.0.0.10"
+      },
+      "zoneId": 300001,
+      "viewId": 200001
+    },
+    {
+      "id": 400002,
+      "name": "www6",
+      "absoluteName": "www6.example.com",
+      "type": "AAAA",
+      "ttl": 300,
+      "rdata": {
+        "address": "2001:db8::10"
+      },
+      "zoneId": 300001,
+      "viewId": 200001
+    },
+    {
+      "id": 400003,
+      "name": "alias",
+      "absoluteName": "alias.example.com",
+      "type": "CNAME",
+      "ttl": 300,
+      "rdata": {
+        "linkedRecord": "www.example.com."
+      },
+      "zoneId": 300001,
+      "viewId": 200001
+    },
+    {
+      "id": 400004,
+      "name": "@",
+      "absoluteName": "example.com",
+      "type": "MX",
+      "ttl": 300,
+      "rdata": {
+        "priority": 10,
+        "linkedRecord": "mail.example.com."
+      },
+      "zoneId": 300001,
+      "viewId": 200001
+    },
+    {
+      "id": 400005,
+      "name": "_sip._tcp",
+      "absoluteName": "_sip._tcp.example.com",
+      "type": "SRV",
+      "ttl": 300,
+      "rdata": {
+        "priority": 10,
+        "weight": 60,
+        "port": 5060,
+        "linkedRecord": "sipserver.example.com."
+      },
+      "zoneId": 300001,
+      "viewId": 200001
+    },
+    {
+      "id": 400006,
+      "name": "@",
+      "absoluteName": "example.com",
+      "type": "TXT",
+      "ttl": 300,
+      "rdata": {
+        "text": "v=spf1 -all"
+      },
+      "zoneId": 300001,
+      "viewId": 200001
+    },
+    {
+      "id": 400007,
+      "name": "10",
+      "absoluteName": "10.0.0.10.in-addr.arpa",
+      "type": "PTR",
+      "ttl": 300,
+      "rdata": {
+        "dname": "www.example.com."
+      },
+      "zoneId": 300002,
+      "viewId": 200001
+    }
+  ]
+}

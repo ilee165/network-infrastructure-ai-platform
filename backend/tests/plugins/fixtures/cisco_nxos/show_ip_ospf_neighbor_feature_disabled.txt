@@ -1,0 +1,3 @@
+# Sanitized NX-OS 9.3(8) show ip ospf neighbor vrf all output when feature ospf is NOT enabled.
+# Demonstrates feature-gate tolerance (ADR-0025 §4): "feature not enabled" => empty not error.
+ERROR: This command requires the ospf feature to be enabled first. Please configure 'feature ospf'

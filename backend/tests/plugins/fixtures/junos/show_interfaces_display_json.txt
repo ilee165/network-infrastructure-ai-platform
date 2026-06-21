@@ -1,0 +1,74 @@
+# source-derived, not live-recorded (ADR-0026 §5, ADR-0024 §5 convention)
+# JunOS show interfaces | display json
+{
+    "interface-information" : [
+        {
+            "physical-interface" : [
+                {
+                    "name" : [{"data": "ge-0/0/0"}],
+                    "admin-status" : [{"data": "up"}],
+                    "oper-status" : [{"data": "up"}],
+                    "if-device-flags" : [{}],
+                    "mtu" : [{"data": "1514"}],
+                    "speed" : [{"data": "1000mbps"}],
+                    "link-duplex" : [{"data": "Full-Duplex"}],
+                    "description" : [{"data": "uplink-to-core01"}],
+                    "current-physical-address" : [{"data": "00:1f:12:ab:cd:01"}],
+                    "logical-interface" : [
+                        {
+                            "name" : [{"data": "ge-0/0/0.0"}],
+                            "address-family" : [
+                                {
+                                    "address-family-name" : [{"data": "inet"}],
+                                    "interface-address" : [
+                                        {
+                                            "ifa-local" : [{"data": "10.0.0.1/30"}]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "name" : [{"data": "ge-0/0/1"}],
+                    "admin-status" : [{"data": "up"}],
+                    "oper-status" : [{"data": "down"}],
+                    "if-device-flags" : [{}],
+                    "mtu" : [{"data": "1514"}],
+                    "speed" : [{"data": "1000mbps"}],
+                    "link-duplex" : [{"data": "Full-Duplex"}],
+                    "description" : [{"data": "to-branch-office"}],
+                    "current-physical-address" : [{"data": "00:1f:12:ab:cd:02"}],
+                    "logical-interface" : []
+                },
+                {
+                    "name" : [{"data": "fxp0"}],
+                    "admin-status" : [{"data": "up"}],
+                    "oper-status" : [{"data": "up"}],
+                    "if-device-flags" : [{}],
+                    "mtu" : [{"data": "1514"}],
+                    "speed" : [{"data": "1000mbps"}],
+                    "link-duplex" : [{"data": "Full-Duplex"}],
+                    "description" : [{"data": "oob-mgmt"}],
+                    "current-physical-address" : [{"data": "00:1f:12:ab:cd:03"}],
+                    "logical-interface" : [
+                        {
+                            "name" : [{"data": "fxp0.0"}],
+                            "address-family" : [
+                                {
+                                    "address-family-name" : [{"data": "inet"}],
+                                    "interface-address" : [
+                                        {
+                                            "ifa-local" : [{"data": "192.168.100.20/24"}]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,28 @@
+# source-derived, not live-recorded (ADR-0026 §5, ADR-0024 §5 convention)
+# JunOS show version | display json — structured identity output
+{
+    "software-information" : [
+        {
+            "host-name" : [
+                {
+                    "data" : "juniper-mx01"
+                }
+            ],
+            "product-model" : [
+                {
+                    "data" : "MX480"
+                }
+            ],
+            "product-name" : [
+                {
+                    "data" : "MX480"
+                }
+            ],
+            "junos-version" : [
+                {
+                    "data" : "23.1R1.8"
+                }
+            ]
+        }
+    ]
+}

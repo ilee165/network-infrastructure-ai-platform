@@ -1,0 +1,37 @@
+{
+  "_comment": "source-derived, not live-recorded — BAM RESTful v2 API 9.5 schema; two-page fixture to exercise offset/limit accumulation (ADR-0027 §4)",
+  "page1": {
+    "count": 3,
+    "data": [
+      {
+        "id": 300001,
+        "name": "example.com",
+        "absoluteName": "example.com",
+        "type": "Zone",
+        "deployable": true,
+        "viewId": 200001
+      },
+      {
+        "id": 300002,
+        "name": "10.in-addr.arpa",
+        "absoluteName": "10.in-addr.arpa",
+        "type": "Zone",
+        "deployable": true,
+        "viewId": 200001
+      }
+    ]
+  },
+  "page2": {
+    "count": 3,
+    "data": [
+      {
+        "id": 300003,
+        "name": "test.internal",
+        "absoluteName": "test.internal",
+        "type": "Zone",
+        "deployable": false,
+        "viewId": 200001
+      }
+    ]
+  }
+}
