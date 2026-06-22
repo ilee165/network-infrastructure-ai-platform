@@ -81,8 +81,11 @@ spec:
                     publicKeys: ""
 {{- end }}
 
-    # --- Rule 3: PSS deviation allow-list — only the packet sandbox may add
-    #     NET_RAW or run a non-RuntimeDefault seccomp profile. ---
+    # --- Rule 3: PSS deviation allow-list — only the packet-CAPTURE workload may
+    #     add NET_RAW/NET_ADMIN. Excluded by the NARROW net-raw label (capture
+    #     ONLY), NOT the broad packet-sandbox label — so the analysis parser stays
+    #     SUBJECT to this rule and a NET_RAW regression on it fails admission
+    #     (ADR-0031 §2). ---
     - name: restrict-net-raw-to-packet-sandbox
       match:
         any:
@@ -94,9 +97,9 @@ spec:
           - resources:
               selector:
                 matchLabels:
-                  {{- toYaml .Values.admission.packetSandboxSelector.matchLabels | nindent 18 }}
+                  {{- toYaml .Values.admission.netRawDeviationSelector.matchLabels | nindent 18 }}
       validate:
-        message: "NET_RAW / NET_ADMIN may be added only by the packet-sandbox workloads (ADR-0031 §5)."
+        message: "NET_RAW / NET_ADMIN may be added only by the packet-capture workload (ADR-0031 §2/§5)."
         pattern:
           spec:
             =(containers):

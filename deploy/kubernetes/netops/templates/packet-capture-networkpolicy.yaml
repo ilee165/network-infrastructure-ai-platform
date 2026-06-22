@@ -1,0 +1,77 @@
+{{- /*
+Default-deny egress NetworkPolicy for the packet-CAPTURE pod (ADR-0031 §4).
+
+The capture pod is credential-bearing and holds NET_RAW; an UNRESTRICTED egress
+would let a compromised capture worker reach anything (PRODUCTION.md §5 "collector
+network segmentation: egress restricted to management subnets"). ADR-0031 §4: the
+capture policy "does allow management-subnet egress confined to those subnets".
+
+default-deny ingress + egress, with egress allowed ONLY to:
+- cluster DNS (resolve the Redis/Postgres/device names),
+- the device MANAGEMENT subnet CIDR(s) (drive SSH / monitor-session captures),
+- the Redis broker (pull packet_capture tasks + write results),
+- Postgres (persist pcap_metadata).
+Everything else — internet, other namespaces, other subnets — is denied. This is
+the egress half that lives with capture (trusted input); the analysis parser gets
+NO management egress at all (ADR-0031 §4 "egress lives with capture").
+
+Installed into the capture namespace (ADR-0031 §5) alongside the capture
+Deployment/SA.
+*/ -}}
+{{- if and .Values.networkPolicy.enabled .Values.packet.enabled .Values.packet.capture.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: packet-capture-egress
+  namespace: {{ include "netops.captureNamespace" . }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: packet-capture
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "netops.name" . }}
+      app.kubernetes.io/component: packet-capture
+  policyTypes:
+    - Ingress
+    - Egress
+  # Ingress: none. (No ingress rules => deny all inbound.)
+  ingress: []
+  egress:
+    # Cluster DNS only (UDP+TCP 53).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceSelectorLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Device MANAGEMENT subnet(s) only — the capture pod drives device SSH /
+    # monitor-session captures. Confined to these CIDRs (PRODUCTION.md §5).
+    - to:
+        {{- range .Values.networkPolicy.captureManagementCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+    # Redis broker — pull packet_capture tasks + write results.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.broker.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.broker.port }}
+    # Postgres — persist pcap_metadata.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+{{- end }}

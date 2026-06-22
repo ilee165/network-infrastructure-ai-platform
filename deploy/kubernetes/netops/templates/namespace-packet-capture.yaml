@@ -1,0 +1,33 @@
+{{- /*
+Dedicated namespace for the packet-CAPTURE workload (ADR-0031 §5).
+
+The install namespace enforces Pod Security Admission `restricted`. The capture
+Deployment adds NET_RAW + NET_ADMIN (worker-side tcpdump / device monitor-session
+capture), which PSS `restricted` — and even `baseline` (allowed-add list is
+NET_BIND_SERVICE only) — forbids. Built-in PSA is a SEPARATE controller from the
+Kyverno/VAP admission allow-list: a pod label cannot grant a PSA exemption (PSA
+exemptions are API-server config). So the deviation is granted at the NAMESPACE
+level here, scoped to this one namespace and node pool (ADR-0031 §5 "deviation
+granted only to the packet namespace/node pool"). The analysis parser stays in the
+restricted install namespace, fully compliant.
+
+enforce=privileged is the only built-in level that admits the added capability;
+audit/warn stay restricted so other drift in this namespace still surfaces. The
+capture pod itself remains non-root, non-privileged, readOnlyRootFilesystem — only
+the single NET_RAW/NET_ADMIN capability deviation is what needs the relaxed level.
+*/ -}}
+{{- if and .Values.packet.enabled .Values.packet.capture.enabled .Values.captureNamespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "netops.captureNamespace" . }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: packet-capture
+    pod-security.kubernetes.io/enforce: {{ .Values.captureNamespace.podSecurity.enforce }}
+    pod-security.kubernetes.io/enforce-version: {{ .Values.captureNamespace.podSecurity.version }}
+    pod-security.kubernetes.io/audit: {{ .Values.captureNamespace.podSecurity.audit }}
+    pod-security.kubernetes.io/audit-version: {{ .Values.captureNamespace.podSecurity.version }}
+    pod-security.kubernetes.io/warn: {{ .Values.captureNamespace.podSecurity.warn }}
+    pod-security.kubernetes.io/warn-version: {{ .Values.captureNamespace.podSecurity.version }}
+{{- end }}

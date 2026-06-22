@@ -70,6 +70,17 @@ seccompProfile:
 {{- printf "%s:%s" $img.repository $img.tag -}}
 {{- end -}}
 
+{{/*
+Namespace the packet-CAPTURE workload (Deployment/SA/NetworkPolicy) is installed
+into (ADR-0031 §5). Capture adds NET_RAW, which built-in Pod Security Admission
+rejects under `restricted` and a pod label cannot exempt — so capture lives in
+its own namespace at a relaxed PSA level. Falls back to the release namespace if
+unset so the chart still renders.
+*/}}
+{{- define "netops.captureNamespace" -}}
+{{- default .Release.Namespace .Values.captureNamespace.name -}}
+{{- end -}}
+
 {{/* Packet node-pool toleration matching the taint (ADR-0031 §5). */}}
 {{- define "netops.packetToleration" -}}
 - key: {{ .Values.packetNodePool.taint.key | quote }}

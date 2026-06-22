@@ -223,6 +223,9 @@ def test_analyze_capture_returns_findings_and_audits_no_payload(
         return findings
 
     monkeypatch.setattr(tasks, "_analyze_pcap", _fake_analyze)
+    # The OS-isolation posture is the deployment's job; the eager runner has none
+    # of those controls, so the runtime backstop is neutralized here (ADR-0031 §2).
+    monkeypatch.setattr(tasks, "_assert_posture", lambda settings: None)
 
     result = tasks.analyze_capture(str(capture_id))
 
@@ -244,6 +247,7 @@ def test_analyze_capture_sandbox_failure_is_audited(
         raise SandboxError("tshark exceeded the timeout")
 
     monkeypatch.setattr(tasks, "_analyze_pcap", _boom)
+    monkeypatch.setattr(tasks, "_assert_posture", lambda settings: None)
 
     result = tasks.analyze_capture(str(uuid.uuid4()))
     assert result["ok"] is False
@@ -260,9 +264,42 @@ def test_analyze_capture_rejected_filter_is_audited(
         raise FilterValidationError("filter rejected")
 
     monkeypatch.setattr(tasks, "_analyze_pcap", _reject)
+    monkeypatch.setattr(tasks, "_assert_posture", lambda settings: None)
 
     result = tasks.analyze_capture(str(uuid.uuid4()), display_filter="tcp; rm -rf /")
     assert result["ok"] is False
+    actions = {a.action for a in _fetch_all(db_url, AuditLog)}
+    assert "packet.analysis_failed" in actions
+
+
+def test_analyze_capture_refuses_when_posture_check_fails(
+    eager_celery: None, db_url: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A misconfigured deployment fails closed: posture failure => no tshark, audited.
+
+    The runtime backstop (ADR-0031 §2) refuses to spawn tshark when the worker is
+    root / holds CAP_NET_RAW / has a writable rootfs. Here the posture seam raises
+    and we assert tshark is never invoked and the failure is audited as ok=False.
+    """
+    from app.engines.packet import PostureError
+
+    monkeypatch.setattr(tasks._settings(), "pcap_dir", tmp_path)
+    spawned: list[Any] = []
+
+    def _should_not_run(path: str, *, display_filter: Any, settings: Any) -> PacketFindings:
+        spawned.append(path)
+        return PacketFindings(packet_count=0)
+
+    def _bad_posture(settings: Any) -> None:
+        raise PostureError("effective UID is 0 (root); the parser must run non-root")
+
+    monkeypatch.setattr(tasks, "_analyze_pcap", _should_not_run)
+    monkeypatch.setattr(tasks, "_assert_posture", _bad_posture)
+
+    result = tasks.analyze_capture(str(uuid.uuid4()))
+
+    assert result["ok"] is False
+    assert spawned == []  # tshark never spawned — failed closed
     actions = {a.action for a in _fetch_all(db_url, AuditLog)}
     assert "packet.analysis_failed" in actions
 

@@ -3,14 +3,18 @@ Default-deny ingress+egress NetworkPolicy for the packet-analysis pod
 (ADR-0031 §4). The analysis pod is the highest-risk workload and gets the
 tightest policy on the platform:
 - default-deny: no ingress from outside the namespace, no egress by default.
-- egress allows ONLY: cluster DNS (resolve the Postgres Service name) and
-  Postgres (write normalized findings + pcap_metadata).
+- egress allows ONLY: cluster DNS (resolve the Postgres/Redis Service names),
+  Postgres (write normalized findings + pcap_metadata), and the Redis broker
+  (the Celery worker pulls tasks from + writes results to Redis — ADR-0031 §4
+  "the broker connection is egress from the worker's perspective and is
+  allow-listed to the Redis Service only").
 - NO route to device-management subnets, NO internet egress.
 tshark is invoked with -n (ADR-0023 §1) so the DNS allow is the backstop, not a
 relied-on path. Two independent layers: -n primary, NetworkPolicy backstop.
 
-The capture pod's policy (broader, management-subnet egress) is W4/separate —
-egress lives with capture (trusted input), parsing lives with analysis (none).
+The capture pod's policy (broader, management-subnet egress) ships separately in
+packet-capture-networkpolicy.yaml — egress lives with capture (trusted input),
+parsing lives with analysis (Redis broker + Postgres + DNS only, no device egress).
 */ -}}
 {{- if and .Values.networkPolicy.enabled .Values.packet.enabled .Values.packet.analysis.enabled }}
 apiVersion: networking.k8s.io/v1
@@ -47,7 +51,7 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Postgres only — write findings + pcap_metadata. No other egress.
+    # Postgres only — write findings + pcap_metadata.
     - to:
         - podSelector:
             matchLabels:
@@ -55,4 +59,16 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.postgres.port }}
+    # Redis broker only — the Celery worker PULLS tasks from and writes results to
+    # Redis (broker + result backend; celery_app.py). ADR-0031 §4: "the broker
+    # connection is egress from the worker's perspective and is allow-listed to the
+    # Redis Service only." Without this the analysis worker receives zero tasks.
+    # No other egress: no device-management subnets, no internet.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.broker.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.broker.port }}
 {{- end }}
