@@ -41,7 +41,6 @@ from .assertions import (
     assert_restore_authorized,
     assert_sampled_sha256_matches,
     emit_line,
-    is_authorized,
 )
 from .fixture import build_seeded_state, live_snapshot_ids, tombstoned_capture_ids
 
@@ -64,6 +63,22 @@ async def _run_async(args: argparse.Namespace, *, stream: TextIO | None = None) 
     sampled id and the MATCH/NO outcome either way so the W5-T5 collector always
     sees a result.
     """
+    # (c) engineer+ gate FIRST — refuse a sub-engineer actor BEFORE any restore I/O
+    # or manifest materialization (ADR-0023 §5). An unauthorized actor must trigger
+    # ZERO side effects: no scratch dir, no file copy, no manifest write. We emit the
+    # gated FAIL line and fail closed before touching disk.
+    try:
+        assert_restore_authorized(args.actor_role, min_role=args.min_role, stream=stream)
+    except DrillError as exc:
+        emit_line(
+            PcapDrillResult(
+                "unauthorized", sha256_match=False, tombstoned_resurrected=False, passed=False
+            ).line(),
+            stream=stream,
+        )
+        emit_line(f"{DRILL_TAG} OUTCOME=FAIL failed_assertion={exc.assertion}", stream=stream)
+        return 1
+
     restore_root = Path(args.restore_path) if args.restore_path else Path(tempfile.mkdtemp())
     pcap_src = restore_root / "src-pcaps"
     restored = restore_root / "restored"
@@ -103,9 +118,7 @@ async def _run_async(args: argparse.Namespace, *, stream: TextIO | None = None) 
     sha_match = False
     resurrected = False
     try:
-        # (c) engineer+ gate — refuse a sub-engineer actor (ADR-0023 §5).
-        assert_restore_authorized(args.actor_role, min_role=args.min_role, stream=stream)
-
+        # (c) authorization is already enforced ABOVE, before any restore I/O.
         # (a) the sampled LIVE capture's restored bytes sha256-match (ADR-0023 §3).
         restored_sample = restored / f"{sampled}.pcap"
         assert_sampled_sha256_matches(
@@ -185,10 +198,8 @@ def _assert_guard_bites(
 def run(argv: Sequence[str] | None = None, *, stream: TextIO | None = None) -> int:
     """Sync wrapper around the async drill (the module entrypoint)."""
     args = _parse_args(argv)
-    # Fail closed early on an obviously-unauthorized actor before any restore I/O.
-    if not is_authorized(args.actor_role, args.min_role):
-        # Still run the full path so the gated assertion emits its FAIL line.
-        pass
+    # Authorization is enforced inside `_run_async` BEFORE any restore I/O (an
+    # unauthorized actor triggers zero side effects), so no pre-check is needed here.
     return asyncio.run(_run_async(args, stream=stream))
 
 

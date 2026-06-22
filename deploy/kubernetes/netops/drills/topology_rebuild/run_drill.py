@@ -44,6 +44,19 @@ from .fixture import build_seeded_projection, run_rebuild
 DEFAULT_RTO_SECONDS = 1800.0
 
 
+def _non_negative_int(value: str) -> int:
+    """Parse a >= 0 int for --count-tolerance.
+
+    A negative tolerance makes a HEALTHY rebuild fail deterministically
+    (``abs(delta) > tolerance`` is always true when tolerance < 0), so reject it at
+    parse time rather than silently inverting the drift assertion.
+    """
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("--count-tolerance must be >= 0")
+    return parsed
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="topology_rebuild.run_drill")
     parser.add_argument(
@@ -54,9 +67,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--count-tolerance",
-        type=int,
-        default=int(os.environ.get("TOPOLOGY_COUNT_TOLERANCE", "0")),
-        help="allowed absolute node/edge count drift vs the pre-wipe projection.",
+        type=_non_negative_int,
+        default=_non_negative_int(os.environ.get("TOPOLOGY_COUNT_TOLERANCE", "0")),
+        help="allowed absolute node/edge count drift vs the pre-wipe projection (>= 0).",
     )
     return parser.parse_args(list(argv) if argv is not None else None)
 

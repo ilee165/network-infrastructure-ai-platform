@@ -101,8 +101,13 @@ async def plan(
         # top of the tombstoned_at filter above.
         if cid in prune_ids:
             continue
-        # Only snapshot a file that is actually present on the volume.
-        if storage_path and not Path(storage_path).exists():
+        # Only snapshot a file that has a concrete path AND is present on the
+        # volume. A row with no storage_path (None/"") cannot be a "file-present"
+        # copy candidate — emitting it would poison apply (a None/garbage object
+        # key), so skip it outright.
+        if not storage_path:
+            continue
+        if not Path(storage_path).exists():
             continue
         effective = _effective_expiry(retention_expires_at, policy_days, moment)
         copy.append(

@@ -162,12 +162,19 @@ async def live_snapshot_ids(state: SeededPcapState) -> set[uuid.UUID]:
     async with state.sessionmaker() as session:
         from sqlalchemy import select
 
-        rows = (
-            await session.execute(
-                select(PcapMetadata.capture_id).where(PcapMetadata.tombstoned_at.is_(None))
-            )
-        ).scalars()
-        return set(rows)
+        rows = list(
+            (
+                await session.execute(
+                    select(PcapMetadata.capture_id).where(PcapMetadata.tombstoned_at.is_(None))
+                )
+            ).scalars()
+        )
+        # A row can be NON-tombstoned yet PAST retention (the live purge worklist):
+        # it is about to be purged and must NOT be a snapshot candidate. Exclude it
+        # via the SAME expired_capture_ids worklist the snapshot/prune uses — so the
+        # retention proof is not weakened by an expired-but-not-yet-tombstoned leak.
+        expired = set(await expired_capture_ids(session))
+        return {capture_id for capture_id in rows if capture_id not in expired}
 
 
 async def tombstoned_capture_ids(state: SeededPcapState) -> set[uuid.UUID]:

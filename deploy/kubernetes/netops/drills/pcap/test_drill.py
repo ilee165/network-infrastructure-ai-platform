@@ -336,6 +336,34 @@ def test_full_drill_refuses_sub_engineer_actor(tmp_path, capsys) -> None:
     assert "OUTCOME=FAIL" in out
 
 
+def test_unauthorized_actor_triggers_no_restore_side_effects(tmp_path, capsys) -> None:
+    # The engineer+ gate runs BEFORE any restore I/O / manifest materialization: an
+    # unauthorized actor must produce ZERO side effects — no manifest written and no
+    # restored/ scratch tree created (authorize-before-side-effect; ADR-0023 §5).
+    restore_path = tmp_path / "restore"
+    manifest_path = tmp_path / "manifest.json"
+    rc = run(
+        [
+            "--restore-path",
+            str(restore_path),
+            "--actor-role",
+            "viewer",
+            "--min-role",
+            "engineer",
+            "--manifest-out",
+            str(manifest_path),
+        ]
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "restore_authorized=FAIL" in out
+    assert "OUTCOME=FAIL" in out
+    # No restore materialization happened: the manifest was never written and the
+    # restored/ scratch dir was never created.
+    assert not manifest_path.exists()
+    assert not (restore_path / "restored").exists()
+
+
 # ---------------------------------------------------------------------------
 # Fail-closed empty-plan guard (ADR-0030 §3): a missing DSN with no explicit
 # dry-run must FAIL the snapshot (non-zero, no plan file) — never a green empty

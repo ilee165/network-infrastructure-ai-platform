@@ -187,7 +187,7 @@ light).
 docker compose \
   -f deploy/docker/docker-compose.yml \
   -f deploy/docker/docker-compose.backup.yml \
-  --profile backup --env-file ../../.env up -d
+  --profile backup --env-file .env up -d
 
 # Run a full backup + verify on demand (the same script ofelia schedules):
 docker compose -f deploy/docker/docker-compose.yml -f deploy/docker/docker-compose.backup.yml \
@@ -200,3 +200,16 @@ root `.env` as `PGBACKREST_REPO1_*` / `MINIO_ROOT_*` env — NEVER inlined in
 `pgbackrest/pgbackrest.conf` or the compose file (the repo and its key are never
 co-located, ADR-0011 §4). The restore / PITR drill is W5-T2. RPO ≤ 5 min is a
 PROPOSED target (ADR-0030 §6), re-based in the W5-T5 evidence doc.
+
+> **⚠️ This `backup` profile is LOCAL-DEV-ONLY — do not run it in production.**
+> Scheduling uses `ofelia`, which mounts the host Docker socket
+> (`/var/run/docker.sock`). The `:ro` flag on that mount marks only the socket
+> *file* read-only; it is **not** a Docker-API write barrier — any process that can
+> reach the socket can still issue write calls (create/exec/stop containers), which
+> is effectively host root. That is acceptable for a single-developer stack but not
+> for a shared or production host. The production-grade equivalent is the Helm
+> `netops` chart's pgBackRest CronJobs (`deploy/kubernetes`), which schedule via the
+> Kubernetes API with a scoped ServiceAccount and never mount the Docker socket. A
+> hardened compose variant (fronting `ofelia` with a least-privilege
+> `docker-socket-proxy`) is intentionally out of scope for this dev convenience
+> profile.

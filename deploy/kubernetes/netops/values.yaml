@@ -326,11 +326,17 @@ backup:
     enabled: true
     # pgBackRest stanza name — the logical backup set for this Postgres cluster.
     stanza: netops
-    # pgBackRest image (contains pgbackrest + the postgres client libs). Explicit
-    # version tag ONLY — the admission policy (ADR-0029 §5) rejects `latest`.
+    # pgBackRest image (contains pgbackrest + the postgres client libs). The
+    # pgBackRest project does NOT publish an official application image
+    # (pgbackrest/* on Docker Hub is dev/test only), so we use the actively
+    # maintained community image `woblerr/pgbackrest` (github.com/woblerr/
+    # docker-pgbackrest). Pinned to a FULLY-qualified, immutable tag (pgBackRest
+    # version + image build rev) — explicit version ONLY; the admission policy
+    # (ADR-0029 §5) rejects `latest`. Operators may re-pin by digest in their
+    # overlay for supply-chain strictness.
     image:
-      repository: pgbackrest/pgbackrest
-      tag: "2.54.2"
+      repository: woblerr/pgbackrest
+      tag: "2.55.1-v0.36"
       pullPolicy: IfNotPresent
     # WAL archiving is the RPO floor (ADR-0030 §1/§6). archive_mode=on +
     # archive-push so recovery reaches the last archived WAL segment. The RPO

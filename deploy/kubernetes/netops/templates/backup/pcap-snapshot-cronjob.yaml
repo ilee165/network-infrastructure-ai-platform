@@ -121,9 +121,14 @@ spec:
                   test -s /tmp/pcap-snapshot/plan.json
                   echo "[pcap-snapshot] copy LIVE files + prune tombstoned/expired object copies"
                   # The planner applies the plan via the configured object-store
-                  # client when --apply is set; in P1 it runs plan-only (no live
-                  # store) so the gate is a green dry-run. P2 supplies --apply.
-                  python -m pcap.snapshot --apply-plan /tmp/pcap-snapshot/plan.json ${PCAP_SNAPSHOT_APPLY:+--apply}
+                  # client when --apply is passed; in P1 (dryRun=true) it runs
+                  # plan-only (no live store) so the gate is a green dry-run. The
+                  # --apply flag is rendered IN by Helm from `backup.pcap.dryRun`
+                  # (apply mode = NOT dry-run) — P2 flips dryRun=false and the
+                  # snapshot actually copies/prunes. Rendering the literal flag (vs
+                  # a runtime `${VAR:+--apply}` that always expanded empty because
+                  # no such env was ever set) is what makes apply mode reachable.
+                  python -m pcap.snapshot --apply-plan /tmp/pcap-snapshot/plan.json {{- if not $p.dryRun }} --apply{{- end }}
                   echo "[pcap-snapshot] daily snapshot complete (live-only, retention-honored)"
               env:
                 # On-volume pcap dir + the pcap object-store prefix (used by the

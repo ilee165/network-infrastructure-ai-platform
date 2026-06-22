@@ -24,6 +24,16 @@ is degraded (ADR-0030 §4/§5, Alt #5). Disabling the tier (backup.postgres.enab
 =false) renders NONE of this (a warned opt-out, NOTES.txt).
 */ -}}
 {{- if and .Values.backup.postgres.enabled .Values.services.postgres.enabled }}
+{{- /* Fail fast (render-time) when the TLS backup path is disabled: these in-chart
+       CronJobs reach PGDATA ONLY through the pgBackRest TLS server sidecar (the
+       CronJob pod has no PGDATA volume). With TLS off they would render onto a
+       non-working path and fail at RUNTIME — a clear render-time error is safer
+       than a silently-broken DR tier (ADR-0030 §1/§4). An out-of-cluster pgBackRest
+       topology that does not need this sidecar opts the WHOLE tier out
+       (backup.postgres.enabled=false), not just TLS. */ -}}
+{{- if not .Values.backup.postgres.tls.enabled }}
+{{- fail "backup.postgres.tls.enabled must be true when backup.postgres.enabled=true (the in-chart pgBackRest CronJobs reach PGDATA only via the TLS server sidecar; ADR-0030 §1/§4). Disable the whole tier (backup.postgres.enabled=false) for an out-of-cluster pgBackRest topology." }}
+{{- end }}
 {{- $b := .Values.backup.postgres -}}
 {{- $fullname := include "netops.fullname" . -}}
 apiVersion: batch/v1

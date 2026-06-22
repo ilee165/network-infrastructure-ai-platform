@@ -943,6 +943,32 @@ backup_credential_env(name) if {
 	endswith(name, "S3_KEY_SECRET")
 }
 
+# --- REQUIRED credential envs: the prior rules only validate a credential env when
+# it is PRESENT, so DELETING or RENAMING the pgBackRest cipher pass / S3 key / S3
+# secret would bypass the policy entirely — producing a green backup CronJob that
+# cannot decrypt or reach the repo. Require each, by EXACT name, sourced from a
+# secretKeyRef (ADR-0030 §1 / ADR-0029 §6). ---
+required_backup_credential_envs := {
+	"PGBACKREST_REPO1_CIPHER_PASS",
+	"PGBACKREST_REPO1_S3_KEY",
+	"PGBACKREST_REPO1_S3_KEY_SECRET",
+}
+
+container_has_secret_env(c, name) if {
+	some e in object.get(c, "env", [])
+	e.name == name
+	e.valueFrom.secretKeyRef
+	object.get(e, "value", null) == null
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	some name in required_backup_credential_envs
+	not container_has_secret_env(c, name)
+	msg := sprintf("backup CronJob %q container %q must set %q from valueFrom.secretKeyRef (deleting/renaming the cipher pass or object-store credential must not silently pass; ADR-0030 §1 / ADR-0029 §6)", [input.metadata.name, c.name, name])
+}
+
 deny contains msg if {
 	is_backup_cronjob(input)
 	some c in backup_containers(input)
@@ -1511,11 +1537,23 @@ deny contains msg if {
 # would grant the snapshot the pgbackrest/ prefix (broad grant) and vice-versa —
 # a leak of one would expose the other's prefix (ADR-0030 §3 / least-privilege §7).
 # Asserted by the secretKeyRef KEY NAME the snapshot env points at. ---
+# BOTH halves of the S3 credential (the access key id AND the secret) are checked:
+# `endswith(.., "S3_KEY")` is FALSE for `..S3_KEY_SECRET`, so a separation check on
+# the key id alone would let the secret half point at the pgbackrest repo credential
+# and pass. Match either suffix.
+pcap_snapshot_s3_env(name) if {
+	endswith(name, "S3_KEY")
+}
+
+pcap_snapshot_s3_env(name) if {
+	endswith(name, "S3_KEY_SECRET")
+}
+
 deny contains msg if {
 	is_pcap_snapshot(input)
 	some c in pcap_snapshot_containers(input)
 	some e in object.get(c, "env", [])
-	endswith(e.name, "S3_KEY")
+	pcap_snapshot_s3_env(e.name)
 	key := e.valueFrom.secretKeyRef.key
 	contains(key, "backup-repo-s3")
 	msg := sprintf("pcap snapshot %q env %q must reference the pcap-prefix-scoped credential (pcap-snapshot-s3-*), NOT the pgbackrest repo credential %q — a snapshot that reuses the pgbackrest credential gets a broad cross-prefix grant (ADR-0030 §3 / least-privilege §7)", [input.metadata.name, e.name, key])
@@ -1612,6 +1650,10 @@ deny contains msg if {
 pcap_drill_has_min_role(c) if {
 	some e in object.get(c, "env", [])
 	e.name == "DRILL_MIN_ROLE"
+	# Presence is not enough: a lower role (e.g. `viewer`) would satisfy a bare
+	# presence check while WEAKENING the gate. The restore must stay engineer+
+	# (ADR-0023 §5), so assert the rendered value IS the engineer role.
+	lower(sprintf("%v", [e.value])) == "engineer"
 }
 
 # --- pod hardening parity for both pcap objects (the CronJob/Job kinds nest
@@ -1664,6 +1706,31 @@ deny contains msg if {
 	some c in pcap_workload_containers(input)
 	c.securityContext.allowPrivilegeEscalation != false
 	msg := sprintf("pcap workload %q container %q must set allowPrivilegeEscalation=false (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+# RuntimeDefault seccomp parity: the other W5 backup/drill workloads (the backup
+# CronJob, the PITR / neo4j / full-platform drills) all assert a RuntimeDefault
+# seccompProfile; the pcap parity block omitted it, so a pcap pod could pass with no
+# seccomp. Match container-level OR the pod-level (CronJob/Job) seccompProfile.
+deny contains msg if {
+	is_pcap_workload(input)
+	some c in pcap_workload_containers(input)
+	not pcap_workload_container_seccomp_set(input, c)
+	msg := sprintf("pcap workload %q container %q must set a RuntimeDefault seccompProfile (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+pcap_workload_container_seccomp_set(_, c) if {
+	c.securityContext.seccompProfile.type == "RuntimeDefault"
+}
+
+pcap_workload_container_seccomp_set(obj, _) if {
+	is_pcap_snapshot(obj)
+	obj.spec.jobTemplate.spec.template.spec.securityContext.seccompProfile.type == "RuntimeDefault"
+}
+
+pcap_workload_container_seccomp_set(obj, _) if {
+	is_pcap_drill(obj)
+	pcap_drill_pod_spec(obj).securityContext.seccompProfile.type == "RuntimeDefault"
 }
 
 deny contains msg if {

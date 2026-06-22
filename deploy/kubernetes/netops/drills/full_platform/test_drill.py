@@ -112,6 +112,39 @@ def test_composite_line_carries_measured_numbers() -> None:
     assert "topology_rto_s=2.000" in line
 
 
+def test_over_budget_rto_fails_even_when_all_tiers_pass() -> None:
+    """A chain that passed every tier but blew the end-to-end RTO budget is FAIL.
+
+    Wires the --rto-minutes budget (ADR-0030 §6 G-REL): passing tiers is necessary
+    but NOT sufficient — exceeding the measured RTO target fails the aggregate.
+    """
+    ev = collect("\n".join(_ALL))  # every tier OUTCOME=PASS
+    assert ev.passed is True  # no budget set yet → tiers-only verdict
+    # Measured chain RTO (3600s) exceeds a 60-minute (3600s) budget? equal passes;
+    # make it strictly over.
+    ev.rto_budget_seconds = 3600.0
+    ev.rto_seconds = 3600.0
+    assert ev.passed is True  # exactly at budget is allowed (<=)
+    ev.rto_seconds = 3600.1  # one tick over budget
+    assert ev.passed is False
+    assert "result=FAIL" in ev.composite_line()
+
+
+def test_within_budget_rto_still_passes() -> None:
+    ev = collect("\n".join(_ALL))
+    ev.rto_budget_seconds = 3600.0
+    ev.rto_seconds = 12.0
+    assert ev.passed is True
+
+
+def test_no_budget_means_rto_not_enforced() -> None:
+    """Back-compat: with no rto_budget_seconds, the RTO check is a no-op."""
+    ev = collect("\n".join(_ALL))
+    ev.rto_seconds = 999999.0  # absurd RTO, but no budget configured
+    assert ev.rto_budget_seconds is None
+    assert ev.passed is True
+
+
 # ---------------------------------------------------------------------------
 # End-to-end seeded dry-run: all three tiers PASS (W5-T5 exit criterion).
 # ---------------------------------------------------------------------------
@@ -139,3 +172,32 @@ def test_seeded_chain_is_green_end_to_end() -> None:
     # The composite end-to-end line is emitted with a PASS verdict.
     assert f"{FULL_TAG} tiers=3 passed=3" in out
     assert "result=PASS" in out
+
+
+def test_chain_fails_when_rto_budget_is_exceeded_end_to_end() -> None:
+    """End-to-end: --rto-minutes 0 makes the budget 0s, so any measured RTO blows it.
+
+    Proves --rto-minutes is no longer a no-op: even with all three tiers green, an
+    over-budget chain exits non-zero (the G-REL assertion the bot flagged).
+    """
+    sink = io.StringIO()
+    code = run(
+        [
+            "--rpo-window-minutes",
+            "5",
+            "--rto-minutes",
+            "0",  # 0-minute budget → 0s; the seeded chain's wall-clock exceeds it
+            "--topology-rto-minutes",
+            "30",
+        ],
+        stream=sink,
+    )
+    out = sink.getvalue()
+    # Every tier still PASSED individually...
+    assert "DRILL postgres_pitr OUTCOME=PASS" in out
+    assert "DRILL neo4j_rebuild OUTCOME=PASS" in out
+    assert "DRILL pcap_spot_restore OUTCOME=PASS" in out
+    # ...but the over-budget end-to-end RTO fails the aggregate (non-zero exit).
+    assert code == 1, out
+    assert f"{FULL_TAG} tiers=3 passed=3" in out  # tiers all passed
+    assert "result=FAIL" in out  # yet the rolled-up verdict is FAIL on RTO

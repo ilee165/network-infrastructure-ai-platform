@@ -107,8 +107,20 @@ services:
     restart: unless-stopped
 
   # The host-cron equivalent: ofelia reads the job-exec labels above and triggers
-  # them on schedule against the pgbackrest container. Read-only Docker socket so
-  # it can exec into the labelled container but cannot mutate the daemon.
+  # them on schedule against the pgbackrest container by talking to the Docker
+  # daemon socket.
+  #
+  # ⚠️ LOCAL-DEV-ONLY — DO NOT RUN THIS PROFILE IN PRODUCTION. ⚠️
+  # The `:ro` flag on the docker.sock mount below is NOT a write barrier: it only
+  # makes the SOCKET FILE read-only, not the Docker API. Any process that can reach
+  # the socket can still issue WRITE calls (create/exec/stop containers), which is
+  # effectively root on the host — `:ro` does not restrict that. This is acceptable
+  # ONLY for a single-developer local stack. The production equivalent is the Helm
+  # `netops` chart's pgBackRest CronJobs (deploy/kubernetes), which schedule via the
+  # Kubernetes API with a scoped ServiceAccount and never mount the Docker socket.
+  # A hardened compose alternative (fronting ofelia with a least-privilege
+  # docker-socket-proxy) is intentionally NOT added here — it is out of scope for a
+  # local-dev convenience profile (see README "Backup tier").
   ofelia:
     image: mcuadros/ofelia:v0.3.13
     profiles: ["backup"]
@@ -119,6 +131,9 @@ services:
       - "no-new-privileges:true"
     read_only: true
     volumes:
+      # `:ro` here only marks the socket FILE read-only — it does NOT make the
+      # Docker API read-only (see the LOCAL-DEV-ONLY warning above). Daemon-level
+      # control surface; local dev only.
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       - pgbackrest

@@ -146,6 +146,10 @@ def run(argv: Sequence[str] | None = None, *, stream: TextIO | None = None) -> i
     evidence: DrillEvidence = collect("\n".join(captured))
     evidence.rpo_seconds = rpo_seconds
     evidence.rto_seconds = rto_seconds
+    # Wire the --rto-minutes budget into the aggregate verdict: a chain that passed
+    # every tier but exceeded the end-to-end RTO target FAILS the drill (ADR-0030
+    # §6 G-REL — passing tiers is necessary but not sufficient).
+    evidence.rto_budget_seconds = args.rto_minutes * 60.0
     write_report(evidence, stream=out)
 
     return 0 if evidence.passed else 1

@@ -106,6 +106,11 @@ class DrillEvidence:
     tiers: list[TierResult]
     rpo_seconds: float | None = None
     rto_seconds: float | None = None
+    #: The end-to-end RTO budget (seconds) from ``--rto-minutes``. When BOTH this and
+    #: the measured ``rto_seconds`` are set, the aggregate verdict FAILS if the
+    #: measured chain RTO exceeds the budget (a chain can pass every tier yet blow
+    #: the end-to-end RTO target — ADR-0030 §6 G-REL). ``None`` = not enforced.
+    rto_budget_seconds: float | None = None
 
     @property
     def topology_rto_seconds(self) -> float | None:
@@ -124,7 +129,16 @@ class DrillEvidence:
         seen = {t.tier for t in self.tiers}
         if not set(TIER_TAGS).issubset(seen):
             return False
-        return all(t.status == "PASS" for t in self.tiers if t.tier in TIER_TAGS)
+        tiers_ok = all(t.status == "PASS" for t in self.tiers if t.tier in TIER_TAGS)
+        if not tiers_ok:
+            return False
+        # All tiers passed — now enforce the end-to-end RTO budget if one was
+        # supplied. A chain that restored every tier but exceeded the RTO target is
+        # NOT a passing DR drill (ADR-0030 §6). When no budget/measurement is present
+        # the RTO check is a no-op (the per-tier verdicts stand).
+        if self.rto_budget_seconds is None or self.rto_seconds is None:
+            return True
+        return self.rto_seconds <= self.rto_budget_seconds
 
     @property
     def passed_count(self) -> int:
