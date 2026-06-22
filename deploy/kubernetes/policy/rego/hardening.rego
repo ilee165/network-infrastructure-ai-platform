@@ -620,3 +620,18 @@ deny contains msg if {
 	input.kind == "ClusterRole"
 	msg := sprintf("chart must ship ZERO ClusterRole (found %q, ADR-0029 §5)", [input.metadata.name])
 }
+
+# --- The migration-job Role's configmaps rule MUST carry a non-empty
+# resourceNames list. An empty/absent resourceNames grants get/list/watch on
+# EVERY ConfigMap in the namespace, contradicting the in-template least-privilege
+# claim ("GET on EXACTLY the migration Job's own ConfigMap by name") and ADR-0029
+# §5. The template now `required`s configMapName, so this is the policy-test guard
+# that the broadening can never reappear (e.g. via a future un-guarded edit).
+deny contains msg if {
+	input.kind == "Role"
+	input.metadata.labels["app.kubernetes.io/component"] == "migration-job"
+	some rule in input.rules
+	"configmaps" in rule.resources
+	count(object.get(rule, "resourceNames", [])) == 0
+	msg := "migration-job Role configmaps rule must carry a non-empty resourceNames list — an empty list grants get/list/watch on ALL ConfigMaps in the namespace, not the Job's own (ADR-0029 §5 least-privilege)"
+}

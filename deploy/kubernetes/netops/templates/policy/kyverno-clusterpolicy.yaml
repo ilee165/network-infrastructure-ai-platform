@@ -85,7 +85,7 @@ spec:
             - entries:
                 {{- if .Values.admission.signedImages.publicKeyConfigMap }}
                 - keys:
-                    publicKeys: "{{ printf "{{ \"%s\".data.\"cosign.pub\" }}" .Values.admission.signedImages.publicKeyConfigMap }}"
+                    publicKeys: {{ printf "{{ '%s'.data.'cosign.pub' }}" .Values.admission.signedImages.publicKeyConfigMap | quote }}
                 {{- else }}
                 # No verifier wired yet (W6). Keyless placeholder; the rule is
                 # Audit-only until signedImages.enabled + a real key/identity.
