@@ -142,6 +142,22 @@ cert bytes are never committed.
 For a hardened compose deployment, drop the `:8000`/`:8080` host port mappings
 from the base file so the platform is reachable only through the TLS edge.
 
+### packet-analysis seccomp profile path
+
+The `packet-analysis` service applies the deny-by-default Localhost seccomp
+profile (ADR-0031 §3), byte-for-byte the same JSON the Helm chart references.
+Docker resolves a `seccomp=` **relative** path against the **client CWD** (not
+the compose-file directory), so the default
+`NETOPS_SECCOMP_PROFILE=./deploy/docker/seccomp/packet-analysis-seccomp.json`
+resolves correctly under the documented **run-from-repository-root** convention.
+If you invoke compose from a different directory (or an air-gapped mirror),
+override it with an **absolute** path:
+
+```bash
+NETOPS_SECCOMP_PROFILE=/opt/netops/seccomp/packet-analysis-seccomp.json \
+  docker compose -f deploy/docker/docker-compose.yml up -d
+```
+
 ## Operations
 
 ```bash

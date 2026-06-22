@@ -101,9 +101,17 @@ services:
     command: celery -A app.workers.celery_app worker -Q packet_analysis
     env_file: ../../.env
     # Seccomp lockstep with the Helm chart (ADR-0031 §3): same JSON, two targets.
+    # Docker resolves a `seccomp=` RELATIVE path against the CLIENT CWD, not this
+    # compose file's directory — so a bare `./seccomp/...` only resolves when the
+    # CWD happens to be deploy/docker/, and BREAKS under the documented
+    # run-from-repository-root convention (README "Run everything from the
+    # repository root"). Anchor it to that documented CWD via an overridable var:
+    # the default resolves correctly from the repo root; invoking from elsewhere
+    # (or an air-gapped mirror) overrides NETOPS_SECCOMP_PROFILE with an ABSOLUTE
+    # path. Keep this byte-for-byte in lockstep with the chart profile.
     security_opt:
       - "no-new-privileges:true"
-      - "seccomp=./seccomp/packet-analysis-seccomp.json"
+      - "seccomp=${NETOPS_SECCOMP_PROFILE:-./deploy/docker/seccomp/packet-analysis-seccomp.json}"
     cap_drop:
       - ALL
     user: "10001:10001"

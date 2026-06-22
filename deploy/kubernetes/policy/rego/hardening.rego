@@ -635,3 +635,243 @@ deny contains msg if {
 	count(object.get(rule, "resourceNames", [])) == 0
 	msg := "migration-job Role configmaps rule must carry a non-empty resourceNames list — an empty list grants get/list/watch on ALL ConfigMaps in the namespace, not the Job's own (ADR-0029 §5 least-privilege)"
 }
+
+# ===========================================================================
+# W4-T6 — GENERIC per-workload hardening (ADR-0029 §3, exit §7.1)
+#
+# The earlier rules assert hardening on the packet-* workloads by NAME. These
+# generic rules assert the SAME ADR-0029 §3 container controls on EVERY platform
+# workload (api/worker/frontend + the postgres/neo4j/redis/ollama data stores),
+# across both Deployment and StatefulSet — so a hardening regression on ANY
+# service (not just packet-*) fails the gate. The packet-capture / packet-analysis
+# workloads are deliberately EXCLUDED here (they carry the documented ADR-0031
+# deviation and are governed by the named rules above). Matched by the component
+# label so a fullname-prefix rename cannot slip a workload past this guard.
+# ===========================================================================
+
+# The platform workload components every generic §3 control applies to. packet-*
+# is intentionally absent (governed by the named ADR-0031 rules above).
+platform_workload_components := {"api", "worker", "frontend", "postgres", "neo4j", "redis", "ollama"}
+
+# True for a rendered Deployment/StatefulSet that is one of the platform services.
+is_platform_workload(obj) if {
+	obj.kind in {"Deployment", "StatefulSet"}
+	platform_workload_components[obj.metadata.labels["app.kubernetes.io/component"]]
+}
+
+# Component label of the workload (for message clarity).
+workload_component(obj) := obj.metadata.labels["app.kubernetes.io/component"]
+
+# --- drop ALL capabilities (no exception for platform services) ---
+deny contains msg if {
+	is_platform_workload(input)
+	some c in input.spec.template.spec.containers
+	not drops_all(c)
+	msg := sprintf("%s workload %q container %q must drop ALL capabilities (ADR-0029 §3)", [workload_component(input), input.metadata.name, c.name])
+}
+
+# --- platform services may add NO capability at all (only packet-capture may) ---
+deny contains msg if {
+	is_platform_workload(input)
+	some c in input.spec.template.spec.containers
+	some cap in object.get(object.get(object.get(c, "securityContext", {}), "capabilities", {}), "add", [])
+	msg := sprintf("%s workload %q container %q must add NO capabilities (found %q); only packet-capture may add one (ADR-0029 §3)", [workload_component(input), input.metadata.name, c.name, cap])
+}
+
+# --- runAsNonRoot: true on every platform container ---
+deny contains msg if {
+	is_platform_workload(input)
+	some c in input.spec.template.spec.containers
+	c.securityContext.runAsNonRoot != true
+	msg := sprintf("%s workload %q container %q must set runAsNonRoot=true (ADR-0029 §3)", [workload_component(input), input.metadata.name, c.name])
+}
+
+# --- readOnlyRootFilesystem: true on every platform container ---
+deny contains msg if {
+	is_platform_workload(input)
+	some c in input.spec.template.spec.containers
+	c.securityContext.readOnlyRootFilesystem != true
+	msg := sprintf("%s workload %q container %q must set readOnlyRootFilesystem=true (ADR-0029 §3 — writable scratch is an enumerated emptyDir only)", [workload_component(input), input.metadata.name, c.name])
+}
+
+# --- allowPrivilegeEscalation: false on every platform container ---
+deny contains msg if {
+	is_platform_workload(input)
+	some c in input.spec.template.spec.containers
+	c.securityContext.allowPrivilegeEscalation != false
+	msg := sprintf("%s workload %q container %q must set allowPrivilegeEscalation=false (ADR-0029 §3)", [workload_component(input), input.metadata.name, c.name])
+}
+
+# --- seccompProfile set (pod-level or container-level) on every platform
+# container, and it must be RuntimeDefault (only the packet sandbox may run a
+# Localhost profile — ADR-0029 §3). ---
+deny contains msg if {
+	is_platform_workload(input)
+	some c in input.spec.template.spec.containers
+	not container_seccomp_set(input, c)
+	msg := sprintf("%s workload %q container %q must set a seccompProfile (pod- or container-level) (ADR-0029 §3)", [workload_component(input), input.metadata.name, c.name])
+}
+
+container_seccomp_set(obj, c) if {
+	c.securityContext.seccompProfile.type
+}
+
+container_seccomp_set(obj, _) if {
+	obj.spec.template.spec.securityContext.seccompProfile.type
+}
+
+deny contains msg if {
+	is_platform_workload(input)
+	some c in input.spec.template.spec.containers
+	t := c.securityContext.seccompProfile.type
+	t != "RuntimeDefault"
+	msg := sprintf("%s workload %q container %q seccompProfile must be RuntimeDefault (found %q); only the packet sandbox may run a Localhost profile (ADR-0029 §3)", [workload_component(input), input.metadata.name, c.name, t])
+}
+
+# --- resource requests AND limits present on every platform container ---
+deny contains msg if {
+	is_platform_workload(input)
+	some c in input.spec.template.spec.containers
+	not c.resources.requests
+	msg := sprintf("%s workload %q container %q must declare resource requests (ADR-0029 §3 — never absent)", [workload_component(input), input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_platform_workload(input)
+	some c in input.spec.template.spec.containers
+	not c.resources.limits
+	msg := sprintf("%s workload %q container %q must declare resource limits (ADR-0029 §3 — never absent)", [workload_component(input), input.metadata.name, c.name])
+}
+
+# --- no `latest` / tagless image on any platform container (parity with the
+# named Deployment rules above, extended to StatefulSets). ---
+deny contains msg if {
+	is_platform_workload(input)
+	some c in input.spec.template.spec.containers
+	endswith(c.image, ":latest")
+	msg := sprintf("%s workload %q image %q must not use the `latest` tag (ADR-0029 §5)", [workload_component(input), input.metadata.name, c.image])
+}
+
+deny contains msg if {
+	is_platform_workload(input)
+	some c in input.spec.template.spec.containers
+	not contains(c.image, ":")
+	not contains(c.image, "@sha256:")
+	msg := sprintf("%s workload %q image %q must carry an explicit tag or digest (ADR-0029 §5)", [workload_component(input), input.metadata.name, c.image])
+}
+
+# ===========================================================================
+# W4-T6 — admission rule BODY assertions (ADR-0029 §5, exit §7.4)
+#
+# The W3 rules above assert the admission ClusterPolicy includes rules by NAME
+# (has_rule). These assert the rule BODIES do what their names claim, so a future
+# edit that keeps the rule name but guts the pattern is caught:
+#   - disallow-latest-tag actually matches an image pattern that bans `:latest`.
+#   - restrict-net-raw excludes EXACTLY the net-raw deviation selector and nothing
+#     wider (the allow-list selector matches the packet-sandbox label only).
+# ===========================================================================
+
+# The disallow-latest-tag rule must carry a validate.pattern banning `:latest`
+# on container images (a name-only rule with an empty body would pass has_rule
+# but enforce nothing).
+deny contains msg if {
+	input.kind == "ClusterPolicy"
+	input.metadata.name == "netops-hardening-baseline"
+	some r in input.spec.rules
+	r.name == "disallow-latest-tag"
+	not latest_rule_bans_latest(r)
+	msg := "disallow-latest-tag admission rule must carry a validate.pattern that bans `:latest` on container images — a name-only rule enforces nothing (ADR-0029 §5)"
+}
+
+latest_rule_bans_latest(r) if {
+	some c in r.validate.pattern.spec.containers
+	contains(c.image, "!*:latest")
+}
+
+# The restrict-net-raw-to-packet-sandbox rule's exclude selector must match
+# EXACTLY the netRawDeviationSelector label set (the chart's `netops.io/net-raw`
+# allow-list) — not a broader/empty selector that would exempt more than the one
+# permitted workload. Asserts the allow-list selector is precisely the deviation
+# label and nothing else (cardinality of the selector keys = 1, the net-raw key).
+deny contains msg if {
+	input.kind == "ClusterPolicy"
+	input.metadata.name == "netops-hardening-baseline"
+	some r in input.spec.rules
+	r.name == "restrict-net-raw-to-packet-sandbox"
+	not net_raw_exclude_is_exactly_net_raw(r)
+	msg := "restrict-net-raw-to-packet-sandbox exclude selector must match EXACTLY the `netops.io/net-raw` deviation label (one key) — a broader/empty selector would exempt more than the single permitted workload (ADR-0029 §5 / ADR-0031 §5)"
+}
+
+# True only when the rule excludes via a resource selector whose matchLabels is
+# exactly { "netops.io/net-raw": <value> } — one key, the net-raw label.
+net_raw_exclude_is_exactly_net_raw(r) if {
+	some e in r.exclude.any
+	labels := e.resources.selector.matchLabels
+	count(labels) == 1
+	labels["netops.io/net-raw"]
+}
+
+# ===========================================================================
+# W4-T6 — no inlined secret literal (ADR-0029 §6, exit §7.5)
+#
+# Secrets are by-reference: when an existingSecret is supplied the chart must
+# render NO Secret object at all (the dev-convenience secret.yaml is guarded
+# `{{- if not .Values.secrets.existingSecret }}`). And NO Secret the chart ships
+# may inline an obvious credential key in stringData/data. These assert directly
+# on the rendered manifests so a regression (templating a real credential, or
+# emitting secret.yaml under existingSecret) fails the gate.
+# ===========================================================================
+
+# Obvious credential key names that must NEVER be inlined in a chart-shipped
+# Secret as a real value. The dev-convenience Secret is explicitly marked with
+# `netops.io/dev-secret: "true"` and holds only render-time random placeholders
+# (randAlphaNum) — it is exempt from the literal check but still subject to the
+# existingSecret-absence guard below.
+credential_key_substrings := {"password", "secret", "token", "key", "auth"}
+
+is_dev_convenience_secret(s) if {
+	s.metadata.annotations["netops.io/dev-secret"] == "true"
+}
+
+# --- Any chart-shipped Secret OTHER than the marked dev-convenience one must not
+# exist (the chart ships exactly one Secret, and only when no existingSecret is
+# set). A second/unmarked Secret means a real credential was templated in. ---
+deny contains msg if {
+	input.kind == "Secret"
+	not is_dev_convenience_secret(input)
+	msg := sprintf("chart must ship NO Secret holding credential material — only the marked dev-convenience Secret (netops.io/dev-secret=true) may render, and only when secrets.existingSecret is empty (Secret %q found; ADR-0029 §6)", [input.metadata.name])
+}
+
+# --- The dev-convenience Secret's credential-looking keys must hold render-time
+# generated placeholders, NEVER an authored literal. The template uses
+# `randAlphaNum`, which produces alphanumeric-only values; a value containing a
+# non-alphanumeric character (':', '/', '=', whitespace, …) other than the
+# documented neo4j `user/<rand>` and `dev-local:<rand>` shapes signals an inlined
+# literal. This is a defensive guard on the rendered manifest (ADR-0029 §6).
+deny contains msg if {
+	input.kind == "Secret"
+	is_dev_convenience_secret(input)
+	some k, v in object.get(input, "stringData", {})
+	key_is_credential(k)
+	not value_is_generated_placeholder(v)
+	msg := sprintf("dev-convenience Secret key %q must hold a render-time generated placeholder (randAlphaNum), not an inlined literal (ADR-0029 §6)", [k])
+}
+
+key_is_credential(k) if {
+	some sub in credential_key_substrings
+	contains(lower(k), sub)
+}
+
+# Accept the alphanumeric randAlphaNum output and its two documented composite
+# shapes: neo4j `<user>/<rand>` and the dev KMS `dev-local:<rand>` reference.
+value_is_generated_placeholder(v) if {
+	regex.match(`^[A-Za-z0-9]+$`, v)
+}
+
+value_is_generated_placeholder(v) if {
+	regex.match(`^[A-Za-z0-9._-]+/[A-Za-z0-9]+$`, v)
+}
+
+value_is_generated_placeholder(v) if {
+	regex.match(`^dev-local:[A-Za-z0-9]+$`, v)
+}

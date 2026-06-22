@@ -179,13 +179,15 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
 
-  # Policy-as-test for the K8s/Helm declarative half (P1 W3, ADR-0031 +
-  # ADR-0029 §3/§5). This job is the evidence that flips the M5 PARTIAL
-  # packet-sandbox sign-off (ADR-0031 §7): it renders the chart and asserts every
-  # OS-isolation / hardening control on the rendered manifests. It runs
-  # independently of the image jobs (no `needs`) — the manifests do not depend on
-  # built images. trivy config scans the chart for IaC misconfig; cosign is N/A
-  # here (W3 adds no new image refs — the packet workloads reuse netops-backend).
+  # Chart-validation + policy-as-test for the K8s/Helm declarative half (P1 W4 GA
+  # chart, ADR-0029 §3/§5 + ADR-0031). This job is the G-SEC K8s-posture evidence:
+  # it renders the GA chart and asserts every OS-isolation / hardening control on
+  # the rendered manifests (helm lint → render → kubeconform → kube-linter →
+  # conftest → trivy config). It runs independently of the image jobs (no `needs`)
+  # — the manifests do not depend on built images. trivy config GATES on fixable
+  # HIGH/CRIT IaC misconfig (exit-code 1, ignore-unfixed) without duplicating
+  # conftest's policy semantics; cosign is W6 (no new image refs here — the packet
+  # + per-service workloads reuse netops-backend/-frontend).
   infra:
     name: infra (helm lint, kubeconform, kube-linter, conftest)
     runs-on: ubuntu-latest
@@ -254,20 +256,32 @@ jobs:
 
       # The policy-as-test gate: every ADR-0031 / ADR-0029 control asserted on
       # the rendered manifests. Fails the build on any violation.
+      #
+      # --all-namespaces evaluates EVERY rego package found under the policy dir
+      # unambiguously; the prior `--namespace netops.hardening --all-namespaces`
+      # pair was contradictory (a single explicit namespace AND "all"). The rego
+      # lives in one package (netops.hardening), so --all-namespaces runs it and
+      # any future package without an edit here (W4-T6 deferred-minor cleanup).
       - name: conftest (OPA policy-as-test)
         run: |
           conftest test rendered.yaml \
             --policy deploy/kubernetes/policy/rego \
-            --namespace netops.hardening \
             --all-namespaces
 
-      # IaC misconfiguration scan of the chart + compose (config target). No new
-      # image refs are introduced in W3, so trivy image / cosign verify are N/A.
+      # IaC misconfiguration scan of the chart + compose (Trivy `config` target).
+      # GATING on its OWN findings: exit-code 1 on fixable HIGH/CRITICAL misconfig,
+      # mirroring the image-scan posture (ignore-unfixed). This is scoped to IaC
+      # misconfig (scan-type: config) and does NOT duplicate conftest's job —
+      # conftest asserts our ADR-0029/0031 policy semantics on the rendered
+      # manifests; Trivy checks generic IaC best-practice misconfig on the chart +
+      # compose sources. No new image refs in W3/W4 (packet + per-service
+      # workloads reuse netops-backend/-frontend), so trivy image / cosign are N/A.
       - name: Trivy config scan (chart + compose)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: deploy
           severity: CRITICAL,HIGH
-          exit-code: "0"
+          ignore-unfixed: true
+          exit-code: "1"
           format: table

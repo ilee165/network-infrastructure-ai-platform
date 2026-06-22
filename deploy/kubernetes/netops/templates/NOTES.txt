@@ -1,7 +1,9 @@
 netops chart installed (release: {{ .Release.Name }}, namespace: {{ .Release.Namespace }}).
 
-P1 W3 scaffold: packet-sandbox OS-isolation (ADR-0031) + K8s hardening round 1
-primitives (ADR-0029 §3/§5). The full per-service GA chart is W4.
+P1 GA chart: the full per-service platform (api/worker/frontend + toggleable
+postgres/neo4j/redis/ollama) with cert-manager TLS ingress, §3.1 NetworkPolicies,
+least-privilege RBAC + admission policy, and the packet-sandbox OS-isolation
+workloads (ADR-0031 / ADR-0029). SINGLE-REPLICA — not highly available (HA is P2).
 
 Secure-by-default posture (every control below is ON):
   - Namespace PSA: enforce/audit/warn = {{ .Values.namespaceLabels.podSecurity.enforce }}
