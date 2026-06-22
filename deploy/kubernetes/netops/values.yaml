@@ -388,6 +388,30 @@ serviceAccounts:
   create: true
   automountServiceAccountToken: false
 
+# -- Pre-upgrade Alembic migration Job RBAC (ADR-0029 §5 — "the only namespaced
+#    Role is a tightly-scoped one for the Helm pre-upgrade migration Job").
+#    OPT-IN, DEFAULT OFF: the long-running api/worker pods talk to Postgres/Neo4j/
+#    Redis, NOT the K8s API, so they need ZERO RBAC in steady state. This Role is
+#    granted ONLY to a short-lived migration Job's ServiceAccount and ONLY when a
+#    Helm-managed migration hook needs to read its own ConfigMap during the
+#    expand/contract Alembic step (PRODUCTION.md §10). It is NAMESPACED ONLY — a
+#    Role + RoleBinding scoped to the release namespace; the chart ships ZERO
+#    ClusterRole / ClusterRoleBinding (ADR-0029 §5). When false, no RBAC object
+#    renders at all and the secure default (no K8s API access) holds.
+migrationJob:
+  rbac:
+    # Render the namespaced Role + RoleBinding + migration-job SA. Default OFF:
+    # the steady-state platform needs no K8s API access. Enable ONLY with a
+    # migration hook that must read its own ConfigMap (ADR-0029 §5).
+    enabled: false
+    # Name of the ServiceAccount the migration Job runs as (subject of the
+    # RoleBinding). automountServiceAccountToken stays false unless the Job
+    # genuinely needs the token; the Role itself is the least-privilege grant.
+    serviceAccountName: migration-job-sa
+    # ConfigMap name the Job is permitted to GET (its own migration config). The
+    # Role grants get/list/watch on THIS ConfigMap name only — nothing wider.
+    configMapName: ""
+
 # -- Admission policy (ADR-0029 §5). Kyverno ClusterPolicy by default; the
 #    chart also ships a ValidatingAdmissionPolicy fallback for clusters that
 #    forbid an admission webhook (toggle `engine`). On by default; disabling is

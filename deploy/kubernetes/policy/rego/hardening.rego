@@ -382,6 +382,22 @@ deny contains msg if {
 	msg := "admission ClusterPolicy must include the packet-sandbox NET_RAW deviation allow-list (ADR-0029 §5 / ADR-0031 §5)"
 }
 
+# The signed-image (cosign) verify rule must ALWAYS render (ADR-0029 §5 rule 2 —
+# rule present, enforcement gated by admission.signedImages.enabled, default off
+# per W3). Its absence means the supply-chain enforcement rule was dropped.
+deny contains msg if {
+	input.kind == "ClusterPolicy"
+	input.metadata.name == "netops-hardening-baseline"
+	not policy_has_verify_images(input)
+	msg := "admission ClusterPolicy must include the cosign signed-image verify rule (verify-image-signatures); it renders always, enforcement gated by admission.signedImages.enabled (ADR-0029 §5)"
+}
+
+policy_has_verify_images(policy) if {
+	some r in policy.spec.rules
+	r.name == "verify-image-signatures"
+	r.verifyImages
+}
+
 has_rule(policy, name) if {
 	some r in policy.spec.rules
 	r.name == name
@@ -501,4 +517,106 @@ deny contains msg if {
 	input.kind == "NetworkPolicy"
 	input.metadata.labels["app.kubernetes.io/component"] == "external-llm-egress"
 	msg := "external-LLM egress NetworkPolicy must NOT render unless networkPolicy.externalLlmEgress.enabled — it is opt-in, default-off (ADR-0029 §2)"
+}
+
+# ===========================================================================
+# W4-T5 — RBAC + admission allow-list singularity (ADR-0029 §5, exit §7.4/§7.5)
+#
+# The admission PSS-deviation allow-list must name EXACTLY ONE workload — the
+# ADR-0031 packet sandbox — and nothing else. The allow-list is expressed as the
+# `netops.io/net-raw: allowed` Pod label that the restrict-net-raw admission rule
+# excludes (kyverno-clusterpolicy.yaml / validatingadmissionpolicy.yaml). These
+# rules prove cardinality = 1 and that every W4 service stays SUBJECT to the
+# rule, asserted per rendered document (conftest --all-namespaces, no --combine).
+# ===========================================================================
+
+# The SINGLE workload permitted the NET_RAW / PSS deviation. Cardinality = 1:
+# this is the ONLY Deployment whose name may carry the net-raw deviation label.
+net_raw_allowed_workload := "packet-capture"
+
+# W4 platform Deployments — these MUST stay subject to restrict-net-raw (they may
+# never be exempted via the deviation label). Matched by component label so a
+# rename of the fullname prefix does not slip a workload past this guard.
+is_w4_platform_deployment(dep) if {
+	dep.kind == "Deployment"
+	dep.metadata.labels["app.kubernetes.io/component"] in {"api", "worker", "frontend"}
+}
+
+# --- Cardinality = 1: any workload OTHER than the packet sandbox that carries
+# the net-raw deviation label widens the allow-list beyond one. The pod-template
+# label is what admission matches, so assert on it. packet-capture is permitted
+# (asserted-present elsewhere); ANY other named Deployment with the label fails.
+deny contains msg if {
+	input.kind == "Deployment"
+	input.spec.template.metadata.labels["netops.io/net-raw"]
+	input.metadata.name != net_raw_allowed_workload
+	msg := sprintf("admission NET_RAW deviation allow-list must name EXACTLY ONE workload (%q); Deployment %q also carries the `netops.io/net-raw` label — cardinality must be 1 (ADR-0029 §5 / ADR-0031 §5)", [net_raw_allowed_workload, input.metadata.name])
+}
+
+# The same cardinality guard at the object-metadata level (some manifests label
+# the Deployment object as well as the pod template).
+deny contains msg if {
+	input.kind == "Deployment"
+	input.metadata.labels["netops.io/net-raw"]
+	input.metadata.name != net_raw_allowed_workload
+	msg := sprintf("admission NET_RAW deviation allow-list must name EXACTLY ONE workload (%q); Deployment %q also carries the `netops.io/net-raw` object label — cardinality must be 1 (ADR-0029 §5 / ADR-0031 §5)", [net_raw_allowed_workload, input.metadata.name])
+}
+
+# --- Every W4 Deployment (api/worker/frontend) must stay SUBJECT to the
+# restrict-net-raw admission rule — i.e. it must NOT carry the deviation label on
+# its pod template, or admission would exempt it and a NET_RAW regression on a
+# platform service would pass silently (ADR-0029 §5 / ADR-0031 §2).
+deny contains msg if {
+	is_w4_platform_deployment(input)
+	input.spec.template.metadata.labels["netops.io/net-raw"]
+	msg := sprintf("W4 Deployment %q must stay SUBJECT to restrict-net-raw — it must NOT carry the `netops.io/net-raw` deviation label (ADR-0029 §5 / ADR-0031 §2)", [input.metadata.name])
+}
+
+# --- and must not carry the broad packet-sandbox (custom-seccomp) deviation
+# label either: only the packet sandbox may deviate from RuntimeDefault.
+deny contains msg if {
+	is_w4_platform_deployment(input)
+	input.spec.template.metadata.labels["netops.io/packet-sandbox"]
+	msg := sprintf("W4 Deployment %q must NOT carry the `netops.io/packet-sandbox` deviation label — only the packet sandbox may deviate from restricted (ADR-0029 §3/§5)", [input.metadata.name])
+}
+
+# --- A W4 platform Deployment must NEVER add NET_RAW/NET_ADMIN directly (the
+# admission rule denies it; this is the chart-side parity guard on the rendered
+# pod spec, so a regression is caught at policy-test time, not only at admission).
+deny contains msg if {
+	is_w4_platform_deployment(input)
+	some c in input.spec.template.spec.containers
+	some cap in object.get(object.get(object.get(c, "securityContext", {}), "capabilities", {}), "add", [])
+	cap in {"NET_RAW", "NET_ADMIN"}
+	msg := sprintf("W4 Deployment %q container %q must add no NET_RAW/NET_ADMIN (found %q) — only the packet sandbox may (ADR-0029 §5 / ADR-0031 §2)", [input.metadata.name, c.name, cap])
+}
+
+# --- W4 ServiceAccounts must set automountServiceAccountToken=false. The generic
+# ServiceAccount rule above already covers ALL SAs; this is the explicit W4
+# coverage for the api/worker/frontend (+data store) identities (ADR-0029 §5).
+w4_sa_components := {"api", "worker", "frontend", "postgres", "neo4j", "redis", "ollama"}
+
+deny contains msg if {
+	input.kind == "ServiceAccount"
+	w4_sa_components[input.metadata.labels["app.kubernetes.io/component"]]
+	input.automountServiceAccountToken != false
+	msg := sprintf("W4 ServiceAccount %q (component %q) must set automountServiceAccountToken=false (ADR-0029 §5)", [input.metadata.name, input.metadata.labels["app.kubernetes.io/component"]])
+}
+
+# --- The migration-Job RBAC, when rendered, must be NAMESPACED only: a Role +
+# RoleBinding, never a ClusterRole/ClusterRoleBinding. The ClusterRoleBinding
+# guard already exists above; assert the migration RoleBinding binds a Role (not
+# a ClusterRole) so an opt-in migration grant can never escalate cluster-wide.
+deny contains msg if {
+	input.kind == "RoleBinding"
+	input.metadata.labels["app.kubernetes.io/component"] == "migration-job"
+	input.roleRef.kind != "Role"
+	msg := sprintf("migration-job RoleBinding must bind a namespaced Role, not %q (ADR-0029 §5 — no cluster-scope grants)", [input.roleRef.kind])
+}
+
+# No ClusterRole may be shipped by the chart (parity with the ClusterRoleBinding
+# guard — least-privilege RBAC grants are namespaced Roles only, ADR-0029 §5).
+deny contains msg if {
+	input.kind == "ClusterRole"
+	msg := sprintf("chart must ship ZERO ClusterRole (found %q, ADR-0029 §5)", [input.metadata.name])
 }
