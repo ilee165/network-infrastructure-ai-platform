@@ -154,6 +154,11 @@ services:
     enabled: true
     replicas: 1
     port: 8000
+    # Service type. ClusterIP is the secure default (ADR-0029 §4 "all platform
+    # Services are ClusterIP"; the cert-manager TLS Ingress → frontend is the
+    # SINGLE front door). NodePort/LoadBalancer open a Service-level side door
+    # that bypasses the Ingress TLS termination — a WARNED opt-out (NOTES.txt).
+    type: ClusterIP
     resources:
       requests:
         cpu: 250m
@@ -189,6 +194,11 @@ services:
     enabled: true
     replicas: 1
     port: 8080
+    # Service type. ClusterIP is the secure default (ADR-0029 §4) — the Ingress
+    # controller is the single TLS-terminated front door to frontend. Exposing it
+    # as NodePort/LoadBalancer creates a plaintext side door around the Ingress's
+    # ssl-redirect/HSTS — a WARNED opt-out (NOTES.txt). Keep ClusterIP.
+    type: ClusterIP
     resources:
       requests:
         cpu: 50m
@@ -260,6 +270,61 @@ services:
       limits:
         cpu: "4"
         memory: 8Gi
+
+# -- Ingress + TLS (ADR-0029 §4 / ADR-0012 §2). The SINGLE front door: ONE
+#    HTTPS-only Ingress routing ALL paths to the `frontend` Service — NEVER a
+#    direct ingress → api door (nginx inside frontend is the same-origin reverse
+#    proxy for /api + WS, ADR-0012 §2; reintroducing a direct api backend would
+#    re-open the CORS surface this posture closes). TLS is cert-manager-managed:
+#    the chart references an Issuer/ClusterIssuer and renders a Certificate; NO
+#    private key EVER appears here or in Helm release history (ADR-0029 §6, Alt 6).
+#    ssl-redirect + HSTS are on by default; plaintext :80 only 308-redirects to
+#    :443. All platform Services stay ClusterIP — there is NO NodePort/LoadBalancer
+#    side door (ADR-0029 §4); a `services.<svc>.type` override is a warned opt-out.
+ingress:
+  # On by default (secure-by-default front door). Disabling renders NO Ingress
+  # and emits a NOTES warning — the platform is then unreachable until an
+  # external front door is wired (a conscious, warned opt-out, not the default).
+  enabled: true
+  # IngressClass the controller watches (e.g. "nginx"). Empty = the cluster's
+  # default IngressClass. Set to match your installed ingress controller.
+  className: nginx
+  # The external hostname the platform is served on (the TLS SNI + cert CN/SAN).
+  # Operators MUST set this to their real FQDN; the placeholder is a stand-in.
+  host: netops.example.com
+  # Annotations applied to the Ingress. The defaults enforce TLS-only:
+  #   - ssl-redirect/force-ssl-redirect: plaintext :80 → 308 redirect to :443.
+  #   - HSTS: the controller emits Strict-Transport-Security on HTTPS responses.
+  # These are ingress-nginx annotation keys; override the whole map for a
+  # different controller (keep an equivalent ssl-redirect + HSTS pair).
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/hsts: "true"
+    nginx.ingress.kubernetes.io/hsts-include-subdomains: "true"
+    nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+    # frontend serves plain HTTP inside the pod (nginx :8080); the Ingress
+    # terminates TLS and proxies to the ClusterIP Service over HTTP.
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+  tls:
+    # Name of the Secret holding the TLS keypair. cert-manager PROVISIONS this
+    # Secret from the Certificate below — it is NEVER templated from values, and
+    # no key material passes through Helm (ADR-0029 §4/§6). The Ingress only
+    # references the name; the Secret is owned by cert-manager.
+    secretName: netops-tls
+    # cert-manager Certificate provisioning (ADR-0029 §4). When enabled the chart
+    # renders a Certificate (certificate.yaml) referencing issuerRef below;
+    # cert-manager then issues into `secretName`. Disable ONLY if the TLS Secret
+    # is provisioned out-of-band (e.g. an org-wide cert pipeline) — then create
+    # `secretName` yourself; the Ingress still references it.
+    certManager:
+      enabled: true
+    # The Issuer/ClusterIssuer cert-manager uses to sign. REFERENCE ONLY — no key
+    # material. Operators point this at their cluster's issuer (ACME/Vault/CA).
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+      group: cert-manager.io
 
 # -- Non-secret application config (rendered into configmap.yaml as NETOPS_*
 #    env). NO credential material here — secrets are by-reference only (see the

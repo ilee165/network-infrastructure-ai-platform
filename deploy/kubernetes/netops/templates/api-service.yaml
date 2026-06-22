@@ -14,7 +14,7 @@ metadata:
   labels:
     {{- include "netops.componentLabels" (dict "ctx" . "component" "api") | nindent 4 }}
 spec:
-  type: ClusterIP
+  type: {{ .Values.services.api.type | default "ClusterIP" }}
   selector:
     {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 4 }}
   ports:
