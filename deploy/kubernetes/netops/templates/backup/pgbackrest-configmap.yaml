@@ -1,0 +1,140 @@
+{{- /*
+pgBackRest stanza config (W5-T1, ADR-0030 §1/§4).
+
+This ConfigMap holds the NON-SECRET pgBackRest coordinates only — the repo
+location, retention, cipher TYPE, and the postgres connection target. The repo
+cipher PASSPHRASE and the object-store key/secret are NEVER here: pgBackRest
+reads them from PGBACKREST_REPO1_CIPHER_PASS / PGBACKREST_REPO1_S3_KEY /
+PGBACKREST_REPO1_S3_KEY_SECRET env, sourced from the platform Secret at runtime
+(secret.yaml / existingSecret). The repo and its key are never co-located in the
+config (ADR-0011 §4); a policy-test denies any inlined cipher-pass/s3-key literal.
+
+This ConfigMap holds TWO stanza VIEWS of the same repo (W5-T1, ADR-0030 §4),
+because pg1-path (PGDATA) access differs by where pgBackRest runs:
+
+  - pgbackrest.conf        — the LOCAL view (no pg1-host). pg1-path is a LOCAL
+                             filesystem path. Mounted by:
+                               * the postgres pod's archive_command (archive-push
+                                 runs INSIDE the postgres pod → PGDATA is local;
+                                 a pg1-host here would force the remote protocol
+                                 against its own Service and FAIL each WAL push),
+                               * the `pgbackrest server` TLS SIDECAR in the
+                                 postgres pod (it too has PGDATA mounted locally
+                                 and serves it to remote clients over TLS).
+  - pgbackrest-remote.conf — the REMOTE view used by the scheduled-backup
+                             CronJob, which has NO PGDATA volume. It sets
+                             pg1-host=<postgres> + pg1-host-type=tls + the TLS
+                             server port, so pgBackRest reaches PGDATA through the
+                             in-postgres server sidecar over mTLS instead of
+                             trying (and failing) to read a local pg1-path.
+
+Splitting the views is what fixes the architecture mismatch: a single shared
+pg1-host broke BOTH the in-pod archive-push (it is local, must NOT be remote) AND
+the CronJob backup (it is remote, but had no server to reach + no PGDATA mount).
+*/ -}}
+{{- /*
+Shared [global] repo block — authored ONCE, included into BOTH views so the repo
+location / cipher TYPE / retention cannot drift between the local and remote
+config. Holds NO secret (the cipher PASS + S3 key are PGBACKREST_* env).
+*/ -}}
+{{- define "netops.pgbackrestGlobalRepo" -}}
+{{- $b := .Values.backup.postgres -}}
+[global]
+# --- MinIO/S3 object-store repo (ADR-0030 §1). The credential is by-reference:
+# repo1-s3-key / repo1-s3-key-secret are supplied as PGBACKREST_* env from the
+# Secret, NOT here. Least-privilege: that credential is write-to-`{{ $b.repo.prefix }}`-
+# prefix only (least-privilege §7); pcaps/ is reserved for W5-T4.
+repo1-type=s3
+repo1-path={{ $b.repo.prefix }}
+repo1-s3-bucket={{ $b.repo.bucket }}
+repo1-s3-endpoint={{ $b.repo.endpoint }}:{{ $b.repo.port }}
+repo1-s3-region={{ $b.repo.region }}
+repo1-s3-uri-style={{ $b.repo.uriStyle }}
+repo1-storage-verify-tls={{ if $b.repo.verifyTls }}y{{ else }}n{{ end }}
+{{- if $b.encryption.enabled }}
+# --- Repo encryption (ADR-0030 §1 / Alt #3) — INDEPENDENT of object-store SSE.
+# cipher TYPE here; the PASSPHRASE is PGBACKREST_REPO1_CIPHER_PASS env (Secret).
+repo1-cipher-type={{ $b.encryption.cipherType }}
+{{- else }}
+repo1-cipher-type=none
+{{- end }}
+# --- Retention (ADR-0030 §1 table). SCOPE: this `repo1-retention-full` is a
+# COUNT of fulls — the ~35-day OPERATIONAL restore window only, NOT a tiered
+# GFS policy. The ADR-0030 §1 "monthly fulls kept 1 year" long-retention tier
+# is NOT implemented in this config (pgBackRest's single retention-full knob
+# cannot express it); that tier is DEFERRED out-of-band (W5-T5). The repo
+# retention does NOT override the 7-year AUDIT-DATA retention (PRODUCTION.md
+# §7) — audit rows ride inside every Postgres backup, so the in-chart audit
+# guarantee is the 35-day window; the full 7-year horizon rides the deferred
+# out-of-band tier (ADR-0030 §1 req 5).
+repo1-retention-full={{ $b.retention.full }}
+repo1-retention-diff={{ $b.retention.diff }}
+repo1-retention-archive-type={{ $b.retention.archiveType }}
+# Hardened/quiet defaults.
+log-level-console=info
+log-level-file=off
+compress-type=zst
+# PROPOSED RPO target {{ $b.wal.proposedRpoMinutes }} min (ADR-0030 §6) — WAL
+# archive-push is continuous; re-base this target in the W5-T5 evidence doc.
+{{- end -}}
+{{- if .Values.backup.postgres.enabled }}
+{{- $b := .Values.backup.postgres -}}
+{{- $useTls := and $b.tls.enabled .Values.services.postgres.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "netops.fullname" . }}-pgbackrest-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+data:
+  # === LOCAL view: archive_command (in the postgres pod) + the TLS server sidecar.
+  # NO pg1-host — pg1-path is a LOCAL filesystem path (the PGDATA PVC). A pg1-host
+  # here would force the remote protocol against the pod's own Service and FAIL
+  # every WAL archive-push (the RPO-floor hazard). Fixes finding #3.
+  pgbackrest.conf: |
+    {{- include "netops.pgbackrestGlobalRepo" . | nindent 4 }}
+    {{- if $useTls }}
+    # --- TLS server (ADR-0030 §4). The sidecar runs `pgbackrest server` on this
+    # port and serves the LOCAL pg1-path to the remote CronJob over mTLS. Certs
+    # are mounted from the platform Secret (by-reference; NEVER inlined here).
+    tls-server-address=*
+    tls-server-port={{ $b.tls.serverPort }}
+    tls-server-ca-file=/etc/pgbackrest-tls/ca.crt
+    tls-server-cert-file=/etc/pgbackrest-tls/server.crt
+    tls-server-key-file=/etc/pgbackrest-tls/server.key
+    # Only a client presenting a cert with this CN may drive the stanza (maps the
+    # client CN → the stanzas it is authorized for). One authorized client.
+    tls-server-auth={{ $b.tls.clientCommonName }}={{ $b.stanza }}
+    {{- end }}
+
+    [{{ $b.stanza }}]
+    # LOCAL primary — pg1-path is on this pod's PGDATA PVC (no pg1-host). Used by
+    # archive-push and read by the TLS server sidecar (ADR-0030 §4).
+    pg1-port={{ .Values.services.postgres.port }}
+    pg1-path=/var/lib/postgresql/data/pgdata
+    pg1-database={{ .Values.config.postgres.database }}
+    pg1-user={{ .Values.config.postgres.user }}
+  {{- if $useTls }}
+  # === REMOTE view: the scheduled-backup CronJob (NO PGDATA volume). Reaches the
+  # in-postgres `pgbackrest server` over mTLS so pg1-path resolves on the server
+  # side, not in the (PGDATA-less) CronJob pod. Fixes finding #2.
+  pgbackrest-remote.conf: |
+    {{- include "netops.pgbackrestGlobalRepo" . | nindent 4 }}
+
+    [{{ $b.stanza }}]
+    # REMOTE primary — pg1-host is the pgBackRest TLS SERVER on the postgres pod
+    # (pg1-host-type=tls), NOT a libpq endpoint. pg1-path is resolved by the
+    # server side over the connection; the CronJob never touches PGDATA directly.
+    pg1-host={{ include "netops.fullname" . }}-postgres
+    pg1-host-type=tls
+    pg1-host-port={{ $b.tls.serverPort }}
+    pg1-host-ca-file=/etc/pgbackrest-tls/ca.crt
+    pg1-host-cert-file=/etc/pgbackrest-tls/client.crt
+    pg1-host-key-file=/etc/pgbackrest-tls/client.key
+    pg1-port={{ .Values.services.postgres.port }}
+    pg1-path=/var/lib/postgresql/data/pgdata
+    pg1-database={{ .Values.config.postgres.database }}
+    pg1-user={{ .Values.config.postgres.user }}
+  {{- end }}
+{{- end }}

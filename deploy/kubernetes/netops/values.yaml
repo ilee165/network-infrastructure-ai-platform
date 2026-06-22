@@ -124,6 +124,38 @@ secrets:
     # OIDC/SSO client secret (ADR-0028 §4) — the confidential-client secret the
     # api exchanges at the token endpoint. REFERENCE ONLY.
     oidcClientSecret: oidc-client-secret
+    # pgBackRest repo (W5-T1, ADR-0030 §1/§4). All THREE are REFERENCE-ONLY key
+    # NAMES inside existingSecret — never values. The chart-rendered dev Secret
+    # generates random placeholders for them (idempotent via `lookup`, L4); in
+    # production they come from the external-secrets operator / CSI store.
+    #   - backupRepoCipherPass: the aes-256-cbc repo passphrase (repo encryption is
+    #     INDEPENDENT of object-store SSE — ADR-0030 §1 / Alt #3; SSE may layer WITH
+    #     it, never INSTEAD). The KEK is NEVER co-located with the repo (ADR-0011 §4)
+    #     — this is the repo-cipher pass, a DISTINCT secret from the platform KEK.
+    #   - backupRepoS3Key / backupRepoS3KeySecret: the MinIO/S3 credential, scoped
+    #     write-only to the `pgbackrest/` prefix (ADR-0030 §1, least-privilege §7).
+    backupRepoCipherPass: backup-repo-cipher-pass
+    backupRepoS3Key: backup-repo-s3-key
+    backupRepoS3KeySecret: backup-repo-s3-key-secret
+    # pcap snapshot object-store credential (W5-T4, ADR-0030 §3 / ADR-0023 §5).
+    # A SEPARATE, least-privilege MinIO/S3 credential scoped write-only to the
+    # `pcaps/` prefix — DISTINCT from the pgbackrest/ credential above so a leak of
+    # one does not grant the other's prefix (least-privilege §7). REFERENCE key
+    # NAMES only; the dev Secret generates random placeholders (idempotent via
+    # lookup, L4); production supplies them via existingSecret / external-secrets.
+    pcapSnapshotS3Key: pcap-snapshot-s3-key
+    pcapSnapshotS3KeySecret: pcap-snapshot-s3-key-secret
+    # pgBackRest TLS-server mTLS material (W5-T1, ADR-0030 §1/§4). The scheduled
+    # CronJob reaches the in-postgres `pgbackrest server` over TLS (it has no
+    # PGDATA volume of its own), so a CA + server cert/key + client cert/key are
+    # mounted from the Secret. REFERENCE key NAMES only — the dev Secret generates
+    # a self-signed CA + server/client pair (idempotent via lookup); production
+    # supplies them via existingSecret / external-secrets. Mirrors backup.postgres.tls.secretKeys.
+    backupTlsCa: backup-tls-ca-crt
+    backupTlsServerCert: backup-tls-server-crt
+    backupTlsServerKey: backup-tls-server-key
+    backupTlsClientCert: backup-tls-client-crt
+    backupTlsClientKey: backup-tls-client-key
   # KMS master-key REFERENCE (ADR-0032 / D11). The pod receives a KMS HANDLE or
   # a mounted secret PATH — never the KEK itself. This is the indirect handle the
   # envelope-encryption layer resolves at runtime against the customer KMS/Vault.
@@ -270,6 +302,469 @@ services:
       limits:
         cpu: "4"
         memory: 8Gi
+
+# -- Backup / DR tier (W5-T1, ADR-0030 §1/§4). pgBackRest continuous WAL
+#    archiving + weekly-full / daily-incr backups of the Postgres system of
+#    record, repo-encrypted (aes-256-cbc), written to a MinIO/S3 object store.
+#    Each backup job runs `pgbackrest verify` and FAILS on a non-clean verify —
+#    a backup that cannot be verified is a failed backup (ADR-0030 §1, policy-test).
+#
+#    SECURE/RESILIENT BY DEFAULT, OPT-OUT NEVER OPT-IN (ADR-0029 §0 / ADR-0030 §4):
+#    `enabled: true`. Disabling renders NO CronJob / ConfigMap / SA / NetworkPolicy
+#    and drops the postgres archive_command back to `/bin/true` (WAL not pushed) —
+#    a WARNED opt-out (NOTES.txt). Backups run as K8s CronJobs, NOT Celery beat,
+#    so they keep running when the app/Redis is degraded (ADR-0030 §4/§5, Alt #5).
+#
+#    ALL credentials are external-secret REFERENCES (secrets.keys.backupRepo*) —
+#    the repo cipher passphrase and the object-store key/secret are NEVER inlined
+#    in any manifest, ConfigMap, rendered template, or Helm history (ADR-0030 §1,
+#    G-SEC). The KEK is NEVER co-located with the repo (ADR-0011 §4) — the repo
+#    cipher pass is a DISTINCT secret; no step here materializes a KEK.
+backup:
+  postgres:
+    # On by default (resilient-by-default DR floor). Opt-out is warned.
+    enabled: true
+    # pgBackRest stanza name — the logical backup set for this Postgres cluster.
+    stanza: netops
+    # pgBackRest image (contains pgbackrest + the postgres client libs). The
+    # pgBackRest project does NOT publish an official application image
+    # (pgbackrest/* on Docker Hub is dev/test only), so we use the actively
+    # maintained community image `woblerr/pgbackrest` (github.com/woblerr/
+    # docker-pgbackrest). Pinned to a FULLY-qualified, immutable tag (pgBackRest
+    # version + image build rev) — explicit version ONLY; the admission policy
+    # (ADR-0029 §5) rejects `latest`. Operators may re-pin by digest in their
+    # overlay for supply-chain strictness.
+    image:
+      repository: woblerr/pgbackrest
+      tag: "2.55.1-v0.36"
+      pullPolicy: IfNotPresent
+    # WAL archiving is the RPO floor (ADR-0030 §1/§6). archive_mode=on +
+    # archive-push so recovery reaches the last archived WAL segment. The RPO
+    # target below is PROPOSED (ADR-0030 §6, pending the Consultant §12 answer) —
+    # re-base in the W5-T5 evidence doc; build to this default for now.
+    wal:
+      archiveMode: "on"
+      # PROPOSED RPO target (minutes). Informational — surfaced in the stanza
+      # config + evidence stub; archive-push is continuous regardless.
+      proposedRpoMinutes: 5
+    # pgBackRest TLS server (ADR-0030 §1/§4 — "sidecar/CronJob against the
+    # primary"). The scheduled-backup CronJob pod has NO Postgres PGDATA volume,
+    # so it CANNOT read pg1-path directly; pgBackRest's `pg1-host` is the host
+    # running a pgBackRest REMOTE server, not a libpq endpoint. We therefore run a
+    # `pgbackrest server` SIDECAR in the Postgres pod (it shares the PGDATA PVC →
+    # local pg1-path) and the CronJob reaches it over TLS on the port below.
+    # archive-push (inside the postgres pod) stays LOCAL — it uses pgbackrest.conf
+    # (no pg1-host), never the remote view. mTLS certs are by-reference from the
+    # platform Secret (tls.* keys); the dev path generates a CA + server/client
+    # pair (idempotent via lookup), production supplies them via existingSecret.
+    tls:
+      # On by default whenever the backup tier + in-chart postgres are enabled:
+      # without the server sidecar the CronJob cannot reach PGDATA and the DR tier
+      # produces no backups. Disabling it is a warned opt-out (NOTES) intended
+      # ONLY for an out-of-cluster pgBackRest topology supplied out-of-band.
+      enabled: true
+      # The pgBackRest TLS server port on the Postgres pod (NOT 5432 — that is the
+      # libpq port; pgBackRest's control connection + remote protocol ride this
+      # dedicated TLS port). The backup NetworkPolicy opens exactly this port.
+      serverPort: 8432
+      # Key NAMES inside the platform Secret holding the mTLS material (CA cert +
+      # server cert/key + client cert/key). References only — never values. In dev
+      # secret.yaml generates a self-signed CA and a server/client pair under these
+      # keys (idempotent via lookup); in production they come from existingSecret /
+      # external-secrets. pgBackRest requires the peer CN to match tls-server-auth.
+      secretKeys:
+        ca: backup-tls-ca-crt
+        serverCert: backup-tls-server-crt
+        serverKey: backup-tls-server-key
+        clientCert: backup-tls-client-crt
+        clientKey: backup-tls-client-key
+      # CN embedded in the generated client cert; tls-server-auth on the server
+      # maps this CN to the stanza it may drive. Stable so the auth line matches.
+      clientCommonName: pgbackrest-client
+    # Cadence (ADR-0030 §1): full WEEKLY, incremental DAILY, as SEPARATE CronJobs.
+    # Each job runs `pgbackrest verify` after the backup and fails on a non-clean
+    # verify (the verify GATES the job — ADR-0030 §1 requirement 2).
+    schedule:
+      # Sunday 01:00 — weekly full.
+      full: "0 1 * * 0"
+      # Mon–Sat 01:00 — daily incremental (full day skips its incr).
+      incr: "0 1 * * 1-6"
+    # Bound concurrency + history so a long backup never overlaps the next tick
+    # and the cluster is not flooded with completed Job pods.
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 3600
+    backoffLimit: 1
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # Retention (ADR-0030 §1 table). SCOPE NOTE: only the ~35-day OPERATIONAL
+    # restore window is configured in-chart, via pgBackRest's single
+    # `repo1-retention-full` (a COUNT of fulls, NOT a tiered/GFS policy). The
+    # ADR-0030 §1 "monthly fulls kept 1 year" long-retention tier is NOT
+    # implemented here — pgBackRest's one retention-full knob cannot express a
+    # grandfather-father-son schedule, so the 1-year monthly tier is DEFERRED
+    # out-of-band (a separate monthly-full repo/prefix or escrow process owned
+    # outside this chart; see W5-T5). Do NOT read the 35-day window as also
+    # providing the 1-year tier.
+    #
+    # The 35-day repo retention does NOT override the 7-YEAR AUDIT DATA retention
+    # (PRODUCTION.md §7): audit rows ride INSIDE every Postgres backup (ADR-0030
+    # §1, requirement 5 — no separate audit backup), so audit data is retained as
+    # long as the longest-retained full. With only the in-chart 35-day window,
+    # the in-chart guarantee for audit data is 35 days; the full 7-year horizon
+    # depends on the deferred out-of-band long-retention tier above. Repo
+    # retention != audit-data retention.
+    retention:
+      # Keep enough fulls to cover ~35 days with a weekly full (5 weeks). This is
+      # the OPERATIONAL window only — NOT the deferred 1-year monthly tier.
+      full: 5
+      # Keep N differential/incr sets.
+      diff: 6
+      # Archive (WAL) retention follows the full retention by default.
+      archiveType: full
+    # Repo encryption (ADR-0030 §1 / Alt #3) — INDEPENDENT of the object store's
+    # SSE. aes-256-cbc on; the passphrase is an external-secret REFERENCE
+    # (secrets.keys.backupRepoCipherPass), NEVER inlined. SSE may layer WITH this,
+    # never INSTEAD of it.
+    encryption:
+      enabled: true
+      cipherType: aes-256-cbc
+    # MinIO/S3-compatible object store (ADR-0030 §1). Least-privilege: the backup
+    # credential is write-to-`pgbackrest/`-prefix only (requirement 7). The bucket
+    # layout reserves `pgbackrest/` here and leaves `pcaps/` for W5-T4.
+    repo:
+      # Object-store endpoint host (MinIO Service / S3 endpoint). Operators MUST
+      # set this to their real endpoint; the in-cluster MinIO default is a stand-in.
+      endpoint: minio.netops-backup.svc.cluster.local
+      # Endpoint port + TLS. MinIO commonly terminates TLS on 9000; set verifyTls
+      # false ONLY for a plaintext dev MinIO (warned).
+      port: 9000
+      verifyTls: true
+      # S3 region (MinIO ignores it but pgBackRest requires a value).
+      region: us-east-1
+      # Bucket + the pgbackrest-only prefix (pcaps/ is reserved for W5-T4).
+      bucket: netops-backups
+      prefix: /pgbackrest
+      # path-style addressing (MinIO requires it; AWS S3 also accepts it).
+      uriStyle: path
+    # Resource requests + limits (never absent — ADR-0029 §3). Backup is IO-bound,
+    # modest CPU; sized for a single-node GA cluster.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    # Egress allow-list for the backup CronJob's NetworkPolicy: the object-store
+    # CIDRs the job must reach to write the repo (ADR-0030 §4 / PRODUCTION.md §5
+    # — confined egress, never blanket). Operators MUST narrow this to their real
+    # object-store ranges; the RFC1918 default is a placeholder, NOT an internet
+    # allow. The job also reaches postgres:5432 (in-namespace) for archive/backup.
+    objectStoreCidrs:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+  # -- pcap VOLUME SNAPSHOT tier (W5-T4, ADR-0030 §3/§5.4; ADR-0023 §3/§4/§5).
+  #    Snapshots the pcap disk volume (/data/pcaps/{capture_id}.pcap) to the SAME
+  #    object store as W5-T1 but a SEPARATE `pcaps/` prefix, under the hard
+  #    constraint that DR HONORS — never subverts — the ADR-0023 retention
+  #    contract: the snapshot captures ONLY live (non-tombstoned) files, prunes any
+  #    object-store copy whose pcap_metadata.tombstoned_at is set, and the snapshot
+  #    window is the SHORTER of (object-store policy) and the pcap's
+  #    retention_expires_at — so DR can NEVER re-extend the lifetime of a
+  #    credential/PII-bearing payload past retention (ADR-0030 §3, the load-bearing
+  #    constraint). pcaps are the lowest-criticality tier (diagnostic artifacts);
+  #    the restore drill is therefore ANNUAL (ADR-0030 §5.4), not quarterly.
+  pcap:
+    # On by default (resilient-by-default DR floor); disabling is a warned opt-out
+    # (NOTES). Renders the daily snapshot CronJob.
+    enabled: true
+    # DAILY snapshot (ADR-0030 §8 — pcap daily snapshot). 02:30 keeps it clear of
+    # the 01:00 pgBackRest window so the two DR tiers do not contend for the link.
+    schedule: "30 2 * * *"
+    # The pcap snapshot/restore image: the SAME Python-bearing backend image as the
+    # drill so app.models.pcap_metadata + the retention helpers
+    # (tombstone_capture / sha256_file / expired_capture_ids) are importable — the
+    # snapshot REUSES the model to decide live-vs-tombstoned, never re-implements
+    # retention. Explicit tag ONLY (admission rejects `latest`, ADR-0029 §5).
+    image:
+      repository: ghcr.io/netops/netops-backend
+      tag: "p1"
+      pullPolicy: IfNotPresent
+    # The on-volume pcap directory the snapshot reads (ADR-0023 §3 disk layout).
+    # Mirrors packet.pcapVolume.mountPath; the snapshot mounts the SAME volume
+    # read-only (it never writes the capture volume — write goes to the object store).
+    pcapDir: /data/pcaps
+    # MinIO/S3 object store (the SAME store as W5-T1, ADR-0030 §1) — but a SEPARATE
+    # `pcaps/` prefix with its OWN least-privilege, write-to-prefix-only credential
+    # (requirement 4 / §7). NEVER reuse the pgbackrest/ credential here.
+    repo:
+      endpoint: minio.netops-backup.svc.cluster.local
+      port: 9000
+      verifyTls: true
+      region: us-east-1
+      bucket: netops-backups
+      # The pcap-only prefix — DISTINCT from backup.postgres.repo.prefix
+      # (`/pgbackrest`). The snapshot credential is scoped write-only to THIS prefix.
+      prefix: /pcaps
+      uriStyle: path
+    # Object-store server-side encryption for the pcap prefix (defense-in-depth for
+    # PII/credential-bearing payloads at rest in the off-host store). aes256 = SSE-S3.
+    sseEncryption: aes256
+    # Snapshot retention window (days) at the OBJECT-STORE level. The EFFECTIVE
+    # window is the SHORTER of this and each pcap's retention_expires_at (ADR-0030
+    # §3 — object-store policy may NEVER extend a pcap past its own retention). Set
+    # to the ADR-0023 §4 30-day tombstone window so the two are aligned by default;
+    # the snapshot/prune script clamps per-file to retention_expires_at regardless.
+    retentionDays: 30
+    # Fail-closed dry-run switch (ADR-0030 §3). true = P1 plan-only: with NO live DB
+    # DSN reachable the planner is ALLOWED to emit an empty structurally-valid plan
+    # so the gate is a green dry-run. Set FALSE in P2 (live DSN supplied) so a
+    # missing/unreachable DB FAILS the job loudly instead of producing a green
+    # snapshot of nothing.
+    dryRun: true
+    # Bound concurrency + history so a long snapshot never overlaps the next tick.
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 3600
+    backoffLimit: 1
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # Resource requests + limits (never absent — ADR-0029 §3). rsync/sha256 is
+    # IO-bound, modest CPU.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    # Egress allow-list for the snapshot CronJob's NetworkPolicy: the object-store
+    # CIDRs the job must reach (ADR-0030 §4 / PRODUCTION.md §5 — confined, never
+    # blanket). Operators MUST narrow to their real object-store ranges. The job
+    # also reaches postgres:5432 (in-namespace) to read pcap_metadata read-only.
+    objectStoreCidrs:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+  # -- Restore-DRILL (W5-T2, ADR-0030 §5/§5.1). The drill RESTORES the latest full
+  #    + WAL from the object-store repo ALONE to a THROWAWAY target and runs the
+  #    four pass/fail assertions (RPO-in-window, audit immutable, credentials fail
+  #    closed without the KEK, pgbackrest verify clean). BUILT in P1, EXECUTED
+  #    quarterly from P2 (ADR-0030 §5 / P1-PLAN.md §6): the suspended CronJob is
+  #    shipped here, scheduling deferred. The one-shot Job + the CronJob both render
+  #    only when drills.enabled.
+  drills:
+    # OFF by default: the drill is a P2-executed control. enabled renders the
+    # suspended quarterly CronJob (+ the on-demand Job) so the manifest + harness
+    # ship in P1 and are policy-tested, WITHOUT scheduling any run. Flip true in P2.
+    enabled: true
+    # Hard belt-and-braces switch: even when enabled, the CronJob renders
+    # `suspend: true` so K8s NEVER auto-fires it until P2 deliberately sets this
+    # false (ADR-0030 §5 — built P1, run P2). The on-demand Job is the manual path.
+    suspend: true
+    # Quarterly cadence (ADR-0030 §5): 02:00 on the 1st of Jan/Apr/Jul/Oct. Inert
+    # while `suspend: true`; the schedule is recorded so P2 only flips the switch.
+    schedule: "0 2 1 1,4,7,10 *"
+    # THROWAWAY restore target: the drill restores into a SCRATCH data dir, NEVER
+    # the live Postgres (a drill that writes to prod is a footgun). Isolation from
+    # production data is enforced at runtime by the pgbackrest `--pg1-path` override
+    # (it restores into this scratch path, not the live PGDATA) backed by an
+    # emptyDir volume that is torn down with the pod — NOT by a separate namespace.
+    # The drill objects render into the release namespace alongside live Postgres;
+    # the throwaway-path + emptyDir-only rego guards (hardening.rego, W5-T2) assert
+    # that isolation on the rendered manifest.
+    throwaway:
+      # The disposable restore data dir (emptyDir scratch — never the live PVC).
+      restorePath: /var/lib/pgbackrest-drill/restore
+    # RPO window the drill asserts against (ADR-0030 §1/§5.1.1) is NOT configured
+    # here: the drill template drives DRILL_RPO_WINDOW_MINUTES directly off the
+    # SAME PROPOSED knob as W5-T1 (backup.postgres.wal.proposedRpoMinutes), so the
+    # within-window check tracks the Consultant §12 answer from one source of truth,
+    # never a second drill-local literal that could silently drift.
+    # The drill assertion image: a Python-bearing image that carries app.core.crypto
+    # for the credential-separation proof + the pgbackrest client for the restore.
+    # Explicit tag ONLY (admission rejects `latest`, ADR-0029 §5).
+    image:
+      repository: ghcr.io/netops/netops-backend
+      tag: "p1"
+      pullPolicy: IfNotPresent
+    # backoff/history bounds (mirror the backup CronJobs).
+    backoffLimit: 1
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 3600
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # Auto-reap the completed on-demand Job pod after this many seconds so a manual
+    # drill run does not leave a finished pod lingering (the CronJob path reaps via
+    # successfulJobsHistoryLimit instead). 1h default.
+    ttlSecondsAfterFinished: 3600
+    # Resource requests + limits (never absent — ADR-0029 §3). The restore is
+    # IO-bound; the assertion step is light.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    # -- Neo4j REBUILD-DRILL (W5-T3, ADR-0030 §2/§5.2; ADR-0005 D5). Neo4j has NO
+    #    backup — DR is a full RE-PROJECTION from Postgres, never a graph dump/restore
+    #    (D5). The drill drops/recreates the projected graph, re-projects the WHOLE
+    #    Postgres inventory via the EXISTING engines/topology full-rebuild path (which
+    #    records `topology_rebuild_seconds` + node/edge gauges — the topology-RTO,
+    #    G-REL/G-OBS), and asserts the rebuilt node/edge counts MATCH the pre-wipe
+    #    projection (turning "rebuildable" into a checkable invariant). Built P1,
+    #    executed quarterly from P2 (ADR-0030 §5.2): the suspended CronJob ships here,
+    #    scheduling deferred; the on-demand Job is the manual path. This is the SAME
+    #    job that runs the G-REL "destroy-and-rebuild" line (one artifact, two uses).
+    neo4j:
+      # OFF by default: the drill is a P2-executed control. enabled renders the
+      # suspended quarterly CronJob (+ the on-demand Job) so the manifest + harness
+      # ship in P1 and are policy-tested WITHOUT scheduling any run. Flip true in P2.
+      enabled: true
+      # Hard belt-and-braces switch: even when enabled, the CronJob renders
+      # `suspend: true` so K8s NEVER auto-fires it until P2 deliberately sets this
+      # false (ADR-0030 §5.2 — built P1, run P2). The on-demand Job is the manual path.
+      suspend: true
+      # Quarterly cadence (ADR-0030 §5.2): 02:00 on the 15th of Jan/Apr/Jul/Oct
+      # (offset from the Postgres PITR drill's 1st so the two drills do not contend).
+      # Inert while `suspend: true`; the schedule is recorded so P2 only flips it.
+      schedule: "0 2 15 1,4,7,10 *"
+      # PROPOSED topology-RTO target (minutes). The drill pass/fail is
+      # `topology_rebuild_seconds < this * 60` (ADR-0030 §2/§6 — < 30 min at 5,000
+      # devices). PROPOSED, parameterized: re-base on the Consultant §12 answer from
+      # this ONE source of truth, never a drill-local literal. The certified-scale
+      # 5,000-device validation is P2/lab-deferred (P1-PLAN.md §6).
+      proposedRtoMinutes: 30
+      # Allowed absolute node/edge count drift between the pre-wipe projection and the
+      # rebuild (0 = exact-match required). A drift beyond this fails the drill — the
+      # projection pipeline is incomplete (ADR-0005 D5 / ADR-0030 Negative).
+      countTolerance: 0
+      # `neo4j-admin dump` fast-start: OPT-IN, OFF by default (true to D5 — the
+      # projection is disposable; a stale dump could disagree with Postgres, which D5
+      # forbids). When enabled it is validated AGAINST the rebuild, never authoritative.
+      dump:
+        enabled: false
+      # The drill image: a Python-bearing image carrying app.engines.topology (the
+      # full-rebuild + the topology_rebuild_seconds metric hook) and the drills/
+      # harness. Explicit tag ONLY (admission rejects `latest`, ADR-0029 §5).
+      image:
+        repository: ghcr.io/netops/netops-backend
+        tag: "p1"
+        pullPolicy: IfNotPresent
+      # backoff/history bounds (mirror the Postgres drill).
+      backoffLimit: 1
+      concurrencyPolicy: Forbid
+      startingDeadlineSeconds: 3600
+      successfulJobsHistoryLimit: 3
+      failedJobsHistoryLimit: 3
+      ttlSecondsAfterFinished: 3600
+      # Resource requests + limits (never absent — ADR-0029 §3). The re-projection is
+      # CPU/IO-bound at scale; the seeded dry-run is light. Sized like the api.
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+    # -- pcap SPOT-RESTORE drill (W5-T4, ADR-0030 §5.4; ADR-0023 §3/§4/§5). The
+    #    annual spot-restore that PROVES DR honors the ADR-0023 retention contract:
+    #    a sampled LIVE capture restores from the `pcaps/` prefix and sha256-matches
+    #    its capture-time hash, AND a TOMBSTONED capture is NOT resurrected (the
+    #    load-bearing no-resurrection guard — ADR-0030 §3). Built P1, executed
+    #    ANNUALLY from P2 (lowest-criticality tier, §5.4): the suspended CronJob
+    #    ships here, scheduling deferred; the on-demand Job is the manual path. The
+    #    drill is engineer+ gated (ADR-0023 §5 — the restore/download path is the
+    #    existing audited engineer+ door, never a new ungated read).
+    pcap:
+      # OFF by default: the drill is a P2-executed control. enabled renders the
+      # suspended ANNUAL CronJob (+ the on-demand Job) so the manifest + harness
+      # ship in P1 and are policy-tested WITHOUT scheduling any run. Flip true in P2.
+      enabled: true
+      # Hard belt-and-braces switch: even when enabled, the CronJob renders
+      # `suspend: true` so K8s NEVER auto-fires it until P2 deliberately sets this
+      # false (ADR-0030 §5.4 — built P1, run P2). The on-demand Job is the manual path.
+      suspend: true
+      # ANNUAL cadence (ADR-0030 §5.4 — pcaps are the lowest-criticality tier, so a
+      # yearly spot-restore, NOT the quarterly Postgres cadence): 03:00 on Jan 2nd.
+      # Inert while `suspend: true`; the schedule is recorded so P2 only flips it.
+      schedule: "0 3 2 1 *"
+      # The minimum role authorized to run the restore drill (ADR-0023 §5 — restore
+      # access stays gated to engineer+; the harness asserts the requested actor's
+      # role clears this bar before it will restore ANY capture). Reference only.
+      minRole: engineer
+      # backoff/history bounds (mirror the Postgres drill).
+      backoffLimit: 1
+      concurrencyPolicy: Forbid
+      startingDeadlineSeconds: 3600
+      successfulJobsHistoryLimit: 3
+      failedJobsHistoryLimit: 3
+      ttlSecondsAfterFinished: 3600
+      # Resource requests + limits (never absent — ADR-0029 §3). The restore is
+      # IO-bound; the assertion step is light.
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
+    # -- FULL-PLATFORM DR drill (W5-T5, ADR-0030 §5.3/§6; PRODUCTION.md §8/§11).
+    #    The COMPOSING drill: restores Postgres from object storage ALONE onto a
+    #    clean target (emptyDir scratch — no live PVC), then CHAINS the three
+    #    per-tier drills end-to-end (Postgres PITR assert -> Neo4j rebuild over the
+    #    RESTORED Postgres -> pcap spot-restore) via `full_platform.run_drill`,
+    #    which AGGREGATES — never re-implements — the per-tier `DRILL ...` lines and
+    #    emits the composite line the G-REL evidence collector records. This is the
+    #    G-REL "DR drill from backups alone, onto a clean cluster" gate. Built P1
+    #    (green seeded dry-run), executed >= twice yearly from P2 (the certified-
+    #    scale 5,000-device clean-cluster run is P2 — ADR-0030 §6 / P1-PLAN.md §6).
+    fullPlatform:
+      # OFF by default: the drill is a P2-executed control. enabled renders the
+      # suspended SEMIANNUAL CronJob (+ the on-demand Job) so the manifest + the
+      # orchestrator ship in P1 and are policy-tested WITHOUT scheduling any run.
+      # Flip true in P2. Requires the three per-tier drills enabled (it composes
+      # their harnesses); rendering is gated on postgres + the drills toggle too.
+      enabled: true
+      # Hard belt-and-braces switch: even when enabled, the CronJob renders
+      # `suspend: true` so K8s NEVER auto-fires it until P2 deliberately sets this
+      # false (ADR-0030 §5.3 — built P1, run P2). The on-demand Job is the manual path.
+      suspend: true
+      # SEMIANNUAL cadence (PRODUCTION.md §8 — full DR drill >= twice yearly):
+      # 04:00 on the 20th of Jan + Jul (offset from the per-tier drills' 1st/15th so
+      # the composing drill does not contend with them). Inert while `suspend: true`;
+      # the schedule is recorded so P2 only flips the switch.
+      schedule: "0 4 20 1,7 *"
+      # PROPOSED end-to-end RTO budget (minutes): the WHOLE recovery (Postgres
+      # restore -> Neo4j rebuild -> pcap spot-restore) within RTO <= 1 h (ADR-0030
+      # §6). PROPOSED, parameterized: re-base on the Consultant §12 answer from this
+      # ONE source of truth, never a drill-local literal. The per-tier RPO window
+      # (5 min) and topology-RTO (30 min) are driven off backup.postgres.wal.
+      # proposedRpoMinutes and backup.drills.neo4j.proposedRtoMinutes respectively,
+      # so all three PROPOSED targets track one source of truth each.
+      proposedRtoMinutes: 60
+      # pcap tier gate (ADR-0023 §5): the composing drill restores pcaps only as an
+      # engineer+ actor (the existing audited door — DR opens no new ungated read).
+      pcap:
+        minRole: engineer
+      # backoff/history bounds (mirror the per-tier drills).
+      backoffLimit: 1
+      concurrencyPolicy: Forbid
+      startingDeadlineSeconds: 3600
+      successfulJobsHistoryLimit: 3
+      failedJobsHistoryLimit: 3
+      ttlSecondsAfterFinished: 3600
+      # Resource requests + limits (never absent — ADR-0029 §3). Sized for the
+      # restore (IO-bound) + the chained re-projection (CPU/IO at scale; light at
+      # the seeded dry-run). Mirrors the Neo4j-rebuild tier (the heaviest step).
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
 
 # -- Ingress + TLS (ADR-0029 §4 / ADR-0012 §2). The SINGLE front door: ONE
 #    HTTPS-only Ingress routing ALL paths to the `frontend` Service — NEVER a

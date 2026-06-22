@@ -1,0 +1,74 @@
+{{- /*
+pgBackRest backup CronJobs (W5-T1, ADR-0030 §1/§4).
+
+TWO CronJobs, one cadence each (ADR-0030 §1 req 2):
+  - <fullname>-pgbackrest-full : WEEKLY full   (schedule.full)
+  - <fullname>-pgbackrest-incr : DAILY  incr   (schedule.incr)
+
+Each job, in ONE hardened pod (the reusable `netops.pgbackrestJobPod` helper):
+  1. ensures the stanza exists (`stanza-create`, idempotent),
+  2. runs the backup (`backup --type full|incr`),
+  3. runs `pgbackrest verify` — which GATES the job: a non-clean verify fails the
+     job (ADR-0030 §1 req 2 — a backup that cannot be verified is a FAILED backup),
+  4. asserts the resulting backup set is NON-EMPTY (`pgbackrest info`), so a
+     silently-empty backup fails instead of "succeeding" (L5).
+
+The script runs under `sh -c` (L3 — the stanza/type are shell vars, and exec argv
+does not do its own $(VAR) substitution), with `set -o pipefail` and a `test -s`
+size guard on the info pipe (L5). The repo cipher pass + object-store credential
+are PGBACKREST_* env from the platform Secret (valueFrom.secretKeyRef) — NEVER
+inlined (ADR-0030 §1 / ADR-0029 §6); pgBackRest reads them directly from env.
+
+Backups are K8s CronJobs, NOT Celery beat — they keep running when the app/Redis
+is degraded (ADR-0030 §4/§5, Alt #5). Disabling the tier (backup.postgres.enabled
+=false) renders NONE of this (a warned opt-out, NOTES.txt).
+*/ -}}
+{{- if and .Values.backup.postgres.enabled .Values.services.postgres.enabled }}
+{{- /* Fail fast (render-time) when the TLS backup path is disabled: these in-chart
+       CronJobs reach PGDATA ONLY through the pgBackRest TLS server sidecar (the
+       CronJob pod has no PGDATA volume). With TLS off they would render onto a
+       non-working path and fail at RUNTIME — a clear render-time error is safer
+       than a silently-broken DR tier (ADR-0030 §1/§4). An out-of-cluster pgBackRest
+       topology that does not need this sidecar opts the WHOLE tier out
+       (backup.postgres.enabled=false), not just TLS. */ -}}
+{{- if not .Values.backup.postgres.tls.enabled }}
+{{- fail "backup.postgres.tls.enabled must be true when backup.postgres.enabled=true (the in-chart pgBackRest CronJobs reach PGDATA only via the TLS server sidecar; ADR-0030 §1/§4). Disable the whole tier (backup.postgres.enabled=false) for an out-of-cluster pgBackRest topology." }}
+{{- end }}
+{{- $b := .Values.backup.postgres -}}
+{{- $fullname := include "netops.fullname" . -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-pgbackrest-full
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+    netops.io/backup-type: full
+spec:
+  # WEEKLY full (day-of-week pinned — a `*` DOW would make it daily; policy-tested).
+  schedule: {{ $b.schedule.full | quote }}
+  concurrencyPolicy: {{ $b.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $b.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $b.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $b.failedJobsHistoryLimit }}
+  jobTemplate:
+    {{- include "netops.pgbackrestJobPod" (dict "ctx" . "type" "full") | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-pgbackrest-incr
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+    netops.io/backup-type: incr
+spec:
+  # DAILY incremental (Mon–Sat; the weekly full covers Sunday).
+  schedule: {{ $b.schedule.incr | quote }}
+  concurrencyPolicy: {{ $b.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $b.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $b.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $b.failedJobsHistoryLimit }}
+  jobTemplate:
+    {{- include "netops.pgbackrestJobPod" (dict "ctx" . "type" "incr") | nindent 4 }}
+{{- end }}

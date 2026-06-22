@@ -1,0 +1,229 @@
+{{- /*
+pcap VOLUME SNAPSHOT CronJob (W5-T4, ADR-0030 §3/§5.4; ADR-0023 §3/§4/§5).
+
+ONE daily CronJob (<fullname>-pcap-snapshot) that snapshots the pcap disk volume
+(/data/pcaps/{capture_id}.pcap, ADR-0023 §3) to the `pcaps/` object-store prefix
+(SEPARATE from pgbackrest/, W5-T1) under the HARD constraint that DR HONORS —
+never subverts — the ADR-0023 retention contract (ADR-0030 §3, the load-bearing
+requirement):
+
+  1. SNAPSHOT ONLY LIVE FILES. The snapshot set is computed by REUSING the
+     pcap_metadata model (app.models.pcap_metadata.PcapMetadata + the engine's
+     expired_capture_ids / tombstone columns) — a tombstoned row's file is SKIPPED,
+     never copied. The chart does NOT re-implement retention; the snapshot script
+     `python -m pcap.snapshot` calls the model (requirement 1).
+  2. PRUNE TOMBSTONED COPIES. Any object already in `pcaps/` whose pcap_metadata
+     row is tombstoned (or past retention_expires_at) is DELETED from the store —
+     so DR can never re-extend a purged payload's lifetime (requirement 1/3).
+  3. WINDOW = SHORTER OF (object-store policy) and (retention_expires_at). The
+     snapshot/prune clamps each object's lifetime to the SHORTER of
+     backup.pcap.retentionDays and that pcap's own retention_expires_at, so
+     object-store policy can NEVER extend a pcap past its retention (requirement 3).
+
+The credential is a SEPARATE, least-privilege MinIO/S3 key scoped WRITE-ONLY to
+the `pcaps/` prefix (requirement 4 / §7), supplied by valueFrom.secretKeyRef —
+NEVER inlined. The DB password (read-only `pcap_metadata` join) is likewise a
+secretKeyRef. No capture leaves the gated path: this job READS the volume + the
+metadata and WRITES the object store; it opens NO new read door (ADR-0023 §5).
+
+W4-LESSONS guards applied:
+  L3 — every `$VAR` lives inside ONE `sh -c '...'`; the k8s exec argv never does
+       its own $(VAR) substitution.
+  L5 — `set -o pipefail` AND a fail-closed planner: with no reachable DB DSN the
+       planner refuses an empty no-op plan (non-zero, no plan file) UNLESS
+       PCAP_SNAPSHOT_DRY_RUN is explicitly declared, so a silently-empty snapshot
+       set FAILS the job (never "succeeds"). The `test -s` on plan.json is the
+       belt-and-braces follow-up, not the primary guard.
+  L4 — this Job generates NO chart secret (it references existing Secret keys);
+       nothing to make idempotent here (the dev placeholder lives in secret.yaml,
+       lookup-idempotent there).
+
+Backups are K8s CronJobs, NOT Celery beat (ADR-0030 §4 / req 5) — they keep
+running when the app/Redis is degraded. Disabling the tier (backup.pcap.enabled
+=false) renders NOTHING here (a warned opt-out, NOTES.txt).
+*/ -}}
+{{- if .Values.backup.pcap.enabled }}
+{{- $p := .Values.backup.pcap -}}
+{{- $fullname := include "netops.fullname" . -}}
+{{- $secretName := include "netops.platformSecretName" . -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-pcap-snapshot
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+    # Distinct backup-type so the W5-T1 pgbackrest cadence rules (-full/-incr) and
+    # the W5-T2 PITR drill rules do not mis-fire on this snapshot (policy-tested).
+    netops.io/backup-type: pcap-snapshot
+spec:
+  # DAILY pcap snapshot (ADR-0030 §8). Bound so a long snapshot never overlaps the
+  # next tick (a second snapshot racing the same prefix) and pods are reaped.
+  schedule: {{ $p.schedule | quote }}
+  concurrencyPolicy: {{ $p.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $p.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $p.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $p.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $p.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 12 }}
+            netops.io/backup-type: pcap-snapshot
+        spec:
+          serviceAccountName: backup-sa
+          automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+          restartPolicy: Never
+          securityContext:
+            {{- include "netops.podSecurityContext" . | nindent 12 }}
+          containers:
+            - name: pcap-snapshot
+              image: {{ include "netops.image" (dict "img" $p.image) }}
+              imagePullPolicy: {{ $p.image.pullPolicy }}
+              securityContext:
+                {{- include "netops.hardenedSecurityContext" . | nindent 16 }}
+              command:
+                - sh
+                - -c
+                # ONE sh -c script (L3: env vars expand HERE; a raw exec argv would
+                # NOT do $(VAR)). set -o pipefail + a `test -s` non-empty guard (L5)
+                # on the snapshot-manifest pipe so a silently-empty plan FAILS the
+                # job. `python -m pcap.snapshot` REUSES app.models.pcap_metadata to
+                # decide live-vs-tombstoned + the per-file retention window (it does
+                # NOT re-implement retention) and emits the snapshot/prune plan;
+                # rclone/aws then mirrors only the LIVE files to the `pcaps/` prefix
+                # and deletes tombstoned/expired objects. set -e fails the pod on any
+                # non-zero from the planner, the copy, or the prune.
+                - |
+                  set -euo pipefail
+                  echo "[pcap-snapshot] planning live-vs-tombstoned snapshot of ${PCAP_DIR} -> ${PCAP_S3_PREFIX} (honoring ADR-0023 retention)"
+                  mkdir -p /tmp/pcap-snapshot
+                  # The planner joins pcap_metadata (READ-ONLY) and writes the plan:
+                  #   live capture ids to COPY (non-tombstoned, file present), and
+                  #   tombstoned/expired object keys to PRUNE. It NEVER lists a
+                  #   tombstoned capture in the COPY set (the no-resurrection guard).
+                  python -m pcap.snapshot \
+                    --pcap-dir "${PCAP_DIR}" \
+                    --s3-prefix "${PCAP_S3_PREFIX}" \
+                    --retention-days "${PCAP_RETENTION_DAYS}" \
+                    --plan-out /tmp/pcap-snapshot/plan.json \
+                    | tee /tmp/pcap-snapshot/plan.log
+                  echo "[pcap-snapshot] assert the snapshot plan exists (L5 belt-and-braces)"
+                  # The PRIMARY empty-snapshot guard lives in the planner: with no DB
+                  # reachable it FAILS CLOSED (non-zero, no plan file written) unless
+                  # PCAP_SNAPSHOT_DRY_RUN is explicitly set — so a DB-unreachable /
+                  # planner-no-op run cannot pass as a green snapshot of nothing
+                  # (set -e above already aborts on that non-zero). This `test -s` is
+                  # the belt-and-braces follow-up: if the planner somehow exited 0 but
+                  # wrote no plan file, fail here too.
+                  test -s /tmp/pcap-snapshot/plan.json
+                  echo "[pcap-snapshot] copy LIVE files + prune tombstoned/expired object copies"
+                  # The planner applies the plan via the configured object-store
+                  # client when --apply is passed; in P1 (dryRun=true) it runs
+                  # plan-only (no live store) so the gate is a green dry-run. The
+                  # --apply flag is rendered IN by Helm from `backup.pcap.dryRun`
+                  # (apply mode = NOT dry-run) — P2 flips dryRun=false and the
+                  # snapshot actually copies/prunes. Rendering the literal flag (vs
+                  # a runtime `${VAR:+--apply}` that always expanded empty because
+                  # no such env was ever set) is what makes apply mode reachable.
+                  python -m pcap.snapshot --apply-plan /tmp/pcap-snapshot/plan.json {{- if not $p.dryRun }} --apply{{- end }}
+                  echo "[pcap-snapshot] daily snapshot complete (live-only, retention-honored)"
+              env:
+                # On-volume pcap dir + the pcap object-store prefix (used by the
+                # sh -c script, never interpolated into a raw exec argv).
+                - name: PCAP_DIR
+                  value: {{ $p.pcapDir | quote }}
+                - name: PCAP_S3_PREFIX
+                  value: {{ printf "%s/%s%s" $p.repo.bucket (trimPrefix "/" $p.repo.prefix) "" | quote }}
+                # The OBJECT-STORE retention window (days); the planner clamps each
+                # file to the SHORTER of this and its retention_expires_at (ADR-0030
+                # §3). Passed as a value so the planner re-bases on one source.
+                - name: PCAP_RETENTION_DAYS
+                  value: {{ $p.retentionDays | quote }}
+                # Fail-closed switch (ADR-0030 §3). When NO DB DSN is reachable the
+                # planner refuses to emit an empty no-op plan UNLESS dry-run is
+                # explicitly declared — so a P2 missing/unreachable DSN FAILS the job
+                # (loud) instead of producing a green snapshot of nothing. P1 ships a
+                # plan-only dry-run (no live store), so dry-run is opted IN here; P2
+                # supplies a real DSN and sets this false.
+                - name: PCAP_SNAPSHOT_DRY_RUN
+                  value: {{ $p.dryRun | quote }}
+                # The pcap engine reads its on-disk layout + retention defaults from
+                # the app package; PYTHONPATH carries both app and the drills/ dir
+                # (so `import pcap.snapshot` resolves alongside `app.models...`).
+                - name: PYTHONPATH
+                  value: "/app:/app/drills"
+                # Object-store coordinates (NON-secret) for the snapshot client.
+                - name: PCAP_S3_ENDPOINT
+                  value: {{ printf "%s:%v" $p.repo.endpoint $p.repo.port | quote }}
+                - name: PCAP_S3_REGION
+                  value: {{ $p.repo.region | quote }}
+                - name: PCAP_S3_URI_STYLE
+                  value: {{ $p.repo.uriStyle | quote }}
+                - name: PCAP_S3_VERIFY_TLS
+                  value: {{ $p.repo.verifyTls | quote }}
+                # Server-side encryption for the pcap prefix at rest (defense in
+                # depth for PII/credential-bearing payloads in the off-host store).
+                - name: PCAP_S3_SSE
+                  value: {{ $p.sseEncryption | quote }}
+                # DB user (non-secret) by configMapKeyRef; password by-reference.
+                # The snapshot joins pcap_metadata READ-ONLY (live-vs-tombstoned).
+                - name: PGUSER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {{ $fullname }}-config
+                      key: NETOPS_POSTGRES_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $secretName }}
+                      key: {{ .Values.secrets.keys.postgresPassword }}
+                # SEPARATE, least-privilege object-store credential — scoped
+                # WRITE-ONLY to the `pcaps/` prefix (requirement 4 / §7). External-
+                # secret REFs only; NEVER inlined (ADR-0030 §3 / ADR-0029 §6).
+                - name: PCAP_S3_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $secretName }}
+                      key: {{ .Values.secrets.keys.pcapSnapshotS3Key }}
+                - name: PCAP_S3_KEY_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $secretName }}
+                      key: {{ .Values.secrets.keys.pcapSnapshotS3KeySecret }}
+              resources:
+                {{- toYaml $p.resources | nindent 16 }}
+              volumeMounts:
+                # The pcap volume is mounted READ-ONLY: the snapshot READS captures
+                # and never writes the capture volume (writes go to the object
+                # store). A read-only mount is the integrity guarantee (ADR-0023 §3).
+                - name: pcaps
+                  mountPath: {{ $p.pcapDir }}
+                  readOnly: true
+                # readOnlyRootFilesystem:true — the plan/scratch dir is the ONLY
+                # writable mount (emptyDir; torn down with the pod).
+                - name: snapshot-scratch
+                  mountPath: /tmp/pcap-snapshot
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            # The SAME pcap volume the capture/analysis pods use (ADR-0023 §3). W3
+            # scaffold is an emptyDir placeholder; W4 wires the real PVC. Mounted
+            # read-only above regardless.
+            - name: pcaps
+              {{- if .Values.packet.pcapVolume.emptyDir }}
+              emptyDir:
+                sizeLimit: {{ .Values.packet.pcapVolume.emptyDir.sizeLimit }}
+              {{- else }}
+              persistentVolumeClaim:
+                claimName: {{ .Values.packet.pcapVolume.persistentVolumeClaim.claimName }}
+              {{- end }}
+            - name: snapshot-scratch
+              emptyDir:
+                sizeLimit: 256Mi
+            - name: tmp
+              emptyDir:
+                sizeLimit: 128Mi
+{{- end }}

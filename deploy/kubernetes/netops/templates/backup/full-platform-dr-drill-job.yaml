@@ -1,0 +1,374 @@
+{{- /*
+FULL-PLATFORM DR DRILL — Job + suspended SEMIANNUAL CronJob (W5-T5,
+ADR-0030 §5.3/§6; ADR-0005 D5; ADR-0011 §1/§2).
+
+WHAT IT PROVES (the G-REL "DR drill from backups ALONE, onto a clean cluster"
+gate — ADR-0030 §5.3): the WHOLE platform is recoverable from object storage with
+NO surviving live state, by CHAINING the three per-tier drills end-to-end:
+
+  (1) W5-T2 Postgres PITR — restore the latest full + WAL from the object-store
+      repo ALONE into a THROWAWAY target (never the live PVC), then assert the
+      four §5.1 checks (RPO-in-window, audit immutable, credentials fail-closed
+      without the KEK, pgbackrest verify clean);
+  (2) W5-T3 Neo4j rebuild — re-project the WHOLE topology over the RESTORED
+      Postgres (NOT a graph dump — ADR-0005 D5), asserting counts-match +
+      topology-RTO < the PROPOSED budget;
+  (3) W5-T4 pcap spot-restore — restore sampled captures from the `pcaps/` prefix,
+      sha256-verify a live sample, and PROVE no tombstoned capture is resurrected.
+
+This Job AGGREGATES — never re-implements — the per-tier structured `DRILL ...`
+lines via `full_platform.run_drill`, measures the end-to-end RPO/RTO, and emits
+the composite `DRILL full_platform ...` line the W5-T5 G-REL evidence collector
+records. A non-zero from ANY tier fails the pod (set -e); the orchestrator runs
+ALL three tiers regardless so the evidence table is complete.
+
+CLEAN-CLUSTER / FROM-BACKUPS-ALONE: the restore target is an emptyDir scratch
+(torn down with the pod), reached via pgbackrest `--pg1-path`; the drill mounts NO
+live PVC, so it cannot lean on surviving live state (ADR-0030 §5.3). This proves
+the D5 "one authoritative thing to restore (Postgres) + one thing to rebuild
+(Neo4j projection)" story end-to-end.
+
+BUILT P1, RUN P2 (ADR-0030 §5 / P1-PLAN.md §6): the CronJob renders `suspend:
+true` so K8s NEVER auto-fires it; the Job is the on-demand manual path. The P1
+gate is a GREEN end-to-end dry-run over the seeded fixtures (no hardware). The
+certified-scale (5,000-device) clean-cluster run is P2 (ADR-0030 §6) — the G-REL
+evidence doc flags this explicitly; this manifest does NOT imply the gate is
+fully closed at production scale.
+
+W4-LESSONS guards applied:
+  L3 — every `$VAR` lives inside ONE `sh -c '...'`; the k8s exec argv never does
+       its own $(VAR) substitution.
+  L5 — `set -o pipefail` AND a `test -s` non-empty guard on the restore + on the
+       aggregated drill-output pipe, so a silently-empty restore/aggregate stream
+       FAILS the job (never "succeeds").
+  L4 — this Job generates NO chart secret (it references existing platform Secret
+       keys); nothing to make idempotent here.
+SECRET-SURFACE: the repo cipher pass, S3 credentials (backup + pcap), DB password,
+Neo4j auth, and the KEK reference are ALL valueFrom.secretKeyRef — never inlined
+(ADR-0030 §1 / ADR-0011 §4 / ADR-0029 §6). The KEK is the master-key REFERENCE
+(ADR-0032), not the key. This is the SECRET-SURFACE-bearing tier of the wave; the
+external-secret indirection is the only credential path.
+*/ -}}
+{{- /*
+Reusable full-platform DR-drill pod spec (authored ONCE so the on-demand Job and
+the suspended CronJob cannot drift). Defined at the top level (Helm `define` may
+not nest inside an `if` action).
+*/ -}}
+{{- define "netops.fullPlatformDrillPod" -}}
+{{- $ctx := .ctx -}}
+{{- $d := $ctx.Values.backup.drills -}}
+{{- $fp := $ctx.Values.backup.drills.fullPlatform -}}
+{{- $b := $ctx.Values.backup.postgres -}}
+{{- $neo := $ctx.Values.backup.drills.neo4j -}}
+{{- $p := $ctx.Values.backup.pcap -}}
+{{- $fullname := include "netops.fullname" $ctx -}}
+{{- $secretName := include "netops.platformSecretName" $ctx -}}
+{{- $useTls := and $b.tls.enabled $ctx.Values.services.postgres.enabled -}}
+metadata:
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" $ctx "component" "backup") | nindent 4 }}
+    # Distinct backup-type so the W5-T1 cadence rules (full|incr) and the W5-T2
+    # PITR-drill rules (which require `pgbackrest verify` on the drill object) do
+    # not mis-fire on this composing drill; it has its own W5-T5 rego rules.
+    netops.io/backup-type: full-platform-drill
+spec:
+  serviceAccountName: backup-sa
+  automountServiceAccountToken: {{ $ctx.Values.serviceAccounts.automountServiceAccountToken }}
+  restartPolicy: Never
+  securityContext:
+    {{- include "netops.podSecurityContext" $ctx | nindent 4 }}
+  containers:
+    - name: full-platform-dr-drill
+      # Reuses the backend image (carries app.core.crypto + app.engines.topology +
+      # app.models.pcap_metadata that the three tier harnesses import) plus the
+      # pgbackrest client for the restore. Explicit tag ONLY (admission rejects
+      # `latest`, ADR-0029 §5).
+      image: {{ include "netops.image" (dict "img" $d.image) }}
+      imagePullPolicy: {{ $d.image.pullPolicy }}
+      securityContext:
+        {{- include "netops.hardenedSecurityContext" $ctx | nindent 8 }}
+      command:
+        - sh
+        - -c
+        # ONE sh -c script (L3: env vars expand HERE; a raw exec argv would NOT do
+        # $(VAR)). set -o pipefail + `test -s` non-empty guards (L5) on the restore
+        # and on the aggregated drill-output pipe, so a silently-empty restore or
+        # aggregate stream FAILS the job. The restore reads ONLY the object-store
+        # repo into a THROWAWAY scratch dir (never a live PVC) — proving the
+        # from-backups-alone / clean-cluster property (ADR-0030 §5.3). Then the
+        # `full_platform.run_drill` orchestrator chains the three tier harnesses
+        # (Postgres assert -> Neo4j rebuild over restored PG -> pcap spot-restore),
+        # AGGREGATES their `DRILL ...` lines, and emits the composite line. A
+        # non-zero from restore OR the orchestrator fails the pod (set -e).
+        - |
+          set -euo pipefail
+          echo "[dr-drill] restoring stanza ${PGBACKREST_STANZA} from object storage ALONE -> THROWAWAY ${DRILL_RESTORE_PATH}"
+          mkdir -p "${DRILL_RESTORE_PATH}"
+          # Restore the latest full + WAL from the repo ALONE into the scratch dir
+          # (clean-cluster: no live PVC is mounted — ADR-0030 §5.3).
+          pgbackrest --stanza="${PGBACKREST_STANZA}" \
+            --pg1-path="${DRILL_RESTORE_PATH}" \
+            --log-level-console=detail \
+            --delta restore
+          echo "[dr-drill] assert the restored data dir is NON-EMPTY (L5)"
+          test -s "${DRILL_RESTORE_PATH}/PG_VERSION"
+          echo "[dr-drill] chaining the three tiers + aggregating the DRILL lines"
+          # The orchestrator runs all three tier harnesses, aggregates their
+          # structured lines, and emits the composite `DRILL full_platform ...`
+          # line. Tee so the L5 non-empty guard can assert evidence was produced.
+          python -m full_platform.run_drill \
+            --rpo-window-minutes "${DRILL_RPO_WINDOW_MINUTES}" \
+            --rto-minutes "${DRILL_RTO_MINUTES}" \
+            --topology-rto-minutes "${DRILL_TOPOLOGY_RTO_MINUTES}" \
+            --actor-role "${DRILL_ACTOR_ROLE}" \
+            --min-role "${DRILL_MIN_ROLE}" \
+            | tee "${DRILL_RESTORE_PATH}/dr-drill.log"
+          echo "[dr-drill] assert the aggregated drill output is NON-EMPTY (L5)"
+          test -s "${DRILL_RESTORE_PATH}/dr-drill.log"
+          grep -q "DRILL full_platform .* result=PASS" "${DRILL_RESTORE_PATH}/dr-drill.log"
+          echo "[dr-drill] full-platform DR chain PASSED (P2 executes this semiannually; P1 dry-run)"
+      env:
+        # Stanza + the THROWAWAY restore path (used by the sh -c script, never argv).
+        - name: PGBACKREST_STANZA
+          value: {{ $b.stanza | quote }}
+        - name: DRILL_RESTORE_PATH
+          value: {{ $d.throwaway.restorePath | quote }}
+        # PROPOSED targets — ALL parameterized off the single source-of-truth knobs
+        # (W5-T1 backup.postgres.wal.proposedRpoMinutes; W5-T3 neo4j.proposedRtoMinutes;
+        # the end-to-end RTO from fullPlatform.proposedRtoMinutes) so they re-base on
+        # the Consultant §12 answer, never a drill-local literal (ADR-0030 §6).
+        - name: DRILL_RPO_WINDOW_MINUTES
+          value: {{ $b.wal.proposedRpoMinutes | quote }}
+        - name: DRILL_RTO_MINUTES
+          value: {{ $fp.proposedRtoMinutes | quote }}
+        - name: DRILL_TOPOLOGY_RTO_MINUTES
+          value: {{ $neo.proposedRtoMinutes | quote }}
+        # pcap restore stays engineer+ gated (ADR-0023 §5); reference-only roles.
+        - name: DRILL_ACTOR_ROLE
+          value: {{ $fp.pcap.minRole | quote }}
+        - name: DRILL_MIN_ROLE
+          value: {{ $fp.pcap.minRole | quote }}
+        # PYTHONPATH carries the app package + the drills/ dir so the orchestrator
+        # can import postgres_pitr / topology_rebuild / pcap alongside app.*.
+        - name: PYTHONPATH
+          value: "/app:/app/drills"
+        # pgBackRest config (remote view when the TLS server is enabled — the drill
+        # pod, like the backup CronJob, has no live PGDATA volume; ADR-0030 §4).
+        - name: PGBACKREST_CONFIG
+          {{- if $useTls }}
+          value: /etc/pgbackrest/pgbackrest-remote.conf
+          {{- else }}
+          value: /etc/pgbackrest/pgbackrest.conf
+          {{- end }}
+        # --- connection coordinates: NON-secret configMap env (hosts/URIs/users). ---
+        - name: NETOPS_POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_POSTGRES_HOST
+        - name: NETOPS_POSTGRES_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_POSTGRES_PORT
+        - name: NETOPS_POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_POSTGRES_DB
+        - name: NETOPS_POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_POSTGRES_USER
+        - name: NETOPS_NEO4J_URI
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_NEO4J_URI
+        - name: NETOPS_NEO4J_USER
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_NEO4J_USER
+        # pcap object-store coordinates (NON-secret).
+        - name: PCAP_S3_ENDPOINT
+          value: {{ printf "%s:%v" $p.repo.endpoint $p.repo.port | quote }}
+        - name: PCAP_S3_REGION
+          value: {{ $p.repo.region | quote }}
+        - name: PCAP_S3_PREFIX
+          value: {{ printf "%s/%s" $p.repo.bucket (trimPrefix "/" $p.repo.prefix) | quote }}
+        # DB user (non-secret) by configMapKeyRef; password by-reference (below).
+        - name: PGUSER
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_POSTGRES_USER
+        # --- credentials: external-secret REFs ONLY; NEVER inlined (ADR-0029 §6). ---
+        # DB password (shared by the Postgres + Neo4j-rebuild + pcap tiers).
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.postgresPassword }}
+        - name: NETOPS_POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.postgresPassword }}
+        # Neo4j auth (the rebuild tier projects into a clean graph).
+        - name: NETOPS_NEO4J_AUTH
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.neo4jAuth }}
+        {{- if $b.encryption.enabled }}
+        # Backup repo cipher PASSPHRASE — external-secret REF only; NEVER inlined.
+        - name: PGBACKREST_REPO1_CIPHER_PASS
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.backupRepoCipherPass }}
+        {{- end }}
+        # Backup object-store credential (least-privilege). External-secret REFs only.
+        - name: PGBACKREST_REPO1_S3_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.backupRepoS3Key }}
+        - name: PGBACKREST_REPO1_S3_KEY_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.backupRepoS3KeySecret }}
+        # SEPARATE, least-privilege pcap object-store credential (read `pcaps/`).
+        - name: PCAP_S3_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.pcapSnapshotS3Key }}
+        - name: PCAP_S3_KEY_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.pcapSnapshotS3KeySecret }}
+        {{- if eq $ctx.Values.secrets.kms.provider "secret" }}
+        # KEK master-key REFERENCE (ADR-0032) — the indirect handle the envelope
+        # layer resolves; NOT the KEK itself. By-reference so the Postgres tier's
+        # credential-separation proof can attempt the matching-KEK decrypt. The
+        # fail-closed half needs NO KEK by design (that is the point of the proof).
+        - name: NETOPS_KEK_REF
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.kms.masterKeyRefKey }}
+        {{- end }}
+      resources:
+        {{- toYaml $fp.resources | nindent 8 }}
+      volumeMounts:
+        - name: pgbackrest-config
+          mountPath: /etc/pgbackrest
+          readOnly: true
+        {{- if $useTls }}
+        - name: pgbackrest-tls
+          mountPath: /etc/pgbackrest-tls
+          readOnly: true
+        {{- end }}
+        # readOnlyRootFilesystem:true — the THROWAWAY restore + pgbackrest scratch
+        # are the ONLY writable mounts (emptyDir; torn down with the pod).
+        - name: drill-restore
+          mountPath: {{ dir $d.throwaway.restorePath | quote }}
+        - name: pgbackrest-runtime
+          mountPath: /var/lib/pgbackrest
+        - name: pgbackrest-tmp
+          mountPath: /tmp/pgbackrest
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: pgbackrest-config
+      configMap:
+        name: {{ $fullname }}-pgbackrest-config
+    {{- if $useTls }}
+    - name: pgbackrest-tls
+      secret:
+        secretName: {{ $secretName }}
+        items:
+          - key: {{ $ctx.Values.secrets.keys.backupTlsCa }}
+            path: ca.crt
+          - key: {{ $ctx.Values.secrets.keys.backupTlsClientCert }}
+            path: client.crt
+          - key: {{ $ctx.Values.secrets.keys.backupTlsClientKey }}
+            path: client.key
+    {{- end }}
+    # THROWAWAY restore target — emptyDir scratch ONLY (never a live PVC). This is
+    # the from-backups-alone / clean-cluster guarantee (ADR-0030 §5.3).
+    - name: drill-restore
+      emptyDir:
+        sizeLimit: 4Gi
+    - name: pgbackrest-runtime
+      emptyDir:
+        sizeLimit: 1Gi
+    - name: pgbackrest-tmp
+      emptyDir:
+        sizeLimit: 256Mi
+    - name: tmp
+      emptyDir:
+        sizeLimit: 128Mi
+{{- end -}}
+{{- if and .Values.backup.drills.enabled .Values.backup.drills.fullPlatform.enabled .Values.backup.postgres.enabled .Values.services.postgres.enabled }}
+{{- $d := .Values.backup.drills -}}
+{{- $fp := .Values.backup.drills.fullPlatform -}}
+{{- $fullname := include "netops.fullname" . -}}
+---
+# On-demand Job (manual path): `kubectl create job --from=cronjob/...` or applied
+# directly. Inert until invoked; the chained tiers run a GREEN dry-run in P1.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-full-platform-dr-drill
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+    netops.io/backup-type: full-platform-drill
+  annotations:
+    # BUILT P1, RUN P2 (ADR-0030 §5.3): shipped + policy-tested now; execution is
+    # the semiannual P2 control (PRODUCTION.md §8 — full DR drill >= twice yearly).
+    netops.io/execution-phase: P2
+    helm.sh/hook-weight: "0"
+spec:
+  backoffLimit: {{ $fp.backoffLimit }}
+  ttlSecondsAfterFinished: {{ $fp.ttlSecondsAfterFinished }}
+  template:
+    {{- include "netops.fullPlatformDrillPod" (dict "ctx" .) | nindent 4 }}
+---
+# Suspended SEMIANNUAL CronJob (ADR-0030 §5.3; PRODUCTION.md §8 — full DR drill
+# >= twice yearly). `suspend: true` so K8s NEVER auto-fires it in P1 — P2 flips
+# backup.drills.fullPlatform.suspend=false to begin the twice-yearly run.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-full-platform-dr-drill
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+    netops.io/backup-type: full-platform-drill
+  annotations:
+    netops.io/execution-phase: P2
+spec:
+  # Semiannual cadence (PRODUCTION.md §8 — >= twice yearly): 04:00 on Jan/Jul 20th
+  # (offset from the per-tier drills so the composing drill does not contend with
+  # them). INERT while suspended (built P1, run P2 — ADR-0030 §5.3).
+  schedule: {{ $fp.schedule | quote }}
+  # The belt-and-braces switch: rendered suspended by default so no run fires until
+  # P2 deliberately un-suspends it (ADR-0030 §5.3 / P1-PLAN.md §6).
+  suspend: {{ $fp.suspend }}
+  concurrencyPolicy: {{ $fp.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $fp.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $fp.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $fp.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $fp.backoffLimit }}
+      template:
+        {{- include "netops.fullPlatformDrillPod" (dict "ctx" .) | nindent 8 }}
+{{- end }}

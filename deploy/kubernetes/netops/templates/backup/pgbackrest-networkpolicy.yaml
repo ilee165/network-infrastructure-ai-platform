@@ -1,0 +1,63 @@
+{{- /*
+Backup CronJob NetworkPolicy (W5-T1, ADR-0030 §4 / ADR-0029 §2).
+
+The backup pod is credential-bearing (repo cipher pass + object-store key) and
+reads the audit/PII-bearing system of record — so its egress is CONFINED, never
+blanket (PRODUCTION.md §5). It is additive on top of the default-deny floor
+(networkpolicies.yaml). The cluster-wide allow-dns-egress (podSelector {}) already
+grants :53; this policy adds exactly two §-arrows:
+  - backup -> postgres       (reach the in-postgres `pgbackrest server` over mTLS
+                              on the TLS server port when tls.enabled; else 5432)
+  - backup -> object store     (write the repo to MinIO/S3, ports 9000 + 443)
+No empty-`to` rule (a missing `to` = allow-anywhere — exactly what default-deny
+forbids; policy-tested). Renders only when the backup tier is on AND the in-chart
+postgres + the platform NetworkPolicies are enabled.
+*/ -}}
+{{- if and .Values.backup.postgres.enabled .Values.services.postgres.enabled .Values.networkPolicy.enabled }}
+{{- $b := .Values.backup.postgres -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "netops.fullname" . }}-allow-backup-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "backup") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # backup -> postgres. With the TLS server sidecar (default), the CronJob
+    # reaches the in-pod `pgbackrest server` on the TLS server port, NOT 5432
+    # (5432 is libpq; pgBackRest's remote protocol rides the TLS port — ADR-0030
+    # §4). Without TLS (out-of-cluster topology), fall back to the libpq port.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        {{- if and $b.tls.enabled .Values.services.postgres.enabled }}
+        - protocol: TCP
+          port: {{ $b.tls.serverPort }}
+        {{- else }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+        {{- end }}
+    # backup -> object store (write the encrypted repo to MinIO/S3). CONFINED to
+    # the configured object-store CIDRs — NEVER an empty-`to` allow. Operators MUST
+    # narrow backup.postgres.objectStoreCidrs to their real ranges (the RFC1918
+    # default is a placeholder). Both the MinIO port and 443 (HTTPS S3) are opened.
+    - to:
+        {{- range $b.objectStoreCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $b.repo.port }}
+        - protocol: TCP
+          port: 443
+{{- end }}

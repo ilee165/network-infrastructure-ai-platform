@@ -35,6 +35,7 @@ RBAC + admission policy, and the packet-sandbox OS-isolation workloads
 | `packet-analysis-seccomp.json` | ADR-0031 §3 | deny-by-default seccomp allow-list |
 | ServiceAccounts | ADR-0029 §5 / ADR-0031 §1 | one per workload, `automountServiceAccountToken: false`, zero ClusterRole(Binding) |
 | Admission policy (Kyverno / VAP) | ADR-0029 §5 | no-`latest`, signed-image (data-gated), PSS-deviation allow-list naming EXACTLY the packet sandbox |
+| pgBackRest backup `CronJob`s + `ConfigMap` (W5-T1) | ADR-0030 §1/§4 | continuous WAL archiving (postgres `archive_mode=on` + `archive_command`) + weekly-full / daily-incr backups → MinIO/S3, repo `aes-256-cbc` encryption, `pgbackrest verify` GATES every job; ON by default (`backup.postgres.enabled`); own `backup-sa`; confined egress NetworkPolicy; all repo secrets by external-secret reference |
 
 ## Secure by default = opt-out, never opt-in
 
@@ -89,6 +90,11 @@ Prerequisites for the hardened path:
 | `admission.enabled` / `admission.engine` | `true` / `kyverno` | `vap` fallback for webhook-free clusters |
 | `admission.signedImages.enabled` | `false` | W6 wires the cosign verifier key |
 | `secrets.existingSecret` | `""` | set in production; empty renders a warned dev Secret |
+| `backup.postgres.enabled` | `true` | resilient-by-default DR tier; disabling is a warned opt-out (no CronJob, archive_command off) |
+| `backup.postgres.schedule.full` / `.incr` | `0 1 * * 0` / `0 1 * * 1-6` | weekly-full / daily-incr; each job runs `pgbackrest verify` (gates the job) |
+| `backup.postgres.encryption.cipherType` | `aes-256-cbc` | repo encryption, independent of object-store SSE; passphrase by external-secret ref |
+| `backup.postgres.repo.endpoint` / `.bucket` / `.prefix` | MinIO svc / `netops-backups` / `/pgbackrest` | object-store repo; credential scoped write-to-`pgbackrest/` only (`pcaps/` is W5-T4) |
+| `secrets.keys.backupRepo*` | reference key names | repo cipher pass + S3 key/secret — REFERENCE ONLY, never inlined |
 | `serviceAccounts.automountServiceAccountToken` | `false` | workloads need no K8s API token |
 | `packet.analysis.*` / `packet.capture.capabilities.add` | full §2 profile / `[NET_RAW,NET_ADMIN]` | NET_RAW only on capture |
 

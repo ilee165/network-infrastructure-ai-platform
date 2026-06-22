@@ -134,3 +134,175 @@ Falls back to the release namespace if both are unset.
   value: {{ .Values.packetNodePool.taint.value | quote }}
   effect: {{ .Values.packetNodePool.taint.effect }}
 {{- end -}}
+
+{{/*
+netops.platformSecretName — the Secret the chart references for platform
+credentials (postgres password, OIDC, KMS ref, and the W5-T1 pgBackRest repo
+keys). In production this is `secrets.existingSecret` (populated out-of-band by
+external-secrets / CSI); in dev it is the chart-generated `<fullname>-dev-secrets`
+(secret.yaml). Authored once so every consumer resolves the SAME name.
+*/}}
+{{- define "netops.platformSecretName" -}}
+{{- if .Values.secrets.existingSecret -}}
+{{ .Values.secrets.existingSecret }}
+{{- else -}}
+{{ include "netops.fullname" . }}-dev-secrets
+{{- end -}}
+{{- end -}}
+
+{{/*
+netops.pgbackrestJobPod — the reusable backup Job-pod spec for a pgBackRest
+backup of a given `--type` (W5-T1, ADR-0030 §1/§4). Authored ONCE so the weekly-
+full and daily-incr CronJobs cannot drift. Args:
+  ctx   = root context (.)
+  type  = "full" | "incr"
+The container runs ONE `sh -c` script: stanza-create (idempotent) → backup →
+`pgbackrest verify` (GATES the job) → a non-empty `info` assertion (L5). All
+credentials are PGBACKREST_* / PG* env from the platform Secret (secretKeyRef),
+never inlined. Hardened via the shared securityContext helpers.
+*/}}
+{{- define "netops.pgbackrestJobPod" -}}
+{{- $ctx := .ctx -}}
+{{- $type := .type -}}
+{{- $b := $ctx.Values.backup.postgres -}}
+{{- $fullname := include "netops.fullname" $ctx -}}
+{{- $secretName := include "netops.platformSecretName" $ctx -}}
+spec:
+  # The backup must not overlap the next tick (a second pgbackrest against the
+  # same stanza races the repo); a missed window is rescheduled within the deadline.
+  backoffLimit: {{ $b.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" $ctx "component" "backup") | nindent 8 }}
+    spec:
+      serviceAccountName: backup-sa
+      automountServiceAccountToken: {{ $ctx.Values.serviceAccounts.automountServiceAccountToken }}
+      restartPolicy: Never
+      securityContext:
+        {{- include "netops.podSecurityContext" $ctx | nindent 8 }}
+      containers:
+        - name: pgbackrest
+          image: {{ include "netops.image" (dict "img" $b.image) }}
+          imagePullPolicy: {{ $b.image.pullPolicy }}
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" $ctx | nindent 12 }}
+          command:
+            - sh
+            - -c
+            # ONE sh -c script (L3: env expands here; exec argv would NOT do
+            # $(VAR)). pipefail + a `test -s` non-empty guard on the info pipe
+            # (L5). `verify` GATES the job — `set -e` makes any non-zero (backup
+            # OR verify) fail the pod. Credentials are PGBACKREST_* env, never argv.
+            - |
+              set -euo pipefail
+              echo "[pgbackrest] stanza-create (idempotent) for stanza ${PGBACKREST_STANZA}"
+              pgbackrest --stanza="${PGBACKREST_STANZA}" --log-level-console=info stanza-create || true
+              echo "[pgbackrest] {{ $type }} backup -> object-store repo"
+              pgbackrest --stanza="${PGBACKREST_STANZA}" --type={{ $type }} --log-level-console=info backup
+              echo "[pgbackrest] verify (GATES this job — a non-clean verify fails it)"
+              pgbackrest --stanza="${PGBACKREST_STANZA}" --log-level-console=detail verify
+              echo "[pgbackrest] assert the backup set is non-empty"
+              # L5: pipe through tee with pipefail; `test -s` guards an empty info
+              # stream so a silently-empty repo fails the job instead of passing.
+              pgbackrest --stanza="${PGBACKREST_STANZA}" info --output=text | tee /tmp/pgbackrest/info.txt
+              test -s /tmp/pgbackrest/info.txt
+              grep -q "status: ok" /tmp/pgbackrest/info.txt
+              echo "[pgbackrest] {{ $type }} backup + verify complete"
+          env:
+            # Stanza + type as env (used by the sh -c script, not interpolated argv).
+            - name: PGBACKREST_STANZA
+              value: {{ $b.stanza | quote }}
+            # pgBackRest reads its config from this path (the mounted ConfigMap).
+            # The CronJob has NO PGDATA volume, so it uses the REMOTE view
+            # (pg1-host=tls → the in-postgres `pgbackrest server` sidecar) when the
+            # TLS server is enabled; the LOCAL view only applies in-pod (ADR-0030 §4).
+            - name: PGBACKREST_CONFIG
+              {{- if and $b.tls.enabled $ctx.Values.services.postgres.enabled }}
+              value: /etc/pgbackrest/pgbackrest-remote.conf
+              {{- else }}
+              value: /etc/pgbackrest/pgbackrest.conf
+              {{- end }}
+            # Postgres auth — the backup connects as the platform DB user; the
+            # password is by-reference (secrets.keys.postgresPassword).
+            - name: PGUSER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ $fullname }}-config
+                  key: NETOPS_POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ $ctx.Values.secrets.keys.postgresPassword }}
+            {{- if $b.encryption.enabled }}
+            # Repo cipher PASSPHRASE — aes-256-cbc (ADR-0030 §1). External-secret
+            # REF only; NEVER inlined. pgBackRest reads PGBACKREST_REPO1_CIPHER_PASS.
+            - name: PGBACKREST_REPO1_CIPHER_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ $ctx.Values.secrets.keys.backupRepoCipherPass }}
+            {{- end }}
+            # Object-store credential (least-privilege, write-to-prefix only).
+            # External-secret REFs only; NEVER inlined (ADR-0030 §1 / ADR-0011 §4).
+            - name: PGBACKREST_REPO1_S3_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ $ctx.Values.secrets.keys.backupRepoS3Key }}
+            - name: PGBACKREST_REPO1_S3_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ $ctx.Values.secrets.keys.backupRepoS3KeySecret }}
+          resources:
+            {{- toYaml $b.resources | nindent 12 }}
+          volumeMounts:
+            - name: pgbackrest-config
+              mountPath: /etc/pgbackrest
+              readOnly: true
+            {{- if and $b.tls.enabled $ctx.Values.services.postgres.enabled }}
+            # mTLS client material (CA + client cert/key) to reach the in-postgres
+            # `pgbackrest server` over TLS (ADR-0030 §4). By-reference from the
+            # Secret; the CronJob presents client.crt (CN = tls.clientCommonName).
+            - name: pgbackrest-tls
+              mountPath: /etc/pgbackrest-tls
+              readOnly: true
+            {{- end }}
+            # readOnlyRootFilesystem:true — pgBackRest needs writable scratch for
+            # its lock/spool/log + the info assertion file (the ONLY writable mounts).
+            - name: pgbackrest-runtime
+              mountPath: /var/lib/pgbackrest
+            - name: pgbackrest-tmp
+              mountPath: /tmp/pgbackrest
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: pgbackrest-config
+          configMap:
+            name: {{ $fullname }}-pgbackrest-config
+        {{- if and $b.tls.enabled $ctx.Values.services.postgres.enabled }}
+        # mTLS client material for the remote (TLS) backup path (ADR-0030 §4),
+        # by-reference from the platform Secret (NEVER inlined).
+        - name: pgbackrest-tls
+          secret:
+            secretName: {{ $secretName }}
+            items:
+              - key: {{ $ctx.Values.secrets.keys.backupTlsCa }}
+                path: ca.crt
+              - key: {{ $ctx.Values.secrets.keys.backupTlsClientCert }}
+                path: client.crt
+              - key: {{ $ctx.Values.secrets.keys.backupTlsClientKey }}
+                path: client.key
+        {{- end }}
+        - name: pgbackrest-runtime
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: pgbackrest-tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+{{- end -}}
