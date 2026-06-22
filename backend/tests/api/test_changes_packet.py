@@ -404,11 +404,11 @@ class TestCaptureLaunch:
         capture_id = body["capture_id"]
         assert uuid.UUID(capture_id)  # well-formed
         assert body["interface"] == "eth0"
-        # The work was enqueued to the packet queue, never run inline.
+        # The work was enqueued to the packet capture queue, never run inline.
         assert len(sent_tasks) == 1
         task = sent_tasks[0]
         assert task["name"] == "packet.capture_segment"
-        assert task["queue"] == "packet"
+        assert task["queue"] == "packet_capture"
         assert capture_id in task["args"]
         # The launch is audited.
         assert "packet.capture_requested" in await _audit_actions(sessionmaker)
