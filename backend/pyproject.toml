@@ -21,8 +21,12 @@ dependencies = [
     # Async jobs + cache (D8)
     "celery[redis]",
     "redis",
-    # Observability (D15)
+    # Observability (D15): structured logs + Prometheus metrics. prometheus-client
+    # backs the topology-RTO `topology_rebuild_seconds` series (P1 W5-T3, ADR-0030
+    # §2) and any future /metrics exposition. The engine metric hook degrades to a
+    # no-op when it is absent, so a slim install still imports.
     "structlog",
+    "prometheus-client",
     # HTTP client (D7)
     "httpx",
     # Graph store (D5)

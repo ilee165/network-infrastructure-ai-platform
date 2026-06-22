@@ -601,6 +601,67 @@ backup:
       limits:
         cpu: "1"
         memory: 1Gi
+    # -- Neo4j REBUILD-DRILL (W5-T3, ADR-0030 §2/§5.2; ADR-0005 D5). Neo4j has NO
+    #    backup — DR is a full RE-PROJECTION from Postgres, never a graph dump/restore
+    #    (D5). The drill drops/recreates the projected graph, re-projects the WHOLE
+    #    Postgres inventory via the EXISTING engines/topology full-rebuild path (which
+    #    records `topology_rebuild_seconds` + node/edge gauges — the topology-RTO,
+    #    G-REL/G-OBS), and asserts the rebuilt node/edge counts MATCH the pre-wipe
+    #    projection (turning "rebuildable" into a checkable invariant). Built P1,
+    #    executed quarterly from P2 (ADR-0030 §5.2): the suspended CronJob ships here,
+    #    scheduling deferred; the on-demand Job is the manual path. This is the SAME
+    #    job that runs the G-REL "destroy-and-rebuild" line (one artifact, two uses).
+    neo4j:
+      # OFF by default: the drill is a P2-executed control. enabled renders the
+      # suspended quarterly CronJob (+ the on-demand Job) so the manifest + harness
+      # ship in P1 and are policy-tested WITHOUT scheduling any run. Flip true in P2.
+      enabled: true
+      # Hard belt-and-braces switch: even when enabled, the CronJob renders
+      # `suspend: true` so K8s NEVER auto-fires it until P2 deliberately sets this
+      # false (ADR-0030 §5.2 — built P1, run P2). The on-demand Job is the manual path.
+      suspend: true
+      # Quarterly cadence (ADR-0030 §5.2): 02:00 on the 15th of Jan/Apr/Jul/Oct
+      # (offset from the Postgres PITR drill's 1st so the two drills do not contend).
+      # Inert while `suspend: true`; the schedule is recorded so P2 only flips it.
+      schedule: "0 2 15 1,4,7,10 *"
+      # PROPOSED topology-RTO target (minutes). The drill pass/fail is
+      # `topology_rebuild_seconds < this * 60` (ADR-0030 §2/§6 — < 30 min at 5,000
+      # devices). PROPOSED, parameterized: re-base on the Consultant §12 answer from
+      # this ONE source of truth, never a drill-local literal. The certified-scale
+      # 5,000-device validation is P2/lab-deferred (P1-PLAN.md §6).
+      proposedRtoMinutes: 30
+      # Allowed absolute node/edge count drift between the pre-wipe projection and the
+      # rebuild (0 = exact-match required). A drift beyond this fails the drill — the
+      # projection pipeline is incomplete (ADR-0005 D5 / ADR-0030 Negative).
+      countTolerance: 0
+      # `neo4j-admin dump` fast-start: OPT-IN, OFF by default (true to D5 — the
+      # projection is disposable; a stale dump could disagree with Postgres, which D5
+      # forbids). When enabled it is validated AGAINST the rebuild, never authoritative.
+      dump:
+        enabled: false
+      # The drill image: a Python-bearing image carrying app.engines.topology (the
+      # full-rebuild + the topology_rebuild_seconds metric hook) and the drills/
+      # harness. Explicit tag ONLY (admission rejects `latest`, ADR-0029 §5).
+      image:
+        repository: ghcr.io/netops/netops-backend
+        tag: "p1"
+        pullPolicy: IfNotPresent
+      # backoff/history bounds (mirror the Postgres drill).
+      backoffLimit: 1
+      concurrencyPolicy: Forbid
+      startingDeadlineSeconds: 3600
+      successfulJobsHistoryLimit: 3
+      failedJobsHistoryLimit: 3
+      ttlSecondsAfterFinished: 3600
+      # Resource requests + limits (never absent — ADR-0029 §3). The re-projection is
+      # CPU/IO-bound at scale; the seeded dry-run is light. Sized like the api.
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
     # -- pcap SPOT-RESTORE drill (W5-T4, ADR-0030 §5.4; ADR-0023 §3/§4/§5). The
     #    annual spot-restore that PROVES DR honors the ADR-0023 retention contract:
     #    a sampled LIVE capture restores from the `pcaps/` prefix and sha256-matches

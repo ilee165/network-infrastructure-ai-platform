@@ -1700,3 +1700,216 @@ deny contains msg if {
 	pcap_drill_pod_spec(input).automountServiceAccountToken != false
 	msg := sprintf("pcap restore drill %q pod must set automountServiceAccountToken=false (ADR-0029 §5)", [input.metadata.name])
 }
+
+# ===========================================================================
+# W5-T3 — Neo4j REBUILD-DRILL (ADR-0030 §2/§5.2; ADR-0005 D5)
+#
+# Neo4j has NO backup: DR is a full RE-PROJECTION from Postgres, never a graph
+# dump/restore (ADR-0005 D5). The drill drops/recreates the projected graph,
+# re-projects the whole Postgres inventory via the EXISTING engines/topology
+# full-rebuild path (recording `topology_rebuild_seconds` — the topology-RTO),
+# and asserts the rebuilt node/edge counts match the pre-wipe projection. These
+# rules assert, on the RENDERED drill manifests, the policy-surface invariants the
+# spec's `helm lint / kubeconform / conftest` gate requires:
+#   - the drill credentials (Postgres password, Neo4j auth) are EXTERNAL-SECRET
+#     refs (no inline `value:` secret);
+#   - the suspended quarterly CronJob renders `suspend: true` (built P1, run P2 —
+#     a drill that auto-fires in P1 is a regression, ADR-0030 §5.2 / P1-PLAN.md §6);
+#   - the drill is P2-execution flagged (the `netops.io/execution-phase: P2` ann);
+#   - the drill invokes the EXISTING full-rebuild + assertion harness
+#     (`topology_rebuild.run_drill`) — a wipe with no reproject/assert is not a
+#     rebuild-drill (ADR-0030 §5.2);
+#   - the `neo4j-admin dump` fast-start is OPT-IN, OFF by default (true to D5 — the
+#     projection is disposable; a stale dump could disagree with Postgres);
+#   - the drill mounts NO persistentVolumeClaim — the rebuild is Postgres-sourced
+#     into a CLEAN Neo4j, never a restore onto a live data volume;
+#   - the drill pod is hardened the same as every backup/drill pod.
+# The drill objects carry BOTH the `backup` component label AND a
+# `netops.io/backup-type: neo4j-rebuild-drill` label; match on the latter to scope
+# these rules (the W5-T1 full|incr cadence rules + the W5-T2 PITR `drill` rules
+# exclude this backup-type by construction, so none mis-fire here).
+# ===========================================================================
+
+# A rendered Neo4j rebuild-drill object (Job OR CronJob) by its backup-type label.
+is_neo4j_rebuild_drill(obj) if {
+	obj.metadata.labels["netops.io/backup-type"] == "neo4j-rebuild-drill"
+}
+
+# The drill pod-template spec, normalized across Job and CronJob.
+neo4j_drill_pod_spec(obj) := obj.spec.template.spec if {
+	obj.kind == "Job"
+}
+
+neo4j_drill_pod_spec(obj) := obj.spec.jobTemplate.spec.template.spec if {
+	obj.kind == "CronJob"
+}
+
+# --- secret-surface: any drill env whose NAME signals a credential (the Postgres
+# password or the Neo4j auth) MUST come from a secretKeyRef and carry NO inline
+# `value:` literal (ADR-0030 §1 / ADR-0029 §6). ---
+neo4j_drill_credential_env(name) if {
+	endswith(name, "POSTGRES_PASSWORD")
+}
+
+neo4j_drill_credential_env(name) if {
+	endswith(name, "NEO4J_AUTH")
+}
+
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	neo4j_drill_credential_env(e.name)
+	object.get(e, "value", null) != null
+	msg := sprintf("neo4j rebuild drill %q env %q must NOT carry an inline `value:` literal — the Postgres password / Neo4j auth are external-secret refs only (ADR-0030 §1 / ADR-0029 §6)", [input.metadata.name, e.name])
+}
+
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	neo4j_drill_credential_env(e.name)
+	not e.valueFrom.secretKeyRef
+	msg := sprintf("neo4j rebuild drill %q env %q must be sourced from valueFrom.secretKeyRef (credentials are by-reference only; ADR-0030 §1)", [input.metadata.name, e.name])
+}
+
+# --- built P1, run P2: the quarterly drill CronJob MUST render suspended so K8s
+# never auto-fires it in P1 (ADR-0030 §5.2 / P1-PLAN.md §6). ---
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	input.kind == "CronJob"
+	input.spec.suspend != true
+	msg := sprintf("neo4j rebuild drill CronJob %q must render `suspend: true` — built P1, executed quarterly in P2; it must not auto-fire (ADR-0030 §5.2 / P1-PLAN.md §6)", [input.metadata.name])
+}
+
+# --- the drill must be P2-execution flagged (the W5-T5 evidence layer knows
+# execution is deferred — ADR-0030 §5.2). ---
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	object.get(input.metadata.annotations, "netops.io/execution-phase", "") != "P2"
+	msg := sprintf("neo4j rebuild drill %q must carry the `netops.io/execution-phase: P2` annotation (built P1, executed quarterly in P2; ADR-0030 §5.2)", [input.metadata.name])
+}
+
+# --- the drill must invoke the EXISTING full-rebuild + assertion harness
+# (`topology_rebuild.run_drill`), which re-projects from Postgres and asserts the
+# node/edge counts + topology-RTO. A wipe with no reproject/assert is not a
+# rebuild-drill (ADR-0030 §5.2). Asserted on the rendered argv text. ---
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	not container_runs_neo4j_rebuild_harness(c)
+	msg := sprintf("neo4j rebuild drill %q container %q must invoke the full-rebuild + assertion harness (`topology_rebuild.run_drill`) — a wipe with no reproject/count-assert is not a rebuild-drill (ADR-0030 §5.2)", [input.metadata.name, c.name])
+}
+
+container_runs_neo4j_rebuild_harness(c) if {
+	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
+	contains(arg, "topology_rebuild.run_drill")
+}
+
+# --- `neo4j-admin dump` fast-start is OPT-IN, OFF by default (ADR-0005 D5 — the
+# projection is disposable; a stale dump could disagree with the authoritative
+# Postgres). The rendered TOPOLOGY_DUMP_ENABLED env must NOT be "true" on the
+# default render. (An operator opting in flips backup.drills.neo4j.dump.enabled and
+# consciously accepts this single failure, regenerating the G-REL evidence.) ---
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	e.name == "TOPOLOGY_DUMP_ENABLED"
+	lower(sprintf("%v", [e.value])) == "true"
+	msg := sprintf("neo4j rebuild drill %q must keep the `neo4j-admin dump` fast-start OFF by default (TOPOLOGY_DUMP_ENABLED=true found) — the dump is opt-in only; the projection is disposable and a stale dump could disagree with Postgres (ADR-0005 D5 / ADR-0030 §2)", [input.metadata.name])
+}
+
+# --- the drill rebuilds into a CLEAN Neo4j from Postgres — it must mount NO
+# persistentVolumeClaim (no restore onto a live data volume; the projection is
+# re-derived, never restored). Parity with the throwaway-only restore drills. ---
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some v in object.get(neo4j_drill_pod_spec(input), "volumes", [])
+	v.persistentVolumeClaim
+	msg := sprintf("neo4j rebuild drill %q must mount NO persistentVolumeClaim — the graph is RE-PROJECTED from Postgres into a clean Neo4j, never restored onto a live data volume (ADR-0005 D5)", [input.metadata.name])
+}
+
+# --- the drill pod talks to Postgres + Neo4j, not the K8s API:
+# automountServiceAccountToken=false (parity with the backup/drill pods, ADR-0029 §5). ---
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	neo4j_drill_pod_spec(input).automountServiceAccountToken != false
+	msg := sprintf("neo4j rebuild drill %q pod must set automountServiceAccountToken=false — it talks to Postgres + Neo4j, not the K8s API (ADR-0029 §5)", [input.metadata.name])
+}
+
+# --- per-container hardening on the drill (the drill JOB is a separate kind from
+# the platform Deployment/StatefulSet rules; assert the SAME ADR-0029 §3 controls
+# on its containers so a hardening regression fails the gate too): drop ALL caps,
+# add none, non-root, RO-rootfs, no-privesc, RuntimeDefault seccomp, requests AND
+# limits, no `latest` tag. ---
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	not drops_all(c)
+	msg := sprintf("neo4j rebuild drill %q container %q must drop ALL capabilities (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	some cap in object.get(object.get(object.get(c, "securityContext", {}), "capabilities", {}), "add", [])
+	msg := sprintf("neo4j rebuild drill %q container %q must add NO capabilities (found %q; ADR-0029 §3)", [input.metadata.name, c.name, cap])
+}
+
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	c.securityContext.runAsNonRoot != true
+	msg := sprintf("neo4j rebuild drill %q container %q must set runAsNonRoot=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	c.securityContext.readOnlyRootFilesystem != true
+	msg := sprintf("neo4j rebuild drill %q container %q must set readOnlyRootFilesystem=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	c.securityContext.allowPrivilegeEscalation != false
+	msg := sprintf("neo4j rebuild drill %q container %q must set allowPrivilegeEscalation=false (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	not neo4j_drill_container_seccomp_set(input, c)
+	msg := sprintf("neo4j rebuild drill %q container %q must set a RuntimeDefault seccompProfile (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+neo4j_drill_container_seccomp_set(obj, c) if {
+	c.securityContext.seccompProfile.type == "RuntimeDefault"
+}
+
+neo4j_drill_container_seccomp_set(obj, _) if {
+	neo4j_drill_pod_spec(obj).securityContext.seccompProfile.type == "RuntimeDefault"
+}
+
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	not c.resources.requests
+	msg := sprintf("neo4j rebuild drill %q container %q must declare resource requests (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	not c.resources.limits
+	msg := sprintf("neo4j rebuild drill %q container %q must declare resource limits (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_rebuild_drill(input)
+	some c in neo4j_drill_pod_spec(input).containers
+	endswith(c.image, ":latest")
+	msg := sprintf("neo4j rebuild drill %q image %q must not use the `latest` tag (ADR-0029 §5)", [input.metadata.name, c.image])
+}

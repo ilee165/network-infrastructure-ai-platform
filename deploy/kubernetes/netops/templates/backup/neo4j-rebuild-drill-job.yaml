@@ -1,0 +1,227 @@
+{{- /*
+Neo4j REBUILD-DRILL — Job + suspended quarterly CronJob (W5-T3, ADR-0030 §2/§5.2,
+ADR-0005 D5).
+
+WHAT IT PROVES: Neo4j has NO backup — DR is a full RE-PROJECTION from Postgres, not
+a restore of a graph dump (ADR-0005 D5 / ADR-0030 §2, Alt #2). Restoring a stale
+`neo4j-admin dump` could reintroduce a projection that DISAGREES with the
+authoritative Postgres — forbidden by D5. So this drill:
+  (1) drops/recreates the projected graph + re-projects the WHOLE Postgres inventory
+      via the EXISTING engines/topology full-rebuild path
+      (app.engines.topology.metrics.timed_rebuild → rebuild() → projector.full_rebuild),
+      which times the wall-clock and records `topology_rebuild_seconds` +
+      topology_rebuild_nodes/_edges onto Prometheus (the topology-RTO; G-REL/G-OBS);
+  (2) asserts the rebuilt node/edge counts MATCH the pre-wipe projection within
+      tolerance — turning "rebuildable" into a checkable invariant (ADR-0005's
+      contract). A mismatch is a FAILED drill (the projection pipeline is incomplete
+      — ADR-0030 Negative);
+  (3) asserts `topology_rebuild_seconds` < the PROPOSED topology-RTO (< 30 min at
+      5,000 devices; ADR-0030 §2/§6 — PARAMETERIZED off the Job env, re-bases on the
+      Consultant §12 answer), then emits the structured
+      `DRILL neo4j_rebuild seconds=<n> nodes=<n> edges=<n> result=PASS|FAIL` line for
+      the W5-T5 G-REL evidence collector.
+
+This is the SAME job that runs the G-REL "destroy-and-rebuild" line (ADR-0030 §5.2)
+— one artifact, two uses (drill + gate metric). The `neo4j-admin dump` fast-start is
+OPT-IN and OFF by default (dump.enabled) — true to D5: the projection is disposable;
+when enabled it is validated AGAINST the rebuild, never authoritative.
+
+BUILT P1, RUN P2 (ADR-0030 §5 / P1-PLAN.md §6): the CronJob renders `suspend: true`
+so K8s NEVER auto-fires it; the Job is the on-demand manual path. The P1 gate is a
+green dry-run over the seeded fixture (no hardware) — the 5,000-device certified-scale
+run is lab-deferred.
+
+W4-LESSONS guards applied:
+  L3 — every `$VAR` lives inside ONE `sh -c '...'`; the k8s exec argv never does its
+       own $(VAR) substitution.
+  L5 — `set -o pipefail` AND a non-empty (`test -s`) guard on the rebuild-output pipe,
+       so a silently-empty rebuild stream FAILS the job (never "succeeds").
+  L4 — this Job generates NO chart secret (it references existing platform Secret
+       keys); nothing to make idempotent here.
+SECRET-SURFACE: the Postgres password + the Neo4j auth are valueFrom.secretKeyRef
+ONLY — never inlined (ADR-0030 §1 / ADR-0029 §6). The connection coordinates (hosts,
+URIs, users) are non-secret configMap env.
+*/ -}}
+{{- /*
+Reusable rebuild-drill pod spec (authored ONCE so the on-demand Job and the suspended
+CronJob cannot drift). Defined at the top level (Helm `define` may not nest inside an
+`if` action).
+*/ -}}
+{{- define "netops.neo4jRebuildDrillPod" -}}
+{{- $ctx := .ctx -}}
+{{- $d := $ctx.Values.backup.drills.neo4j -}}
+{{- $fullname := include "netops.fullname" $ctx -}}
+{{- $secretName := include "netops.platformSecretName" $ctx -}}
+metadata:
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" $ctx "component" "backup") | nindent 4 }}
+    netops.io/backup-type: neo4j-rebuild-drill
+spec:
+  serviceAccountName: backup-sa
+  automountServiceAccountToken: {{ $ctx.Values.serviceAccounts.automountServiceAccountToken }}
+  restartPolicy: Never
+  securityContext:
+    {{- include "netops.podSecurityContext" $ctx | nindent 4 }}
+  containers:
+    - name: neo4j-rebuild-drill
+      image: {{ include "netops.image" (dict "img" $d.image) }}
+      imagePullPolicy: {{ $d.image.pullPolicy }}
+      securityContext:
+        {{- include "netops.hardenedSecurityContext" $ctx | nindent 8 }}
+      command:
+        - sh
+        - -c
+        # ONE sh -c script (L3: env vars expand HERE; a raw exec argv would NOT do
+        # $(VAR)). set -o pipefail + a `test -s` non-empty guard (L5) so a silently-
+        # empty rebuild stream FAILS the job. The harness drops/recreates the graph,
+        # re-projects the WHOLE Postgres inventory via the EXISTING engines/topology
+        # full-rebuild path (records topology_rebuild_seconds + node/edge gauges),
+        # asserts counts-match + RTO-within-target, and emits the `DRILL ...` line. A
+        # non-zero from the harness fails the pod (set -e). In P1 it runs the seeded
+        # dry-run (no live stores); P2 points it at restored/live Postgres + Neo4j.
+        - |
+          set -euo pipefail
+          echo "[neo4j-rebuild-drill] re-projecting topology from Postgres -> clean Neo4j (RTO budget ${TOPOLOGY_RTO_SECONDS}s)"
+          # The harness reuses app.engines.topology (full-rebuild + the
+          # topology_rebuild_seconds metric hook); PYTHONPATH carries both the app
+          # package and the drills/ dir. Tee the DRILL lines so the non-empty guard
+          # can assert the harness actually produced evidence (L5).
+          python -m topology_rebuild.run_drill \
+            --rto-seconds "${TOPOLOGY_RTO_SECONDS}" \
+            --count-tolerance "${TOPOLOGY_COUNT_TOLERANCE}" \
+            | tee /tmp/drill/result.txt
+          echo "[neo4j-rebuild-drill] assert the drill produced a NON-EMPTY result stream (L5)"
+          test -s /tmp/drill/result.txt
+          grep -q "DRILL neo4j_rebuild .* result=PASS" /tmp/drill/result.txt
+          echo "[neo4j-rebuild-drill] PASS (P2 executes this quarterly; P1 seeded dry-run)"
+      env:
+        # PROPOSED topology-RTO target (seconds) the drill asserts against (ADR-0030
+        # §2/§6). PARAMETERIZED so it re-bases on the Consultant §12 answer from ONE
+        # source of truth (backup.drills.neo4j.proposedRtoMinutes), never a drill-local
+        # literal. Used by the sh -c script, never argv.
+        - name: TOPOLOGY_RTO_SECONDS
+          value: {{ mul $d.proposedRtoMinutes 60 | quote }}
+        # Allowed absolute node/edge count drift vs the pre-wipe projection (0 = exact).
+        - name: TOPOLOGY_COUNT_TOLERANCE
+          value: {{ $d.countTolerance | quote }}
+        # neo4j-admin dump fast-start is OPT-IN, OFF by default (true to D5 — the
+        # projection is disposable). When on it is validated AGAINST the rebuild,
+        # never authoritative. Surfaced so the harness can branch in P2.
+        - name: TOPOLOGY_DUMP_ENABLED
+          value: {{ $d.dump.enabled | quote }}
+        - name: PYTHONPATH
+          value: "/app:/app/drills"
+        # --- connection coordinates: NON-secret configMap env (hosts/URIs/users). ---
+        - name: NETOPS_POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_POSTGRES_HOST
+        - name: NETOPS_POSTGRES_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_POSTGRES_PORT
+        - name: NETOPS_POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_POSTGRES_DB
+        - name: NETOPS_POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_POSTGRES_USER
+        - name: NETOPS_NEO4J_URI
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_NEO4J_URI
+        - name: NETOPS_NEO4J_USER
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_NEO4J_USER
+        # --- credentials: external-secret REFs ONLY; NEVER inlined (ADR-0029 §6). ---
+        - name: NETOPS_POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.postgresPassword }}
+        - name: NETOPS_NEO4J_AUTH
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.neo4jAuth }}
+      resources:
+        {{- toYaml $d.resources | nindent 8 }}
+      volumeMounts:
+        # readOnlyRootFilesystem:true — the only writable mounts are emptyDir scratch
+        # (the DRILL result stream + python/tmp), torn down with the pod.
+        - name: drill-scratch
+          mountPath: /tmp/drill
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: drill-scratch
+      emptyDir:
+        sizeLimit: 64Mi
+    - name: tmp
+      emptyDir:
+        sizeLimit: 128Mi
+{{- end -}}
+{{- if and .Values.backup.drills.enabled .Values.backup.drills.neo4j.enabled .Values.services.neo4j.enabled .Values.services.postgres.enabled }}
+{{- $d := .Values.backup.drills.neo4j -}}
+{{- $fullname := include "netops.fullname" . -}}
+---
+# On-demand Job (manual path): `kubectl create job --from=cronjob/...` or applied
+# directly. Inert until invoked; the two assertions run a green dry-run in P1.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-neo4j-rebuild-drill
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+    netops.io/backup-type: neo4j-rebuild-drill
+  annotations:
+    # BUILT P1, RUN P2 (ADR-0030 §5.2): shipped + policy-tested now; execution is the
+    # quarterly P2 control. Helm leaves it for manual/CI invocation.
+    netops.io/execution-phase: P2
+    helm.sh/hook-weight: "0"
+spec:
+  backoffLimit: {{ $d.backoffLimit }}
+  # Auto-reap the finished pod (the CronJob reaps via its history limits instead).
+  ttlSecondsAfterFinished: {{ $d.ttlSecondsAfterFinished }}
+  template:
+    {{- include "netops.neo4jRebuildDrillPod" (dict "ctx" .) | nindent 4 }}
+---
+# Suspended quarterly CronJob (ADR-0030 §5.2). `suspend: true` so K8s NEVER auto-
+# fires it in P1 — P2 flips backup.drills.neo4j.suspend=false to begin the quarterly
+# destroy-and-rebuild run (the G-REL topology-RTO line).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-neo4j-rebuild-drill
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+    netops.io/backup-type: neo4j-rebuild-drill
+  annotations:
+    netops.io/execution-phase: P2
+spec:
+  # Quarterly cadence; INERT while suspended (built P1, run P2 — ADR-0030 §5.2).
+  schedule: {{ $d.schedule | quote }}
+  # The belt-and-braces switch: rendered suspended by default so no run fires until
+  # P2 deliberately un-suspends it (ADR-0030 §5.2 / P1-PLAN.md §6).
+  suspend: {{ $d.suspend }}
+  concurrencyPolicy: {{ $d.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $d.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $d.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $d.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $d.backoffLimit }}
+      template:
+        {{- include "netops.neo4jRebuildDrillPod" (dict "ctx" .) | nindent 8 }}
+{{- end }}
