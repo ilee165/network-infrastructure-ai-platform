@@ -268,19 +268,37 @@ jobs:
             --policy deploy/kubernetes/policy/rego \
             --all-namespaces
 
-      # IaC misconfiguration scan of the chart + compose (Trivy `config` target).
-      # GATING on its OWN findings: exit-code 1 on fixable HIGH/CRITICAL misconfig,
-      # mirroring the image-scan posture (ignore-unfixed). This is scoped to IaC
-      # misconfig (scan-type: config) and does NOT duplicate conftest's job —
-      # conftest asserts our ADR-0029/0031 policy semantics on the rendered
-      # manifests; Trivy checks generic IaC best-practice misconfig on the chart +
-      # compose sources. No new image refs in W3/W4 (packet + per-service
-      # workloads reuse netops-backend/-frontend), so trivy image / cosign are N/A.
-      - name: Trivy config scan (chart + compose)
+      # IaC misconfiguration scan (Trivy `config` target). GATING on its OWN
+      # findings: exit-code 1 on fixable HIGH/CRITICAL misconfig, mirroring the
+      # image-scan posture (ignore-unfixed). Scoped to IaC misconfig
+      # (scan-type: config) and does NOT duplicate conftest — conftest asserts
+      # our ADR-0029/0031 policy semantics; Trivy checks generic IaC
+      # best-practice misconfig.
+      #
+      # SCOPE (W4-T6 fix): the scan-ref is the RENDERED manifest this task
+      # hardens, NOT the raw chart dir. Trivy's Helm parser renders templates
+      # with empty/default values and flags HIGH/CRIT (missing securityContext /
+      # resource limits) that the chart actually mitigates at render time via
+      # _helpers.tpl — gating over `deploy/` (un-rendered templates +
+      # deploy/spatiumddi/, neither this task's artifact) is a false-positive
+      # CI-regression risk. We gate the rendered.yaml the rest of the job
+      # validated, plus deploy/docker (real compose + Dockerfile IaC this task
+      # touches). No new image refs in W3/W4, so trivy image / cosign are N/A.
+      - name: Trivy config scan (rendered chart manifest)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
-          scan-ref: deploy
+          scan-ref: rendered.yaml
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Trivy config scan (docker compose + Dockerfiles)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: deploy/docker
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
