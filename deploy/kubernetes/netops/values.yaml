@@ -388,6 +388,48 @@ networkPolicy:
       app.kubernetes.io/name: netops
       app.kubernetes.io/component: redis
     port: 6379
+  # ---- W4 GA per-edge allow seams (ADR-0029 §2 edge table) -----------------
+  # The W4 networkpolicies.yaml renders the platform default-deny floor plus one
+  # additive allow per ADR-0029 §2 / PRODUCTION.md §3.1 arrow — NO edge that is
+  # not an arrow there. Each selector below is the dest workload's component
+  # label; the source is selected from the same chart's component labels. Ports
+  # match the §2 table. The data-store selectors reuse the postgres/broker shapes
+  # above (postgres:5432, redis:6379) and add neo4j:7687.
+  neo4j:
+    # Selector for the Neo4j workload the api + worker dial (topology projection,
+    # ADR-0029 §2 `A --> NEO`, `WD/WC/WX --> NEO`). W4 owns the Neo4j StatefulSet.
+    podSelectorLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: neo4j
+    port: 7687
+  # Selector for the ingress-controller pods permitted to reach the frontend
+  # (ADR-0029 §2 `LB --> FE` — the SOLE ingress front-door edge; the controller
+  # has NO direct edge to api per ADR-0012 §2). Defaults to the ingress-nginx
+  # controller labels; override for a different ingress namespace/controller.
+  # Both selectors are matched (namespace AND pod) so only the real controller —
+  # not any pod in that namespace — gets the frontend ingress allow.
+  ingressController:
+    namespaceSelectorLabels:
+      kubernetes.io/metadata.name: ingress-nginx
+    podSelectorLabels:
+      app.kubernetes.io/name: ingress-nginx
+  # External LLM-provider egress (ADR-0009 anthropic/openai/azure). OPT-IN,
+  # DEFAULT OFF: local-first / air-gapped is the default posture (ADR-0029 §2,
+  # ADR-0015 alt #2). When false the api/worker get NO external egress allow —
+  # only the in-cluster edges (PG/Neo4j/Redis/ollama) above. Enabling it renders
+  # an api/worker → external-LLM egress allow to the CIDRs/ports below and emits a
+  # NOTES warning. NEVER an empty-`to` allow: egress is confined to these CIDRs.
+  externalLlmEgress:
+    enabled: false
+    # CIDR(s) the external LLM provider endpoints resolve to. Operators MUST set
+    # these to their provider's real ranges — the public placeholder below is a
+    # documented stand-in, NOT a blanket internet allow. (No rule renders at all
+    # while enabled=false.)
+    cidrs:
+      - 0.0.0.0/0
+    # Provider HTTPS port (anthropic/openai/azure all terminate TLS on 443).
+    ports:
+      - 443
   # CIDR(s) the packet-CAPTURE workload is allowed to egress to: the device
   # management subnet(s) it must reach to drive SSH/monitor-session captures
   # (ADR-0031 §4 capture NetworkPolicy; PRODUCTION.md §5 "collector network

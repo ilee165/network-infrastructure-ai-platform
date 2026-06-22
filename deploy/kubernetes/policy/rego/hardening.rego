@@ -402,3 +402,103 @@ deny contains msg if {
 	not contains(c.image, ":")
 	msg := sprintf("image %q must carry an explicit tag or digest (ADR-0029 §5)", [c.image])
 }
+
+# ===========================================================================
+# ADR-0029 §2 / PRODUCTION.md §3.1 — W4 platform NetworkPolicies (the firewall
+# spec). The §3.1 topology diagram IS the firewall: a default-deny floor plus
+# one additive allow per §2 arrow, every egress confined to a known
+# component/port, and NO external-LLM egress unless the opt-in is set. These
+# rules run per rendered document (conftest --all-namespaces, no --combine), so
+# they assert the SHAPE of each W4 policy directly on the rendered manifests.
+# The packet-capture / packet-analysis policies are W3-owned and asserted above.
+# ===========================================================================
+
+# The §2 allow edge table, as a known set of {dest-component, port}. An egress
+# allow that targets any port outside this set is not a §2 arrow and is denied.
+# (DNS :53 is the universal default-deny backstop, also permitted.)
+netpol_known_egress_ports := {5432, 7687, 6379, 11434, 443, 53}
+
+# Names of the W3-owned packet NetworkPolicies — excluded from the W4 platform
+# assertions below (they carry their own ADR-0031 rules earlier in this file).
+is_packet_netpol(np) if {
+	np.spec.podSelector.matchLabels["app.kubernetes.io/component"] == "packet-analysis"
+}
+
+is_packet_netpol(np) if {
+	np.spec.podSelector.matchLabels["app.kubernetes.io/component"] == "packet-capture"
+}
+
+# --- default-deny floor: when the default-deny-all policy is rendered it MUST
+# select all pods ({}) and declare BOTH Ingress and Egress, or it is not a floor.
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	endswith(input.metadata.name, "-default-deny-all")
+	count(object.keys(input.spec.podSelector)) != 0
+	msg := "default-deny-all NetworkPolicy must select ALL pods (podSelector {}) (ADR-0029 §2)"
+}
+
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	endswith(input.metadata.name, "-default-deny-all")
+	not policy_has_ingress(input)
+	msg := "default-deny-all NetworkPolicy must declare policyTypes Ingress (ADR-0029 §2)"
+}
+
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	endswith(input.metadata.name, "-default-deny-all")
+	not policy_has_egress(input)
+	msg := "default-deny-all NetworkPolicy must declare policyTypes Egress (ADR-0029 §2)"
+}
+
+# The default-deny-all policy must carry NO allow rules — any ingress/egress rule
+# on it would punch a hole in the floor (allows belong in additive policies).
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	endswith(input.metadata.name, "-default-deny-all")
+	count(object.get(input.spec, "egress", [])) != 0
+	msg := "default-deny-all NetworkPolicy must contain NO egress allow rules (the floor stays empty; ADR-0029 §2)"
+}
+
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	endswith(input.metadata.name, "-default-deny-all")
+	count(object.get(input.spec, "ingress", [])) != 0
+	msg := "default-deny-all NetworkPolicy must contain NO ingress allow rules (the floor stays empty; ADR-0029 §2)"
+}
+
+# --- no blanket egress: NO platform NetworkPolicy egress rule may omit `to`
+# (a missing `to` = allow-to-anywhere, exactly what default-deny forbids). The
+# DNS-egress policy and every §2 allow target an explicit `to`. (packet policies
+# already carry this guard above; exclude them to avoid duplicate messages.)
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	not is_packet_netpol(input)
+	some rule in object.get(input.spec, "egress", [])
+	not rule.to
+	msg := sprintf("NetworkPolicy %q has an egress rule with no `to` — blanket egress is forbidden (ADR-0029 §2)", [input.metadata.name])
+}
+
+# --- every egress allow port must map to a known §2 edge. An egress port outside
+# netpol_known_egress_ports is not a §3.1 arrow and is denied.
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	not is_packet_netpol(input)
+	some rule in object.get(input.spec, "egress", [])
+	some p in object.get(rule, "ports", [])
+	not netpol_known_egress_ports[p.port]
+	msg := sprintf("NetworkPolicy %q egress targets port %v, not a known §2 edge port (5432/7687/6379/11434/443/53) (ADR-0029 §2)", [input.metadata.name, p.port])
+}
+
+# --- external-LLM egress is OPT-IN, default OFF: the allow-external-llm-egress
+# policy MUST NOT render unless networkPolicy.externalLlmEgress.enabled. It is
+# identified by its component label `external-llm-egress` (label-based, matching
+# the rest of this file). On the default render (opt-in off) this policy is
+# absent; its presence means the secure default was inverted. When an operator
+# opts in, this is the documented, reviewed exception — they regenerate the
+# G-SEC evidence with the flag and accept this single failure consciously.
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	input.metadata.labels["app.kubernetes.io/component"] == "external-llm-egress"
+	msg := "external-LLM egress NetworkPolicy must NOT render unless networkPolicy.externalLlmEgress.enabled — it is opt-in, default-off (ADR-0029 §2)"
+}
