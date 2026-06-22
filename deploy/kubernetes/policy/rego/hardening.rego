@@ -900,16 +900,27 @@ value_is_generated_placeholder(v) if {
 # already gated there — these rules add the backup-SPECIFIC controls.
 # ===========================================================================
 
-# A rendered backup CronJob is identified by the `backup` component label. The
-# W5-T2 PITR restore-DRILL also carries the `backup` component label but is a
-# RESTORE drill, not a pgBackRest full/incr BACKUP — it has its own dedicated
-# W5-T2 rules (suspend/P2/throwaway/secret-ref + hardening) below, so it is
-# EXCLUDED here so the backup cadence/naming rules (weekly-full / daily-incr,
-# `-pgbackrest-full/-incr` suffix) do not mis-fire on the drill object.
+# A rendered pgBackRest BACKUP CronJob is identified by the `backup` component
+# label AND a backup-type of exactly `full` or `incr`. Other `backup`-component
+# CronJobs carry a DIFFERENT backup-type and have their OWN dedicated rules, so
+# they are EXCLUDED here so the pgBackRest cadence/verify/naming rules (weekly-full
+# / daily-incr, `-pgbackrest-full/-incr` suffix, `pgbackrest verify`) do not
+# mis-fire on them:
+#   - the W5-T2 PITR restore-DRILL (backup-type `drill`);
+#   - the W5-T4 pcap volume SNAPSHOT (backup-type `pcap-snapshot`) — an rsync/
+#     sha256 snapshot of the pcap volume, NOT a pgBackRest backup (no `verify`,
+#     no full/incr cadence);
+#   - the W5-T4 pcap SPOT-RESTORE drill (backup-type `pcap-drill`).
+# Scoping by a POSITIVE backup-type allow-set (full|incr) means any future
+# backup-type is excluded by default (fail-safe), not silently swept in.
+pgbackrest_backup_type(t) if t == "full"
+
+pgbackrest_backup_type(t) if t == "incr"
+
 is_backup_cronjob(obj) if {
 	obj.kind == "CronJob"
 	obj.metadata.labels["app.kubernetes.io/component"] == "backup"
-	obj.metadata.labels["netops.io/backup-type"] != "drill"
+	pgbackrest_backup_type(obj.metadata.labels["netops.io/backup-type"])
 }
 
 # The container spec list inside a CronJob's Job template.
@@ -1391,4 +1402,301 @@ deny contains msg if {
 container_runs_drill_harness(c) if {
 	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
 	contains(arg, "run_drill")
+}
+
+# ===========================================================================
+# W5-T4 — pcap volume snapshot + spot-restore drill (ADR-0030 §3/§5.4;
+# ADR-0023 §3/§4/§5)
+#
+# pcaps hold cleartext credentials/PII — the WHOLE risk is DR resurrecting a
+# purged payload (ADR-0030 §3, the load-bearing constraint). These rules assert,
+# on the RENDERED pcap manifests, that DR HONORS — never subverts — the ADR-0023
+# retention contract:
+#   - the SNAPSHOT CronJob (backup-type `pcap-snapshot`): its object-store
+#     credential is an external-secret REF (least-privilege, write-to-`pcaps/`-
+#     prefix only — never inlined); it reads the pcap volume READ-ONLY; and it
+#     invokes the model-reusing planner (`pcap.snapshot`) that skips tombstoned
+#     files (no duplicated retention logic);
+#   - the SPOT-RESTORE drill (backup-type `pcap-drill`): suspended ANNUAL CronJob
+#     (built P1, run P2 — §5.4); P2-execution flagged; credentials are external-
+#     secret REFs; it restores to a THROWAWAY emptyDir (never the live pcap PVC);
+#     and it invokes the assertion harness (`pcap.run_drill`) that sha256-verifies
+#     and PROVES no tombstoned resurrection.
+# The generic per-container hardening is asserted here too (the CronJob/Job kinds
+# nest containers under their own paths). Both objects carry the `backup` component
+# label; match on the W5-T4 backup-type labels to scope these rules. The W5-T1
+# pgBackRest cadence rules EXCLUDE these backup-types (is_backup_cronjob scopes to
+# full|incr only), so they do not mis-fire here.
+# ===========================================================================
+
+# A rendered pcap SNAPSHOT CronJob (the daily live-only snapshot).
+is_pcap_snapshot(obj) if {
+	obj.kind == "CronJob"
+	obj.metadata.labels["netops.io/backup-type"] == "pcap-snapshot"
+}
+
+# A rendered pcap SPOT-RESTORE drill object (Job OR suspended annual CronJob).
+is_pcap_drill(obj) if {
+	obj.metadata.labels["netops.io/backup-type"] == "pcap-drill"
+}
+
+# The container list of a pcap-snapshot CronJob.
+pcap_snapshot_containers(cj) := cj.spec.jobTemplate.spec.template.spec.containers
+
+# The pcap-drill pod spec, normalized across Job and CronJob.
+pcap_drill_pod_spec(obj) := obj.spec.template.spec if {
+	obj.kind == "Job"
+}
+
+pcap_drill_pod_spec(obj) := obj.spec.jobTemplate.spec.template.spec if {
+	obj.kind == "CronJob"
+}
+
+# --- secret-surface: any pcap env whose NAME signals a credential (the pcap
+# object-store key/secret or the DB password) MUST come from a secretKeyRef and
+# carry NO inline `value:` literal (ADR-0030 §3 / ADR-0029 §6). ---
+pcap_credential_env(name) if {
+	endswith(name, "S3_KEY")
+}
+
+pcap_credential_env(name) if {
+	endswith(name, "S3_KEY_SECRET")
+}
+
+pcap_credential_env(name) if {
+	name == "PGPASSWORD"
+}
+
+# Snapshot CronJob credential checks.
+deny contains msg if {
+	is_pcap_snapshot(input)
+	some c in pcap_snapshot_containers(input)
+	some e in object.get(c, "env", [])
+	pcap_credential_env(e.name)
+	object.get(e, "value", null) != null
+	msg := sprintf("pcap snapshot %q env %q must NOT carry an inline `value:` literal — the object-store credential / DB password are external-secret refs only (ADR-0030 §3 / ADR-0029 §6)", [input.metadata.name, e.name])
+}
+
+deny contains msg if {
+	is_pcap_snapshot(input)
+	some c in pcap_snapshot_containers(input)
+	some e in object.get(c, "env", [])
+	pcap_credential_env(e.name)
+	not e.valueFrom.secretKeyRef
+	msg := sprintf("pcap snapshot %q env %q must be sourced from valueFrom.secretKeyRef (the object-store credential / DB password are by-reference only; ADR-0030 §3 / ADR-0023 §5)", [input.metadata.name, e.name])
+}
+
+# Spot-restore drill credential checks (same secret-surface guard).
+deny contains msg if {
+	is_pcap_drill(input)
+	some c in pcap_drill_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	pcap_credential_env(e.name)
+	object.get(e, "value", null) != null
+	msg := sprintf("pcap restore drill %q env %q must NOT carry an inline `value:` literal — credentials are external-secret refs only (ADR-0030 §3 / ADR-0029 §6)", [input.metadata.name, e.name])
+}
+
+deny contains msg if {
+	is_pcap_drill(input)
+	some c in pcap_drill_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	pcap_credential_env(e.name)
+	not e.valueFrom.secretKeyRef
+	msg := sprintf("pcap restore drill %q env %q must be sourced from valueFrom.secretKeyRef (credentials are by-reference only; ADR-0030 §3)", [input.metadata.name, e.name])
+}
+
+# --- least-privilege credential SEPARATION: the pcap snapshot must use the pcap-
+# prefix-scoped credential (secrets.keys.pcapSnapshotS3*), NEVER the pgbackrest/
+# repo S3 credential (secrets.keys.backupRepoS3*). Reusing the pgbackrest key here
+# would grant the snapshot the pgbackrest/ prefix (broad grant) and vice-versa —
+# a leak of one would expose the other's prefix (ADR-0030 §3 / least-privilege §7).
+# Asserted by the secretKeyRef KEY NAME the snapshot env points at. ---
+deny contains msg if {
+	is_pcap_snapshot(input)
+	some c in pcap_snapshot_containers(input)
+	some e in object.get(c, "env", [])
+	endswith(e.name, "S3_KEY")
+	key := e.valueFrom.secretKeyRef.key
+	contains(key, "backup-repo-s3")
+	msg := sprintf("pcap snapshot %q env %q must reference the pcap-prefix-scoped credential (pcap-snapshot-s3-*), NOT the pgbackrest repo credential %q — a snapshot that reuses the pgbackrest credential gets a broad cross-prefix grant (ADR-0030 §3 / least-privilege §7)", [input.metadata.name, e.name, key])
+}
+
+# --- the snapshot must mount the pcap volume READ-ONLY (it reads captures, writes
+# only the object store; a writable mount risks integrity — ADR-0023 §3). ---
+deny contains msg if {
+	is_pcap_snapshot(input)
+	some c in pcap_snapshot_containers(input)
+	some m in c.volumeMounts
+	m.name == "pcaps"
+	m.readOnly != true
+	msg := sprintf("pcap snapshot %q must mount the pcap volume readOnly:true — it reads captures and writes only the object store (ADR-0023 §3)", [input.metadata.name])
+}
+
+# --- the snapshot must invoke the model-reusing planner (`pcap.snapshot`), which
+# SKIPS tombstoned files + prunes tombstoned object copies by calling the
+# pcap_metadata model — a snapshot that does not is not retention-honoring
+# (requirement 1, the no-resurrection-at-snapshot guard). Asserted on argv text. ---
+deny contains msg if {
+	is_pcap_snapshot(input)
+	some c in pcap_snapshot_containers(input)
+	not container_runs_pcap_snapshot(c)
+	msg := sprintf("pcap snapshot %q container %q must invoke the model-reusing planner (`pcap.snapshot`) — it must skip tombstoned files + prune tombstoned copies by calling pcap_metadata, not re-implement retention (ADR-0023 §4 / ADR-0030 §3)", [input.metadata.name, c.name])
+}
+
+container_runs_pcap_snapshot(c) if {
+	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
+	contains(arg, "pcap.snapshot")
+}
+
+# --- built P1, run P2: the ANNUAL pcap drill CronJob MUST render suspended so K8s
+# never auto-fires it in P1 (ADR-0030 §5.4 / P1-PLAN.md §6). ---
+deny contains msg if {
+	is_pcap_drill(input)
+	input.kind == "CronJob"
+	input.spec.suspend != true
+	msg := sprintf("pcap restore drill CronJob %q must render `suspend: true` — built P1, executed annually in P2; it must not auto-fire (ADR-0030 §5.4)", [input.metadata.name])
+}
+
+# --- the drill must be P2-execution flagged (the W5-T5 evidence layer knows
+# execution is deferred — ADR-0030 §5.4). ---
+deny contains msg if {
+	is_pcap_drill(input)
+	object.get(input.metadata.annotations, "netops.io/execution-phase", "") != "P2"
+	msg := sprintf("pcap restore drill %q must carry the `netops.io/execution-phase: P2` annotation (built P1, executed annually in P2; ADR-0030 §5.4)", [input.metadata.name])
+}
+
+# --- THROWAWAY restore: the drill restore volume must be an emptyDir scratch
+# (never a PVC), and the drill must mount NO persistentVolumeClaim — so a restore
+# can NEVER write onto the live pcap volume (no resurrection path onto the live
+# disk; ADR-0030 §3 / §5.1). ---
+deny contains msg if {
+	is_pcap_drill(input)
+	some v in object.get(pcap_drill_pod_spec(input), "volumes", [])
+	v.name == "drill-restore"
+	not v.emptyDir
+	msg := sprintf("pcap restore drill %q `drill-restore` volume must be an emptyDir scratch (throwaway), never a PVC (ADR-0030 §5.1)", [input.metadata.name])
+}
+
+deny contains msg if {
+	is_pcap_drill(input)
+	some v in object.get(pcap_drill_pod_spec(input), "volumes", [])
+	v.persistentVolumeClaim
+	msg := sprintf("pcap restore drill %q must mount NO persistentVolumeClaim — the restore is object-store-sourced to throwaway scratch only; it must never touch the live pcap volume (ADR-0030 §3/§5.1)", [input.metadata.name])
+}
+
+# --- the drill must invoke the assertion harness (`pcap.run_drill`) — the sha256-
+# verify + no-resurrection + engineer+ gate assertions are the whole point; a
+# restore with no assertions is not a drill (ADR-0023 §5 / ADR-0030 §3). ---
+deny contains msg if {
+	is_pcap_drill(input)
+	some c in pcap_drill_pod_spec(input).containers
+	not container_runs_pcap_drill(c)
+	msg := sprintf("pcap restore drill %q container %q must invoke the assertion harness (`pcap.run_drill`) — a restore with no sha256/no-resurrection/gated assertions is not a drill (ADR-0023 §5 / ADR-0030 §3)", [input.metadata.name, c.name])
+}
+
+container_runs_pcap_drill(c) if {
+	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
+	contains(arg, "pcap.run_drill")
+}
+
+# --- the drill restore is engineer+ GATED (ADR-0023 §5): the rendered pod must
+# carry the DRILL_MIN_ROLE env so the harness enforces the gate. A drill with no
+# min-role would restore for any actor — the ungated read path the spec forbids. ---
+deny contains msg if {
+	is_pcap_drill(input)
+	some c in pcap_drill_pod_spec(input).containers
+	not pcap_drill_has_min_role(c)
+	msg := sprintf("pcap restore drill %q container %q must set DRILL_MIN_ROLE so the restore stays engineer+ gated (ADR-0023 §5 — no new ungated read path)", [input.metadata.name, c.name])
+}
+
+pcap_drill_has_min_role(c) if {
+	some e in object.get(c, "env", [])
+	e.name == "DRILL_MIN_ROLE"
+}
+
+# --- pod hardening parity for both pcap objects (the CronJob/Job kinds nest
+# containers under their own paths; assert the ADR-0029 §3 controls here so a
+# hardening regression on the pcap pods fails the gate too). The snapshot is a
+# CronJob; the drill is a Job AND a CronJob. Cover both via a unified container
+# iterator. ---
+pcap_workload_containers(obj) := pcap_snapshot_containers(obj) if {
+	is_pcap_snapshot(obj)
+}
+
+pcap_workload_containers(obj) := pcap_drill_pod_spec(obj).containers if {
+	is_pcap_drill(obj)
+}
+
+is_pcap_workload(obj) if is_pcap_snapshot(obj)
+
+is_pcap_workload(obj) if is_pcap_drill(obj)
+
+deny contains msg if {
+	is_pcap_workload(input)
+	some c in pcap_workload_containers(input)
+	not drops_all(c)
+	msg := sprintf("pcap workload %q container %q must drop ALL capabilities (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_pcap_workload(input)
+	some c in pcap_workload_containers(input)
+	some cap in object.get(object.get(object.get(c, "securityContext", {}), "capabilities", {}), "add", [])
+	msg := sprintf("pcap workload %q container %q must add NO capabilities (found %q; ADR-0029 §3)", [input.metadata.name, c.name, cap])
+}
+
+deny contains msg if {
+	is_pcap_workload(input)
+	some c in pcap_workload_containers(input)
+	c.securityContext.runAsNonRoot != true
+	msg := sprintf("pcap workload %q container %q must set runAsNonRoot=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_pcap_workload(input)
+	some c in pcap_workload_containers(input)
+	c.securityContext.readOnlyRootFilesystem != true
+	msg := sprintf("pcap workload %q container %q must set readOnlyRootFilesystem=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_pcap_workload(input)
+	some c in pcap_workload_containers(input)
+	c.securityContext.allowPrivilegeEscalation != false
+	msg := sprintf("pcap workload %q container %q must set allowPrivilegeEscalation=false (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_pcap_workload(input)
+	some c in pcap_workload_containers(input)
+	not c.resources.requests
+	msg := sprintf("pcap workload %q container %q must declare resource requests (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_pcap_workload(input)
+	some c in pcap_workload_containers(input)
+	not c.resources.limits
+	msg := sprintf("pcap workload %q container %q must declare resource limits (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_pcap_workload(input)
+	some c in pcap_workload_containers(input)
+	endswith(c.image, ":latest")
+	msg := sprintf("pcap workload %q image %q must not use the `latest` tag (ADR-0029 §5)", [input.metadata.name, c.image])
+}
+
+# --- the pcap pods talk to Postgres + the object store, not the K8s API:
+# automountServiceAccountToken=false (parity with the backup CronJob, ADR-0029 §5). ---
+deny contains msg if {
+	is_pcap_snapshot(input)
+	input.spec.jobTemplate.spec.template.spec.automountServiceAccountToken != false
+	msg := sprintf("pcap snapshot %q pod must set automountServiceAccountToken=false (ADR-0029 §5)", [input.metadata.name])
+}
+
+deny contains msg if {
+	is_pcap_drill(input)
+	pcap_drill_pod_spec(input).automountServiceAccountToken != false
+	msg := sprintf("pcap restore drill %q pod must set automountServiceAccountToken=false (ADR-0029 §5)", [input.metadata.name])
 }

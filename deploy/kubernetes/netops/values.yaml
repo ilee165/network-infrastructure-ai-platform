@@ -137,6 +137,14 @@ secrets:
     backupRepoCipherPass: backup-repo-cipher-pass
     backupRepoS3Key: backup-repo-s3-key
     backupRepoS3KeySecret: backup-repo-s3-key-secret
+    # pcap snapshot object-store credential (W5-T4, ADR-0030 §3 / ADR-0023 §5).
+    # A SEPARATE, least-privilege MinIO/S3 credential scoped write-only to the
+    # `pcaps/` prefix — DISTINCT from the pgbackrest/ credential above so a leak of
+    # one does not grant the other's prefix (least-privilege §7). REFERENCE key
+    # NAMES only; the dev Secret generates random placeholders (idempotent via
+    # lookup, L4); production supplies them via existingSecret / external-secrets.
+    pcapSnapshotS3Key: pcap-snapshot-s3-key
+    pcapSnapshotS3KeySecret: pcap-snapshot-s3-key-secret
     # pgBackRest TLS-server mTLS material (W5-T1, ADR-0030 §1/§4). The scheduled
     # CronJob reaches the in-postgres `pgbackrest server` over TLS (it has no
     # PGDATA volume of its own), so a CA + server cert/key + client cert/key are
@@ -450,6 +458,82 @@ backup:
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
+  # -- pcap VOLUME SNAPSHOT tier (W5-T4, ADR-0030 §3/§5.4; ADR-0023 §3/§4/§5).
+  #    Snapshots the pcap disk volume (/data/pcaps/{capture_id}.pcap) to the SAME
+  #    object store as W5-T1 but a SEPARATE `pcaps/` prefix, under the hard
+  #    constraint that DR HONORS — never subverts — the ADR-0023 retention
+  #    contract: the snapshot captures ONLY live (non-tombstoned) files, prunes any
+  #    object-store copy whose pcap_metadata.tombstoned_at is set, and the snapshot
+  #    window is the SHORTER of (object-store policy) and the pcap's
+  #    retention_expires_at — so DR can NEVER re-extend the lifetime of a
+  #    credential/PII-bearing payload past retention (ADR-0030 §3, the load-bearing
+  #    constraint). pcaps are the lowest-criticality tier (diagnostic artifacts);
+  #    the restore drill is therefore ANNUAL (ADR-0030 §5.4), not quarterly.
+  pcap:
+    # On by default (resilient-by-default DR floor); disabling is a warned opt-out
+    # (NOTES). Renders the daily snapshot CronJob.
+    enabled: true
+    # DAILY snapshot (ADR-0030 §8 — pcap daily snapshot). 02:30 keeps it clear of
+    # the 01:00 pgBackRest window so the two DR tiers do not contend for the link.
+    schedule: "30 2 * * *"
+    # The pcap snapshot/restore image: the SAME Python-bearing backend image as the
+    # drill so app.models.pcap_metadata + the retention helpers
+    # (tombstone_capture / sha256_file / expired_capture_ids) are importable — the
+    # snapshot REUSES the model to decide live-vs-tombstoned, never re-implements
+    # retention. Explicit tag ONLY (admission rejects `latest`, ADR-0029 §5).
+    image:
+      repository: ghcr.io/netops/netops-backend
+      tag: "p1"
+      pullPolicy: IfNotPresent
+    # The on-volume pcap directory the snapshot reads (ADR-0023 §3 disk layout).
+    # Mirrors packet.pcapVolume.mountPath; the snapshot mounts the SAME volume
+    # read-only (it never writes the capture volume — write goes to the object store).
+    pcapDir: /data/pcaps
+    # MinIO/S3 object store (the SAME store as W5-T1, ADR-0030 §1) — but a SEPARATE
+    # `pcaps/` prefix with its OWN least-privilege, write-to-prefix-only credential
+    # (requirement 4 / §7). NEVER reuse the pgbackrest/ credential here.
+    repo:
+      endpoint: minio.netops-backup.svc.cluster.local
+      port: 9000
+      verifyTls: true
+      region: us-east-1
+      bucket: netops-backups
+      # The pcap-only prefix — DISTINCT from backup.postgres.repo.prefix
+      # (`/pgbackrest`). The snapshot credential is scoped write-only to THIS prefix.
+      prefix: /pcaps
+      uriStyle: path
+    # Object-store server-side encryption for the pcap prefix (defense-in-depth for
+    # PII/credential-bearing payloads at rest in the off-host store). aes256 = SSE-S3.
+    sseEncryption: aes256
+    # Snapshot retention window (days) at the OBJECT-STORE level. The EFFECTIVE
+    # window is the SHORTER of this and each pcap's retention_expires_at (ADR-0030
+    # §3 — object-store policy may NEVER extend a pcap past its own retention). Set
+    # to the ADR-0023 §4 30-day tombstone window so the two are aligned by default;
+    # the snapshot/prune script clamps per-file to retention_expires_at regardless.
+    retentionDays: 30
+    # Bound concurrency + history so a long snapshot never overlaps the next tick.
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 3600
+    backoffLimit: 1
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # Resource requests + limits (never absent — ADR-0029 §3). rsync/sha256 is
+    # IO-bound, modest CPU.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    # Egress allow-list for the snapshot CronJob's NetworkPolicy: the object-store
+    # CIDRs the job must reach (ADR-0030 §4 / PRODUCTION.md §5 — confined, never
+    # blanket). Operators MUST narrow to their real object-store ranges. The job
+    # also reaches postgres:5432 (in-namespace) to read pcap_metadata read-only.
+    objectStoreCidrs:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
   # -- Restore-DRILL (W5-T2, ADR-0030 §5/§5.1). The drill RESTORES the latest full
   #    + WAL from the object-store repo ALONE to a THROWAWAY target and runs the
   #    four pass/fail assertions (RPO-in-window, audit immutable, credentials fail
@@ -511,6 +595,48 @@ backup:
       limits:
         cpu: "1"
         memory: 1Gi
+    # -- pcap SPOT-RESTORE drill (W5-T4, ADR-0030 §5.4; ADR-0023 §3/§4/§5). The
+    #    annual spot-restore that PROVES DR honors the ADR-0023 retention contract:
+    #    a sampled LIVE capture restores from the `pcaps/` prefix and sha256-matches
+    #    its capture-time hash, AND a TOMBSTONED capture is NOT resurrected (the
+    #    load-bearing no-resurrection guard — ADR-0030 §3). Built P1, executed
+    #    ANNUALLY from P2 (lowest-criticality tier, §5.4): the suspended CronJob
+    #    ships here, scheduling deferred; the on-demand Job is the manual path. The
+    #    drill is engineer+ gated (ADR-0023 §5 — the restore/download path is the
+    #    existing audited engineer+ door, never a new ungated read).
+    pcap:
+      # OFF by default: the drill is a P2-executed control. enabled renders the
+      # suspended ANNUAL CronJob (+ the on-demand Job) so the manifest + harness
+      # ship in P1 and are policy-tested WITHOUT scheduling any run. Flip true in P2.
+      enabled: true
+      # Hard belt-and-braces switch: even when enabled, the CronJob renders
+      # `suspend: true` so K8s NEVER auto-fires it until P2 deliberately sets this
+      # false (ADR-0030 §5.4 — built P1, run P2). The on-demand Job is the manual path.
+      suspend: true
+      # ANNUAL cadence (ADR-0030 §5.4 — pcaps are the lowest-criticality tier, so a
+      # yearly spot-restore, NOT the quarterly Postgres cadence): 03:00 on Jan 2nd.
+      # Inert while `suspend: true`; the schedule is recorded so P2 only flips it.
+      schedule: "0 3 2 1 *"
+      # The minimum role authorized to run the restore drill (ADR-0023 §5 — restore
+      # access stays gated to engineer+; the harness asserts the requested actor's
+      # role clears this bar before it will restore ANY capture). Reference only.
+      minRole: engineer
+      # backoff/history bounds (mirror the Postgres drill).
+      backoffLimit: 1
+      concurrencyPolicy: Forbid
+      startingDeadlineSeconds: 3600
+      successfulJobsHistoryLimit: 3
+      failedJobsHistoryLimit: 3
+      ttlSecondsAfterFinished: 3600
+      # Resource requests + limits (never absent — ADR-0029 §3). The restore is
+      # IO-bound; the assertion step is light.
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
 
 # -- Ingress + TLS (ADR-0029 §4 / ADR-0012 §2). The SINGLE front door: ONE
 #    HTTPS-only Ingress routing ALL paths to the `frontend` Service — NEVER a

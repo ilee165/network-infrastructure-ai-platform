@@ -1,0 +1,230 @@
+{{- /*
+pcap SPOT-RESTORE drill — Job + suspended ANNUAL CronJob (W5-T4, ADR-0030 §5.4;
+ADR-0023 §3/§4/§5).
+
+WHAT IT PROVES (the ADR-0023 retention contract DR must HONOR, not subvert):
+  (a) live-restore + sha256 — a sampled LIVE (non-tombstoned) capture restores
+      from the `pcaps/` prefix and its restored bytes sha256-MATCH the capture-time
+      hash recorded in pcap_metadata (ADR-0023 §3 integrity).
+  (b) NO RESURRECTION — a TOMBSTONED capture is NOT restored: its object copy is
+      absent/pruned, and even if forced into the restore set the metadata-consistency
+      guard DROPS it, so a tombstoned capture's download still 404s post-restore
+      (ADR-0030 §3, the load-bearing constraint; ADR-0023 §4/§5).
+  (c) GATED access — the restore is authorized only for an engineer+ actor
+      (ADR-0023 §5); the harness refuses to restore for a sub-engineer role, so DR
+      opens NO new ungated read path to PII/credential-bearing payloads.
+
+The drill RESTORES from the `pcaps/` object-store prefix ALONE to a THROWAWAY
+target (an emptyDir scratch restorePath — NEVER the live capture volume). It then
+runs `python -m pcap.run_drill`, which REUSES app.models.pcap_metadata
+(tombstone_capture / sha256_file / expired_capture_ids / retention_expires_at) for
+its retention decisions (no duplicated retention logic) and emits the structured
+`DRILL pcap_spot_restore sampled=<id> sha256=MATCH|MISMATCH
+tombstoned_resurrected=NO|YES result=PASS|FAIL` line for the W5-T5 collector.
+
+BUILT P1, RUN P2 (ADR-0030 §5.4 — pcaps are the lowest-criticality tier, so an
+ANNUAL spot-restore): the CronJob renders `suspend: true` so K8s NEVER auto-fires
+it; the Job is the on-demand manual path. The P1 gate is a green dry-run over the
+seeded fixture (one live + one tombstoned capture, no hardware).
+
+W4-LESSONS guards applied:
+  L3 — every `$VAR` lives inside ONE `sh -c '...'`; the k8s exec argv never does
+       its own $(VAR) substitution.
+  L5 — `set -o pipefail` AND a `test -s` non-empty guard on the restore/verify
+       pipe, so a silently-empty restore stream FAILS the job (never "succeeds").
+  L4 — this Job generates NO chart secret (it references existing Secret keys);
+       nothing to make idempotent here.
+SECRET-SURFACE: the object-store credential + DB password are valueFrom.secretKeyRef
+— never inlined (ADR-0030 §3 / ADR-0029 §6). The restore is engineer+ gated
+(ADR-0023 §5); captured packet data never leaves the audited download path.
+*/ -}}
+{{- /*
+Reusable pcap-drill pod spec (authored ONCE so the on-demand Job and the
+suspended CronJob cannot drift). Defined at the top level (Helm `define` may not
+nest inside an `if` action).
+*/ -}}
+{{- define "netops.pcapDrillPod" -}}
+{{- $ctx := .ctx -}}
+{{- $pd := $ctx.Values.backup.drills.pcap -}}
+{{- $p := $ctx.Values.backup.pcap -}}
+{{- $fullname := include "netops.fullname" $ctx -}}
+{{- $secretName := include "netops.platformSecretName" $ctx -}}
+metadata:
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" $ctx "component" "backup") | nindent 4 }}
+    # Distinct backup-type so the W5-T2 PITR-drill rules (which require `pgbackrest
+    # verify`) do not mis-fire on this pcap drill; it has its own W5-T4 rego rules.
+    netops.io/backup-type: pcap-drill
+spec:
+  serviceAccountName: backup-sa
+  automountServiceAccountToken: {{ $ctx.Values.serviceAccounts.automountServiceAccountToken }}
+  restartPolicy: Never
+  securityContext:
+    {{- include "netops.podSecurityContext" $ctx | nindent 4 }}
+  containers:
+    - name: pcap-spot-restore-drill
+      # Reuses the pcap snapshot image (the backend image carrying app.models.
+      # pcap_metadata + the retention helpers the harness imports). No separate
+      # drill image — one source of truth for the Python-bearing image.
+      image: {{ include "netops.image" (dict "img" $p.image) }}
+      imagePullPolicy: {{ $p.image.pullPolicy }}
+      securityContext:
+        {{- include "netops.hardenedSecurityContext" $ctx | nindent 8 }}
+      command:
+        - sh
+        - -c
+        # ONE sh -c script (L3: env vars expand HERE; a raw exec argv would NOT do
+        # $(VAR)). set -o pipefail + a `test -s` non-empty guard (L5) on the restore
+        # manifest pipe so a silently-empty restore FAILS the job. The restore reads
+        # ONLY the `pcaps/` object-store prefix into a THROWAWAY scratch dir (never
+        # the live capture volume). `python -m pcap.run_drill` then runs the three
+        # assertions (sha256-match a sampled LIVE capture, PROVE a tombstoned capture
+        # is NOT resurrected, and refuse restore for a sub-engineer actor) and emits
+        # the `DRILL pcap_spot_restore ...` line. set -e fails the pod on any non-zero.
+        - |
+          set -euo pipefail
+          echo "[pcap-drill] restoring sampled captures from ${PCAP_S3_PREFIX} -> THROWAWAY ${DRILL_RESTORE_PATH}"
+          mkdir -p "${DRILL_RESTORE_PATH}"
+          # The drill harness restores into the scratch dir, sha256-checks the live
+          # sample, and proves the tombstoned sample is NOT resurrected. In P1 it
+          # runs against the seeded fixture (no live store) so the gate is a green
+          # dry-run; P2 supplies a live store + --apply. It writes a restore manifest
+          # the L5 non-empty guard checks, then asserts.
+          python -m pcap.run_drill \
+            --restore-path "${DRILL_RESTORE_PATH}" \
+            --s3-prefix "${PCAP_S3_PREFIX}" \
+            --actor-role "${DRILL_ACTOR_ROLE}" \
+            --min-role "${DRILL_MIN_ROLE}" \
+            --manifest-out "${DRILL_RESTORE_PATH}/manifest.json" \
+            | tee "${DRILL_RESTORE_PATH}/drill.log"
+          echo "[pcap-drill] assert the restore manifest is NON-EMPTY (L5)"
+          test -s "${DRILL_RESTORE_PATH}/manifest.json"
+          echo "[pcap-drill] all assertions PASSED (P2 executes this annually; P1 dry-run)"
+      env:
+        # The THROWAWAY restore path (used by the sh -c script, never argv).
+        - name: DRILL_RESTORE_PATH
+          value: {{ $ctx.Values.backup.drills.throwaway.restorePath | quote }}
+        # The pcap object-store prefix the restore reads (bucket/pcaps).
+        - name: PCAP_S3_PREFIX
+          value: {{ printf "%s/%s" $p.repo.bucket (trimPrefix "/" $p.repo.prefix) | quote }}
+        # ADR-0023 §5 access gate: the actor's role + the minimum required role. The
+        # harness refuses to restore unless the actor clears engineer+. In P1 the
+        # dry-run uses the minRole itself as the actor (the positive gated path);
+        # the harness ALSO runs a negative sub-engineer case internally to prove the
+        # gate bites. References only — no credential here.
+        - name: DRILL_ACTOR_ROLE
+          value: {{ $pd.minRole | quote }}
+        - name: DRILL_MIN_ROLE
+          value: {{ $pd.minRole | quote }}
+        # The pcap engine + model live in the app package; PYTHONPATH carries both
+        # app and the drills/ dir so `import pcap.run_drill` resolves alongside
+        # `app.models.pcap_metadata` (the harness REUSES the model, never re-impls).
+        - name: PYTHONPATH
+          value: "/app:/app/drills"
+        # Object-store coordinates (NON-secret) for the restore client.
+        - name: PCAP_S3_ENDPOINT
+          value: {{ printf "%s:%v" $p.repo.endpoint $p.repo.port | quote }}
+        - name: PCAP_S3_REGION
+          value: {{ $p.repo.region | quote }}
+        - name: PCAP_S3_URI_STYLE
+          value: {{ $p.repo.uriStyle | quote }}
+        - name: PCAP_S3_VERIFY_TLS
+          value: {{ $p.repo.verifyTls | quote }}
+        # DB user (non-secret) by configMapKeyRef; password by-reference (the drill
+        # joins pcap_metadata READ-ONLY to source the capture-time sha256 + tombstone
+        # state).
+        - name: PGUSER
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_POSTGRES_USER
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.postgresPassword }}
+        # SEPARATE, least-privilege object-store credential (read the `pcaps/`
+        # prefix for restore). External-secret REFs only; NEVER inlined.
+        - name: PCAP_S3_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.pcapSnapshotS3Key }}
+        - name: PCAP_S3_KEY_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.pcapSnapshotS3KeySecret }}
+      resources:
+        {{- toYaml $pd.resources | nindent 8 }}
+      volumeMounts:
+        # readOnlyRootFilesystem:true — the THROWAWAY restore scratch is the ONLY
+        # writable mount (emptyDir; torn down with the pod). The drill NEVER mounts
+        # the live capture volume (no resurrection path onto the live disk).
+        - name: drill-restore
+          mountPath: {{ dir $ctx.Values.backup.drills.throwaway.restorePath | quote }}
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    # THROWAWAY restore target — emptyDir scratch ONLY (never the live pcap volume).
+    - name: drill-restore
+      emptyDir:
+        sizeLimit: 2Gi
+    - name: tmp
+      emptyDir:
+        sizeLimit: 128Mi
+{{- end -}}
+{{- if and .Values.backup.drills.pcap.enabled .Values.backup.pcap.enabled }}
+{{- $pd := .Values.backup.drills.pcap -}}
+{{- $fullname := include "netops.fullname" . -}}
+---
+# On-demand Job (manual path): `kubectl create job --from=cronjob/...` or applied
+# directly. Inert until invoked; the assertions run a green dry-run in P1.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-pcap-spot-restore-drill
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+    netops.io/backup-type: pcap-drill
+  annotations:
+    # BUILT P1, RUN P2 (ADR-0030 §5.4): this Job is shipped + policy-tested now;
+    # execution is the ANNUAL P2 control. Helm leaves it for manual/CI invocation.
+    netops.io/execution-phase: P2
+    helm.sh/hook-weight: "0"
+spec:
+  backoffLimit: {{ $pd.backoffLimit }}
+  # Auto-reap the finished pod (the CronJob reaps via its history limits instead).
+  ttlSecondsAfterFinished: {{ $pd.ttlSecondsAfterFinished }}
+  template:
+    {{- include "netops.pcapDrillPod" (dict "ctx" .) | nindent 4 }}
+---
+# Suspended ANNUAL CronJob (ADR-0030 §5.4). `suspend: true` so K8s NEVER auto-fires
+# it in P1 — P2 flips backup.drills.pcap.suspend=false to begin the annual run.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-pcap-spot-restore-drill
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+    netops.io/backup-type: pcap-drill
+  annotations:
+    netops.io/execution-phase: P2
+spec:
+  # ANNUAL cadence; INERT while suspended (built P1, run P2 — ADR-0030 §5.4).
+  schedule: {{ $pd.schedule | quote }}
+  # The belt-and-braces switch: rendered suspended by default so no run fires until
+  # P2 deliberately un-suspends it (ADR-0030 §5.4 / P1-PLAN.md §6).
+  suspend: {{ $pd.suspend }}
+  concurrencyPolicy: {{ $pd.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $pd.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $pd.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $pd.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $pd.backoffLimit }}
+      template:
+        {{- include "netops.pcapDrillPod" (dict "ctx" .) | nindent 8 }}
+{{- end }}
