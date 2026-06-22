@@ -209,6 +209,66 @@ spec:
             - name: pgbackrest-runtime
               mountPath: /var/lib/pgbackrest
             {{- end }}
+        {{- if and .Values.backup.postgres.enabled .Values.backup.postgres.tls.enabled }}
+        # pgBackRest TLS SERVER sidecar (W5-T1, ADR-0030 §4). It shares the PGDATA
+        # PVC (local pg1-path) and serves it to the remote backup CronJob over
+        # mTLS — the CronJob has NO PGDATA volume and cannot read pg1-path itself.
+        # Uses the SAME init-copied pgbackrest binary + the LOCAL pgbackrest.conf
+        # (no pg1-host). Hardened identically (drop-ALL, non-root, RO-rootfs).
+        - name: pgbackrest-server
+          image: {{ include "netops.image" (dict "img" .Values.backup.postgres.image) }}
+          imagePullPolicy: {{ .Values.backup.postgres.image.pullPolicy }}
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          command:
+            - /shared/pgbackrest/pgbackrest
+          args:
+            - --config=/etc/pgbackrest/pgbackrest.conf
+            - server
+          ports:
+            - name: pgbackrest
+              containerPort: {{ .Values.backup.postgres.tls.serverPort }}
+              protocol: TCP
+          env:
+            # The server reads + pushes to the repo on the client's behalf, so it
+            # needs the repo credentials as PGBACKREST_* env (external-secret REFs
+            # only; NEVER inlined — ADR-0030 §1 / ADR-0011 §4).
+            {{- if .Values.backup.postgres.encryption.enabled }}
+            - name: PGBACKREST_REPO1_CIPHER_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.platformSecretName" . }}
+                  key: {{ .Values.secrets.keys.backupRepoCipherPass }}
+            {{- end }}
+            - name: PGBACKREST_REPO1_S3_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.platformSecretName" . }}
+                  key: {{ .Values.secrets.keys.backupRepoS3Key }}
+            - name: PGBACKREST_REPO1_S3_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.platformSecretName" . }}
+                  key: {{ .Values.secrets.keys.backupRepoS3KeySecret }}
+          resources:
+            {{- toYaml .Values.backup.postgres.resources | nindent 12 }}
+          volumeMounts:
+            # Shares the PGDATA PVC so pg1-path is LOCAL to the server.
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: pgbackrest-bin
+              mountPath: /shared/pgbackrest
+              readOnly: true
+            - name: pgbackrest-config
+              mountPath: /etc/pgbackrest
+              readOnly: true
+            # mTLS material (CA + server cert/key) mounted read-only from the Secret.
+            - name: pgbackrest-tls
+              mountPath: /etc/pgbackrest-tls
+              readOnly: true
+            - name: pgbackrest-runtime
+              mountPath: /var/lib/pgbackrest
+        {{- end }}
       volumes:
         - name: run
           emptyDir:
@@ -226,6 +286,21 @@ spec:
         - name: pgbackrest-runtime
           emptyDir:
             sizeLimit: 512Mi
+        {{- if .Values.backup.postgres.tls.enabled }}
+        # pgBackRest mTLS material (CA + server cert/key) for the server sidecar,
+        # by-reference from the platform Secret (NEVER inlined). The sidecar
+        # presents server.crt; pg1-host clients verify against ca.crt.
+        - name: pgbackrest-tls
+          secret:
+            secretName: {{ include "netops.platformSecretName" . }}
+            items:
+              - key: {{ .Values.secrets.keys.backupTlsCa }}
+                path: ca.crt
+              - key: {{ .Values.secrets.keys.backupTlsServerCert }}
+                path: server.crt
+              - key: {{ .Values.secrets.keys.backupTlsServerKey }}
+                path: server.key
+        {{- end }}
         {{- end }}
   volumeClaimTemplates:
     - metadata:
@@ -257,4 +332,12 @@ spec:
       port: {{ .Values.services.postgres.port }}
       targetPort: postgres
       protocol: TCP
+    {{- if and .Values.backup.postgres.enabled .Values.backup.postgres.tls.enabled }}
+    # pgBackRest TLS server port — the backup CronJob reaches the in-pod
+    # `pgbackrest server` sidecar here (mTLS), NOT 5432 (ADR-0030 §4).
+    - name: pgbackrest
+      port: {{ .Values.backup.postgres.tls.serverPort }}
+      targetPort: pgbackrest
+      protocol: TCP
+    {{- end }}
 {{- end }}

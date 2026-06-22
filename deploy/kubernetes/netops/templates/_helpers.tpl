@@ -214,8 +214,15 @@ spec:
             - name: PGBACKREST_STANZA
               value: {{ $b.stanza | quote }}
             # pgBackRest reads its config from this path (the mounted ConfigMap).
+            # The CronJob has NO PGDATA volume, so it uses the REMOTE view
+            # (pg1-host=tls → the in-postgres `pgbackrest server` sidecar) when the
+            # TLS server is enabled; the LOCAL view only applies in-pod (ADR-0030 §4).
             - name: PGBACKREST_CONFIG
+              {{- if and $b.tls.enabled $ctx.Values.services.postgres.enabled }}
+              value: /etc/pgbackrest/pgbackrest-remote.conf
+              {{- else }}
               value: /etc/pgbackrest/pgbackrest.conf
+              {{- end }}
             # Postgres auth — the backup connects as the platform DB user; the
             # password is by-reference (secrets.keys.postgresPassword).
             - name: PGUSER
@@ -255,6 +262,14 @@ spec:
             - name: pgbackrest-config
               mountPath: /etc/pgbackrest
               readOnly: true
+            {{- if and $b.tls.enabled $ctx.Values.services.postgres.enabled }}
+            # mTLS client material (CA + client cert/key) to reach the in-postgres
+            # `pgbackrest server` over TLS (ADR-0030 §4). By-reference from the
+            # Secret; the CronJob presents client.crt (CN = tls.clientCommonName).
+            - name: pgbackrest-tls
+              mountPath: /etc/pgbackrest-tls
+              readOnly: true
+            {{- end }}
             # readOnlyRootFilesystem:true — pgBackRest needs writable scratch for
             # its lock/spool/log + the info assertion file (the ONLY writable mounts).
             - name: pgbackrest-runtime
@@ -267,6 +282,20 @@ spec:
         - name: pgbackrest-config
           configMap:
             name: {{ $fullname }}-pgbackrest-config
+        {{- if and $b.tls.enabled $ctx.Values.services.postgres.enabled }}
+        # mTLS client material for the remote (TLS) backup path (ADR-0030 §4),
+        # by-reference from the platform Secret (NEVER inlined).
+        - name: pgbackrest-tls
+          secret:
+            secretName: {{ $secretName }}
+            items:
+              - key: {{ $ctx.Values.secrets.keys.backupTlsCa }}
+                path: ca.crt
+              - key: {{ $ctx.Values.secrets.keys.backupTlsClientCert }}
+                path: client.crt
+              - key: {{ $ctx.Values.secrets.keys.backupTlsClientKey }}
+                path: client.key
+        {{- end }}
         - name: pgbackrest-runtime
           emptyDir:
             sizeLimit: 1Gi

@@ -433,8 +433,11 @@ deny contains msg if {
 # allow that targets any port outside this set is not a §2 arrow and is denied.
 # (DNS :53 is the universal default-deny backstop, also permitted.) Port 9000 is
 # the W5-T1 MinIO/S3 object-store edge (the backup CronJob → object store,
-# ADR-0030 §4); :443 already covers an HTTPS S3 endpoint.
-netpol_known_egress_ports := {5432, 7687, 6379, 11434, 9000, 443, 53}
+# ADR-0030 §4); :443 already covers an HTTPS S3 endpoint. Port 8432 is the W5-T1
+# pgBackRest TLS-server edge: the backup CronJob → the in-postgres `pgbackrest
+# server` sidecar (mTLS), since the CronJob pod has no PGDATA volume of its own
+# and cannot read pg1-path directly (ADR-0030 §4).
+netpol_known_egress_ports := {5432, 7687, 6379, 11434, 9000, 8432, 443, 53}
 
 # Names of the W3-owned packet NetworkPolicies — excluded from the W4 platform
 # assertions below (they carry their own ADR-0031 rules earlier in this file).

@@ -137,6 +137,17 @@ secrets:
     backupRepoCipherPass: backup-repo-cipher-pass
     backupRepoS3Key: backup-repo-s3-key
     backupRepoS3KeySecret: backup-repo-s3-key-secret
+    # pgBackRest TLS-server mTLS material (W5-T1, ADR-0030 §1/§4). The scheduled
+    # CronJob reaches the in-postgres `pgbackrest server` over TLS (it has no
+    # PGDATA volume of its own), so a CA + server cert/key + client cert/key are
+    # mounted from the Secret. REFERENCE key NAMES only — the dev Secret generates
+    # a self-signed CA + server/client pair (idempotent via lookup); production
+    # supplies them via existingSecret / external-secrets. Mirrors backup.postgres.tls.secretKeys.
+    backupTlsCa: backup-tls-ca-crt
+    backupTlsServerCert: backup-tls-server-crt
+    backupTlsServerKey: backup-tls-server-key
+    backupTlsClientCert: backup-tls-client-crt
+    backupTlsClientKey: backup-tls-client-key
   # KMS master-key REFERENCE (ADR-0032 / D11). The pod receives a KMS HANDLE or
   # a mounted secret PATH — never the KEK itself. This is the indirect handle the
   # envelope-encryption layer resolves at runtime against the customer KMS/Vault.
@@ -322,6 +333,40 @@ backup:
       # PROPOSED RPO target (minutes). Informational — surfaced in the stanza
       # config + evidence stub; archive-push is continuous regardless.
       proposedRpoMinutes: 5
+    # pgBackRest TLS server (ADR-0030 §1/§4 — "sidecar/CronJob against the
+    # primary"). The scheduled-backup CronJob pod has NO Postgres PGDATA volume,
+    # so it CANNOT read pg1-path directly; pgBackRest's `pg1-host` is the host
+    # running a pgBackRest REMOTE server, not a libpq endpoint. We therefore run a
+    # `pgbackrest server` SIDECAR in the Postgres pod (it shares the PGDATA PVC →
+    # local pg1-path) and the CronJob reaches it over TLS on the port below.
+    # archive-push (inside the postgres pod) stays LOCAL — it uses pgbackrest.conf
+    # (no pg1-host), never the remote view. mTLS certs are by-reference from the
+    # platform Secret (tls.* keys); the dev path generates a CA + server/client
+    # pair (idempotent via lookup), production supplies them via existingSecret.
+    tls:
+      # On by default whenever the backup tier + in-chart postgres are enabled:
+      # without the server sidecar the CronJob cannot reach PGDATA and the DR tier
+      # produces no backups. Disabling it is a warned opt-out (NOTES) intended
+      # ONLY for an out-of-cluster pgBackRest topology supplied out-of-band.
+      enabled: true
+      # The pgBackRest TLS server port on the Postgres pod (NOT 5432 — that is the
+      # libpq port; pgBackRest's control connection + remote protocol ride this
+      # dedicated TLS port). The backup NetworkPolicy opens exactly this port.
+      serverPort: 8432
+      # Key NAMES inside the platform Secret holding the mTLS material (CA cert +
+      # server cert/key + client cert/key). References only — never values. In dev
+      # secret.yaml generates a self-signed CA and a server/client pair under these
+      # keys (idempotent via lookup); in production they come from existingSecret /
+      # external-secrets. pgBackRest requires the peer CN to match tls-server-auth.
+      secretKeys:
+        ca: backup-tls-ca-crt
+        serverCert: backup-tls-server-crt
+        serverKey: backup-tls-server-key
+        clientCert: backup-tls-client-crt
+        clientKey: backup-tls-client-key
+      # CN embedded in the generated client cert; tls-server-auth on the server
+      # maps this CN to the stanza it may drive. Stable so the auth line matches.
+      clientCommonName: pgbackrest-client
     # Cadence (ADR-0030 §1): full WEEKLY, incremental DAILY, as SEPARATE CronJobs.
     # Each job runs `pgbackrest verify` after the backup and fails on a non-clean
     # verify (the verify GATES the job — ADR-0030 §1 requirement 2).
@@ -337,14 +382,26 @@ backup:
     backoffLimit: 1
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3
-    # Retention (ADR-0030 §1 table). The 35-day repo retention is the OPERATIONAL
-    # restore window; it does NOT override the 7-YEAR AUDIT DATA retention
-    # (PRODUCTION.md §7) — audit rows ride INSIDE every Postgres backup (ADR-0030
-    # §1, requirement 5: no separate audit backup), and the longest-retained full
-    # (the monthly-full kept 1 year here, escrowed further out-of-band) satisfies
-    # the audit-data horizon. Repo retention != audit-data retention.
+    # Retention (ADR-0030 §1 table). SCOPE NOTE: only the ~35-day OPERATIONAL
+    # restore window is configured in-chart, via pgBackRest's single
+    # `repo1-retention-full` (a COUNT of fulls, NOT a tiered/GFS policy). The
+    # ADR-0030 §1 "monthly fulls kept 1 year" long-retention tier is NOT
+    # implemented here — pgBackRest's one retention-full knob cannot express a
+    # grandfather-father-son schedule, so the 1-year monthly tier is DEFERRED
+    # out-of-band (a separate monthly-full repo/prefix or escrow process owned
+    # outside this chart; see W5-T5). Do NOT read the 35-day window as also
+    # providing the 1-year tier.
+    #
+    # The 35-day repo retention does NOT override the 7-YEAR AUDIT DATA retention
+    # (PRODUCTION.md §7): audit rows ride INSIDE every Postgres backup (ADR-0030
+    # §1, requirement 5 — no separate audit backup), so audit data is retained as
+    # long as the longest-retained full. With only the in-chart 35-day window,
+    # the in-chart guarantee for audit data is 35 days; the full 7-year horizon
+    # depends on the deferred out-of-band long-retention tier above. Repo
+    # retention != audit-data retention.
     retention:
-      # Keep enough fulls to cover ~35 days with a weekly full (5 weeks).
+      # Keep enough fulls to cover ~35 days with a weekly full (5 weeks). This is
+      # the OPERATIONAL window only — NOT the deferred 1-year monthly tier.
       full: 5
       # Keep N differential/incr sets.
       diff: 6

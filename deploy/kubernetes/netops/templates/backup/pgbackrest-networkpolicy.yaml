@@ -6,7 +6,8 @@ reads the audit/PII-bearing system of record — so its egress is CONFINED, neve
 blanket (PRODUCTION.md §5). It is additive on top of the default-deny floor
 (networkpolicies.yaml). The cluster-wide allow-dns-egress (podSelector {}) already
 grants :53; this policy adds exactly two §-arrows:
-  - backup -> postgres:5432   (read the primary for archive/backup)
+  - backup -> postgres       (reach the in-postgres `pgbackrest server` over mTLS
+                              on the TLS server port when tls.enabled; else 5432)
   - backup -> object store     (write the repo to MinIO/S3, ports 9000 + 443)
 No empty-`to` rule (a missing `to` = allow-anywhere — exactly what default-deny
 forbids; policy-tested). Renders only when the backup tier is on AND the in-chart
@@ -29,14 +30,22 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # backup -> postgres:5432 (read the primary for archive/backup).
+    # backup -> postgres. With the TLS server sidecar (default), the CronJob
+    # reaches the in-pod `pgbackrest server` on the TLS server port, NOT 5432
+    # (5432 is libpq; pgBackRest's remote protocol rides the TLS port — ADR-0030
+    # §4). Without TLS (out-of-cluster topology), fall back to the libpq port.
     - to:
         - podSelector:
             matchLabels:
               {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
       ports:
+        {{- if and $b.tls.enabled .Values.services.postgres.enabled }}
+        - protocol: TCP
+          port: {{ $b.tls.serverPort }}
+        {{- else }}
         - protocol: TCP
           port: {{ .Values.networkPolicy.postgres.port }}
+        {{- end }}
     # backup -> object store (write the encrypted repo to MinIO/S3). CONFINED to
     # the configured object-store CIDRs — NEVER an empty-`to` allow. Operators MUST
     # narrow backup.postgres.objectStoreCidrs to their real ranges (the RFC1918
