@@ -704,6 +704,61 @@ backup:
         limits:
           cpu: "1"
           memory: 1Gi
+    # -- FULL-PLATFORM DR drill (W5-T5, ADR-0030 §5.3/§6; PRODUCTION.md §8/§11).
+    #    The COMPOSING drill: restores Postgres from object storage ALONE onto a
+    #    clean target (emptyDir scratch — no live PVC), then CHAINS the three
+    #    per-tier drills end-to-end (Postgres PITR assert -> Neo4j rebuild over the
+    #    RESTORED Postgres -> pcap spot-restore) via `full_platform.run_drill`,
+    #    which AGGREGATES — never re-implements — the per-tier `DRILL ...` lines and
+    #    emits the composite line the G-REL evidence collector records. This is the
+    #    G-REL "DR drill from backups alone, onto a clean cluster" gate. Built P1
+    #    (green seeded dry-run), executed >= twice yearly from P2 (the certified-
+    #    scale 5,000-device clean-cluster run is P2 — ADR-0030 §6 / P1-PLAN.md §6).
+    fullPlatform:
+      # OFF by default: the drill is a P2-executed control. enabled renders the
+      # suspended SEMIANNUAL CronJob (+ the on-demand Job) so the manifest + the
+      # orchestrator ship in P1 and are policy-tested WITHOUT scheduling any run.
+      # Flip true in P2. Requires the three per-tier drills enabled (it composes
+      # their harnesses); rendering is gated on postgres + the drills toggle too.
+      enabled: true
+      # Hard belt-and-braces switch: even when enabled, the CronJob renders
+      # `suspend: true` so K8s NEVER auto-fires it until P2 deliberately sets this
+      # false (ADR-0030 §5.3 — built P1, run P2). The on-demand Job is the manual path.
+      suspend: true
+      # SEMIANNUAL cadence (PRODUCTION.md §8 — full DR drill >= twice yearly):
+      # 04:00 on the 20th of Jan + Jul (offset from the per-tier drills' 1st/15th so
+      # the composing drill does not contend with them). Inert while `suspend: true`;
+      # the schedule is recorded so P2 only flips the switch.
+      schedule: "0 4 20 1,7 *"
+      # PROPOSED end-to-end RTO budget (minutes): the WHOLE recovery (Postgres
+      # restore -> Neo4j rebuild -> pcap spot-restore) within RTO <= 1 h (ADR-0030
+      # §6). PROPOSED, parameterized: re-base on the Consultant §12 answer from this
+      # ONE source of truth, never a drill-local literal. The per-tier RPO window
+      # (5 min) and topology-RTO (30 min) are driven off backup.postgres.wal.
+      # proposedRpoMinutes and backup.drills.neo4j.proposedRtoMinutes respectively,
+      # so all three PROPOSED targets track one source of truth each.
+      proposedRtoMinutes: 60
+      # pcap tier gate (ADR-0023 §5): the composing drill restores pcaps only as an
+      # engineer+ actor (the existing audited door — DR opens no new ungated read).
+      pcap:
+        minRole: engineer
+      # backoff/history bounds (mirror the per-tier drills).
+      backoffLimit: 1
+      concurrencyPolicy: Forbid
+      startingDeadlineSeconds: 3600
+      successfulJobsHistoryLimit: 3
+      failedJobsHistoryLimit: 3
+      ttlSecondsAfterFinished: 3600
+      # Resource requests + limits (never absent — ADR-0029 §3). Sized for the
+      # restore (IO-bound) + the chained re-projection (CPU/IO at scale; light at
+      # the seeded dry-run). Mirrors the Neo4j-rebuild tier (the heaviest step).
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
 
 # -- Ingress + TLS (ADR-0029 §4 / ADR-0012 §2). The SINGLE front door: ONE
 #    HTTPS-only Ingress routing ALL paths to the `frontend` Service — NEVER a

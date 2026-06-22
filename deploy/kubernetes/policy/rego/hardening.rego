@@ -1913,3 +1913,254 @@ deny contains msg if {
 	endswith(c.image, ":latest")
 	msg := sprintf("neo4j rebuild drill %q image %q must not use the `latest` tag (ADR-0029 §5)", [input.metadata.name, c.image])
 }
+
+# ===========================================================================
+# W5-T5 — FULL-PLATFORM DR drill (ADR-0030 §5.3/§6; ADR-0005 D5; ADR-0011 §1/§2)
+#
+# The COMPOSING drill: it restores Postgres from object storage ALONE onto a
+# CLEAN target (emptyDir scratch — no live PVC) and CHAINS the three per-tier
+# drills end-to-end (Postgres assert -> Neo4j rebuild over the RESTORED Postgres
+# -> pcap spot-restore), aggregating their `DRILL ...` lines. These rules assert,
+# on the RENDERED manifests, the policy-surface invariants the spec's gate
+# requires — the SAME shape as the per-tier drills, scoped to this drill's
+# backup-type so they cannot mis-fire elsewhere:
+#   - ALL credential envs (DB password, Neo4j auth, backup + pcap S3 keys, repo
+#     cipher pass, KEK reference) are EXTERNAL-SECRET refs (no inline `value:`);
+#   - the suspended semiannual CronJob renders `suspend: true` (built P1, run P2);
+#   - the drill is P2-execution flagged (`netops.io/execution-phase: P2`);
+#   - the drill restores to a THROWAWAY emptyDir scratch, never a live PVC — the
+#     from-backups-alone / clean-cluster guarantee (ADR-0030 §5.3);
+#   - the drill actually RUNS the pgbackrest restore AND invokes the orchestrator
+#     (`full_platform.run_drill`) — a restore with no chained assertions, or a
+#     chain with no object-store restore, is not the G-REL drill;
+#   - the drill pod is hardened identically to every backup/drill pod.
+# Both objects carry the `backup` component label AND a
+# `netops.io/backup-type: full-platform-drill` label; match on the latter to scope
+# these rules (the W5-T1 full|incr cadence rules + the W5-T2/T3/T4 per-tier rules
+# all scope to OTHER backup-types, so none mis-fire on this composing drill).
+# ===========================================================================
+
+# A rendered full-platform DR-drill object (Job OR suspended semiannual CronJob).
+is_full_platform_drill(obj) if {
+	obj.metadata.labels["netops.io/backup-type"] == "full-platform-drill"
+}
+
+# The drill pod spec, normalized across Job and CronJob.
+fp_drill_pod_spec(obj) := obj.spec.template.spec if {
+	obj.kind == "Job"
+}
+
+fp_drill_pod_spec(obj) := obj.spec.jobTemplate.spec.template.spec if {
+	obj.kind == "CronJob"
+}
+
+# --- secret-surface: any drill env whose NAME signals a credential MUST come from
+# a secretKeyRef and carry NO inline `value:` literal. This is the SECRET-SURFACE-
+# bearing tier of the wave (it composes ALL three tiers' credentials), so the
+# external-secret indirection is asserted strictly (ADR-0030 §1 / ADR-0029 §6). ---
+fp_credential_env(name) if {
+	endswith(name, "CIPHER_PASS")
+}
+
+fp_credential_env(name) if {
+	endswith(name, "S3_KEY")
+}
+
+fp_credential_env(name) if {
+	endswith(name, "S3_KEY_SECRET")
+}
+
+fp_credential_env(name) if {
+	name == "PGPASSWORD"
+}
+
+fp_credential_env(name) if {
+	endswith(name, "POSTGRES_PASSWORD")
+}
+
+fp_credential_env(name) if {
+	endswith(name, "NEO4J_AUTH")
+}
+
+fp_credential_env(name) if {
+	endswith(name, "KEK_REF")
+}
+
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	fp_credential_env(e.name)
+	object.get(e, "value", null) != null
+	msg := sprintf("full-platform DR drill %q env %q must NOT carry an inline `value:` literal — all credentials (DB password, Neo4j auth, backup + pcap S3 keys, repo cipher pass, KEK reference) are external-secret refs only (ADR-0030 §1 / ADR-0029 §6)", [input.metadata.name, e.name])
+}
+
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	fp_credential_env(e.name)
+	not e.valueFrom.secretKeyRef
+	msg := sprintf("full-platform DR drill %q env %q must be sourced from valueFrom.secretKeyRef (credentials are by-reference only; ADR-0030 §1 / ADR-0011 §4)", [input.metadata.name, e.name])
+}
+
+# --- built P1, run P2: the semiannual drill CronJob MUST render suspended so K8s
+# never auto-fires it in P1 (ADR-0030 §5.3 / P1-PLAN.md §6). ---
+deny contains msg if {
+	is_full_platform_drill(input)
+	input.kind == "CronJob"
+	input.spec.suspend != true
+	msg := sprintf("full-platform DR drill CronJob %q must render `suspend: true` — the drill is BUILT in P1 and EXECUTED >= twice yearly in P2; it must not auto-fire (ADR-0030 §5.3 / PRODUCTION.md §8)", [input.metadata.name])
+}
+
+# --- the drill must be P2-execution flagged so the W5-T5 evidence layer knows
+# execution is deferred (ADR-0030 §5.3 — built P1, run P2). ---
+deny contains msg if {
+	is_full_platform_drill(input)
+	object.get(input.metadata.annotations, "netops.io/execution-phase", "") != "P2"
+	msg := sprintf("full-platform DR drill %q must carry the `netops.io/execution-phase: P2` annotation (built P1, executed >= twice yearly in P2; ADR-0030 §5.3)", [input.metadata.name])
+}
+
+# --- THROWAWAY / clean-cluster: the restore data dir must NOT be the live PGDATA
+# path, and the restore volume must be an emptyDir scratch (the from-backups-alone
+# guarantee — ADR-0030 §5.3). The live PGDATA path is `/var/lib/postgresql/data`. ---
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	e.name == "DRILL_RESTORE_PATH"
+	startswith(e.value, "/var/lib/postgresql/data")
+	msg := sprintf("full-platform DR drill %q restore path %q must be a THROWAWAY scratch dir, NOT the live PGDATA path — DR must restore onto a CLEAN target, never production data (ADR-0030 §5.3)", [input.metadata.name, e.value])
+}
+
+deny contains msg if {
+	is_full_platform_drill(input)
+	some v in object.get(fp_drill_pod_spec(input), "volumes", [])
+	v.name == "drill-restore"
+	not v.emptyDir
+	msg := sprintf("full-platform DR drill %q `drill-restore` volume must be an emptyDir scratch (throwaway), never a PVC — the clean-cluster property (ADR-0030 §5.3)", [input.metadata.name])
+}
+
+# --- the drill must mount NO persistentVolumeClaim at all — it restores from
+# object storage ALONE into scratch; leaning on a live PVC would break the
+# from-backups-alone / clean-cluster guarantee (ADR-0030 §5.3). ---
+deny contains msg if {
+	is_full_platform_drill(input)
+	some v in object.get(fp_drill_pod_spec(input), "volumes", [])
+	v.persistentVolumeClaim
+	msg := sprintf("full-platform DR drill %q must mount NO persistentVolumeClaim — it restores from object storage ALONE onto a clean target (ADR-0030 §5.3)", [input.metadata.name])
+}
+
+# --- the drill must actually RESTORE from the object-store repo (`pgbackrest
+# restore`) — a chain with no object-store restore is not the from-backups-alone
+# drill (ADR-0030 §5.3). Asserted on the rendered argv text. ---
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	not fp_container_runs_restore(c)
+	msg := sprintf("full-platform DR drill %q container %q must run `pgbackrest restore` from the object-store repo — DR from backups ALONE requires the restore step (ADR-0030 §5.3)", [input.metadata.name, c.name])
+}
+
+fp_container_runs_restore(c) if {
+	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
+	contains(arg, "pgbackrest")
+	contains(arg, "restore")
+}
+
+# --- the drill must invoke the orchestrator (`full_platform.run_drill`), which
+# chains the three per-tier harnesses and aggregates their DRILL lines — a restore
+# with no chained assertions is not a drill (ADR-0030 §5.3). ---
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	not fp_container_runs_orchestrator(c)
+	msg := sprintf("full-platform DR drill %q container %q must invoke the orchestrator (`full_platform.run_drill`) that chains + aggregates the three tiers — a restore with no chained assertions is not a drill (ADR-0030 §5.3)", [input.metadata.name, c.name])
+}
+
+fp_container_runs_orchestrator(c) if {
+	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
+	contains(arg, "full_platform.run_drill")
+}
+
+# --- the drill pod talks to Postgres + Neo4j + the object stores, not the K8s
+# API: automountServiceAccountToken=false (parity with the backup/drill pods). ---
+deny contains msg if {
+	is_full_platform_drill(input)
+	fp_drill_pod_spec(input).automountServiceAccountToken != false
+	msg := sprintf("full-platform DR drill %q pod must set automountServiceAccountToken=false — it talks to the data stores + object storage, not the K8s API (ADR-0029 §5)", [input.metadata.name])
+}
+
+# --- per-container hardening on the drill (the drill JOB/CronJob nest containers
+# under their own paths; assert the SAME ADR-0029 §3 controls here so a hardening
+# regression fails the gate too): drop ALL caps, add none, non-root, RO-rootfs,
+# no-privesc, RuntimeDefault seccomp, requests AND limits, no `latest` tag. ---
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	not drops_all(c)
+	msg := sprintf("full-platform DR drill %q container %q must drop ALL capabilities (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	some cap in object.get(object.get(object.get(c, "securityContext", {}), "capabilities", {}), "add", [])
+	msg := sprintf("full-platform DR drill %q container %q must add NO capabilities (found %q; ADR-0029 §3)", [input.metadata.name, c.name, cap])
+}
+
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	c.securityContext.runAsNonRoot != true
+	msg := sprintf("full-platform DR drill %q container %q must set runAsNonRoot=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	c.securityContext.readOnlyRootFilesystem != true
+	msg := sprintf("full-platform DR drill %q container %q must set readOnlyRootFilesystem=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	c.securityContext.allowPrivilegeEscalation != false
+	msg := sprintf("full-platform DR drill %q container %q must set allowPrivilegeEscalation=false (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	not fp_drill_container_seccomp_set(input, c)
+	msg := sprintf("full-platform DR drill %q container %q must set a RuntimeDefault seccompProfile (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+fp_drill_container_seccomp_set(obj, c) if {
+	c.securityContext.seccompProfile.type == "RuntimeDefault"
+}
+
+fp_drill_container_seccomp_set(obj, _) if {
+	fp_drill_pod_spec(obj).securityContext.seccompProfile.type == "RuntimeDefault"
+}
+
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	not c.resources.requests
+	msg := sprintf("full-platform DR drill %q container %q must declare resource requests (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	not c.resources.limits
+	msg := sprintf("full-platform DR drill %q container %q must declare resource limits (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_full_platform_drill(input)
+	some c in fp_drill_pod_spec(input).containers
+	endswith(c.image, ":latest")
+	msg := sprintf("full-platform DR drill %q image %q must not use the `latest` tag (ADR-0029 §5)", [input.metadata.name, c.image])
+}
