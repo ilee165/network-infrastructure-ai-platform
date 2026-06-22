@@ -486,3 +486,30 @@ packet:
     # persistent pcap volume claim (ADR-0023 §3).
     emptyDir:
       sizeLimit: 2Gi
+
+# -- Seccomp-installer DaemonSet (W3 deferred minor, ADR-0031 §3).
+#    The packet-analysis pod uses a Localhost seccomp profile
+#    (netops/packet-analysis-seccomp.json). The kubelet must find that file at
+#    /var/lib/kubelet/seccomp/netops/packet-analysis-seccomp.json on the host.
+#    This DaemonSet copies the bundled profile to that path on each node that
+#    may run the packet-analysis pod. Default on (secure-by-default: omitting it
+#    causes the packet-analysis pod to crash on any node without a pre-seeded
+#    profile). Disable only if your nodes are pre-seeded out-of-band.
+seccompInstaller:
+  enabled: true
+  # Image used to perform the node copy. busybox is minimal and widely available.
+  image:
+    repository: busybox
+    tag: "1.36.1"
+    pullPolicy: IfNotPresent
+  # Host path where kubelet stores seccomp profiles (standard kubelet default).
+  kubeletSeccompRoot: /var/lib/kubelet/seccomp
+  # Subdirectory under kubeletSeccompRoot where netops profiles are placed.
+  profileDir: netops
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi

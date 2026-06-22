@@ -1,0 +1,138 @@
+{{- /*
+Celery worker Deployment (ADR-0029 §1).
+Serves the five restricted-compliant queues: discovery, config, docs, topology,
+system. The `packet` queue is the SINGLE deliberate omission — it is a dedicated
+ADR-0031 workload (packet-capture/analysis). `system` is the Celery default queue
+(task_default_queue=QUEUE_SYSTEM) and must not be dropped: the readiness probe's
+broker round-trip depends on it (ADR-0029 §7).
+
+Hardening contract (same as api; worker talks to Postgres/Redis/Neo4j, not K8s API):
+- securityContext from netops.hardenedSecurityContext.
+- /tmp emptyDir for Python/Celery temp files.
+- liveness: celery inspect ping exec probe (ADR-0029 §7 / ADR-0015 §4).
+- readiness: same exec + broker reachability (system queue round-trip).
+- startupProbe: generous window for broker connection on first boot.
+- own ServiceAccount worker-sa, automountServiceAccountToken:false.
+*/ -}}
+{{- if .Values.services.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "netops.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "worker") | nindent 4 }}
+spec:
+  replicas: {{ .Values.services.worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "worker") | nindent 8 }}
+    spec:
+      serviceAccountName: worker-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "netops.backendImage" . }}
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          command:
+            - celery
+            - -A
+            - app.workers.celery_app
+            - worker
+            - -Q
+            - {{ .Values.services.worker.queues | join "," | quote }}
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "netops.fullname" . }}-config
+          env:
+            {{- if .Values.secrets.existingSecret }}
+            - name: NETOPS_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: {{ .Values.secrets.keys.postgresPassword }}
+            - name: NETOPS_NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: {{ .Values.secrets.keys.neo4jAuth }}
+            - name: NETOPS_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: {{ .Values.secrets.keys.redisPassword }}
+            {{- else }}
+            - name: NETOPS_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.fullname" . }}-dev-secrets
+                  key: {{ .Values.secrets.keys.postgresPassword }}
+            - name: NETOPS_NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.fullname" . }}-dev-secrets
+                  key: {{ .Values.secrets.keys.neo4jAuth }}
+            - name: NETOPS_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.fullname" . }}-dev-secrets
+                  key: {{ .Values.secrets.keys.redisPassword }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.services.worker.resources | nindent 12 }}
+          # startupProbe: generous window for broker connection on first boot.
+          startupProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - app.workers.celery_app
+                - inspect
+                - ping
+                - -d
+                - celery@$HOSTNAME
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - app.workers.celery_app
+                - inspect
+                - ping
+                - -d
+                - celery@$HOSTNAME
+            initialDelaySeconds: 0
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - app.workers.celery_app
+                - inspect
+                - ping
+                - -d
+                - celery@$HOSTNAME
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            failureThreshold: 3
+          volumeMounts:
+            # /tmp: Python/Celery tempfile scratch.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+{{- end }}

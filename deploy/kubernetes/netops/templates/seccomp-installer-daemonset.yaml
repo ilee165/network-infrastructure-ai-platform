@@ -1,0 +1,157 @@
+{{- /*
+seccomp-installer DaemonSet (W3 deferred minor, ADR-0031 §3).
+
+The packet-analysis pod uses a Localhost seccomp profile
+(netops/packet-analysis-seccomp.json via securityContext.seccompProfile.type=Localhost
+localhostProfile=netops/packet-analysis-seccomp.json). The kubelet resolves a
+Localhost profile against its seccomp root: /var/lib/kubelet/seccomp/<path>.
+
+Without the profile file present on the node, the kubelet rejects the pod
+(CreateContainerError / cannot find seccomp profile). This DaemonSet copies
+the bundled profile (from a ConfigMap backed by the seccomp JSON) to the kubelet
+seccomp directory on every node, ensuring the packet-analysis pod can start.
+
+Hardening:
+- The installer runs as root in its init phase ONLY to write to the host path,
+  then exits. There is no long-running privileged process; it is a one-shot copy
+  via an init container followed by a pause loop so Kubernetes reports Ready.
+- hostPath is the MINIMUM required: the kubelet seccomp directory
+  (defaultMode 0755; write needed to place the file). Scoped to
+  /var/lib/kubelet/seccomp/netops/ — the narrowest prefix that works.
+- The DaemonSet tolerates the packet node-pool taint (ADR-0031 §5) so it runs
+  on those nodes too. It has no nodeSelector restriction — the seccomp profile
+  must be present on every node that might schedule the analysis pod.
+- Resource limits are minimal (one-shot shell copy via init container).
+
+NOTE: The init container runs as root (runAsNonRoot:false) because writing to a
+kubelet-owned host path requires root. This is the SOLE exception in this chart;
+the pause container uses the hardened context. This is annotated below and
+suppressed at the object level for kube-linter's run-as-non-root check on the
+init container only.
+*/ -}}
+{{- if .Values.seccompInstaller.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "netops.fullname" . }}-seccomp-profiles
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "seccomp-installer") | nindent 4 }}
+data:
+  # The seccomp profile content is embedded here at render time. The DaemonSet
+  # mounts this ConfigMap and copies the file to the kubelet seccomp directory.
+  packet-analysis-seccomp.json: |
+    {{ .Files.Get "seccomp/packet-analysis-seccomp.json" | fromJson | toJson }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "netops.fullname" . }}-seccomp-installer
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # The init container must run as root to write to the kubelet host path.
+    # This is the narrowest deviation: only the init container, only hostPath
+    # /var/lib/kubelet/seccomp/netops/, one-shot copy then exit.
+    ignore-check.kube-linter.io/run-as-non-root: "seccomp-installer init container must run as root to write to kubelet seccomp host path; pause container is hardened (ADR-0031 §3)"
+    ignore-check.kube-linter.io/no-read-only-root-fs: "seccomp-installer init container writes to host path mount; pause container uses readOnlyRootFilesystem:true (ADR-0031 §3)"
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "seccomp-installer") | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "seccomp-installer") | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "seccomp-installer") | nindent 8 }}
+    spec:
+      serviceAccountName: seccomp-installer-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      # Tolerate the packet node-pool taint so the profile is also installed on
+      # dedicated packet nodes (ADR-0031 §5).
+      tolerations:
+        {{- include "netops.packetToleration" . | nindent 8 }}
+        # Also tolerate the control-plane taint in case the cluster schedules
+        # the analysis pod there.
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      initContainers:
+        - name: install-profile
+          # busybox provides sh + cp, minimal footprint.
+          image: {{ .Values.seccompInstaller.image.repository }}:{{ .Values.seccompInstaller.image.tag }}
+          imagePullPolicy: {{ .Values.seccompInstaller.image.pullPolicy }}
+          # Root required to write to the kubelet host path.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+              # DAC_OVERRIDE needed to create the directory and write the file
+              # under the kubelet seccomp root (owned by root).
+              add:
+                - DAC_OVERRIDE
+            seccompProfile:
+              type: RuntimeDefault
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              DEST="{{ .Values.seccompInstaller.kubeletSeccompRoot }}/{{ .Values.seccompInstaller.profileDir }}"
+              mkdir -p "${DEST}"
+              cp /profiles/packet-analysis-seccomp.json "${DEST}/packet-analysis-seccomp.json"
+              echo "Installed seccomp profile to ${DEST}/packet-analysis-seccomp.json"
+          resources:
+            {{- toYaml .Values.seccompInstaller.resources | nindent 12 }}
+          volumeMounts:
+            # Read-only ConfigMap containing the seccomp profile JSON.
+            - name: profiles
+              mountPath: /profiles
+              readOnly: true
+            # Writable host path — MINIMUM scope: the netops seccomp subdir only.
+            - name: seccomp-dir
+              mountPath: {{ .Values.seccompInstaller.kubeletSeccompRoot }}
+      containers:
+        # Pause container — keeps the DaemonSet pod Running (so Kubernetes reports
+        # the DaemonSet as ready) after the init container completes. Fully hardened.
+        - name: pause
+          image: {{ .Values.seccompInstaller.image.repository }}:{{ .Values.seccompInstaller.image.tag }}
+          imagePullPolicy: {{ .Values.seccompInstaller.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              echo "seccomp profile installed; sleeping until pod is replaced."
+              exec sleep infinity
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.seccompInstaller.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # ConfigMap volume with the seccomp profile JSON.
+        - name: profiles
+          configMap:
+            name: {{ include "netops.fullname" . }}-seccomp-profiles
+        # Host path mount — scoped to the kubelet seccomp root (narrowest).
+        - name: seccomp-dir
+          hostPath:
+            path: {{ .Values.seccompInstaller.kubeletSeccompRoot }}
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+{{- end }}

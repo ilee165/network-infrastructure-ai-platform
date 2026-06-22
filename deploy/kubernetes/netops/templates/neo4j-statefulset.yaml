@@ -1,0 +1,165 @@
+{{- /*
+Neo4j StatefulSet (ADR-0029 §1 — neo4j:5-community, toggleable).
+Disable with services.neo4j.enabled=false to point at an external instance.
+Projection store; rebuildable from Postgres (D5, ADR-0029 §1).
+
+Neo4j writable paths (readOnlyRootFilesystem:true requires emptyDir for each path
+the neo4j process writes that is NOT the data PVC):
+  /var/lib/neo4j/run   — pid file and unix sockets
+  /var/lib/neo4j/logs  — neo4j.log and query.log
+  /tmp                 — java/neo4j temp files
+
+The neo4j image uses /var/lib/neo4j/data as the database directory (mounted PVC).
+  /var/lib/neo4j/plugins  — may be needed for plugin jars (emptyDir for dev; P2
+    can mount a read-only ConfigMap or init container for plugins)
+  /var/lib/neo4j/import   — LOAD CSV staging area (emptyDir)
+
+Hardening:
+- neo4j:5-community runs as uid 7474 / gid 7474 by default; we override with
+  the hardening uid 10001 to stay consistent with the platform UID policy.
+  Neo4j 5 supports NEO4J_server_security_allow__csv__import__from__file__locations=false
+  and HTTP/HTTPS/Bolt listener binding per env.
+- liveness: HTTP /db/neo4j/cluster/status :7474 (or bolt :7687 TCP probe).
+  Neo4j Community does not expose the Enterprise cluster HTTP; use TCP on 7687.
+- readiness: same TCP probe.
+- startupProbe: generous window for Neo4j warm-up (JVM cold start is slow).
+*/ -}}
+{{- if .Values.services.neo4j.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "netops.fullname" . }}-neo4j
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "neo4j") | nindent 4 }}
+spec:
+  replicas: {{ .Values.services.neo4j.replicas }}
+  serviceName: {{ include "netops.fullname" . }}-neo4j
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "neo4j") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "neo4j") | nindent 8 }}
+    spec:
+      serviceAccountName: neo4j-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: neo4j
+          image: {{ include "netops.image" (dict "img" .Values.images.neo4j) }}
+          imagePullPolicy: {{ .Values.images.neo4j.pullPolicy }}
+          ports:
+            - name: bolt
+              containerPort: {{ .Values.services.neo4j.port }}
+              protocol: TCP
+            - name: http
+              containerPort: 7474
+              protocol: TCP
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          env:
+            - name: NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if .Values.secrets.existingSecret }}{{ .Values.secrets.existingSecret }}{{ else }}{{ include "netops.fullname" . }}-dev-secrets{{ end }}
+                  key: {{ .Values.secrets.keys.neo4jAuth }}
+            # Disable HTTPS listener (TLS is terminated at the ingress; bolt+routing
+            # is internal ClusterIP-only).
+            - name: NEO4J_dbms_connector_https_enabled
+              value: "false"
+            # Bind bolt and http to all interfaces (inside the container; not exposed
+            # outside ClusterIP).
+            - name: NEO4J_dbms_connector_bolt_listen__address
+              value: "0.0.0.0:7687"
+            - name: NEO4J_dbms_connector_http_listen__address
+              value: "0.0.0.0:7474"
+          resources:
+            {{- toYaml .Values.services.neo4j.resources | nindent 12 }}
+          # Neo4j JVM cold start is slow — give it 5 minutes to boot.
+          startupProbe:
+            tcpSocket:
+              port: {{ .Values.services.neo4j.port }}
+            failureThreshold: 60
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.services.neo4j.port }}
+            initialDelaySeconds: 0
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.services.neo4j.port }}
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/neo4j/data
+            # neo4j run dir (pid file, unix sockets).
+            - name: run
+              mountPath: /var/lib/neo4j/run
+            # neo4j log files.
+            - name: logs
+              mountPath: /var/lib/neo4j/logs
+            # java/neo4j temp files.
+            - name: tmp
+              mountPath: /tmp
+            # plugin staging (empty in dev; P2 can supply via init container).
+            - name: plugins
+              mountPath: /var/lib/neo4j/plugins
+            # LOAD CSV import staging.
+            - name: import
+              mountPath: /var/lib/neo4j/import
+      volumes:
+        - name: run
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: logs
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: plugins
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: import
+          emptyDir:
+            sizeLimit: 512Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "netops.componentLabels" (dict "ctx" . "component" "neo4j") | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.services.neo4j.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "netops.fullname" . }}-neo4j
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "neo4j") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "netops.serviceSelector" (dict "ctx" . "component" "neo4j") | nindent 4 }}
+  ports:
+    - name: bolt
+      port: {{ .Values.services.neo4j.port }}
+      targetPort: bolt
+      protocol: TCP
+    - name: http
+      port: 7474
+      targetPort: http
+      protocol: TCP
+{{- end }}

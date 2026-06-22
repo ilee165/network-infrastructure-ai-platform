@@ -1,0 +1,97 @@
+{{- /*
+frontend Deployment (ADR-0029 §1 / ADR-0012 §2).
+nginx serving the static Vite build AND acting as the same-origin reverse proxy
+for all /api REST + /ws WebSocket traffic — the SINGLE ingress target. No direct
+ingress→api door exists; nginx proxies all API/WS inside the container.
+
+nginx writable paths (readOnlyRootFilesystem:true requires emptyDir for each):
+  /var/cache/nginx     — proxy cache and temp files
+  /var/run             — nginx.pid and unix sockets
+  /tmp                 — nginx client_body_temp and other temp dirs
+
+Hardening:
+- nginx is configured to run as a non-root user (uid/gid 10001 per values). The
+  standard nginx:alpine image starts as root then drops; we use the
+  netops-frontend image which is already configured non-root (same runAsUser as
+  the hardening defaults). Ports >=1024 are used (8080) so no NET_BIND_SERVICE.
+- securityContext from netops.hardenedSecurityContext.
+- Pod-level from netops.podSecurityContext.
+- liveness/readiness: httpGet /healthz :8080 (nginx static 200, ADR-0029 §7).
+- startupProbe: covers slow nginx cold start.
+- own ServiceAccount frontend-sa, automountServiceAccountToken:false.
+*/ -}}
+{{- if .Values.services.frontend.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "netops.fullname" . }}-frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "frontend") | nindent 4 }}
+spec:
+  replicas: {{ .Values.services.frontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "frontend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "frontend") | nindent 8 }}
+    spec:
+      serviceAccountName: frontend-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: frontend
+          image: {{ include "netops.image" (dict "img" .Values.images.frontend) }}
+          imagePullPolicy: {{ .Values.images.frontend.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.services.frontend.port }}
+              protocol: TCP
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.services.frontend.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.services.frontend.port }}
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.services.frontend.port }}
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.services.frontend.port }}
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            # nginx proxy cache and temp files.
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            # nginx.pid and unix sockets.
+            - name: varrun
+              mountPath: /var/run
+            # nginx client_body_temp and other temp dirs.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-cache
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: varrun
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+{{- end }}

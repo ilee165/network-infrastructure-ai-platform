@@ -1,0 +1,143 @@
+{{- /*
+Redis StatefulSet (ADR-0029 §1 — redis:7-alpine, toggleable).
+Disable with services.redis.enabled=false to point at an external broker (P2 →
+Sentinel, ADR-0013 §4). Celery has no broker and cannot receive tasks if this is
+disabled without supplying an external host.
+
+Redis writable paths (readOnlyRootFilesystem:true):
+  /data       — Redis persistence (RDB/AOF) — this is the PVC mount
+  /var/run    — redis-server .pid and unix socket
+  /tmp        — redis temp files
+
+Hardening:
+- redis:7-alpine can run non-root; the standard entry point accepts --user flag.
+  We set runAsUser/runAsGroup from the hardening values (10001).
+- liveness/readiness: redis-cli ping exec probe (ADR-0029 §7).
+- startupProbe: generous window for AOF replay on first boot.
+*/ -}}
+{{- if .Values.services.redis.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "netops.fullname" . }}-redis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "redis") | nindent 4 }}
+spec:
+  replicas: {{ .Values.services.redis.replicas }}
+  serviceName: {{ include "netops.fullname" . }}-redis
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "redis") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "redis") | nindent 8 }}
+    spec:
+      serviceAccountName: redis-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: redis
+          image: {{ include "netops.image" (dict "img" .Values.images.redis) }}
+          imagePullPolicy: {{ .Values.images.redis.pullPolicy }}
+          command:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            - --save
+            - "900 1"
+            - --save
+            - "300 10"
+            - --dir
+            - /data
+          ports:
+            - name: redis
+              containerPort: {{ .Values.services.redis.port }}
+              protocol: TCP
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if .Values.secrets.existingSecret }}{{ .Values.secrets.existingSecret }}{{ else }}{{ include "netops.fullname" . }}-dev-secrets{{ end }}
+                  key: {{ .Values.secrets.keys.redisPassword }}
+          resources:
+            {{- toYaml .Values.services.redis.resources | nindent 12 }}
+          startupProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            # Redis data directory (PVC — RDB/AOF persistence).
+            - name: data
+              mountPath: /data
+            # redis-server pid and unix socket.
+            - name: varrun
+              mountPath: /var/run
+            # Redis temp files.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: varrun
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "netops.componentLabels" (dict "ctx" . "component" "redis") | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.services.redis.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "netops.fullname" . }}-redis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "redis") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "netops.serviceSelector" (dict "ctx" . "component" "redis") | nindent 4 }}
+  ports:
+    - name: redis
+      port: {{ .Values.services.redis.port }}
+      targetPort: redis
+      protocol: TCP
+{{- end }}

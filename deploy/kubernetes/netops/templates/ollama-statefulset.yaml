@@ -1,0 +1,125 @@
+{{- /*
+Ollama StatefulSet (ADR-0029 §1 / ADR-0009 — OPT-IN, enabled:false / replicas:0
+by default). An external LLM provider is the default posture (ADR-0009 §2
+"local-first is an opt-in profile"). Enabling this emits a NOTES warning and
+requires the api/worker→ollama NetworkPolicy edge (T3).
+
+Ollama writable paths (readOnlyRootFilesystem:true):
+  /root/.ollama    — model cache and config (large, backed by PVC)
+  /tmp             — ollama temp files
+
+Ollama's default model cache is ~/.ollama which resolves to /root/.ollama when
+running as root. Since we run as non-root (uid 10001), we override the cache path
+via OLLAMA_MODELS env.
+
+Hardening:
+- securityContext from netops.hardenedSecurityContext (all controls ON).
+- Pod-level from netops.podSecurityContext.
+- resource requests + limits (generous — model inference is CPU/memory intensive).
+- liveness/readiness: httpGet /api/version :11434 (ollama REST endpoint).
+- startupProbe: very generous window for first-pull model downloads.
+*/ -}}
+{{- if .Values.services.ollama.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "netops.fullname" . }}-ollama
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "ollama") | nindent 4 }}
+spec:
+  replicas: {{ .Values.services.ollama.replicas }}
+  serviceName: {{ include "netops.fullname" . }}-ollama
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "ollama") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "ollama") | nindent 8 }}
+    spec:
+      serviceAccountName: ollama-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: ollama
+          image: {{ include "netops.image" (dict "img" .Values.images.ollama) }}
+          imagePullPolicy: {{ .Values.images.ollama.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.services.ollama.port }}
+              protocol: TCP
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          env:
+            # Point model cache at the PVC-backed volume instead of /root/.ollama
+            # (we run as non-root uid 10001, so /root/.ollama is inaccessible).
+            - name: OLLAMA_MODELS
+              value: /ollama-data/models
+            # Bind to all interfaces inside the container.
+            - name: OLLAMA_HOST
+              value: "0.0.0.0"
+          resources:
+            {{- toYaml .Values.services.ollama.resources | nindent 12 }}
+          # Model pull / JIT load can be very slow — allow up to 10 minutes.
+          startupProbe:
+            httpGet:
+              path: /api/version
+              port: {{ .Values.services.ollama.port }}
+            failureThreshold: 120
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/version
+              port: {{ .Values.services.ollama.port }}
+            initialDelaySeconds: 0
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/version
+              port: {{ .Values.services.ollama.port }}
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            failureThreshold: 3
+          volumeMounts:
+            # Model cache + ollama config (PVC — large, persistent).
+            - name: data
+              mountPath: /ollama-data
+            # Ollama temp files.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "netops.componentLabels" (dict "ctx" . "component" "ollama") | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.services.ollama.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "netops.fullname" . }}-ollama
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "ollama") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "netops.serviceSelector" (dict "ctx" . "component" "ollama") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.services.ollama.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}
