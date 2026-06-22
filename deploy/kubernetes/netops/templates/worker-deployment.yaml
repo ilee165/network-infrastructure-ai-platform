@@ -89,6 +89,12 @@ spec:
           resources:
             {{- toYaml .Values.services.worker.resources | nindent 12 }}
           # startupProbe: generous window for broker connection on first boot.
+          # NOTE: exec-probe argv is run directly (no shell) and does NOT undergo
+          # $(VAR)/$VAR substitution — that only applies to container command/args.
+          # A `-d celery@$HOSTNAME` selector would be sent literally and never match
+          # the real node name (celery@<podname>), so the probe would always fail.
+          # A bare broadcast `inspect ping` targets the local worker and exits 0
+          # when it replies — sufficient for liveness/readiness (ADR-0029 §7).
           startupProbe:
             exec:
               command:
@@ -97,8 +103,6 @@ spec:
                 - app.workers.celery_app
                 - inspect
                 - ping
-                - -d
-                - celery@$HOSTNAME
             failureThreshold: 30
             periodSeconds: 10
           livenessProbe:
@@ -109,8 +113,6 @@ spec:
                 - app.workers.celery_app
                 - inspect
                 - ping
-                - -d
-                - celery@$HOSTNAME
             initialDelaySeconds: 0
             periodSeconds: 30
             failureThreshold: 3
@@ -122,8 +124,6 @@ spec:
                 - app.workers.celery_app
                 - inspect
                 - ping
-                - -d
-                - celery@$HOSTNAME
             initialDelaySeconds: 0
             periodSeconds: 15
             failureThreshold: 3

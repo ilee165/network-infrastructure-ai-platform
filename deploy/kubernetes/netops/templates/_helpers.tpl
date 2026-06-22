@@ -113,6 +113,20 @@ unset so the chart still renders.
 {{- default .Release.Namespace .Values.captureNamespace.name -}}
 {{- end -}}
 
+{{/*
+netops.seccompInstallerNamespace — the namespace the seccomp-installer
+DaemonSet/ConfigMap/SA render into. It runs root + DAC_OVERRIDE + a hostPath
+mount to seed the kubelet seccomp profile, which built-in PSA `restricted` HARD-
+REJECTS — pod annotations cannot exempt PSA (exemptions are API-server config).
+So it MUST live in a relaxed-PSA namespace. Defaults to the capture namespace
+(enforce=privileged), the already-gated home for the seccomp/NET_RAW deviation
+(ADR-0029 §3 / ADR-0031 §5); override seccompInstaller.namespace to relocate.
+Falls back to the release namespace if both are unset.
+*/}}
+{{- define "netops.seccompInstallerNamespace" -}}
+{{- default (include "netops.captureNamespace" .) .Values.seccompInstaller.namespace -}}
+{{- end -}}
+
 {{/* Packet node-pool toleration matching the taint (ADR-0031 §5). */}}
 {{- define "netops.packetToleration" -}}
 - key: {{ .Values.packetNodePool.taint.key | quote }}

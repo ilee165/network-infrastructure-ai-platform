@@ -497,6 +497,14 @@ packet:
 #    profile). Disable only if your nodes are pre-seeded out-of-band.
 seccompInstaller:
   enabled: true
+  # -- Namespace the installer DaemonSet/ConfigMap/SA render into. It runs root +
+  #    DAC_OVERRIDE + a hostPath mount to write the kubelet seccomp profile, which
+  #    built-in PSA `restricted` HARD-REJECTS (pod annotations cannot exempt PSA).
+  #    So it MUST sit in a relaxed-PSA namespace; empty = the capture namespace
+  #    (enforce=privileged), the already-gated home for the seccomp/NET_RAW
+  #    deviation (ADR-0029 §3 / ADR-0031 §5). Override only to relocate to another
+  #    namespace whose PSA enforce level admits root+hostPath.
+  namespace: ""
   # Image used to perform the node copy. busybox is minimal and widely available.
   image:
     repository: busybox

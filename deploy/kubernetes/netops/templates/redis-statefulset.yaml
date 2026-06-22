@@ -66,32 +66,34 @@ spec:
                   key: {{ .Values.secrets.keys.redisPassword }}
           resources:
             {{- toYaml .Values.services.redis.resources | nindent 12 }}
+          # NOTE: exec-probe argv is run directly (no shell) and does NOT undergo
+          # $(VAR) substitution — that only applies to container command/args. Sent
+          # as a literal `$(REDIS_PASSWORD)`, AUTH fails (WRONGPASS) and the probe
+          # never succeeds. Wrap in `sh -c` so the env var expands at probe time;
+          # --no-auth-warning keeps the secret off stderr (ADR-0029 §7).
           startupProbe:
             exec:
               command:
-                - redis-cli
-                - -a
-                - $(REDIS_PASSWORD)
-                - ping
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping
             failureThreshold: 30
             periodSeconds: 5
           livenessProbe:
             exec:
               command:
-                - redis-cli
-                - -a
-                - $(REDIS_PASSWORD)
-                - ping
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping
             initialDelaySeconds: 0
             periodSeconds: 15
             failureThreshold: 3
           readinessProbe:
             exec:
               command:
-                - redis-cli
-                - -a
-                - $(REDIS_PASSWORD)
-                - ping
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping
             initialDelaySeconds: 0
             periodSeconds: 10
             failureThreshold: 3
