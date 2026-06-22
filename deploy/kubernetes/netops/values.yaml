@@ -469,19 +469,22 @@ backup:
     # Quarterly cadence (ADR-0030 §5): 02:00 on the 1st of Jan/Apr/Jul/Oct. Inert
     # while `suspend: true`; the schedule is recorded so P2 only flips the switch.
     schedule: "0 2 1 1,4,7,10 *"
-    # THROWAWAY restore target: the drill restores into a disposable namespace +
-    # instance, NEVER the live Postgres (a drill that writes to prod is a footgun).
-    # The namespace is asserted distinct from the release namespace by policy; the
-    # restore path is scratch-only and torn down after the run.
+    # THROWAWAY restore target: the drill restores into a SCRATCH data dir, NEVER
+    # the live Postgres (a drill that writes to prod is a footgun). Isolation from
+    # production data is enforced at runtime by the pgbackrest `--pg1-path` override
+    # (it restores into this scratch path, not the live PGDATA) backed by an
+    # emptyDir volume that is torn down with the pod — NOT by a separate namespace.
+    # The drill objects render into the release namespace alongside live Postgres;
+    # the throwaway-path + emptyDir-only rego guards (hardening.rego, W5-T2) assert
+    # that isolation on the rendered manifest.
     throwaway:
-      namespace: netops-drill
       # The disposable restore data dir (emptyDir scratch — never the live PVC).
       restorePath: /var/lib/pgbackrest-drill/restore
-    # RPO window the drill asserts against (ADR-0030 §1/§5.1.1). Re-bases off the
-    # SAME PROPOSED knob as W5-T1 (backup.postgres.wal.proposedRpoMinutes) so the
-    # within-window check tracks the Consultant §12 answer, not a second literal.
-    rpo:
-      windowMinutes: 5
+    # RPO window the drill asserts against (ADR-0030 §1/§5.1.1) is NOT configured
+    # here: the drill template drives DRILL_RPO_WINDOW_MINUTES directly off the
+    # SAME PROPOSED knob as W5-T1 (backup.postgres.wal.proposedRpoMinutes), so the
+    # within-window check tracks the Consultant §12 answer from one source of truth,
+    # never a second drill-local literal that could silently drift.
     # The drill assertion image: a Python-bearing image that carries app.core.crypto
     # for the credential-separation proof + the pgbackrest client for the restore.
     # Explicit tag ONLY (admission rejects `latest`, ADR-0029 §5).

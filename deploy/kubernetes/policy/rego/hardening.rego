@@ -1168,7 +1168,9 @@ deny contains msg if {
 #   - the suspended quarterly CronJob renders `suspend: true` (built P1, run P2 —
 #     a drill that auto-fires in P1 is a regression, ADR-0030 §5 / P1-PLAN.md §6);
 #   - the drill is P2-execution flagged (the `netops.io/execution-phase: P2` ann);
-#   - the drill restores to a THROWAWAY path/instance, never the live PGDATA PVC;
+#   - the drill restores to a THROWAWAY scratch path (--pg1-path + emptyDir),
+#     never the live PGDATA PVC — isolation is the path override + scratch volume
+#     (the drill renders into the release namespace; there is no separate one);
 #   - the drill pod is hardened the same as every backup pod (the CronJob path is
 #     already covered by the backup rules above; the drill JOB — a separate kind —
 #     is covered here so its container controls are asserted too).

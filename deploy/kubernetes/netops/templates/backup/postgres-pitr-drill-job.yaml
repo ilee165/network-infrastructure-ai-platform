@@ -13,8 +13,11 @@ WHAT IT PROVES (the four ADR-0030 §5.1 assertions a naive pg_restore skips):
   (d) pgbackrest verify — the restored stanza verifies clean.
 
 The drill restores from the W5-T1 object-store repo ALONE to a THROWAWAY target
-(an emptyDir scratch restorePath in a disposable namespace — NEVER the live
-PVC), then runs `python -m postgres_pitr.run_drill`, which emits structured
+(an emptyDir scratch restorePath reached via pgbackrest `--pg1-path` — NEVER the
+live PVC). The drill objects render into the RELEASE namespace alongside live
+Postgres; isolation from production data is the --pg1-path override + emptyDir
+scratch (torn down with the pod), NOT a separate namespace. It then runs
+`python -m postgres_pitr.run_drill`, which emits structured
 `DRILL postgres_pitr <assertion>=PASS|FAIL duration_s=<n>` lines for the W5-T5
 G-REL evidence collector.
 
@@ -98,9 +101,11 @@ spec:
           value: {{ $b.stanza | quote }}
         - name: DRILL_RESTORE_PATH
           value: {{ $d.throwaway.restorePath | quote }}
-        # RPO window the harness asserts against (re-bases off the W5-T1 PROPOSED knob).
+        # RPO window the harness asserts against — driven DIRECTLY off the W5-T1
+        # PROPOSED knob ($b = backup.postgres) so it re-bases on the single source
+        # of truth (the Consultant §12 answer), never a second drill-local literal.
         - name: DRILL_RPO_WINDOW_MINUTES
-          value: {{ $d.rpo.windowMinutes | quote }}
+          value: {{ $b.wal.proposedRpoMinutes | quote }}
         # The drill restores from the repo only; it does NOT connect to live PG, so
         # the assertion harness uses the seeded fixture in P1 (no live PGHOST).
         - name: PYTHONPATH
