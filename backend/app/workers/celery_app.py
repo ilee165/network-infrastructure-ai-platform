@@ -1,9 +1,15 @@
 """Celery application (ADR-0008): Redis broker/result backend, four work queues.
 
-Canonical queues (D8): ``discovery``, ``config``, ``packet``, ``docs`` — plus a
-``system`` default queue for operational tasks (healthcheck). Task names follow
+Canonical queues (D8): ``discovery``, ``config``, ``docs`` — plus a ``system``
+default queue for operational tasks (healthcheck). Most task names follow
 ``"<queue>.<verb>_<noun>"`` and are routed to their queue by prefix, so adding a
 task never requires editing routes.
+
+The ``packet`` queue is the sole exception (ADR-0031 §1): it is split into two
+separately-hardened workloads, so ``packet.*`` tasks route by verb rather than by
+the shared ``packet`` prefix — ``packet.capture_*`` and ``packet.purge_*`` to
+``packet_capture`` (writes/deletes the read-write pcap volume), ``packet.analyze_*``
+to the zero-capability, no-egress ``packet_analysis`` sandbox.
 
 Execution semantics per ADR-0008 §5: acks-late + reject-on-worker-lost (tasks
 must be idempotent), prefetch 1 for fair fan-out, JSON-only serialization.
@@ -20,7 +26,14 @@ from app.core.config import get_settings
 #: Canonical D8 queue names — referenced by compose/K8s worker commands.
 QUEUE_DISCOVERY = "discovery"
 QUEUE_CONFIG = "config"
-QUEUE_PACKET = "packet"
+#: Packet pipeline split (ADR-0031 §1): the credential-bearing capture/retention
+#: half (read-write pcap volume) and the untrusted-pcap parser half run as two
+#: separately-hardened workloads on distinct queues. ``packet.capture_*`` and the
+#: ``packet.purge_*`` retention sweep route to ``packet_capture`` (the workload
+#: that writes/deletes the volume); ``packet.analyze_*`` routes to the zero-cap,
+#: no-egress ``packet_analysis`` sandbox. They never share a process.
+QUEUE_PACKET_CAPTURE = "packet_capture"
+QUEUE_PACKET_ANALYSIS = "packet_analysis"
 QUEUE_DOCS = "docs"
 #: Topology projection queue (M2): Postgres -> Neo4j sync after discovery.
 QUEUE_TOPOLOGY = "topology"
@@ -30,7 +43,8 @@ QUEUE_SYSTEM = "system"
 WORK_QUEUES: tuple[str, ...] = (
     QUEUE_DISCOVERY,
     QUEUE_CONFIG,
-    QUEUE_PACKET,
+    QUEUE_PACKET_CAPTURE,
+    QUEUE_PACKET_ANALYSIS,
     QUEUE_DOCS,
     QUEUE_TOPOLOGY,
 )
@@ -69,14 +83,21 @@ def create_celery_app() -> Celery:
             Queue(QUEUE_SYSTEM),
             Queue(QUEUE_DISCOVERY),
             Queue(QUEUE_CONFIG),
-            Queue(QUEUE_PACKET),
+            Queue(QUEUE_PACKET_CAPTURE),
+            Queue(QUEUE_PACKET_ANALYSIS),
             Queue(QUEUE_DOCS),
             Queue(QUEUE_TOPOLOGY),
         ),
         task_routes={
             "discovery.*": {"queue": QUEUE_DISCOVERY},
             "config.*": {"queue": QUEUE_CONFIG},
-            "packet.*": {"queue": QUEUE_PACKET},
+            # Packet split (ADR-0031 §1): route by verb, not the shared prefix.
+            # The credential-bearing capture path and the volume-deleting
+            # retention sweep go to the read-write capture workload; the
+            # untrusted-pcap parser goes to the zero-egress analysis sandbox.
+            "packet.capture_*": {"queue": QUEUE_PACKET_CAPTURE},
+            "packet.purge_*": {"queue": QUEUE_PACKET_CAPTURE},
+            "packet.analyze_*": {"queue": QUEUE_PACKET_ANALYSIS},
             "docs.*": {"queue": QUEUE_DOCS},
             "topology.*": {"queue": QUEUE_TOPOLOGY},
             "system.*": {"queue": QUEUE_SYSTEM},

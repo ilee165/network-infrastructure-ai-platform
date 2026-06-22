@@ -92,7 +92,7 @@ from app.schemas.packet_api import (
 from app.services import audit
 from app.services.agent_session import AgentSessionService
 from app.services.change_requests import ChangeRequestService
-from app.workers.celery_app import QUEUE_PACKET, celery_app
+from app.workers.celery_app import QUEUE_PACKET_CAPTURE, celery_app
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -783,7 +783,7 @@ async def launch_capture(
                 body.size_bytes,
                 str(capture_id),
             ],
-            queue=QUEUE_PACKET,
+            queue=QUEUE_PACKET_CAPTURE,
         )
     else:
         celery_app.send_task(
@@ -796,7 +796,7 @@ async def launch_capture(
                 body.size_bytes,
                 str(capture_id),
             ],
-            queue=QUEUE_PACKET,
+            queue=QUEUE_PACKET_CAPTURE,
         )
     return CaptureLaunchResponse(
         capture_id=capture_id,
