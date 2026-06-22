@@ -284,8 +284,16 @@ jobs:
       # CI-regression risk. We gate the rendered.yaml the rest of the job
       # validated, plus deploy/docker (real compose + Dockerfile IaC this task
       # touches). No new image refs in W3/W4, so trivy image / cosign are N/A.
+      # SANCTIONED-DEVIATION SUPPRESSION: deploy/kubernetes/.trivyignore lists the
+      # ADR-0031 exceptions (seccomp-installer root/host-path, packet-capture
+      # NET_RAW) that conftest already guards in a resource-scoped way. Trivy's
+      # generic IaC rules cannot encode those exceptions, so they are suppressed
+      # for THIS misconfig scan only (env scope) — the gate still fails on any
+      # NEW/unexpected HIGH/CRITICAL misconfig.
       - name: Trivy config scan (rendered chart manifest)
         uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
         with:
           scan-type: config
           scan-ref: rendered.yaml

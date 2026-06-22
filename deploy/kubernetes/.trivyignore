@@ -1,0 +1,31 @@
+# Trivy config (IaC misconfig) ignore list — W4.
+#
+# These are SANCTIONED ADR deviations, NOT unhandled risk. conftest
+# (deploy/kubernetes/policy/rego/hardening.rego) is the AUTHORITATIVE,
+# resource-scoped policy-as-test gate for each one: it asserts the deviation is
+# present ONLY on the sanctioned workload and that every other workload stays
+# subject to the hardened rule. Trivy's generic IaC checks cannot encode those
+# ADR exceptions and would gate on the intentional deviation, so they are
+# suppressed HERE for the `trivy config` (misconfig) scan ONLY. Image CVE scans
+# (docker job) are a different finding type and are unaffected by this file.
+#
+# Each suppression below is mirrored by a stronger, scoped conftest rule.
+
+# --- seccomp-installer DaemonSet (ADR-0031 §3/§5) ---
+# The install-profile container MUST run as root with a writable host path to
+# seed the kubelet Localhost seccomp profile directory
+# (/var/lib/kubelet/seccomp/netops/) so the packet-analysis pod can start. The
+# pause container is fully hardened; the hostPath is the single seccomp dir.
+# Already object-annotated for kube-linter.
+AVD-KSV-0014
+KSV-0014
+AVD-KSV-0118
+KSV-0118
+
+# --- packet-capture NET_RAW (ADR-0031 §1/§2) ---
+# packet-capture legitimately adds NET_RAW for raw-socket capture. conftest's
+# restrict-net-raw + net-raw-label assertions scope NET_RAW to packet-capture
+# ALONE and prove packet-analysis (the parser) never carries it. A NET_RAW
+# regression on any other workload still fails conftest.
+AVD-KSV-0119
+KSV-0119
