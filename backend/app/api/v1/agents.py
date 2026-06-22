@@ -58,7 +58,13 @@ from app.core.errors import (
     UnprocessableEntityError,
 )
 from app.core.security import Role, decode_access_token
-from app.engines.packet import PacketFindings, analyze_pcap, pcap_path_for, validate_capture_filter
+from app.engines.packet import (
+    PacketFindings,
+    analyze_pcap,
+    assert_sandbox_posture,
+    pcap_path_for,
+    validate_capture_filter,
+)
 from app.engines.packet.filters import FilterValidationError
 from app.llm.providers import get_chat_model
 from app.llm.runtime_settings import effective_profile_for_role
@@ -177,9 +183,21 @@ def get_pcap_analyzer(
     only normalized :class:`PacketFindings` (top talkers, protocol hierarchy, TCP
     anomalies), never raw packet bytes (ADR-0023 §1). Tests override this seam so
     the API contract is exercised without a real capture file.
+
+    Before tshark is spawned the synchronous path asserts the same OS-isolation
+    posture as the worker backstop (ADR-0031 §2): non-root, no ``CAP_NET_RAW``,
+    read-only rootfs. The FastAPI/web pod is the install namespace at PSA
+    restricted — it holds DB creds/egress and *none* of the packet-analysis
+    sandbox controls — so without this check untrusted pcap bytes would be parsed
+    unconfined here, defeating the ADR-0031 §2 "refuses to spawn tshark / fails
+    closed" goal that the Celery ``packet.analyze_capture`` path already enforces.
     """
 
     def _analyze(capture_id: uuid.UUID, display_filter: str | None) -> PacketFindings:
+        # Runtime sandbox-posture backstop (ADR-0031 §2): the synchronous API
+        # path must fail closed too — refuse to spawn tshark when this pod is
+        # root, holds CAP_NET_RAW, or has a writable rootfs.
+        assert_sandbox_posture(enforced=settings.packet_sandbox_posture_enforced)
         path = pcap_path_for(capture_id, pcap_dir=settings.pcap_dir)
         return analyze_pcap(
             path,
