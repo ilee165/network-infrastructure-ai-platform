@@ -1,0 +1,43 @@
+{{- /*
+Non-secret application config (ADR-0029 §1 — `configmap.yaml`, NETOPS_* settings).
+This holds ONLY connection coordinates + behavioural flags. NO credential
+material ever lands here — passwords, the OIDC client secret, and the KMS
+master-key reference are by-reference only via the `secrets` map (ADR-0029 §6).
+The api/worker read these as NETOPS_* env at boot.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "netops.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+data:
+  NETOPS_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  # Postgres (D11) — password is by-reference (secrets.keys.postgresPassword).
+  NETOPS_POSTGRES_HOST: {{ .Values.config.postgres.host | quote }}
+  NETOPS_POSTGRES_PORT: {{ .Values.config.postgres.port | quote }}
+  NETOPS_POSTGRES_DB: {{ .Values.config.postgres.database | quote }}
+  NETOPS_POSTGRES_USER: {{ .Values.config.postgres.user | quote }}
+  # Neo4j (D5 projection) — auth is by-reference (secrets.keys.neo4jAuth).
+  NETOPS_NEO4J_URI: {{ .Values.config.neo4j.uri | quote }}
+  NETOPS_NEO4J_USER: {{ .Values.config.neo4j.user | quote }}
+  # Redis broker/result backend — password is by-reference (secrets.keys.redisPassword).
+  NETOPS_REDIS_HOST: {{ .Values.config.redis.host | quote }}
+  NETOPS_REDIS_PORT: {{ .Values.config.redis.port | quote }}
+  # LLM provider (ADR-0009). When provider=ollama and services.ollama.enabled,
+  # the in-cluster ollama Service is dialed; otherwise an external provider.
+  NETOPS_LLM_PROVIDER: {{ .Values.config.llm.provider | quote }}
+  NETOPS_OLLAMA_HOST: {{ .Values.config.llm.ollamaHost | quote }}
+  NETOPS_OLLAMA_PORT: {{ .Values.config.llm.ollamaPort | quote }}
+  # OIDC/SSO non-secret coordinates (ADR-0028). The client SECRET is by-reference
+  # only (secrets.keys.oidcClientSecret) — issuer/clientId are non-secret.
+  NETOPS_OIDC_ENABLED: {{ .Values.config.oidc.enabled | quote }}
+  NETOPS_OIDC_ISSUER: {{ .Values.config.oidc.issuer | quote }}
+  NETOPS_OIDC_CLIENT_ID: {{ .Values.config.oidc.clientId | quote }}
+  # KMS master-key REFERENCE provider (ADR-0032 / D11). The handle/path is
+  # resolved at runtime — this is the provider selector, NOT the key.
+  NETOPS_KMS_PROVIDER: {{ .Values.secrets.kms.provider | quote }}
+  {{- if .Values.secrets.kms.masterKeyRef }}
+  NETOPS_KMS_MASTER_KEY_REF: {{ .Values.secrets.kms.masterKeyRef | quote }}
+  {{- end }}

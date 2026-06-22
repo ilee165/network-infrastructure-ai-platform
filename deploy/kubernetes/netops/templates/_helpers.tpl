@@ -71,6 +71,38 @@ seccompProfile:
 {{- end -}}
 
 {{/*
+Fully-qualified image reference for an arbitrary entry under `.Values.images`.
+Usage: {{ include "netops.image" (dict "img" .Values.images.frontend) }}
+Always renders repo:tag (explicit tag, never `latest` — admission rejects it).
+*/}}
+{{- define "netops.image" -}}
+{{- $img := .img -}}
+{{- printf "%s:%s" $img.repository $img.tag -}}
+{{- end -}}
+
+{{/*
+Per-component metadata labels (common labels + the component identifier).
+Usage: {{- include "netops.componentLabels" (dict "ctx" . "component" "api") | nindent 4 }}
+The `ctx` key carries the root context so the shared `netops.labels` resolves;
+`component` is the workload identity used by Services/NetworkPolicies to select.
+*/}}
+{{- define "netops.componentLabels" -}}
+{{ include "netops.labels" .ctx }}
+app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
+{{/*
+Stable pod/Service selector for a component (the immutable subset of labels a
+Service `selector` and NetworkPolicy `podSelector` match on). Kept minimal and
+version-independent so a chart upgrade does not orphan running pods.
+Usage: {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 4 }}
+*/}}
+{{- define "netops.serviceSelector" -}}
+app.kubernetes.io/name: {{ include "netops.name" .ctx }}
+app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
+{{/*
 Namespace the packet-CAPTURE workload (Deployment/SA/NetworkPolicy) is installed
 into (ADR-0031 §5). Capture adds NET_RAW, which built-in Pod Security Admission
 rejects under `restricted` and a pod label cannot exempt — so capture lives in

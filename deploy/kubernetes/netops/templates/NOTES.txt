@@ -19,6 +19,15 @@ Secure-by-default posture (every control below is ON):
 {{- if not .Values.admission.enabled }}{{ $warn = append $warn "admission.enabled=false — the no-latest + PSS-deviation allow-list is NOT enforced; the packet-sandbox NET_RAW deviation is no longer enforceably singular." }}{{ end }}
 {{- if not .Values.serviceAccounts.automountServiceAccountToken }}{{ else }}{{ $warn = append $warn "serviceAccounts.automountServiceAccountToken=true — workloads mount a K8s API token they do not need." }}{{ end }}
 {{- if not .Values.packet.analysis.securityContext.readOnlyRootFilesystem }}{{ $warn = append $warn "packet.analysis readOnlyRootFilesystem=false — the untrusted parser has a writable root filesystem." }}{{ end }}
+{{- /* W4 GA per-service opt-out warnings (ADR-0029 §0 — opt-out never opt-in). */ -}}
+{{- if not .Values.secrets.existingSecret }}{{ $warn = append $warn "secrets.existingSecret is empty — a GENERATED dev Secret (netops.io/dev-secret=true) is rendered with random placeholder credentials. This is DEV-ONLY: in production set secrets.existingSecret and populate it via the external-secrets operator or a CSI secrets-store backed by your KMS/Vault (ADR-0029 §6)." }}{{ end }}
+{{- if not .Values.services.postgres.enabled }}{{ $warn = append $warn "services.postgres.enabled=false — no in-chart Postgres StatefulSet; config.postgres.host MUST point at an external/operator-managed instance (ADR-0013 §4)." }}{{ end }}
+{{- if not .Values.services.neo4j.enabled }}{{ $warn = append $warn "services.neo4j.enabled=false — no in-chart Neo4j StatefulSet; config.neo4j.uri MUST point at an external instance (ADR-0013 §4)." }}{{ end }}
+{{- if not .Values.services.redis.enabled }}{{ $warn = append $warn "services.redis.enabled=false — no in-chart Redis StatefulSet; config.redis.host MUST point at an external broker or Celery has no broker (ADR-0013 §4)." }}{{ end }}
+{{- if .Values.services.ollama.enabled }}{{ $warn = append $warn "services.ollama.enabled=true — the local-LLM profile is OPT-IN (ADR-0009); ensure the api/worker→ollama NetworkPolicy edge is allowed and the node has the model cache capacity." }}{{ end }}
+{{- $replicaHint := list }}
+{{- range $svc := list "api" "worker" "frontend" "postgres" "neo4j" "redis" }}{{- if gt (int (index $.Values.services $svc).replicas) 1 }}{{ $replicaHint = append $replicaHint $svc }}{{ end }}{{- end }}
+{{- if $replicaHint }}{{ $warn = append $warn (printf "services replicas>1 set for [%s] — P1 GA is SINGLE-REPLICA / NOT highly-available (HA is P2: HPA/KEDA/operators/PDBs, ADR-0029 §1). Raising replicas alone gives no autoscaling or disruption budget; treat with care until P2." (join ", " $replicaHint)) }}{{ end }}
 
 {{- if $warn }}
 

@@ -16,6 +16,8 @@ keywords:
   - packet-sandbox
   - security-hardening
 home: https://github.com/ilee165/network-infrastructure-ai-platform
+# Optional chart icon (helm lint recommends one). SVG/PNG over HTTPS only.
+icon: https://raw.githubusercontent.com/ilee165/network-infrastructure-ai-platform/main/docs/assets/netops-icon.png
 maintainers:
   - name: wf-infra
 kubeVersion: ">=1.25.0-0"

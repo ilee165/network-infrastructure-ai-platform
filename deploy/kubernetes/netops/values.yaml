@@ -72,6 +72,229 @@ images:
     repository: netops-backend
     tag: "p1"
     pullPolicy: IfNotPresent
+  # W4 per-service images. The api + worker share the backend image (same
+  # uvicorn/celery process tree, ADR-0029 §1); frontend is the nginx static +
+  # same-origin reverse-proxy image (ADR-0012 §2). Data-store images are the
+  # ADR-0029 §1 table pins. EVERY tag is an explicit version — NEVER `latest`;
+  # the admission policy (ADR-0029 §5 rule 1) rejects mutable tags on render.
+  frontend:
+    repository: netops-frontend
+    tag: "p1"
+    pullPolicy: IfNotPresent
+  postgres:
+    repository: pgvector/pgvector
+    tag: "pg16"
+    pullPolicy: IfNotPresent
+  neo4j:
+    repository: neo4j
+    tag: "5-community"
+    pullPolicy: IfNotPresent
+  redis:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  ollama:
+    repository: ollama/ollama
+    tag: "0.5.4"
+    pullPolicy: IfNotPresent
+
+# -- Platform secrets posture (ADR-0029 §6 / ADR-0013 §4 / ADR-0011).
+#    REFERENCE ONLY: no credential material EVER appears here, in any template,
+#    or in Helm release history. Device credentials never become K8s objects —
+#    they stay AES-256-GCM-encrypted in Postgres (D11), enforced structurally.
+#
+#    Production path (PROPOSED, ADR-0029 §6): the external-secrets operator or a
+#    CSI secrets-store volume backed by the customer KMS/Vault populates the
+#    Secret named in `existingSecret`. The chart-rendered `secret.yaml` is a DEV
+#    CONVENIENCE that renders ONLY when `existingSecret` is empty, and prints a
+#    NOTES warning recommending external-secrets in production.
+secrets:
+  # Name of a pre-existing Secret holding the platform secrets. When set, the
+  # chart renders NO secret.yaml (the guard is `{{- if not .Values.secrets.existingSecret }}`).
+  # Leave empty ONLY for dev/test — a warned dev Secret is rendered instead.
+  existingSecret: ""
+  # Key NAMES inside that Secret (the chart references keys, never values):
+  keys:
+    # Postgres connection password (DB user the api/worker authenticate as).
+    postgresPassword: postgres-password
+    # Neo4j auth (user/password packed per the neo4j AUTH env contract).
+    neo4jAuth: neo4j-auth
+    # Redis broker/result-backend password.
+    redisPassword: redis-password
+    # OIDC/SSO client secret (ADR-0028 §4) — the confidential-client secret the
+    # api exchanges at the token endpoint. REFERENCE ONLY.
+    oidcClientSecret: oidc-client-secret
+  # KMS master-key REFERENCE (ADR-0032 / D11). The pod receives a KMS HANDLE or
+  # a mounted secret PATH — never the KEK itself. This is the indirect handle the
+  # envelope-encryption layer resolves at runtime against the customer KMS/Vault.
+  # No KEK, token, or password literal is permitted in this value.
+  kms:
+    # "external" (KMS handle via env, default/production) | "secret" (mounted
+    # path from existingSecret, dev). Either way this is a reference, not a key.
+    provider: external
+    # Opaque KMS key handle/ARN/URI the envelope layer resolves (ADR-0032). NOT
+    # a key. Empty here = supplied via existingSecret `masterKeyRef` key in dev.
+    masterKeyRef: ""
+    # Key name inside existingSecret carrying the master-key reference when
+    # provider=secret (still a reference/handle, never the raw KEK).
+    masterKeyRefKey: master-key-ref
+
+# -- Per-service workload config (W4 GA contract, ADR-0029 §1 topology table).
+#    SINGLE-REPLICA by default (HA is P2 — ADR-0029 §1, Alt #3); `replicas` is
+#    the seam P2 widens, this wave ships no HPA/operator/PDB. Each service is
+#    `enabled` by default (data stores toggleable to point at external/operator-
+#    managed instances per ADR-0013 §4) EXCEPT ollama (opt-in, replicas 0). Every
+#    container carries resource requests+limits — never absent (ADR-0029 §3).
+#    The per-container securityContext is NOT restated here: T2 workloads pull it
+#    from `netops.hardenedSecurityContext` so the hardened default cannot drift.
+services:
+  # api: stateless uvicorn (D10 JWT, no server sessions). Reached ONLY via the
+  # frontend nginx reverse proxy (ADR-0012 §2), never directly from ingress.
+  api:
+    enabled: true
+    replicas: 1
+    port: 8000
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 1Gi
+
+  # worker: celery over the five restricted-compliant queues. `packet` is the
+  # SINGLE deliberate omission — it is its own ADR-0031 workload (W3-owned), NOT
+  # a queue in this Deployment (ADR-0029 §1). `system` is the default queue and
+  # hosts the broker round-trip the readiness probe relies on — do not drop it.
+  worker:
+    enabled: true
+    replicas: 1
+    queues:
+      - discovery
+      - config
+      - docs
+      - topology
+      - system
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 1Gi
+
+  # frontend: nginx static Vite output + same-origin reverse proxy for /api + WS
+  # (ADR-0012 §2). The SINGLE ingress target (ADR-0029 §4).
+  frontend:
+    enabled: true
+    replicas: 1
+    port: 8080
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  # postgres: pgvector data store. Toggleable — set enabled:false to point at an
+  # external/operator-managed instance (P2 → CloudNativePG, ADR-0013 §4). Sized
+  # above the batch worker per ADR-0029 §3 PriorityClass intent.
+  postgres:
+    enabled: true
+    replicas: 1
+    port: 5432
+    storage:
+      size: 20Gi
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+
+  # neo4j: topology projection store. Toggleable; rebuildable (D5).
+  neo4j:
+    enabled: true
+    replicas: 1
+    port: 7687
+    storage:
+      size: 10Gi
+    resources:
+      requests:
+        cpu: 250m
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+
+  # redis: celery broker + result backend. Toggleable; P2 → Sentinel.
+  redis:
+    enabled: true
+    replicas: 1
+    port: 6379
+    storage:
+      size: 2Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # ollama: local-LLM profile (ADR-0009). OPT-IN — enabled:false / replicas:0 by
+  # default; an external provider is the default posture. Enabling it warns
+  # (NOTES) and requires the networkPolicy.externalLlmEgress / ollama edge.
+  ollama:
+    enabled: false
+    replicas: 0
+    port: 11434
+    storage:
+      size: 20Gi
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: "4"
+        memory: 8Gi
+
+# -- Non-secret application config (rendered into configmap.yaml as NETOPS_*
+#    env). NO credential material here — secrets are by-reference only (see the
+#    `secrets` map). These are the connection coordinates + behavioural flags the
+#    api/worker read at boot; the matching passwords come from `secrets`.
+config:
+  # Log verbosity (api/worker structured logging).
+  logLevel: INFO
+  # In-cluster service DNS coordinates the api/worker dial. Hosts default to the
+  # chart's own Service names; override when a data store is `enabled:false` and
+  # points at an external instance.
+  postgres:
+    host: netops-postgres
+    port: 5432
+    database: netops
+    user: netops
+  neo4j:
+    # bolt:// URI to the neo4j Service.
+    uri: bolt://netops-neo4j:7687
+    user: neo4j
+  redis:
+    host: netops-redis
+    port: 6379
+  # External LLM provider selection (ADR-0009). "ollama" routes to the in-cluster
+  # ollama Service when services.ollama.enabled; otherwise an external provider.
+  llm:
+    provider: ollama
+    ollamaHost: netops-ollama
+    ollamaPort: 11434
+  # OIDC/SSO non-secret coordinates (ADR-0028). The client SECRET is by-reference
+  # only (secrets.keys.oidcClientSecret); issuer/clientId are non-secret.
+  oidc:
+    enabled: false
+    issuer: ""
+    clientId: ""
 
 # -- Reusable hardened per-container securityContext (ADR-0029 §3 table).
 #    W4 services consume this via the `netops.hardenedSecurityContext` helper.
