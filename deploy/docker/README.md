@@ -171,3 +171,32 @@ Both backend containers run the same `netops-backend` image (ADR-0013): `api`
 uses the image's default `uvicorn` command; `worker` overrides it with
 `celery -A app.workers.celery_app worker -Q discovery,config,packet,docs,system`.
 Rebuild after backend or frontend changes with `up -d --build`.
+
+## Backup tier (pgBackRest → MinIO, W5-T1)
+
+Single-node parity for the Helm backup CronJobs (ADR-0030 §1/§4): weekly-full +
+daily-incr pgBackRest backups to a MinIO repo, repo-encrypted (aes-256-cbc), each
+run gated by `pgbackrest verify`. Scheduling is host-cron-equivalent via `ofelia`
+(a container cron triggering `job-exec` against the long-lived `pgbackrest`
+container). It is an OPT-IN compose profile, but the backup TIER is on-by-default
+in the chart (secure/resilient-by-default; the profile only keeps the dev stack
+light).
+
+```bash
+# Set the repo secrets in .env first (PGBACKREST_REPO1_CIPHER_PASS, MINIO_ROOT_*).
+docker compose \
+  -f deploy/docker/docker-compose.yml \
+  -f deploy/docker/docker-compose.backup.yml \
+  --profile backup --env-file ../../.env up -d
+
+# Run a full backup + verify on demand (the same script ofelia schedules):
+docker compose -f deploy/docker/docker-compose.yml -f deploy/docker/docker-compose.backup.yml \
+  exec pgbackrest sh -c 'set -euo pipefail; pgbackrest --stanza=netops stanza-create || true; \
+    pgbackrest --stanza=netops --type=full backup; pgbackrest --stanza=netops verify'
+```
+
+Secrets (the aes-256-cbc repo passphrase + the MinIO key/secret) come from the
+root `.env` as `PGBACKREST_REPO1_*` / `MINIO_ROOT_*` env — NEVER inlined in
+`pgbackrest/pgbackrest.conf` or the compose file (the repo and its key are never
+co-located, ADR-0011 §4). The restore / PITR drill is W5-T2. RPO ≤ 5 min is a
+PROPOSED target (ADR-0030 §6), re-based in the W5-T5 evidence doc.

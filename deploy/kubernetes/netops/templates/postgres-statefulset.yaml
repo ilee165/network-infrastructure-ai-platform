@@ -49,10 +49,54 @@ spec:
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
       securityContext:
         {{- include "netops.podSecurityContext" . | nindent 8 }}
+      {{- if and .Values.backup.postgres.enabled }}
+      # WAL archiving wiring (W5-T1, ADR-0030 §1). The pgvector image has no
+      # pgbackrest binary, so an initContainer copies it (static) out of the
+      # pgbackrest image into a shared emptyDir on the postgres container's PATH.
+      # Postgres `archive_command` (set via -c args below) then runs that
+      # pgbackrest to encrypt + push each completed WAL segment to the repo — the
+      # RPO floor (ADR-0030 §1 req 1). The scheduled full/incr backups are the
+      # CronJobs (independent of this container; ADR-0030 §4/§5).
+      initContainers:
+        - name: pgbackrest-binary
+          image: {{ include "netops.image" (dict "img" .Values.backup.postgres.image) }}
+          imagePullPolicy: {{ .Values.backup.postgres.image.pullPolicy }}
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          command:
+            - sh
+            - -c
+            # L5: pipefail + a `test -s` size guard so a missing/empty binary copy
+            # fails the pod instead of leaving archive_command silently broken.
+            - |
+              set -euo pipefail
+              cp /usr/bin/pgbackrest /shared/pgbackrest
+              chmod 0755 /shared/pgbackrest
+              test -s /shared/pgbackrest
+          resources:
+            {{- toYaml .Values.backup.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: pgbackrest-bin
+              mountPath: /shared
+      {{- end }}
       containers:
         - name: postgres
           image: {{ include "netops.image" (dict "img" .Values.images.postgres) }}
           imagePullPolicy: {{ .Values.images.postgres.pullPolicy }}
+          {{- if .Values.backup.postgres.enabled }}
+          # archive_mode=on + archive_command=pgbackrest archive-push (ADR-0030 §1).
+          # The pgvector entrypoint passes trailing args to `postgres`, so these
+          # `-c` overrides enable continuous WAL archiving. archive_command is a
+          # postgres-internal shell, NOT a k8s exec argv — postgres expands %p
+          # itself; the pgbackrest binary is the init-copied one on PATH.
+          args:
+            - -c
+            - archive_mode={{ .Values.backup.postgres.wal.archiveMode }}
+            - -c
+            - wal_level=replica
+            - -c
+            - archive_command=/shared/pgbackrest/pgbackrest --stanza={{ .Values.backup.postgres.stanza }} --config=/etc/pgbackrest/pgbackrest.conf archive-push %p
+          {{- end }}
           ports:
             - name: postgres
               containerPort: {{ .Values.services.postgres.port }}
@@ -78,6 +122,29 @@ spec:
             # Unix socket directory — postgres writes its .pid and socket here.
             - name: PGHOST
               value: /var/run/postgresql
+            {{- if .Values.backup.postgres.enabled }}
+            # archive_command runs pgbackrest in THIS container; it needs the repo
+            # credentials as PGBACKREST_* env (external-secret REFs only, NEVER
+            # inlined — ADR-0030 §1 / ADR-0011 §4). The cipher pass + S3 key/secret
+            # let archive-push encrypt and push each WAL segment to the repo.
+            {{- if .Values.backup.postgres.encryption.enabled }}
+            - name: PGBACKREST_REPO1_CIPHER_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.platformSecretName" . }}
+                  key: {{ .Values.secrets.keys.backupRepoCipherPass }}
+            {{- end }}
+            - name: PGBACKREST_REPO1_S3_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.platformSecretName" . }}
+                  key: {{ .Values.secrets.keys.backupRepoS3Key }}
+            - name: PGBACKREST_REPO1_S3_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.platformSecretName" . }}
+                  key: {{ .Values.secrets.keys.backupRepoS3KeySecret }}
+            {{- end }}
           resources:
             {{- toYaml .Values.services.postgres.resources | nindent 12 }}
           startupProbe:
@@ -128,6 +195,20 @@ spec:
             # Postgres temp files.
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.backup.postgres.enabled }}
+            # pgBackRest binary (init-copied) + stanza config (ConfigMap) so
+            # archive_command can encrypt + push WAL. readOnlyRootFilesystem:true
+            # still holds — these add the binary/config + a writable pgbackrest
+            # runtime/lock dir (the ONLY new writable mount for archive-push).
+            - name: pgbackrest-bin
+              mountPath: /shared/pgbackrest
+              readOnly: true
+            - name: pgbackrest-config
+              mountPath: /etc/pgbackrest
+              readOnly: true
+            - name: pgbackrest-runtime
+              mountPath: /var/lib/pgbackrest
+            {{- end }}
       volumes:
         - name: run
           emptyDir:
@@ -135,6 +216,17 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 128Mi
+        {{- if .Values.backup.postgres.enabled }}
+        - name: pgbackrest-bin
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: pgbackrest-config
+          configMap:
+            name: {{ include "netops.fullname" . }}-pgbackrest-config
+        - name: pgbackrest-runtime
+          emptyDir:
+            sizeLimit: 512Mi
+        {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data

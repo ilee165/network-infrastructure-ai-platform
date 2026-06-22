@@ -1,0 +1,70 @@
+{{- /*
+pgBackRest stanza config (W5-T1, ADR-0030 §1/§4).
+
+This ConfigMap holds the NON-SECRET pgBackRest coordinates only — the repo
+location, retention, cipher TYPE, and the postgres connection target. The repo
+cipher PASSPHRASE and the object-store key/secret are NEVER here: pgBackRest
+reads them from PGBACKREST_REPO1_CIPHER_PASS / PGBACKREST_REPO1_S3_KEY /
+PGBACKREST_REPO1_S3_KEY_SECRET env, sourced from the platform Secret at runtime
+(secret.yaml / existingSecret). The repo and its key are never co-located in the
+config (ADR-0011 §4); a policy-test denies any inlined cipher-pass/s3-key literal.
+
+The SAME config is mounted by:
+  - the backup CronJobs (pgbackrest backup/verify), and
+  - the postgres StatefulSet's archive-push sidecar context (archive_command),
+so the stanza definition is authored once and cannot drift between the WAL
+push path and the scheduled-backup path.
+*/ -}}
+{{- if .Values.backup.postgres.enabled }}
+{{- $b := .Values.backup.postgres -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "netops.fullname" . }}-pgbackrest-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+data:
+  pgbackrest.conf: |
+    [global]
+    # --- MinIO/S3 object-store repo (ADR-0030 §1). The credential is by-reference:
+    # repo1-s3-key / repo1-s3-key-secret are supplied as PGBACKREST_* env from the
+    # Secret, NOT here. Least-privilege: that credential is write-to-`{{ $b.repo.prefix }}`-
+    # prefix only (least-privilege §7); pcaps/ is reserved for W5-T4.
+    repo1-type=s3
+    repo1-path={{ $b.repo.prefix }}
+    repo1-s3-bucket={{ $b.repo.bucket }}
+    repo1-s3-endpoint={{ $b.repo.endpoint }}:{{ $b.repo.port }}
+    repo1-s3-region={{ $b.repo.region }}
+    repo1-s3-uri-style={{ $b.repo.uriStyle }}
+    repo1-storage-verify-tls={{ if $b.repo.verifyTls }}y{{ else }}n{{ end }}
+    {{- if $b.encryption.enabled }}
+    # --- Repo encryption (ADR-0030 §1 / Alt #3) — INDEPENDENT of object-store SSE.
+    # cipher TYPE here; the PASSPHRASE is PGBACKREST_REPO1_CIPHER_PASS env (Secret).
+    repo1-cipher-type={{ $b.encryption.cipherType }}
+    {{- else }}
+    repo1-cipher-type=none
+    {{- end }}
+    # --- Retention (ADR-0030 §1 table). repo retention is the OPERATIONAL restore
+    # window; it does NOT override the 7-year AUDIT-DATA retention (PRODUCTION.md
+    # §7) — audit rows ride inside every Postgres backup and the longest-retained
+    # full satisfies that horizon (ADR-0030 §1 req 5).
+    repo1-retention-full={{ $b.retention.full }}
+    repo1-retention-diff={{ $b.retention.diff }}
+    repo1-retention-archive-type={{ $b.retention.archiveType }}
+    # Hardened/quiet defaults.
+    log-level-console=info
+    log-level-file=off
+    compress-type=zst
+    # PROPOSED RPO target {{ $b.wal.proposedRpoMinutes }} min (ADR-0030 §6) — WAL
+    # archive-push is continuous; re-base this target in the W5-T5 evidence doc.
+
+    [{{ $b.stanza }}]
+    # The primary this stanza backs up (ADR-0030 §4 — sidecar/CronJob, not Celery
+    # beat). Reaches the in-cluster postgres Service on its canonical port.
+    pg1-host={{ include "netops.fullname" . }}-postgres
+    pg1-port={{ .Values.services.postgres.port }}
+    pg1-path=/var/lib/postgresql/data/pgdata
+    pg1-database={{ .Values.config.postgres.database }}
+    pg1-user={{ .Values.config.postgres.user }}
+{{- end }}

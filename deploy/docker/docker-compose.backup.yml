@@ -1,0 +1,128 @@
+# pgBackRest backup tier — Compose host-cron parity (W5-T1, ADR-0030 §1/§4).
+#
+# Single-node parity for the Helm backup CronJobs. Run as an OPT-IN profile so the
+# dev stack stays lightweight, but the TIER ITSELF is on-by-default in the chart:
+#
+#   docker compose \
+#     -f deploy/docker/docker-compose.yml \
+#     -f deploy/docker/docker-compose.backup.yml \
+#     --profile backup --env-file ../../.env up -d
+#
+# Cadence (ADR-0030 §1): weekly full + daily incr, each followed by `pgbackrest
+# verify` which GATES the run (a non-clean verify exits non-zero = a failed
+# backup). Scheduling is host-cron-equivalent via mcuadros/ofelia (a container
+# cron that triggers `job-exec` against the long-lived pgbackrest container).
+#
+# SECRETS: the repo cipher passphrase + the MinIO key/secret come from the root
+# .env as PGBACKREST_REPO1_* env (see .env.example) — NEVER inlined in this file
+# or the .conf. The repo and its key are never co-located (ADR-0011 §4).
+#
+# This mirrors the K8s CronJobs; like the packet-capture deferral, the in-postgres
+# archive_command WAL push is the chart's concern (the dev pgvector image carries
+# no pgbackrest binary) — the load-bearing scheduled-backup + verify half IS
+# modelled here in lockstep with the chart's verify-gated jobs.
+
+services:
+  # Object store for the repo (dev MinIO). Single-node, plaintext (verify-tls=n in
+  # the .conf). Credentials come from the root .env; the default dev values are a
+  # convenience, NOT production secrets.
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    profiles: ["backup"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-netops-backup}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-netops-backup-dev-only}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 12
+    restart: unless-stopped
+    # console/API ports are NOT published by default (secure by default).
+
+  # Long-lived pgBackRest container ofelia triggers job-exec against. It does no
+  # work on its own (sleeps); the scheduled full/incr/verify run via ofelia below.
+  # Hardened to lockstep the chart's backup pod: cap_drop ALL, no-new-privileges,
+  # non-root, read-only root + bounded tmpfs scratch.
+  pgbackrest:
+    image: pgbackrest/pgbackrest:2.54.2
+    profiles: ["backup"]
+    entrypoint: ["sh", "-c", "sleep infinity"]
+    environment:
+      PGBACKREST_CONFIG: /etc/pgbackrest/pgbackrest.conf
+      PGUSER: ${NETOPS_POSTGRES_USER:-netops}
+      PGPASSWORD: ${NETOPS_POSTGRES_PASSWORD:-netops}
+      # Repo cipher passphrase + MinIO credential — env REFS from .env, never
+      # inlined in the .conf (ADR-0030 §1 / ADR-0011 §4).
+      PGBACKREST_REPO1_CIPHER_PASS: ${PGBACKREST_REPO1_CIPHER_PASS:?set PGBACKREST_REPO1_CIPHER_PASS in .env (the aes-256-cbc repo passphrase)}
+      PGBACKREST_REPO1_S3_KEY: ${MINIO_ROOT_USER:-netops-backup}
+      PGBACKREST_REPO1_S3_KEY_SECRET: ${MINIO_ROOT_PASSWORD:-netops-backup-dev-only}
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    user: "10001:10001"
+    read_only: true
+    volumes:
+      - ./pgbackrest/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+    tmpfs:
+      # The ONLY writable scratch (pgbackrest lock/spool/log + the info assert file).
+      - /var/lib/pgbackrest:size=1g
+      - /tmp/pgbackrest:size=256m
+      - /tmp:size=128m
+    labels:
+      # ofelia job-exec definitions (host-cron parity). Each command is ONE sh -c
+      # with set -o pipefail + a `test -s` non-empty guard (L5); `verify` GATES the
+      # run via `set -e` (L3: env expands under sh -c; argv would not do $(VAR)).
+      ofelia.enabled: "true"
+      # Weekly full — Sunday 01:00.
+      ofelia.job-exec.pgbackrest-full.schedule: "0 0 1 * * 0"
+      ofelia.job-exec.pgbackrest-full.command: >-
+        sh -c 'set -euo pipefail;
+        pgbackrest --stanza=netops stanza-create || true;
+        pgbackrest --stanza=netops --type=full backup;
+        pgbackrest --stanza=netops verify;
+        pgbackrest --stanza=netops info --output=text | tee /tmp/pgbackrest/info.txt;
+        test -s /tmp/pgbackrest/info.txt;
+        grep -q "status: ok" /tmp/pgbackrest/info.txt'
+      # Daily incr — Mon–Sat 01:00.
+      ofelia.job-exec.pgbackrest-incr.schedule: "0 0 1 * * 1-6"
+      ofelia.job-exec.pgbackrest-incr.command: >-
+        sh -c 'set -euo pipefail;
+        pgbackrest --stanza=netops stanza-create || true;
+        pgbackrest --stanza=netops --type=incr backup;
+        pgbackrest --stanza=netops verify;
+        pgbackrest --stanza=netops info --output=text | tee /tmp/pgbackrest/info.txt;
+        test -s /tmp/pgbackrest/info.txt;
+        grep -q "status: ok" /tmp/pgbackrest/info.txt'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The host-cron equivalent: ofelia reads the job-exec labels above and triggers
+  # them on schedule against the pgbackrest container. Read-only Docker socket so
+  # it can exec into the labelled container but cannot mutate the daemon.
+  ofelia:
+    image: mcuadros/ofelia:v0.3.13
+    profiles: ["backup"]
+    command: daemon --docker
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    read_only: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - pgbackrest
+    restart: unless-stopped
+
+volumes:
+  miniodata:

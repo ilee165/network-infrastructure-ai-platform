@@ -431,8 +431,10 @@ deny contains msg if {
 
 # The §2 allow edge table, as a known set of {dest-component, port}. An egress
 # allow that targets any port outside this set is not a §2 arrow and is denied.
-# (DNS :53 is the universal default-deny backstop, also permitted.)
-netpol_known_egress_ports := {5432, 7687, 6379, 11434, 443, 53}
+# (DNS :53 is the universal default-deny backstop, also permitted.) Port 9000 is
+# the W5-T1 MinIO/S3 object-store edge (the backup CronJob → object store,
+# ADR-0030 §4); :443 already covers an HTTPS S3 endpoint.
+netpol_known_egress_ports := {5432, 7687, 6379, 11434, 9000, 443, 53}
 
 # Names of the W3-owned packet NetworkPolicies — excluded from the W4 platform
 # assertions below (they carry their own ADR-0031 rules earlier in this file).
@@ -874,4 +876,274 @@ value_is_generated_placeholder(v) if {
 
 value_is_generated_placeholder(v) if {
 	regex.match(`^dev-local:[A-Za-z0-9]+$`, v)
+}
+
+# ===========================================================================
+# W5-T1 — pgBackRest Postgres backup tier (ADR-0030 §1/§4, ADR-0011 §1/§4)
+#
+# The backup CronJobs are the load-bearing DR tier: a mis-configured off-host
+# repo (no encryption, a reachable/inlined credential, an unverified backup) is a
+# new exfiltration surface for audit/PII/credential-bearing rows (ADR-0030
+# Negative). These rules assert, on the RENDERED backup manifests:
+#   - the repo cipher passphrase + object-store credential are external-secret
+#     REFS (valueFrom.secretKeyRef), NEVER a literal `value:` (secret-surface gate);
+#   - `pgbackrest verify` GATES every backup job (a backup that cannot be verified
+#     is a failed backup — ADR-0030 §1 req 2);
+#   - the schedule matches weekly-full / daily-incr cadence;
+#   - repo encryption is aes-256-cbc (independent of object-store SSE);
+#   - the backup ConfigMap inlines NO cipher/credential literal.
+# The generic per-workload hardening rules above ALSO cover the backup CronJob
+# pods by component label (`backup`), so drop-ALL/non-root/RO-rootfs/limits are
+# already gated there — these rules add the backup-SPECIFIC controls.
+# ===========================================================================
+
+# A rendered backup CronJob is identified by the `backup` component label.
+is_backup_cronjob(obj) if {
+	obj.kind == "CronJob"
+	obj.metadata.labels["app.kubernetes.io/component"] == "backup"
+}
+
+# The container spec list inside a CronJob's Job template.
+backup_containers(cj) := cj.spec.jobTemplate.spec.template.spec.containers
+
+# --- secret-surface: the cipher pass + S3 credential env vars must come from a
+# secretKeyRef, never an inline `value:` literal. Any env var whose NAME signals a
+# credential (PGBACKREST_REPO*_CIPHER_PASS / *_KEY / *_KEY_SECRET) MUST use
+# valueFrom.secretKeyRef. A literal `value:` on such an env is a denied inline
+# secret (ADR-0030 §1 / ADR-0029 §6). ---
+backup_credential_env(name) if {
+	endswith(name, "CIPHER_PASS")
+}
+
+backup_credential_env(name) if {
+	endswith(name, "S3_KEY")
+}
+
+backup_credential_env(name) if {
+	endswith(name, "S3_KEY_SECRET")
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	some e in object.get(c, "env", [])
+	backup_credential_env(e.name)
+	object.get(e, "value", null) != null
+	msg := sprintf("backup CronJob %q env %q must NOT carry an inline `value:` literal — the repo cipher pass / object-store credential are external-secret refs only (ADR-0030 §1 / ADR-0029 §6)", [input.metadata.name, e.name])
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	some e in object.get(c, "env", [])
+	backup_credential_env(e.name)
+	not e.valueFrom.secretKeyRef
+	msg := sprintf("backup CronJob %q env %q must be sourced from valueFrom.secretKeyRef (the repo cipher pass / object-store credential are by-reference only; ADR-0030 §1)", [input.metadata.name, e.name])
+}
+
+# --- verify GATES every backup: the backup container's command/args must invoke
+# `pgbackrest verify`. A backup job that never verifies its repo is a failed
+# control (ADR-0030 §1 req 2). Asserted on the rendered argv text. ---
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	not container_runs_verify(c)
+	msg := sprintf("backup CronJob %q container %q must run `pgbackrest verify` (the verify GATES every backup — an unverifiable backup is a failed backup; ADR-0030 §1)", [input.metadata.name, c.name])
+}
+
+# True when any element of the container's command or args mentions `pgbackrest`
+# AND `verify` (the shell-wrapped script runs `pgbackrest ... verify`).
+container_runs_verify(c) if {
+	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
+	contains(arg, "pgbackrest")
+	contains(arg, "verify")
+}
+
+# --- cadence: exactly one weekly-full + one daily-incr. The full CronJob runs
+# weekly (cron day-of-week field is a single day, not `*`); the incr CronJob runs
+# on the other days. Assert each rendered backup CronJob carries a non-empty
+# schedule and that the full/incr names are distinguishable by a `-full`/`-incr`
+# suffix so the cadence pair is explicit (ADR-0030 §1 req 2). ---
+deny contains msg if {
+	is_backup_cronjob(input)
+	not input.spec.schedule
+	msg := sprintf("backup CronJob %q must declare a schedule (weekly-full / daily-incr cadence; ADR-0030 §1)", [input.metadata.name])
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	not backup_name_is_full_or_incr(input.metadata.name)
+	msg := sprintf("backup CronJob %q must be named with a `-pgbackrest-full` or `-pgbackrest-incr` suffix so the weekly-full / daily-incr cadence pair is explicit (ADR-0030 §1)", [input.metadata.name])
+}
+
+backup_name_is_full_or_incr(name) if {
+	endswith(name, "-pgbackrest-full")
+}
+
+backup_name_is_full_or_incr(name) if {
+	endswith(name, "-pgbackrest-incr")
+}
+
+# The weekly-full CronJob's schedule must NOT run every day-of-week (`* * * * *`
+# style with a `*` DOW would make it daily, not weekly). A weekly full pins the
+# day-of-week field to a specific day (ADR-0030 §1). Asserted on the `-full` job.
+deny contains msg if {
+	is_backup_cronjob(input)
+	endswith(input.metadata.name, "-pgbackrest-full")
+	parts := split(input.spec.schedule, " ")
+	count(parts) == 5
+	parts[4] == "*"
+	msg := sprintf("weekly-full backup CronJob %q must pin the day-of-week field (a `*` DOW makes it daily, not weekly; ADR-0030 §1)", [input.metadata.name])
+}
+
+# --- concurrency: a backup must never overlap the next tick (a second pgbackrest
+# against the same stanza races the repo). concurrencyPolicy must be Forbid or
+# Replace, never Allow (ADR-0030 §4 independence/safety). ---
+deny contains msg if {
+	is_backup_cronjob(input)
+	object.get(input.spec, "concurrencyPolicy", "Allow") == "Allow"
+	msg := sprintf("backup CronJob %q must set concurrencyPolicy Forbid/Replace — overlapping pgbackrest runs race the repo (ADR-0030 §4)", [input.metadata.name])
+}
+
+# --- repo encryption: the stanza ConfigMap must declare aes-256-cbc repo
+# encryption (independent of object-store SSE — ADR-0030 §1 / Alt #3). The
+# pgBackRest config lives in a ConfigMap whose component label is `backup`; assert
+# it carries `repo1-cipher-type=aes-256-cbc`. A repo with cipher-type=none (or a
+# missing cipher-type) is an unencrypted off-host repo — denied. ---
+is_backup_configmap(obj) if {
+	obj.kind == "ConfigMap"
+	obj.metadata.labels["app.kubernetes.io/component"] == "backup"
+}
+
+deny contains msg if {
+	is_backup_configmap(input)
+	some k, v in object.get(input, "data", {})
+	endswith(k, ".conf")
+	not contains(v, "repo1-cipher-type=aes-256-cbc")
+	msg := sprintf("backup ConfigMap %q key %q must set `repo1-cipher-type=aes-256-cbc` — repo encryption is ON and independent of object-store SSE (ADR-0030 §1 / Alt #3)", [input.metadata.name, k])
+}
+
+# --- no inlined secret in the backup ConfigMap: the pgBackRest config is
+# NON-secret coordinates only. The cipher pass + S3 credential are supplied as env
+# from the Secret at runtime (pgBackRest reads PGBACKREST_* env), NEVER baked into
+# the .conf. Assert the config does not inline a cipher-pass or S3 key literal —
+# a `repo1-cipher-pass=` / `repo1-s3-key=` with a value is a denied inline secret
+# (ADR-0030 §1 / ADR-0011 §4 — the repo and its key never co-located). ---
+backup_config_secret_directive(line) if {
+	regex.match(`repo1-cipher-pass=\S`, line)
+}
+
+backup_config_secret_directive(line) if {
+	regex.match(`repo1-s3-key=\S`, line)
+}
+
+backup_config_secret_directive(line) if {
+	regex.match(`repo1-s3-key-secret=\S`, line)
+}
+
+deny contains msg if {
+	is_backup_configmap(input)
+	some _, v in object.get(input, "data", {})
+	some line in split(v, "\n")
+	backup_config_secret_directive(line)
+	msg := sprintf("backup ConfigMap %q must NOT inline a repo cipher-pass / S3 key in the pgBackRest config — they are supplied as PGBACKREST_* env from the Secret at runtime (ADR-0030 §1 / ADR-0011 §4)", [input.metadata.name])
+}
+
+# --- the backup CronJob must mount the credential env from the SAME existingSecret
+# the rest of the chart uses (no second Secret object) — covered by the chart-ships-
+# one-Secret rule above. Here we assert the backup job's pod is hardened the same
+# way (automountServiceAccountToken=false) so a backup pod cannot reach the K8s API
+# with its mounted token (ADR-0029 §5). ---
+deny contains msg if {
+	is_backup_cronjob(input)
+	input.spec.jobTemplate.spec.template.spec.automountServiceAccountToken != false
+	msg := sprintf("backup CronJob %q pod must set automountServiceAccountToken=false — the backup job talks to Postgres + the object store, not the K8s API (ADR-0029 §5)", [input.metadata.name])
+}
+
+# --- the backup NetworkPolicy must be confined egress (no blanket `to`). The
+# generic no-empty-`to` rule above already covers every non-packet NetworkPolicy;
+# this asserts the backup policy declares Egress (so the default-deny floor is
+# additively opened for it, not left implicitly open). ---
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	input.spec.podSelector.matchLabels["app.kubernetes.io/component"] == "backup"
+	not policy_has_egress(input)
+	msg := "backup NetworkPolicy must declare policyTypes Egress (confined egress to postgres + the object store; ADR-0030 §4 / ADR-0029 §2)"
+}
+
+# --- per-container hardening on the backup CronJob (the generic is_platform_workload
+# rules above only match Deployment/StatefulSet by container path; a CronJob nests
+# its containers under jobTemplate.spec.template.spec, so the same ADR-0029 §3
+# controls are asserted here for the backup pod). Every backup container must drop
+# ALL caps, add none, run non-root + RO-rootfs + no-privesc + RuntimeDefault
+# seccomp, and carry resource requests AND limits. ---
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	not drops_all(c)
+	msg := sprintf("backup CronJob %q container %q must drop ALL capabilities (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	some cap in object.get(object.get(object.get(c, "securityContext", {}), "capabilities", {}), "add", [])
+	msg := sprintf("backup CronJob %q container %q must add NO capabilities (found %q; ADR-0029 §3)", [input.metadata.name, c.name, cap])
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	c.securityContext.runAsNonRoot != true
+	msg := sprintf("backup CronJob %q container %q must set runAsNonRoot=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	c.securityContext.readOnlyRootFilesystem != true
+	msg := sprintf("backup CronJob %q container %q must set readOnlyRootFilesystem=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	c.securityContext.allowPrivilegeEscalation != false
+	msg := sprintf("backup CronJob %q container %q must set allowPrivilegeEscalation=false (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	not backup_container_seccomp_set(input, c)
+	msg := sprintf("backup CronJob %q container %q must set a RuntimeDefault seccompProfile (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+backup_container_seccomp_set(cj, c) if {
+	c.securityContext.seccompProfile.type == "RuntimeDefault"
+}
+
+backup_container_seccomp_set(cj, _) if {
+	cj.spec.jobTemplate.spec.template.spec.securityContext.seccompProfile.type == "RuntimeDefault"
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	not c.resources.requests
+	msg := sprintf("backup CronJob %q container %q must declare resource requests (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	not c.resources.limits
+	msg := sprintf("backup CronJob %q container %q must declare resource limits (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_backup_cronjob(input)
+	some c in backup_containers(input)
+	endswith(c.image, ":latest")
+	msg := sprintf("backup CronJob %q image %q must not use the `latest` tag (ADR-0029 §5)", [input.metadata.name, c.image])
 }

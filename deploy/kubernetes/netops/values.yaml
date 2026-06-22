@@ -124,6 +124,19 @@ secrets:
     # OIDC/SSO client secret (ADR-0028 §4) — the confidential-client secret the
     # api exchanges at the token endpoint. REFERENCE ONLY.
     oidcClientSecret: oidc-client-secret
+    # pgBackRest repo (W5-T1, ADR-0030 §1/§4). All THREE are REFERENCE-ONLY key
+    # NAMES inside existingSecret — never values. The chart-rendered dev Secret
+    # generates random placeholders for them (idempotent via `lookup`, L4); in
+    # production they come from the external-secrets operator / CSI store.
+    #   - backupRepoCipherPass: the aes-256-cbc repo passphrase (repo encryption is
+    #     INDEPENDENT of object-store SSE — ADR-0030 §1 / Alt #3; SSE may layer WITH
+    #     it, never INSTEAD). The KEK is NEVER co-located with the repo (ADR-0011 §4)
+    #     — this is the repo-cipher pass, a DISTINCT secret from the platform KEK.
+    #   - backupRepoS3Key / backupRepoS3KeySecret: the MinIO/S3 credential, scoped
+    #     write-only to the `pgbackrest/` prefix (ADR-0030 §1, least-privilege §7).
+    backupRepoCipherPass: backup-repo-cipher-pass
+    backupRepoS3Key: backup-repo-s3-key
+    backupRepoS3KeySecret: backup-repo-s3-key-secret
   # KMS master-key REFERENCE (ADR-0032 / D11). The pod receives a KMS HANDLE or
   # a mounted secret PATH — never the KEK itself. This is the indirect handle the
   # envelope-encryption layer resolves at runtime against the customer KMS/Vault.
@@ -270,6 +283,116 @@ services:
       limits:
         cpu: "4"
         memory: 8Gi
+
+# -- Backup / DR tier (W5-T1, ADR-0030 §1/§4). pgBackRest continuous WAL
+#    archiving + weekly-full / daily-incr backups of the Postgres system of
+#    record, repo-encrypted (aes-256-cbc), written to a MinIO/S3 object store.
+#    Each backup job runs `pgbackrest verify` and FAILS on a non-clean verify —
+#    a backup that cannot be verified is a failed backup (ADR-0030 §1, policy-test).
+#
+#    SECURE/RESILIENT BY DEFAULT, OPT-OUT NEVER OPT-IN (ADR-0029 §0 / ADR-0030 §4):
+#    `enabled: true`. Disabling renders NO CronJob / ConfigMap / SA / NetworkPolicy
+#    and drops the postgres archive_command back to `/bin/true` (WAL not pushed) —
+#    a WARNED opt-out (NOTES.txt). Backups run as K8s CronJobs, NOT Celery beat,
+#    so they keep running when the app/Redis is degraded (ADR-0030 §4/§5, Alt #5).
+#
+#    ALL credentials are external-secret REFERENCES (secrets.keys.backupRepo*) —
+#    the repo cipher passphrase and the object-store key/secret are NEVER inlined
+#    in any manifest, ConfigMap, rendered template, or Helm history (ADR-0030 §1,
+#    G-SEC). The KEK is NEVER co-located with the repo (ADR-0011 §4) — the repo
+#    cipher pass is a DISTINCT secret; no step here materializes a KEK.
+backup:
+  postgres:
+    # On by default (resilient-by-default DR floor). Opt-out is warned.
+    enabled: true
+    # pgBackRest stanza name — the logical backup set for this Postgres cluster.
+    stanza: netops
+    # pgBackRest image (contains pgbackrest + the postgres client libs). Explicit
+    # version tag ONLY — the admission policy (ADR-0029 §5) rejects `latest`.
+    image:
+      repository: pgbackrest/pgbackrest
+      tag: "2.54.2"
+      pullPolicy: IfNotPresent
+    # WAL archiving is the RPO floor (ADR-0030 §1/§6). archive_mode=on +
+    # archive-push so recovery reaches the last archived WAL segment. The RPO
+    # target below is PROPOSED (ADR-0030 §6, pending the Consultant §12 answer) —
+    # re-base in the W5-T5 evidence doc; build to this default for now.
+    wal:
+      archiveMode: "on"
+      # PROPOSED RPO target (minutes). Informational — surfaced in the stanza
+      # config + evidence stub; archive-push is continuous regardless.
+      proposedRpoMinutes: 5
+    # Cadence (ADR-0030 §1): full WEEKLY, incremental DAILY, as SEPARATE CronJobs.
+    # Each job runs `pgbackrest verify` after the backup and fails on a non-clean
+    # verify (the verify GATES the job — ADR-0030 §1 requirement 2).
+    schedule:
+      # Sunday 01:00 — weekly full.
+      full: "0 1 * * 0"
+      # Mon–Sat 01:00 — daily incremental (full day skips its incr).
+      incr: "0 1 * * 1-6"
+    # Bound concurrency + history so a long backup never overlaps the next tick
+    # and the cluster is not flooded with completed Job pods.
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 3600
+    backoffLimit: 1
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # Retention (ADR-0030 §1 table). The 35-day repo retention is the OPERATIONAL
+    # restore window; it does NOT override the 7-YEAR AUDIT DATA retention
+    # (PRODUCTION.md §7) — audit rows ride INSIDE every Postgres backup (ADR-0030
+    # §1, requirement 5: no separate audit backup), and the longest-retained full
+    # (the monthly-full kept 1 year here, escrowed further out-of-band) satisfies
+    # the audit-data horizon. Repo retention != audit-data retention.
+    retention:
+      # Keep enough fulls to cover ~35 days with a weekly full (5 weeks).
+      full: 5
+      # Keep N differential/incr sets.
+      diff: 6
+      # Archive (WAL) retention follows the full retention by default.
+      archiveType: full
+    # Repo encryption (ADR-0030 §1 / Alt #3) — INDEPENDENT of the object store's
+    # SSE. aes-256-cbc on; the passphrase is an external-secret REFERENCE
+    # (secrets.keys.backupRepoCipherPass), NEVER inlined. SSE may layer WITH this,
+    # never INSTEAD of it.
+    encryption:
+      enabled: true
+      cipherType: aes-256-cbc
+    # MinIO/S3-compatible object store (ADR-0030 §1). Least-privilege: the backup
+    # credential is write-to-`pgbackrest/`-prefix only (requirement 7). The bucket
+    # layout reserves `pgbackrest/` here and leaves `pcaps/` for W5-T4.
+    repo:
+      # Object-store endpoint host (MinIO Service / S3 endpoint). Operators MUST
+      # set this to their real endpoint; the in-cluster MinIO default is a stand-in.
+      endpoint: minio.netops-backup.svc.cluster.local
+      # Endpoint port + TLS. MinIO commonly terminates TLS on 9000; set verifyTls
+      # false ONLY for a plaintext dev MinIO (warned).
+      port: 9000
+      verifyTls: true
+      # S3 region (MinIO ignores it but pgBackRest requires a value).
+      region: us-east-1
+      # Bucket + the pgbackrest-only prefix (pcaps/ is reserved for W5-T4).
+      bucket: netops-backups
+      prefix: /pgbackrest
+      # path-style addressing (MinIO requires it; AWS S3 also accepts it).
+      uriStyle: path
+    # Resource requests + limits (never absent — ADR-0029 §3). Backup is IO-bound,
+    # modest CPU; sized for a single-node GA cluster.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    # Egress allow-list for the backup CronJob's NetworkPolicy: the object-store
+    # CIDRs the job must reach to write the repo (ADR-0030 §4 / PRODUCTION.md §5
+    # — confined egress, never blanket). Operators MUST narrow this to their real
+    # object-store ranges; the RFC1918 default is a placeholder, NOT an internet
+    # allow. The job also reaches postgres:5432 (in-namespace) for archive/backup.
+    objectStoreCidrs:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
 
 # -- Ingress + TLS (ADR-0029 §4 / ADR-0012 §2). The SINGLE front door: ONE
 #    HTTPS-only Ingress routing ALL paths to the `frontend` Service — NEVER a
