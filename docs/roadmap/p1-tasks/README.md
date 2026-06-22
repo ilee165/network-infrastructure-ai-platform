@@ -11,6 +11,23 @@ Escalation rule (P1-PLAN.md §2, `.claude/agents/README.md`): every secret-surfa
 (KEK/credential/audit/auth, leak/exit-criteria tests) escalates **reviewers + fixer to the
 strong model (`fable`)**; nothing in a secret pipeline runs on a downgraded model.
 
+## Carry-forward from W4 — READ BEFORE STARTING (`../P1-W4-LESSONS.md`)
+
+W4 (Helm/K8s GA chart, PR #59) cost a CI red and a review round on traps that recur
+directly in these waves. Each lesson there is mapped to the task(s) it will bite here —
+apply the rule up front, don't re-learn it:
+
+| Lesson | Rule | Bites which task(s) here |
+|---|---|---|
+| **L1** new gating CI tool | Run the tool LOCALLY (install or throwaway container) before pushing it as gating; local gate set ≠ CI gate set. | **W6-T4** (pip-audit/npm-audit/gitleaks), **W6-T5** (syft/cosign/Trivy raise) |
+| **L2** sanctioned deviations | Scoped-suppress the generic scanner (`.trivyignore` via `TRIVY_IGNOREFILE` on one step) + back it with a stronger conftest rule; never globalize or weaken. | **W6-T5** (raises Trivy gate — extend, don't drop, existing suppressions) |
+| **L3** exec argv `$(VAR)` | K8s does NOT substitute `$(VAR)` in probe/Job exec argv — wrap in `sh -c "tool \"$VAR\""`; grep sibling manifests when fixing one. | **W5-T1..T5** backup/restore CronJobs (pgBackRest/psql/neo4j-admin), exec probes |
+| **L4** helm secret idempotency | Reuse-or-generate dev secrets via `lookup` (empty in CI, reused on live upgrade) — regen on `helm upgrade` breaks auth. | **W6** KMS dev secrets, **W5** chart-rendered backup creds |
+| **L5** CI pipe masks exit code | `set -o pipefail` + `test -s <out>` on any `cmd \| filter > file` (CI or job). | **W5** backup pipelines (`pg_dump \| gzip \| mc`), any W5/W6 piped CI step |
+| **L6** `gh pr merge` fatal | Local-checkout fatal under sibling worktrees is harmless — verify `gh pr view --json state` MERGED, then `git push origin --delete`. | all waves (merge step) |
+| **L7** session windows | One-atomic-commit-per-task survives session-limit kills; resume via `resumeFromRunId` (cache-replay), discard half-done uncommitted task work. | any multi-task workflow run |
+| **L8** agent registry | Confirm every `agentType` the workflow calls is in the LIVE registry before launch; substitute + fold discipline into the prompt if missing. | any workflow launch (`wf-infra` now loaded) |
+
 ## W5 — Backup / DR baseline (ADR-0030, PRODUCTION.md §8, gate G-REL)
 
 Owner: **`wf-infra`** (declarative infra + policy-as-test, not Python-TDD). Drills are
