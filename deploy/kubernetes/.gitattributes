@@ -1,0 +1,10 @@
+# Helm/K8s manifests and policy-as-test inputs MUST check out and render with LF
+# line endings. Under core.autocrlf=true these files were materialized CRLF in the
+# working tree, so `helm template` emitted CRLF and conftest's YAML splitter
+# collapsed the multi-doc render to a SINGLE evaluated document — every deny rule
+# silently passed (a false-green gate). Pinning eol=lf here keeps the rendered
+# manifest LF so each rendered document is evaluated independently (ADR-0029 §5).
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.rego text eol=lf
+*.json text eol=lf

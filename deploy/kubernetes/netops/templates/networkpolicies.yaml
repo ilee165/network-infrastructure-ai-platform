@@ -190,6 +190,18 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.broker.port }}
+    {{- if .Values.services.ollama.enabled }}
+    # api → ollama:11434 (A -. LLM .-> OLL — egress half of the §2 edge; the
+    # ollama-side ingress allow is allow-llm-to-ollama. Renders ONLY when ollama
+    # is enabled, so default-deny stays intact when the local-LLM profile is off).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "ollama") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.services.ollama.port }}
+    {{- end }}
 {{- end }}
 {{- if .Values.services.worker.enabled }}
 ---
@@ -237,6 +249,18 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.broker.port }}
+    {{- if .Values.services.ollama.enabled }}
+    # worker → ollama:11434 (A -. LLM .-> OLL — egress half of the §2 edge; the
+    # ollama-side ingress allow is allow-llm-to-ollama. Renders ONLY when ollama
+    # is enabled, so default-deny stays intact when the local-LLM profile is off).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "ollama") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.services.ollama.port }}
+    {{- end }}
 {{- end }}
 {{- if .Values.services.ollama.enabled }}
 {{- if or .Values.services.api.enabled .Values.services.worker.enabled }}
