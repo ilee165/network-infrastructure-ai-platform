@@ -17,13 +17,46 @@
 #    right namespace object.
 namespaceLabels:
   enabled: true
-  # restricted enforced namespace-wide; the SOLE deviation is the packet
-  # sandbox, gated by the admission allow-list (ADR-0029 §5 / ADR-0031 §5).
+  # restricted enforced namespace-wide; the analysis parser is fully
+  # restricted-compliant (it adds no capability). The SOLE workload that needs a
+  # PSS deviation is packet-CAPTURE (it adds NET_RAW + NET_ADMIN), and built-in
+  # Pod Security Admission is a separate controller that pod labels CANNOT exempt
+  # — a label-based admission allow-list (Kyverno/VAP) does not grant a PSA
+  # exemption. So capture is placed in its OWN namespace at a relaxed PSS level
+  # (`captureNamespace` below); this install namespace stays restricted (ADR-0029
+  # §3 / ADR-0031 §5 "deviation granted only to the packet namespace/node pool").
   podSecurity:
     enforce: restricted
     audit: restricted
     warn: restricted
     # Pin the PSS version so a cluster upgrade can't silently relax the level.
+    version: latest
+
+# -- Dedicated namespace for the packet-CAPTURE workload (ADR-0031 §5). Built-in
+#    Pod Security Admission rejects NET_RAW/NET_ADMIN under `restricted`, and a
+#    pod label cannot exempt PSA (exemptions are API-server config, not pod-level)
+#    — so the capture Deployment, its ServiceAccount, and its NetworkPolicy live
+#    in this separate namespace whose PSA enforce level admits the documented
+#    NET_RAW deviation. The label-based Kyverno/VAP allow-list narrows the
+#    deviation to the capture component WITHIN this namespace; PSA admits it at
+#    the namespace level. The analysis parser stays in the restricted install
+#    namespace, unaffected.
+captureNamespace:
+  # Create the capture namespace object with PSA labels. Disable only if the
+  # namespace is pre-created out-of-band (then apply these labels there).
+  create: true
+  name: netops-packet-capture
+  podSecurity:
+    # `privileged` is the only built-in PSS level that admits an added NET_RAW /
+    # NET_ADMIN capability (baseline's allowed-add list is NET_BIND_SERVICE only,
+    # so baseline would also reject the capture pod). The capture pod is still
+    # non-root, non-privileged, readOnlyRootFilesystem — the relaxed PSA level is
+    # the ONLY way to admit the single documented capability deviation; the
+    # workload hardening is unchanged. audit/warn stay at restricted so any
+    # OTHER restricted drift in this namespace still surfaces.
+    enforce: privileged
+    audit: restricted
+    warn: restricted
     version: latest
 
 # -- Shared image references. W4 adds api/frontend/worker/data-store images
@@ -86,12 +119,22 @@ admission:
     enabled: false
     # Public cosign key (PEM) or keyless issuer/subject. Reference only.
     publicKeyConfigMap: ""
-  # The SOLE workload permitted to carry NET_RAW / a non-RuntimeDefault seccomp
-  # profile. Matched by label, not name, so the deviation is enforceably
-  # singular (ADR-0029 §5 rule 3 / ADR-0031 §5).
+  # The packet-sandbox workloads permitted a non-RuntimeDefault (Localhost)
+  # seccomp profile: BOTH capture and analysis (the analysis parser legitimately
+  # runs the §3 Localhost profile). Matched by label, not name (ADR-0029 §5 rule
+  # 3 / ADR-0031 §5).
   packetSandboxSelector:
     matchLabels:
       netops.io/packet-sandbox: "true"
+  # The SOLE workload permitted to ADD NET_RAW / NET_ADMIN: packet-CAPTURE ONLY.
+  # This is a SEPARATE, narrower selector than packetSandboxSelector — the
+  # analysis parser must NEVER hold NET_RAW, so it must stay SUBJECT to the
+  # restrict-net-raw admission rule (ADR-0031 §2). The capture Deployment carries
+  # this label; the analysis Deployment does NOT. A NET_RAW regression on analysis
+  # therefore fails admission instead of being silently exempted.
+  netRawDeviationSelector:
+    matchLabels:
+      netops.io/net-raw: allowed
 
 # -- Default-deny NetworkPolicies (ADR-0031 §4). W4 extends the allow edge-set
 #    (ADR-0029 §2). W3 ships the default-deny floor + the analysis egress allow.
@@ -111,6 +154,28 @@ networkPolicy:
       app.kubernetes.io/name: netops
       app.kubernetes.io/component: postgres
     port: 5432
+  # Selector for the Redis broker the analysis worker dials to PULL Celery tasks
+  # and write results (ADR-0031 §4: "the broker connection is egress from the
+  # worker's perspective and is allow-listed to the Redis Service only").
+  # celery_app.py uses Redis as both broker and result backend, so without this
+  # egress the packet_analysis worker silently drops all work. W4 owns the Redis
+  # Deployment; this selector is the seam (mirrors the postgres pattern).
+  broker:
+    podSelectorLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: redis
+    port: 6379
+  # CIDR(s) the packet-CAPTURE workload is allowed to egress to: the device
+  # management subnet(s) it must reach to drive SSH/monitor-session captures
+  # (ADR-0031 §4 capture NetworkPolicy; PRODUCTION.md §5 "collector network
+  # segmentation: egress restricted to management subnets"). Capture egress is
+  # confined to these CIDRs + Redis/Postgres; everything else is denied. Operators
+  # MUST narrow this to their real management ranges. The RFC1918 default is a
+  # placeholder, NOT an internet-wide allow.
+  captureManagementCidrs:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
 
 # -- Dedicated packet node pool (ADR-0031 §5). Taint + matching toleration so
 #    NET_RAW never co-schedules with general pods. nodeSelector/affinity is

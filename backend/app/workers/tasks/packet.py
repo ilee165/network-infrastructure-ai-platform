@@ -61,6 +61,7 @@ from app.engines.packet import (
     CaptureSpec,
     PacketFindings,
     analyze_pcap,
+    assert_sandbox_posture,
     build_eos_capture_commands,
     build_eos_finalize_commands,
     build_tcpdump_argv,
@@ -142,6 +143,18 @@ def _sleep(seconds: float) -> None:
     import time  # local import: capture-only dependency
 
     time.sleep(seconds)
+
+
+def _assert_posture(settings: Settings) -> None:
+    """Assert the analysis worker's OS-isolation posture before spawning tshark.
+
+    Seam (ADR-0031 §2): the runtime backstop to the declarative sandbox. Refuses
+    to spawn tshark when the worker is root, holds CAP_NET_RAW, or has a writable
+    root filesystem, so a misconfigured deployment fails closed. Gated by
+    ``settings.packet_sandbox_posture_enforced`` (ON by default; off only for the
+    eager unit-test/CI runner where the OS controls are not applied).
+    """
+    assert_sandbox_posture(enforced=settings.packet_sandbox_posture_enforced)
 
 
 def _analyze_pcap(path: str, *, display_filter: str | None, settings: Settings) -> PacketFindings:
@@ -532,6 +545,10 @@ def analyze_capture(capture_id: str, display_filter: str | None = None) -> dict[
     cap_uuid = uuid.UUID(capture_id)
     storage_path = pcap_path_for(cap_uuid, pcap_dir=settings.pcap_dir)
     try:
+        # Runtime sandbox-posture backstop (ADR-0031 §2): assert non-root, no
+        # CAP_NET_RAW, read-only rootfs BEFORE spawning tshark — fail closed on a
+        # misconfigured deployment rather than parse untrusted bytes unconfined.
+        _assert_posture(settings)
         findings = _analyze_pcap(storage_path, display_filter=display_filter, settings=settings)
     except Exception as exc:  # noqa: BLE001 — sandbox/validation failure is audited, not raised
         error = f"{type(exc).__name__}: {exc}"

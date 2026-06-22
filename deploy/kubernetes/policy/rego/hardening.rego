@@ -239,26 +239,129 @@ deny contains msg if {
 	msg := "packet-analysis egress must not contain an unrestricted (no `to`) rule (ADR-0031 §4)"
 }
 
+# The analysis worker is a Celery worker — it MUST be allow-listed egress to the
+# Redis broker (port 6379) or it pulls zero tasks and silently drops all work
+# (ADR-0031 §4 "the broker connection is egress … allow-listed to the Redis
+# Service only"). This is the finding-1/finding-4 regression guard.
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	input.spec.podSelector.matchLabels["app.kubernetes.io/component"] == "packet-analysis"
+	not policy_allows_redis_egress(input)
+	msg := "packet-analysis NetworkPolicy must allow egress to the Redis broker on 6379 (the Celery worker pulls tasks from the broker; ADR-0031 §4)"
+}
+
+policy_allows_redis_egress(np) if {
+	some rule in np.spec.egress
+	some p in rule.ports
+	p.port == 6379
+}
+
 # ---------------------------------------------------------------------------
-# ADR-0029 §3 — namespace PSS restricted labels
+# ADR-0031 §4 — packet-CAPTURE NetworkPolicy: management-subnet egress, not
+# unrestricted. The capture pod is credential-bearing and holds NET_RAW, so its
+# egress must be confined (PRODUCTION.md §5). A MISSING capture NetworkPolicy
+# means unrestricted egress — the finding-3 gap.
 # ---------------------------------------------------------------------------
 
 deny contains msg if {
+	input.kind == "NetworkPolicy"
+	input.spec.podSelector.matchLabels["app.kubernetes.io/component"] == "packet-capture"
+	not policy_has_egress(input)
+	msg := "packet-capture NetworkPolicy must declare policyTypes Egress (confined egress, ADR-0031 §4)"
+}
+
+# Capture egress must reach a management-subnet CIDR (ipBlock) — that is the
+# whole point of the capture policy (PRODUCTION.md §5 collector segmentation).
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	input.spec.podSelector.matchLabels["app.kubernetes.io/component"] == "packet-capture"
+	not capture_allows_management_cidr(input)
+	msg := "packet-capture NetworkPolicy must allow egress to a management-subnet CIDR (ipBlock) (ADR-0031 §4 / PRODUCTION.md §5)"
+}
+
+capture_allows_management_cidr(np) if {
+	some rule in np.spec.egress
+	some target in rule.to
+	target.ipBlock.cidr
+}
+
+# Capture egress must NOT contain a wide-open (no `to`) rule.
+deny contains msg if {
+	input.kind == "NetworkPolicy"
+	input.spec.podSelector.matchLabels["app.kubernetes.io/component"] == "packet-capture"
+	some rule in input.spec.egress
+	not rule.to
+	msg := "packet-capture egress must not contain an unrestricted (no `to`) rule (ADR-0031 §4)"
+}
+
+# ---------------------------------------------------------------------------
+# ADR-0029 §3 — namespace PSS restricted labels (install namespace)
+#
+# The packet-CAPTURE namespace is intentionally relaxed (enforce=privileged) so
+# built-in PSA admits the documented NET_RAW deviation a pod label cannot exempt
+# (ADR-0031 §5). It is identified by the packet-capture component label; the
+# restricted assertions below apply to the GENERAL install namespace only.
+# ---------------------------------------------------------------------------
+
+is_capture_namespace(ns) if {
+	ns.metadata.labels["app.kubernetes.io/component"] == "packet-capture"
+}
+
+deny contains msg if {
 	input.kind == "Namespace"
+	not is_capture_namespace(input)
 	input.metadata.labels["pod-security.kubernetes.io/enforce"] != "restricted"
-	msg := "namespace must enforce Pod Security Standard `restricted` (ADR-0029 §3)"
+	msg := "install namespace must enforce Pod Security Standard `restricted` (ADR-0029 §3)"
 }
 
 deny contains msg if {
 	input.kind == "Namespace"
+	not is_capture_namespace(input)
 	input.metadata.labels["pod-security.kubernetes.io/audit"] != "restricted"
-	msg := "namespace must set PSA audit=restricted (ADR-0029 §3)"
+	msg := "install namespace must set PSA audit=restricted (ADR-0029 §3)"
 }
 
 deny contains msg if {
 	input.kind == "Namespace"
+	not is_capture_namespace(input)
 	input.metadata.labels["pod-security.kubernetes.io/warn"] != "restricted"
-	msg := "namespace must set PSA warn=restricted (ADR-0029 §3)"
+	msg := "install namespace must set PSA warn=restricted (ADR-0029 §3)"
+}
+
+# ---------------------------------------------------------------------------
+# ADR-0031 §5 — packet-CAPTURE namespace reconciles NET_RAW against PSA level.
+# Capture adds NET_RAW, which PSS `restricted`/`baseline` forbid; the only PSA
+# level that admits it is `privileged`. This rule catches the render-time
+# conflict the finding flagged: a capture namespace at a level that would reject
+# its own NET_RAW pod.
+# ---------------------------------------------------------------------------
+
+deny contains msg if {
+	input.kind == "Namespace"
+	is_capture_namespace(input)
+	enforce := input.metadata.labels["pod-security.kubernetes.io/enforce"]
+	enforce != "privileged"
+	msg := sprintf("packet-capture namespace must enforce PSA `privileged` to admit its NET_RAW pod (found %q; restricted/baseline reject added NET_RAW, ADR-0031 §5)", [enforce])
+}
+
+# The capture Deployment (NET_RAW) must NOT land in a `restricted`-enforced
+# namespace — assert it carries the capture-only net-raw deviation label so the
+# admission allow-list scopes the deviation to it alone (ADR-0031 §2/§5).
+deny contains msg if {
+	input.kind == "Deployment"
+	input.metadata.name == "packet-capture"
+	not input.spec.template.metadata.labels["netops.io/net-raw"]
+	msg := "packet-capture pod must carry the capture-only `netops.io/net-raw` deviation label so admission scopes NET_RAW to it (ADR-0031 §2/§5)"
+}
+
+# The analysis parser must NOT carry the net-raw deviation label — it must stay
+# subject to the restrict-net-raw admission rule (ADR-0031 §2: NET_RAW must never
+# reach the parser). This is the finding-6 regression guard.
+deny contains msg if {
+	input.kind == "Deployment"
+	input.metadata.name == "packet-analysis"
+	input.spec.template.metadata.labels["netops.io/net-raw"]
+	msg := "packet-analysis must NOT carry the `netops.io/net-raw` label — the parser must stay subject to the NET_RAW admission rule (ADR-0031 §2)"
 }
 
 # ---------------------------------------------------------------------------

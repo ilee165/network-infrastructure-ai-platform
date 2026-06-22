@@ -13,7 +13,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: packet-capture
-  namespace: {{ .Release.Namespace }}
+  # Capture lives in its OWN namespace at a relaxed PSA level (ADR-0031 §5): it
+  # adds NET_RAW, which built-in Pod Security Admission rejects under restricted
+  # and a pod label cannot exempt. See namespace-packet-capture.yaml.
+  namespace: {{ include "netops.captureNamespace" . }}
   annotations:
     # Documented PSS deviation (ADR-0031 §1/§5): the capture half legitimately
     # adds NET_RAW (raw/packet socket, worker-side tcpdump). Suppressed at the
@@ -24,7 +27,12 @@ metadata:
   labels:
     {{- include "netops.labels" . | nindent 4 }}
     app.kubernetes.io/component: packet-capture
+    # packet-sandbox: shared with analysis (Localhost-seccomp deviation allow-list).
     netops.io/packet-sandbox: "true"
+    # net-raw: CAPTURE-ONLY — the narrow NET_RAW deviation allow-list. The analysis
+    # parser does NOT carry this, so it stays subject to the restrict-net-raw
+    # admission rule (ADR-0031 §2 — NET_RAW must never reach the parser).
+    netops.io/net-raw: allowed
 spec:
   replicas: {{ .Values.packet.capture.replicas }}
   selector:
@@ -37,6 +45,8 @@ spec:
         {{- include "netops.labels" . | nindent 8 }}
         app.kubernetes.io/component: packet-capture
         netops.io/packet-sandbox: "true"
+        # CAPTURE-ONLY NET_RAW deviation label (admission matches Pod labels).
+        netops.io/net-raw: allowed
     spec:
       serviceAccountName: packet-capture-sa
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}

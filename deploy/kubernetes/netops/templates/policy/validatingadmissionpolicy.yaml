@@ -27,13 +27,17 @@ spec:
         object.spec.containers.all(c,
           !c.image.endsWith(':latest') && (c.image.contains('@sha256:') || c.image.matches('.+:.+')))
       message: "Images must use a digest or explicit version tag, not latest (ADR-0029 §5)."
-    # NET_RAW / NET_ADMIN only where the packet-sandbox label is present.
+    # NET_RAW / NET_ADMIN only where the CAPTURE-ONLY net-raw label is present —
+    # NOT the broad packet-sandbox label. The analysis parser carries
+    # packet-sandbox but NOT net-raw, so it stays subject to this rule and a
+    # NET_RAW regression on it is denied (ADR-0031 §2). Mirrors the Kyverno
+    # rule-3 narrowing.
     - expression: >-
-        ('netops.io/packet-sandbox' in object.metadata.labels && object.metadata.labels['netops.io/packet-sandbox'] == 'true')
+        ('netops.io/net-raw' in object.metadata.labels && object.metadata.labels['netops.io/net-raw'] == 'allowed')
         || object.spec.containers.all(c,
              !has(c.securityContext) || !has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add)
              || c.securityContext.capabilities.add.all(cap, cap != 'NET_RAW' && cap != 'NET_ADMIN'))
-      message: "NET_RAW / NET_ADMIN may be added only by packet-sandbox workloads (ADR-0031 §5)."
+      message: "NET_RAW / NET_ADMIN may be added only by the packet-capture workload (ADR-0031 §2/§5)."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
