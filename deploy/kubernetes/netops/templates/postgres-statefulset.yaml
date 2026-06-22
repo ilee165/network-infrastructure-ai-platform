@@ -82,33 +82,39 @@ spec:
             {{- toYaml .Values.services.postgres.resources | nindent 12 }}
           startupProbe:
             exec:
+              # exec-probe argv runs directly (no shell) and does NOT undergo
+              # $(VAR) substitution — that only applies to container command/args.
+              # Wrap in `sh -c` so POSTGRES_USER/POSTGRES_DB expand at probe time
+              # (mirrors the redis template's documented pattern, ADR-0029 §7).
               command:
-                - pg_isready
-                - -U
-                - $(POSTGRES_USER)
-                - -d
-                - $(POSTGRES_DB)
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
             failureThreshold: 60
             periodSeconds: 5
           livenessProbe:
             exec:
+              # exec-probe argv runs directly (no shell) and does NOT undergo
+              # $(VAR) substitution — that only applies to container command/args.
+              # Wrap in `sh -c` so POSTGRES_USER/POSTGRES_DB expand at probe time
+              # (mirrors the redis template's documented pattern, ADR-0029 §7).
               command:
-                - pg_isready
-                - -U
-                - $(POSTGRES_USER)
-                - -d
-                - $(POSTGRES_DB)
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
             initialDelaySeconds: 0
             periodSeconds: 15
             failureThreshold: 3
           readinessProbe:
             exec:
+              # exec-probe argv runs directly (no shell) and does NOT undergo
+              # $(VAR) substitution — that only applies to container command/args.
+              # Wrap in `sh -c` so POSTGRES_USER/POSTGRES_DB expand at probe time
+              # (mirrors the redis template's documented pattern, ADR-0029 §7).
               command:
-                - pg_isready
-                - -U
-                - $(POSTGRES_USER)
-                - -d
-                - $(POSTGRES_DB)
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
             initialDelaySeconds: 0
             periodSeconds: 10
             failureThreshold: 3

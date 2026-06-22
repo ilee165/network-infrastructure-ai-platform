@@ -227,12 +227,17 @@ jobs:
 
       - name: Render chart
         run: |
+          # pipefail so a `helm template` failure propagates through the `| tr`
+          # pipe instead of being masked by tr's exit 0 (a false-green gate);
+          # `test -s` then guards an empty render.
+          set -o pipefail
           # Strip any CR bytes: conftest's multi-doc YAML splitter collapses a
           # CRLF render to a SINGLE evaluated document, silently passing every
           # deny rule (a false-green gate). Normalizing to LF keeps each rendered
           # document evaluated independently (ADR-0029 §5).
           helm template netops deploy/kubernetes/netops \
             --namespace netops --kube-version 1.29.0 | tr -d '\r' > rendered.yaml
+          test -s rendered.yaml
           echo "## Rendered chart objects" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           grep -E '^kind:' rendered.yaml | sort | uniq -c >> "$GITHUB_STEP_SUMMARY"
