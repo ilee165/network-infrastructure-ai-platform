@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -40,7 +41,8 @@ from pcap.fixture import (
     tombstoned_capture_ids,
 )
 from pcap.run_drill import run
-from pcap.snapshot import plan
+from pcap.snapshot import _effective_expiry, plan
+from pcap.snapshot import run as snapshot_run
 
 _SINK = io.StringIO  # fresh stream per assertion so emitted lines don't interleave.
 
@@ -215,6 +217,79 @@ def test_snapshot_planner_excludes_tombstoned_from_copy(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Requirement 3 (load-bearing): window = SHORTER OF (object-store policy) and the
+# pcap's retention_expires_at — object-store policy may NEVER extend a pcap past
+# its own retention (ADR-0030 §3). The clamp must be exercised with DIVERGENT
+# values in BOTH directions, else a prune bug silently extends payload lifetime.
+# ---------------------------------------------------------------------------
+
+
+def test_effective_expiry_clamps_to_retention_when_retention_is_shorter() -> None:
+    # retention_expires_at = now + 5d under policy_days=30 → retention is the SHORTER
+    # window, so policy must NOT extend the copy past the pcap's own retention.
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    retention = now + timedelta(days=5)
+    effective = _effective_expiry(retention, policy_days=30, now=now)
+    assert effective == retention
+    # Proof the policy window (now+30d) was the LONGER value that got rejected.
+    assert effective < now + timedelta(days=30)
+
+
+def test_effective_expiry_clamps_to_policy_when_policy_is_shorter() -> None:
+    # Inverse: retention far in the future (now+90d), policy_days=30 → policy is the
+    # SHORTER window, so the copy expires at now+policy_days, not at retention.
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    retention = now + timedelta(days=90)
+    effective = _effective_expiry(retention, policy_days=30, now=now)
+    assert effective == now + timedelta(days=30)
+    assert effective < retention
+
+
+def test_planner_effective_expiry_is_retention_when_retention_is_shorter(tmp_path) -> None:
+    # End-to-end through plan(): a live capture whose retention_expires_at is strictly
+    # earlier than now+policy_days must surface effective_expiry == retention_expires_at
+    # in the COPY row (policy cannot extend it). This is the prune-bug guardrail the
+    # spec's Risks section names.
+    async def _body() -> None:
+        state = await build_seeded_state(tmp_path / "pcaps")
+        # Shrink the live capture's retention to now+5d so it is strictly shorter than
+        # the 30-day policy below, then re-plan.
+        async with state.sessionmaker() as session:
+            from sqlalchemy import select, update
+
+            from app.models.pcap_metadata import PcapMetadata
+            from app.models.mixins import utcnow
+
+            now = utcnow()
+            short_retention = now + timedelta(days=5)
+            await session.execute(
+                update(PcapMetadata)
+                .where(PcapMetadata.capture_id == state.live_capture_id)
+                .values(retention_expires_at=short_retention)
+            )
+            await session.commit()
+            row = (
+                await session.execute(
+                    select(PcapMetadata.retention_expires_at).where(
+                        PcapMetadata.capture_id == state.live_capture_id
+                    )
+                )
+            ).scalar_one()
+
+            doc = await plan(
+                session, pcap_dir=tmp_path / "pcaps", policy_days=30, now=now
+            )
+        live_row = next(
+            r for r in doc["copy"] if r["capture_id"] == str(state.live_capture_id)
+        )
+        # effective_expiry equals the (shorter) retention, NOT now+30d policy.
+        assert live_row["effective_expiry"] == row.isoformat()
+        assert datetime.fromisoformat(live_row["effective_expiry"]) < now + timedelta(days=30)
+
+    asyncio.run(_body())
+
+
+# ---------------------------------------------------------------------------
 # End-to-end green dry-run (the P1 gate, P1-PLAN.md §6).
 # ---------------------------------------------------------------------------
 
@@ -259,3 +334,42 @@ def test_full_drill_refuses_sub_engineer_actor(tmp_path, capsys) -> None:
     out = capsys.readouterr().out
     assert "restore_authorized=FAIL" in out
     assert "OUTCOME=FAIL" in out
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed empty-plan guard (ADR-0030 §3): a missing DSN with no explicit
+# dry-run must FAIL the snapshot (non-zero, no plan file) — never a green empty
+# snapshot of nothing. The `test -s` file-size guard alone is tautological because
+# the planner always wrote a structurally-valid empty doc; the real guard is here.
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_fails_closed_when_dsn_unset_and_not_dry_run(tmp_path, monkeypatch) -> None:
+    # No DB DSN and PCAP_SNAPSHOT_DRY_RUN unset → the planner must FAIL CLOSED
+    # (rc != 0) and write NO plan file, so the job cannot pass as a green no-op.
+    monkeypatch.delenv("PCAP_DRILL_DB_URL", raising=False)
+    monkeypatch.delenv("PCAP_SNAPSHOT_DRY_RUN", raising=False)
+    plan_out = tmp_path / "plan.json"
+    rc = snapshot_run(
+        ["--pcap-dir", str(tmp_path / "pcaps"), "--plan-out", str(plan_out)]
+    )
+    assert rc == 1
+    assert not plan_out.exists()
+
+
+def test_snapshot_dry_run_allows_empty_plan_when_dsn_unset(tmp_path, monkeypatch) -> None:
+    # No DSN but PCAP_SNAPSHOT_DRY_RUN explicitly set → the P1 dry-run path: an
+    # empty structurally-valid plan is emitted (rc 0) and the plan file is written.
+    monkeypatch.delenv("PCAP_DRILL_DB_URL", raising=False)
+    monkeypatch.setenv("PCAP_SNAPSHOT_DRY_RUN", "1")
+    plan_out = tmp_path / "plan.json"
+    rc = snapshot_run(
+        ["--pcap-dir", str(tmp_path / "pcaps"), "--plan-out", str(plan_out)]
+    )
+    assert rc == 0
+    assert plan_out.exists()
+    import json as _json
+
+    doc = _json.loads(plan_out.read_text(encoding="utf-8"))
+    assert doc["copy"] == []
+    assert doc["prune"] == []

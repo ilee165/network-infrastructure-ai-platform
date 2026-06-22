@@ -122,25 +122,55 @@ async def plan(
     }
 
 
+class SnapshotPlanError(RuntimeError):
+    """The planner cannot produce a trustworthy plan (fail closed, never green-empty)."""
+
+
+def _dry_run_enabled() -> bool:
+    """Whether the empty-plan-is-OK path is explicitly opted into (P1 gate only).
+
+    ADR-0030 §3 / backup-DR fail-closed: a missing DSN must FAIL the job unless the
+    operator has explicitly declared a dry-run. Truthy values: ``1/true/yes/on``.
+    """
+    return os.environ.get("PCAP_SNAPSHOT_DRY_RUN", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 async def _plan_from_db(args: argparse.Namespace) -> dict[str, object]:
     """Build the plan against the configured DB, or an empty-but-valid plan in P1.
 
     P1 has no live DB reachable from the snapshot pod's dry-run; when no DB URL is
-    configured the planner returns a structurally-valid plan with empty copy/prune
-    sets so the CronJob's ``test -s`` guard still sees non-empty JSON and the gate
-    is green. P2 sets ``PCAP_DRILL_DB_URL`` to the async DSN.
+    configured AND ``PCAP_SNAPSHOT_DRY_RUN`` is explicitly set, the planner returns a
+    structurally-valid plan with empty copy/prune sets so the CronJob's ``test -s``
+    guard sees non-empty JSON and the gate is green. When the DSN is unset and
+    dry-run is NOT declared, the planner FAILS CLOSED (raises) rather than emitting a
+    green snapshot of nothing — a backup tier that silently backs up nothing is worse
+    than one that fails loudly (ADR-0030 §3). P2 sets ``PCAP_DRILL_DB_URL`` to the
+    async DSN.
     """
     db_url = os.environ.get("PCAP_DRILL_DB_URL")
     pcap_dir = Path(args.pcap_dir)
     if not db_url:
+        if not _dry_run_enabled():
+            raise SnapshotPlanError(
+                "PCAP_DRILL_DB_URL is unset and PCAP_SNAPSHOT_DRY_RUN is not enabled: "
+                "refusing to emit an empty no-op plan (would be a green snapshot of "
+                "nothing). Set the DSN for a real plan, or PCAP_SNAPSHOT_DRY_RUN=1 to "
+                "opt into the P1 empty dry-run."
+            )
         return {
             "generated_at": utcnow().isoformat(),
             "pcap_dir": str(pcap_dir),
             "policy_days": args.retention_days,
             "copy": [],
             "prune": [],
-            "note": "P1 dry-run: no live DB configured (PCAP_DRILL_DB_URL unset); "
-            "plan is structurally valid and empty. P2 supplies the DSN.",
+            "note": "P1 dry-run: no live DB configured (PCAP_DRILL_DB_URL unset) and "
+            "PCAP_SNAPSHOT_DRY_RUN set; plan is structurally valid and empty. P2 "
+            "supplies the DSN.",
         }
     engine = create_async_engine(db_url)
     maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -192,8 +222,14 @@ def run(argv: Sequence[str] | None = None, *, stream: TextIO | None = None) -> i
             )
         return 0
 
-    # PLAN phase: build the plan and write/print it.
-    plan_doc = asyncio.run(_plan_from_db(args))
+    # PLAN phase: build the plan and write/print it. A fail-closed planner (missing
+    # DSN, dry-run not declared) returns non-zero and writes NO plan file, so the
+    # job fails loudly instead of producing a green empty snapshot (ADR-0030 §3).
+    try:
+        plan_doc = asyncio.run(_plan_from_db(args))
+    except SnapshotPlanError as exc:
+        print(f"[pcap-snapshot] FAIL: {exc}", file=sys.stderr, flush=True)
+        return 1
     text = json.dumps(plan_doc, indent=2)
     if args.plan_out:
         Path(args.plan_out).write_text(text, encoding="utf-8")

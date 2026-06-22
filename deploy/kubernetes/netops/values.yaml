@@ -511,6 +511,12 @@ backup:
     # to the ADR-0023 §4 30-day tombstone window so the two are aligned by default;
     # the snapshot/prune script clamps per-file to retention_expires_at regardless.
     retentionDays: 30
+    # Fail-closed dry-run switch (ADR-0030 §3). true = P1 plan-only: with NO live DB
+    # DSN reachable the planner is ALLOWED to emit an empty structurally-valid plan
+    # so the gate is a green dry-run. Set FALSE in P2 (live DSN supplied) so a
+    # missing/unreachable DB FAILS the job loudly instead of producing a green
+    # snapshot of nothing.
+    dryRun: true
     # Bound concurrency + history so a long snapshot never overlaps the next tick.
     concurrencyPolicy: Forbid
     startingDeadlineSeconds: 3600

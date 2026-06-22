@@ -29,8 +29,11 @@ metadata and WRITES the object store; it opens NO new read door (ADR-0023 §5).
 W4-LESSONS guards applied:
   L3 — every `$VAR` lives inside ONE `sh -c '...'`; the k8s exec argv never does
        its own $(VAR) substitution.
-  L5 — `set -o pipefail` AND a `test -s` non-empty guard on the snapshot manifest
-       pipe, so a silently-empty snapshot set FAILS the job (never "succeeds").
+  L5 — `set -o pipefail` AND a fail-closed planner: with no reachable DB DSN the
+       planner refuses an empty no-op plan (non-zero, no plan file) UNLESS
+       PCAP_SNAPSHOT_DRY_RUN is explicitly declared, so a silently-empty snapshot
+       set FAILS the job (never "succeeds"). The `test -s` on plan.json is the
+       belt-and-braces follow-up, not the primary guard.
   L4 — this Job generates NO chart secret (it references existing Secret keys);
        nothing to make idempotent here (the dev placeholder lives in secret.yaml,
        lookup-idempotent there).
@@ -107,9 +110,14 @@ spec:
                     --retention-days "${PCAP_RETENTION_DAYS}" \
                     --plan-out /tmp/pcap-snapshot/plan.json \
                     | tee /tmp/pcap-snapshot/plan.log
-                  echo "[pcap-snapshot] assert the snapshot plan is NON-EMPTY (L5)"
-                  # A silently-empty plan (no DB reachable, planner no-op) must FAIL
-                  # the job, not pass it as a green snapshot of nothing.
+                  echo "[pcap-snapshot] assert the snapshot plan exists (L5 belt-and-braces)"
+                  # The PRIMARY empty-snapshot guard lives in the planner: with no DB
+                  # reachable it FAILS CLOSED (non-zero, no plan file written) unless
+                  # PCAP_SNAPSHOT_DRY_RUN is explicitly set — so a DB-unreachable /
+                  # planner-no-op run cannot pass as a green snapshot of nothing
+                  # (set -e above already aborts on that non-zero). This `test -s` is
+                  # the belt-and-braces follow-up: if the planner somehow exited 0 but
+                  # wrote no plan file, fail here too.
                   test -s /tmp/pcap-snapshot/plan.json
                   echo "[pcap-snapshot] copy LIVE files + prune tombstoned/expired object copies"
                   # The planner applies the plan via the configured object-store
@@ -129,6 +137,14 @@ spec:
                 # §3). Passed as a value so the planner re-bases on one source.
                 - name: PCAP_RETENTION_DAYS
                   value: {{ $p.retentionDays | quote }}
+                # Fail-closed switch (ADR-0030 §3). When NO DB DSN is reachable the
+                # planner refuses to emit an empty no-op plan UNLESS dry-run is
+                # explicitly declared — so a P2 missing/unreachable DSN FAILS the job
+                # (loud) instead of producing a green snapshot of nothing. P1 ships a
+                # plan-only dry-run (no live store), so dry-run is opted IN here; P2
+                # supplies a real DSN and sets this false.
+                - name: PCAP_SNAPSHOT_DRY_RUN
+                  value: {{ $p.dryRun | quote }}
                 # The pcap engine reads its on-disk layout + retention defaults from
                 # the app package; PYTHONPATH carries both app and the drills/ dir
                 # (so `import pcap.snapshot` resolves alongside `app.models...`).
