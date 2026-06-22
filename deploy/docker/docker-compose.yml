@@ -42,19 +42,28 @@ services:
     # Healthcheck (GET /api/v1/health/live) is baked into the image.
 
   # Celery worker - same image as `api`, command overridden to consume the
-  # four canonical D8 queues (ADR-0008) plus the default `system` queue
+  # general D8 queues (ADR-0008) plus the default `system` queue
   # (system.* tasks, e.g. the system.healthcheck broker round-trip probe).
+  #
+  # NOTE (ADR-0031 §1 / P1 W3): the `packet` queue is split OUT of this shared
+  # worker into the dedicated, OS-isolated `packet-analysis` service below — the
+  # untrusted-pcap parser must never share a process with credential-bearing,
+  # broadly-egressing general workers. This matches the Helm chart's two-Deployment
+  # split (capture + analysis). Compose deferral: a fully-separated privileged
+  # `packet-capture` worker (NET_RAW, management-subnet egress) is the K8s
+  # capture-Deployment's concern and is NOT modelled in this dev Compose stack —
+  # local dev captures are typically driven device-side, and adding NET_RAW to a
+  # dev container would weaken the very posture this split exists to demonstrate.
+  # The required, security-load-bearing half — the hardened analysis sandbox in
+  # lockstep with the K8s analysis profile (seccomp, cap_drop, read_only,
+  # resource limits) — IS modelled, below.
   worker:
     build:
       context: ../..
       dockerfile: deploy/docker/backend.Dockerfile
     image: netops-backend:dev
-    command: celery -A app.workers.celery_app worker -Q discovery,config,packet,docs,system
+    command: celery -A app.workers.celery_app worker -Q discovery,config,docs,system
     env_file: ../../.env
-    volumes:
-      # pcap artifact volume: the packet capture worker writes captures here and
-      # the retention beat (packet.purge_expired) deletes expired files (ADR-0023).
-      - pcaps:/data/pcaps
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,6 +74,54 @@ services:
     restart: unless-stopped
     # The image HEALTHCHECK targets uvicorn on :8000, which the worker does
     # not serve - override with a Celery broker round-trip ping.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app inspect ping --timeout 10"]
+      interval: 30s
+      timeout: 15s
+      start_period: 30s
+      retries: 3
+
+  # Packet-analysis sandbox (ADR-0031 §2/§3) — the UNTRUSTED-pcap parser, hardened
+  # in lockstep with the Helm `packet-analysis` Deployment. tshark's C dissectors
+  # carry parsing CVEs and the pcap bytes are remote-attacker-controlled, so this
+  # service runs with the SAME OS-isolation profile as the K8s analysis pod:
+  #   - seccomp: the deny-by-default Localhost profile, byte-for-byte the file the
+  #     chart references (seccomp lockstep, ADR-0031 §3).
+  #   - cap_drop:[ALL], no add — the parser holds zero Linux capabilities (NO NET_RAW).
+  #   - read_only root filesystem + a single bounded tmpfs scratch at the pyshark
+  #     temp path (the K8s `emptyDir` scratch equivalent).
+  #   - non-root, no-new-privileges (allowPrivilegeEscalation:false equivalent).
+  #   - pcap volume mounted READ-ONLY (parser cannot alter/delete evidence).
+  #   - mem/cpu limits so an adversarial capture is OOM/CPU-bound, not node-exhausting.
+  packet-analysis:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/backend.Dockerfile
+    image: netops-backend:dev
+    command: celery -A app.workers.celery_app worker -Q packet_analysis
+    env_file: ../../.env
+    # Seccomp lockstep with the Helm chart (ADR-0031 §3): same JSON, two targets.
+    security_opt:
+      - "no-new-privileges:true"
+      - "seccomp=./seccomp/packet-analysis-seccomp.json"
+    cap_drop:
+      - ALL
+    user: "10001:10001"
+    read_only: true
+    volumes:
+      # Read-ONLY pcap volume: the parser reads bytes, never writes/deletes them.
+      - pcaps:/data/pcaps:ro
+    tmpfs:
+      # The SINGLE bounded writable scratch — the tshark/pyshark temp path.
+      - /tmp/pyshark:size=512m
+    mem_limit: 1g
+    cpus: 2.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "celery -A app.workers.celery_app inspect ping --timeout 10"]
       interval: 30s

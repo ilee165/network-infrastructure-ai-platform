@@ -178,3 +178,92 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
+
+  # Policy-as-test for the K8s/Helm declarative half (P1 W3, ADR-0031 +
+  # ADR-0029 §3/§5). This job is the evidence that flips the M5 PARTIAL
+  # packet-sandbox sign-off (ADR-0031 §7): it renders the chart and asserts every
+  # OS-isolation / hardening control on the rendered manifests. It runs
+  # independently of the image jobs (no `needs`) — the manifests do not depend on
+  # built images. trivy config scans the chart for IaC misconfig; cosign is N/A
+  # here (W3 adds no new image refs — the packet workloads reuse netops-backend).
+  infra:
+    name: infra (helm lint, kubeconform, kube-linter, conftest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL -o /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      - name: Install kube-linter
+        run: |
+          curl -sSL -o /tmp/kube-linter.tar.gz \
+            https://github.com/stackrox/kube-linter/releases/download/v0.7.1/kube-linter-linux.tar.gz
+          tar -xzf /tmp/kube-linter.tar.gz -C /usr/local/bin kube-linter
+          kube-linter version
+
+      - name: Install conftest
+        run: |
+          curl -sSL -o /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+          tar -xzf /tmp/conftest.tar.gz -C /usr/local/bin conftest
+          conftest --version
+
+      - name: Helm lint
+        run: helm lint deploy/kubernetes/netops
+
+      - name: Render chart
+        run: |
+          helm template netops deploy/kubernetes/netops \
+            --namespace netops --kube-version 1.29.0 > rendered.yaml
+          echo "## Rendered chart objects" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^kind:' rendered.yaml | sort | uniq -c >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # Schema-validate core resources strictly; the Kyverno ClusterPolicy is a
+      # CRD (no built-in schema) so it is skipped, not failed.
+      - name: kubeconform (strict)
+        run: |
+          kubeconform -strict -summary \
+            -kubernetes-version 1.29.0 \
+            -ignore-missing-schemas \
+            -skip ClusterPolicy \
+            rendered.yaml
+
+      # kube-linter's curated default (security) check set; the single
+      # documented packet-capture NET_RAW deviation is suppressed at the object
+      # level (annotation) — the parser is still guarded.
+      - name: kube-linter
+        run: kube-linter lint rendered.yaml --config deploy/kubernetes/.kube-linter.yaml
+
+      # The policy-as-test gate: every ADR-0031 / ADR-0029 control asserted on
+      # the rendered manifests. Fails the build on any violation.
+      - name: conftest (OPA policy-as-test)
+        run: |
+          conftest test rendered.yaml \
+            --policy deploy/kubernetes/policy/rego \
+            --namespace netops.hardening \
+            --all-namespaces
+
+      # IaC misconfiguration scan of the chart + compose (config target). No new
+      # image refs are introduced in W3, so trivy image / cosign verify are N/A.
+      - name: Trivy config scan (chart + compose)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: deploy
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+          format: table

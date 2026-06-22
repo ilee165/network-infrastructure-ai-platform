@@ -41,6 +41,10 @@ from app.engines.packet.filters import (
     FilterValidationError,
     validate_capture_filter,
 )
+from app.engines.packet.posture import (
+    PostureError,
+    assert_sandbox_posture,
+)
 from app.engines.packet.sandbox import (
     SandboxError,
     analyze_pcap,
@@ -55,9 +59,11 @@ __all__ = [
     "Conversation",
     "FilterValidationError",
     "PacketFindings",
+    "PostureError",
     "ProtocolCount",
     "SandboxError",
     "analyze_pcap",
+    "assert_sandbox_posture",
     "build_eos_capture_commands",
     "build_eos_finalize_commands",
     "build_tcpdump_argv",

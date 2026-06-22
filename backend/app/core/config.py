@@ -102,6 +102,15 @@ class Settings(BaseSettings):
     packet_capture_duration_seconds: int = 300
     packet_capture_size_bytes: int = 50 * 1024 * 1024
 
+    #: packet-analysis sandbox runtime posture gate (ADR-0031 §2). The analysis
+    #: worker asserts its OS-isolation posture (non-root effective UID, no
+    #: CAP_NET_RAW in the permitted set, read-only root filesystem) before it
+    #: spawns tshark, and refuses otherwise so a misconfigured deployment fails
+    #: closed rather than silently running unconfined. ON by default
+    #: (secure-by-default, opt-out only): set ``false`` ONLY for the eager
+    #: unit-test/CI runner where the sandbox OS controls are not applied.
+    packet_sandbox_posture_enforced: bool = True
+
     #: pcap-retention beat schedule (ADR-0023 §4): the UTC hour/minute the
     #: ``packet.purge_expired`` task fires at. Default 03:00 UTC.
     pcap_retention_hour: int = 3

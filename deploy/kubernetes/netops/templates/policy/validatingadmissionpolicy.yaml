@@ -1,0 +1,56 @@
+{{- /*
+Admission policy — ValidatingAdmissionPolicy fallback (ADR-0029 §5) for clusters
+that forbid an admission webhook (no Kyverno). CEL expressions enforce the same
+intent: no `latest`, and NET_RAW only on the packet-sandbox label selector.
+Rendered only when admission.engine == "vap". Signed-image verification is NOT
+expressible in core VAP (no cosign), so that rule stays Kyverno-only; a VAP
+cluster pairs this with an external image-signature controller (documented gap).
+*/ -}}
+{{- if and .Values.admission.enabled (eq .Values.admission.engine "vap") }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: netops-hardening-baseline
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+spec:
+  failurePolicy: {{ .Values.admission.failurePolicy }}
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  validations:
+    # No `latest` / untagged image references.
+    - expression: >-
+        object.spec.containers.all(c,
+          !c.image.endsWith(':latest') && (c.image.contains('@sha256:') || c.image.matches('.+:.+')))
+      message: "Images must use a digest or explicit version tag, not latest (ADR-0029 §5)."
+    # NET_RAW / NET_ADMIN only where the CAPTURE-ONLY net-raw label is present —
+    # NOT the broad packet-sandbox label. The analysis parser carries
+    # packet-sandbox but NOT net-raw, so it stays subject to this rule and a
+    # NET_RAW regression on it is denied (ADR-0031 §2). Mirrors the Kyverno
+    # rule-3 narrowing.
+    - expression: >-
+        ('netops.io/net-raw' in object.metadata.labels && object.metadata.labels['netops.io/net-raw'] == 'allowed')
+        || object.spec.containers.all(c,
+             !has(c.securityContext) || !has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add)
+             || c.securityContext.capabilities.add.all(cap, cap != 'NET_RAW' && cap != 'NET_ADMIN'))
+      message: "NET_RAW / NET_ADMIN may be added only by the packet-capture workload (ADR-0031 §2/§5)."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: netops-hardening-baseline
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+spec:
+  policyName: netops-hardening-baseline
+  validationActions:
+    - Deny
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Release.Namespace }}
+{{- end }}

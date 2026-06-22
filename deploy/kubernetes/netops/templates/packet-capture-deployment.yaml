@@ -1,0 +1,100 @@
+{{- /*
+packet-capture Deployment (ADR-0031 §1) — the TRUSTED-input, privileged half.
+- caps: drop ALL, add NET_RAW + NET_ADMIN (worker-side tcpdump) — granted ONLY
+  here, ONLY on the tainted packet pool, so a raw-socket-capable pod can never
+  co-schedule with a general platform pod (taint repels; selector attracts).
+- still non-root, no privileged:true, readOnlyRootFilesystem.
+- writes the pcap volume read-write (capture file hand-off to analysis).
+- carries the netops.io/packet-sandbox label that the admission allow-list
+  matches as the SOLE permitted NET_RAW / non-default-seccomp deviation.
+*/ -}}
+{{- if and .Values.packet.enabled .Values.packet.capture.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: packet-capture
+  # Capture lives in its OWN namespace at a relaxed PSA level (ADR-0031 §5): it
+  # adds NET_RAW, which built-in Pod Security Admission rejects under restricted
+  # and a pod label cannot exempt. See namespace-packet-capture.yaml.
+  namespace: {{ include "netops.captureNamespace" . }}
+  annotations:
+    # Documented PSS deviation (ADR-0031 §1/§5): the capture half legitimately
+    # adds NET_RAW (raw/packet socket, worker-side tcpdump). Suppressed at the
+    # object level ONLY — the parser (packet-analysis) is NOT annotated and is
+    # still checked by drop-net-raw-capability. Gated singularly by the
+    # admission allow-list (ADR-0029 §5).
+    ignore-check.kube-linter.io/drop-net-raw-capability: "ADR-0031 §1: capture-only NET_RAW, scoped to the tainted packet node pool and admission allow-listed"
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: packet-capture
+    # packet-sandbox: shared with analysis (Localhost-seccomp deviation allow-list).
+    netops.io/packet-sandbox: "true"
+    # net-raw: CAPTURE-ONLY — the narrow NET_RAW deviation allow-list. The analysis
+    # parser does NOT carry this, so it stays subject to the restrict-net-raw
+    # admission rule (ADR-0031 §2 — NET_RAW must never reach the parser).
+    netops.io/net-raw: allowed
+spec:
+  replicas: {{ .Values.packet.capture.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "netops.name" . }}
+      app.kubernetes.io/component: packet-capture
+  template:
+    metadata:
+      labels:
+        {{- include "netops.labels" . | nindent 8 }}
+        app.kubernetes.io/component: packet-capture
+        netops.io/packet-sandbox: "true"
+        # CAPTURE-ONLY NET_RAW deviation label (admission matches Pod labels).
+        netops.io/net-raw: allowed
+    spec:
+      serviceAccountName: packet-capture-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      # Dedicated packet node pool (ADR-0031 §5): toleration matches the taint;
+      # nodeSelector is complementary (attracts), the taint is what repels
+      # general pods.
+      tolerations:
+        {{- include "netops.packetToleration" . | nindent 8 }}
+      nodeSelector:
+        {{- toYaml .Values.packetNodePool.nodeSelector | nindent 8 }}
+      containers:
+        - name: packet-capture
+          image: {{ include "netops.backendImage" . }}
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          command:
+            {{- toYaml .Values.packet.capture.command | nindent 12 }}
+          securityContext:
+            runAsNonRoot: {{ .Values.hardening.securityContext.runAsNonRoot }}
+            runAsUser: {{ .Values.hardening.securityContext.runAsUser }}
+            runAsGroup: {{ .Values.hardening.securityContext.runAsGroup }}
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: {{ .Values.hardening.securityContext.readOnlyRootFilesystem }}
+            privileged: false
+            capabilities:
+              drop:
+                {{- range .Values.hardening.securityContext.capabilitiesDrop }}
+                - {{ . }}
+                {{- end }}
+              add:
+                {{- toYaml .Values.packet.capture.capabilities.add | nindent 16 }}
+            seccompProfile:
+              type: {{ .Values.hardening.podSeccompProfile.type }}
+          resources:
+            {{- toYaml .Values.packet.capture.resources | nindent 12 }}
+          volumeMounts:
+            # Read-WRITE pcap volume: capture writes the file here.
+            - name: pcaps
+              mountPath: {{ .Values.packet.pcapVolume.mountPath }}
+              readOnly: false
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: pcaps
+          emptyDir:
+            sizeLimit: {{ .Values.packet.pcapVolume.emptyDir.sizeLimit }}
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi
+{{- end }}
