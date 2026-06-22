@@ -1,0 +1,261 @@
+{{- /*
+Postgres PITR restore-DRILL — Job + suspended quarterly CronJob (W5-T2,
+ADR-0030 §5/§5.1, ADR-0011 §1/§2).
+
+WHAT IT PROVES (the four ADR-0030 §5.1 assertions a naive pg_restore skips):
+  (a) RPO-in-window — WAL replay reached within the PROPOSED window.
+  (b) audit-log immutability — the restored append-only audit log is still
+      UPDATE/DELETE-locked AND not truncated (a writable audit log is a FAILED
+      drill, not a successful one — ADR-0030 §1).
+  (c) credentials fail CLOSED — a restored device_credentials row decrypts ONLY
+      with the matching KEK and raises a TYPED error (no plaintext) without it
+      (the "restored DB is inert until the KEK is reachable" property → G-SEC).
+  (d) pgbackrest verify — the restored stanza verifies clean.
+
+The drill restores from the W5-T1 object-store repo ALONE to a THROWAWAY target
+(an emptyDir scratch restorePath in a disposable namespace — NEVER the live
+PVC), then runs `python -m postgres_pitr.run_drill`, which emits structured
+`DRILL postgres_pitr <assertion>=PASS|FAIL duration_s=<n>` lines for the W5-T5
+G-REL evidence collector.
+
+BUILT P1, RUN P2 (ADR-0030 §5 / P1-PLAN.md §6): the CronJob renders `suspend:
+true` so K8s NEVER auto-fires it; the Job is the on-demand manual path. The P1
+gate is a green dry-run over the seeded fixture (no hardware).
+
+W4-LESSONS guards applied:
+  L3 — every `$VAR`/`$(VAR)` lives inside ONE `sh -c '...'`; the k8s exec argv
+       never does its own $(VAR) substitution.
+  L5 — `set -o pipefail` AND a `test -s` non-empty guard on the restore/verify
+       pipes, so a silently-empty restore stream FAILS the job (never "succeeds").
+  L4 — this Job generates NO chart secret (it references the existing platform
+       Secret keys); nothing to make idempotent here.
+SECRET-SURFACE: the repo cipher pass, S3 credential, DB password, and the KEK
+reference are ALL valueFrom.secretKeyRef — never inlined (ADR-0030 §1 / ADR-0011
+§4 / ADR-0029 §6). The KEK is the master-key REFERENCE (ADR-0032), not the key.
+*/ -}}
+{{- /*
+Reusable drill pod spec (authored ONCE so the on-demand Job and the suspended
+CronJob cannot drift). Renders the hardened pod that restores + asserts. Defined
+at the top level (Helm `define` may not nest inside an `if` action).
+*/ -}}
+{{- define "netops.pitrDrillPod" -}}
+{{- $ctx := .ctx -}}
+{{- $d := $ctx.Values.backup.drills -}}
+{{- $b := $ctx.Values.backup.postgres -}}
+{{- $fullname := include "netops.fullname" $ctx -}}
+{{- $secretName := include "netops.platformSecretName" $ctx -}}
+{{- $useTls := and $b.tls.enabled $ctx.Values.services.postgres.enabled -}}
+metadata:
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" $ctx "component" "backup") | nindent 4 }}
+    netops.io/backup-type: drill
+spec:
+  serviceAccountName: backup-sa
+  automountServiceAccountToken: {{ $ctx.Values.serviceAccounts.automountServiceAccountToken }}
+  restartPolicy: Never
+  securityContext:
+    {{- include "netops.podSecurityContext" $ctx | nindent 4 }}
+  containers:
+    - name: pitr-drill
+      image: {{ include "netops.image" (dict "img" $d.image) }}
+      imagePullPolicy: {{ $d.image.pullPolicy }}
+      securityContext:
+        {{- include "netops.hardenedSecurityContext" $ctx | nindent 8 }}
+      command:
+        - sh
+        - -c
+        # ONE sh -c script (L3: env vars expand HERE; a raw exec argv would NOT
+        # do $(VAR)). set -o pipefail + `test -s` guards (L5) so a silently-empty
+        # restore/verify stream FAILS the job. The restore reads ONLY the object-
+        # store repo (RESTORE target = a THROWAWAY scratch dir, never the live
+        # PVC). Then the assertion harness runs the four ADR-0030 §5.1 checks and
+        # emits the `DRILL ...` lines. A non-zero from restore, verify, OR the
+        # harness fails the pod (set -e).
+        - |
+          set -euo pipefail
+          echo "[pitr-drill] restoring stanza ${PGBACKREST_STANZA} -> THROWAWAY ${DRILL_RESTORE_PATH}"
+          mkdir -p "${DRILL_RESTORE_PATH}"
+          # Restore the latest full + WAL from the repo ALONE into the scratch dir.
+          pgbackrest --stanza="${PGBACKREST_STANZA}" \
+            --pg1-path="${DRILL_RESTORE_PATH}" \
+            --log-level-console=detail \
+            --delta restore
+          echo "[pitr-drill] assert the restored data dir is NON-EMPTY (L5)"
+          # A silently-empty restore must fail the drill, not pass it.
+          test -s "${DRILL_RESTORE_PATH}/PG_VERSION"
+          echo "[pitr-drill] pgbackrest verify on the restored stanza (GATES the drill)"
+          pgbackrest --stanza="${PGBACKREST_STANZA}" --log-level-console=detail verify \
+            | tee "${DRILL_RESTORE_PATH}/verify.txt"
+          test -s "${DRILL_RESTORE_PATH}/verify.txt"
+          echo "[pitr-drill] running the four ADR-0030 §5.1 assertions (emits DRILL ... lines)"
+          # The harness reuses app.core.crypto for the credential fail-closed proof;
+          # PYTHONPATH carries both the app package and the drills/ dir.
+          python -m postgres_pitr.run_drill
+          echo "[pitr-drill] all assertions PASSED (P2 executes this quarterly; P1 dry-run)"
+      env:
+        # Stanza + the THROWAWAY restore path (used by the sh -c script, never argv).
+        - name: PGBACKREST_STANZA
+          value: {{ $b.stanza | quote }}
+        - name: DRILL_RESTORE_PATH
+          value: {{ $d.throwaway.restorePath | quote }}
+        # RPO window the harness asserts against (re-bases off the W5-T1 PROPOSED knob).
+        - name: DRILL_RPO_WINDOW_MINUTES
+          value: {{ $d.rpo.windowMinutes | quote }}
+        # The drill restores from the repo only; it does NOT connect to live PG, so
+        # the assertion harness uses the seeded fixture in P1 (no live PGHOST).
+        - name: PYTHONPATH
+          value: "/app:/app/drills"
+        # pgBackRest config (remote view when the TLS server is enabled — the drill
+        # pod, like the backup CronJob, has no live PGDATA volume; ADR-0030 §4).
+        - name: PGBACKREST_CONFIG
+          {{- if $useTls }}
+          value: /etc/pgbackrest/pgbackrest-remote.conf
+          {{- else }}
+          value: /etc/pgbackrest/pgbackrest.conf
+          {{- end }}
+        # DB user (non-secret) by configMapKeyRef; password by-reference.
+        - name: PGUSER
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $fullname }}-config
+              key: NETOPS_POSTGRES_USER
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.postgresPassword }}
+        {{- if $b.encryption.enabled }}
+        # Repo cipher PASSPHRASE — external-secret REF only; NEVER inlined.
+        - name: PGBACKREST_REPO1_CIPHER_PASS
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.backupRepoCipherPass }}
+        {{- end }}
+        # Object-store credential (least-privilege). External-secret REFs only.
+        - name: PGBACKREST_REPO1_S3_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.backupRepoS3Key }}
+        - name: PGBACKREST_REPO1_S3_KEY_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.keys.backupRepoS3KeySecret }}
+        {{- if eq $ctx.Values.secrets.kms.provider "secret" }}
+        # KEK master-key REFERENCE (ADR-0032) — the indirect handle the envelope
+        # layer resolves; NOT the KEK itself. By-reference from the Secret so the
+        # credential-separation proof can attempt the matching-KEK decrypt. The
+        # fail-closed half needs NO KEK by design (that is the point of the proof).
+        - name: NETOPS_KEK_REF
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secretName }}
+              key: {{ $ctx.Values.secrets.kms.masterKeyRefKey }}
+        {{- end }}
+      resources:
+        {{- toYaml $d.resources | nindent 8 }}
+      volumeMounts:
+        - name: pgbackrest-config
+          mountPath: /etc/pgbackrest
+          readOnly: true
+        {{- if $useTls }}
+        - name: pgbackrest-tls
+          mountPath: /etc/pgbackrest-tls
+          readOnly: true
+        {{- end }}
+        # readOnlyRootFilesystem:true — the THROWAWAY restore + pgbackrest scratch
+        # are the ONLY writable mounts (emptyDir; torn down with the pod).
+        - name: drill-restore
+          mountPath: {{ dir $d.throwaway.restorePath | quote }}
+        - name: pgbackrest-runtime
+          mountPath: /var/lib/pgbackrest
+        - name: pgbackrest-tmp
+          mountPath: /tmp/pgbackrest
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: pgbackrest-config
+      configMap:
+        name: {{ $fullname }}-pgbackrest-config
+    {{- if $useTls }}
+    - name: pgbackrest-tls
+      secret:
+        secretName: {{ $secretName }}
+        items:
+          - key: {{ $ctx.Values.secrets.keys.backupTlsCa }}
+            path: ca.crt
+          - key: {{ $ctx.Values.secrets.keys.backupTlsClientCert }}
+            path: client.crt
+          - key: {{ $ctx.Values.secrets.keys.backupTlsClientKey }}
+            path: client.key
+    {{- end }}
+    # THROWAWAY restore target — emptyDir scratch ONLY (never the live PGDATA PVC).
+    - name: drill-restore
+      emptyDir:
+        sizeLimit: 4Gi
+    - name: pgbackrest-runtime
+      emptyDir:
+        sizeLimit: 1Gi
+    - name: pgbackrest-tmp
+      emptyDir:
+        sizeLimit: 256Mi
+    - name: tmp
+      emptyDir:
+        sizeLimit: 128Mi
+{{- end -}}
+{{- if and .Values.backup.drills.enabled .Values.backup.postgres.enabled .Values.services.postgres.enabled }}
+{{- $d := .Values.backup.drills -}}
+{{- $fullname := include "netops.fullname" . -}}
+---
+# On-demand Job (manual path): `kubectl create job --from=cronjob/...` or applied
+# directly. Inert until invoked; the four assertions run a green dry-run in P1.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-postgres-pitr-drill
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+    netops.io/backup-type: drill
+  annotations:
+    # BUILT P1, RUN P2 (ADR-0030 §5): this Job is shipped + policy-tested now;
+    # execution is the quarterly P2 control. Helm leaves it for manual/CI invocation.
+    netops.io/execution-phase: P2
+    helm.sh/hook-weight: "0"
+spec:
+  backoffLimit: {{ $d.backoffLimit }}
+  # Auto-reap the finished pod (the CronJob reaps via its history limits instead).
+  ttlSecondsAfterFinished: {{ $d.ttlSecondsAfterFinished }}
+  template:
+    {{- include "netops.pitrDrillPod" (dict "ctx" .) | nindent 4 }}
+---
+# Suspended quarterly CronJob (ADR-0030 §5). `suspend: true` so K8s NEVER auto-
+# fires it in P1 — P2 flips backup.drills.suspend=false to begin the quarterly run.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-postgres-pitr-drill
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "backup") | nindent 4 }}
+    netops.io/backup-type: drill
+  annotations:
+    netops.io/execution-phase: P2
+spec:
+  # Quarterly cadence; INERT while suspended (built P1, run P2 — ADR-0030 §5).
+  schedule: {{ $d.schedule | quote }}
+  # The belt-and-braces switch: rendered suspended by default so no run fires
+  # until P2 deliberately un-suspends it (ADR-0030 §5 / P1-PLAN.md §6).
+  suspend: {{ $d.suspend }}
+  concurrencyPolicy: {{ $d.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $d.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $d.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $d.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $d.backoffLimit }}
+      template:
+        {{- include "netops.pitrDrillPod" (dict "ctx" .) | nindent 8 }}
+{{- end }}

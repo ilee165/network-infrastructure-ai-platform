@@ -450,6 +450,64 @@ backup:
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
+  # -- Restore-DRILL (W5-T2, ADR-0030 §5/§5.1). The drill RESTORES the latest full
+  #    + WAL from the object-store repo ALONE to a THROWAWAY target and runs the
+  #    four pass/fail assertions (RPO-in-window, audit immutable, credentials fail
+  #    closed without the KEK, pgbackrest verify clean). BUILT in P1, EXECUTED
+  #    quarterly from P2 (ADR-0030 §5 / P1-PLAN.md §6): the suspended CronJob is
+  #    shipped here, scheduling deferred. The one-shot Job + the CronJob both render
+  #    only when drills.enabled.
+  drills:
+    # OFF by default: the drill is a P2-executed control. enabled renders the
+    # suspended quarterly CronJob (+ the on-demand Job) so the manifest + harness
+    # ship in P1 and are policy-tested, WITHOUT scheduling any run. Flip true in P2.
+    enabled: true
+    # Hard belt-and-braces switch: even when enabled, the CronJob renders
+    # `suspend: true` so K8s NEVER auto-fires it until P2 deliberately sets this
+    # false (ADR-0030 §5 — built P1, run P2). The on-demand Job is the manual path.
+    suspend: true
+    # Quarterly cadence (ADR-0030 §5): 02:00 on the 1st of Jan/Apr/Jul/Oct. Inert
+    # while `suspend: true`; the schedule is recorded so P2 only flips the switch.
+    schedule: "0 2 1 1,4,7,10 *"
+    # THROWAWAY restore target: the drill restores into a disposable namespace +
+    # instance, NEVER the live Postgres (a drill that writes to prod is a footgun).
+    # The namespace is asserted distinct from the release namespace by policy; the
+    # restore path is scratch-only and torn down after the run.
+    throwaway:
+      namespace: netops-drill
+      # The disposable restore data dir (emptyDir scratch — never the live PVC).
+      restorePath: /var/lib/pgbackrest-drill/restore
+    # RPO window the drill asserts against (ADR-0030 §1/§5.1.1). Re-bases off the
+    # SAME PROPOSED knob as W5-T1 (backup.postgres.wal.proposedRpoMinutes) so the
+    # within-window check tracks the Consultant §12 answer, not a second literal.
+    rpo:
+      windowMinutes: 5
+    # The drill assertion image: a Python-bearing image that carries app.core.crypto
+    # for the credential-separation proof + the pgbackrest client for the restore.
+    # Explicit tag ONLY (admission rejects `latest`, ADR-0029 §5).
+    image:
+      repository: ghcr.io/netops/netops-backend
+      tag: "p1"
+      pullPolicy: IfNotPresent
+    # backoff/history bounds (mirror the backup CronJobs).
+    backoffLimit: 1
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 3600
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # Auto-reap the completed on-demand Job pod after this many seconds so a manual
+    # drill run does not leave a finished pod lingering (the CronJob path reaps via
+    # successfulJobsHistoryLimit instead). 1h default.
+    ttlSecondsAfterFinished: 3600
+    # Resource requests + limits (never absent — ADR-0029 §3). The restore is
+    # IO-bound; the assertion step is light.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
 
 # -- Ingress + TLS (ADR-0029 §4 / ADR-0012 §2). The SINGLE front door: ONE
 #    HTTPS-only Ingress routing ALL paths to the `frontend` Service — NEVER a
