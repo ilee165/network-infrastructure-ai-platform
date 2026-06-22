@@ -542,3 +542,44 @@ class TestCaptureAnalysis:
             f"/api/v1/agents/captures/{capture_id}/analysis", headers=auth("operator")
         )
         assert resp.status_code == 403
+
+    async def test_analysis_fails_closed_on_bad_posture(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        auth: Callable[[str], dict[str, str]],
+        users: dict[str, User],
+        sessionmaker: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The synchronous analysis path runs the posture backstop too (ADR-0031 §2).
+
+        GET /captures/{id}/analysis must refuse to spawn tshark when the web pod
+        lacks the sandbox OS controls — non-root, no CAP_NET_RAW, RO rootfs — and
+        must NOT reach ``analyze_pcap`` with untrusted pcap bytes. Exercises the
+        REAL :func:`get_pcap_analyzer` (the stub override is removed) with
+        ``packet_sandbox_posture_enforced`` on and the posture seam forced to fail.
+        """
+        from app.engines.packet import posture as posture_mod
+
+        # Use the real analyzer (the app fixture stubs it for the happy path).
+        app.dependency_overrides.pop(agents_router.get_pcap_analyzer, None)
+        # Force enforcement on and make the posture check fail (web pod is root).
+        app.state.settings.packet_sandbox_posture_enforced = True
+        monkeypatch.setattr(posture_mod, "_effective_uid", lambda: 0)
+        # tshark must never be reached once posture fails closed.
+        analyzed: list[str] = []
+        monkeypatch.setattr(
+            agents_router, "analyze_pcap", lambda *a, **k: analyzed.append("called")
+        )
+
+        capture_id = await self._seed_capture(sessionmaker, users["engineer"])
+        resp = await client.get(
+            f"/api/v1/agents/captures/{capture_id}/analysis", headers=auth("engineer")
+        )
+
+        assert resp.status_code == 502
+        assert analyzed == []  # fail-closed: tshark was never spawned
+        body = resp.json()
+        # Only the failed posture control is named — never a credential or path.
+        assert "posture" in body["detail"].lower()
