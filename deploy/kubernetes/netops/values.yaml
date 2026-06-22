@@ -72,6 +72,294 @@ images:
     repository: netops-backend
     tag: "p1"
     pullPolicy: IfNotPresent
+  # W4 per-service images. The api + worker share the backend image (same
+  # uvicorn/celery process tree, ADR-0029 §1); frontend is the nginx static +
+  # same-origin reverse-proxy image (ADR-0012 §2). Data-store images are the
+  # ADR-0029 §1 table pins. EVERY tag is an explicit version — NEVER `latest`;
+  # the admission policy (ADR-0029 §5 rule 1) rejects mutable tags on render.
+  frontend:
+    repository: netops-frontend
+    tag: "p1"
+    pullPolicy: IfNotPresent
+  postgres:
+    repository: pgvector/pgvector
+    tag: "pg16"
+    pullPolicy: IfNotPresent
+  neo4j:
+    repository: neo4j
+    tag: "5-community"
+    pullPolicy: IfNotPresent
+  redis:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  ollama:
+    repository: ollama/ollama
+    tag: "0.5.4"
+    pullPolicy: IfNotPresent
+
+# -- Platform secrets posture (ADR-0029 §6 / ADR-0013 §4 / ADR-0011).
+#    REFERENCE ONLY: no credential material EVER appears here, in any template,
+#    or in Helm release history. Device credentials never become K8s objects —
+#    they stay AES-256-GCM-encrypted in Postgres (D11), enforced structurally.
+#
+#    Production path (PROPOSED, ADR-0029 §6): the external-secrets operator or a
+#    CSI secrets-store volume backed by the customer KMS/Vault populates the
+#    Secret named in `existingSecret`. The chart-rendered `secret.yaml` is a DEV
+#    CONVENIENCE that renders ONLY when `existingSecret` is empty, and prints a
+#    NOTES warning recommending external-secrets in production.
+secrets:
+  # Name of a pre-existing Secret holding the platform secrets. When set, the
+  # chart renders NO secret.yaml (the guard is `{{- if not .Values.secrets.existingSecret }}`).
+  # Leave empty ONLY for dev/test — a warned dev Secret is rendered instead.
+  existingSecret: ""
+  # Key NAMES inside that Secret (the chart references keys, never values):
+  keys:
+    # Postgres connection password (DB user the api/worker authenticate as).
+    postgresPassword: postgres-password
+    # Neo4j auth (user/password packed per the neo4j AUTH env contract).
+    neo4jAuth: neo4j-auth
+    # Redis broker/result-backend password.
+    redisPassword: redis-password
+    # OIDC/SSO client secret (ADR-0028 §4) — the confidential-client secret the
+    # api exchanges at the token endpoint. REFERENCE ONLY.
+    oidcClientSecret: oidc-client-secret
+  # KMS master-key REFERENCE (ADR-0032 / D11). The pod receives a KMS HANDLE or
+  # a mounted secret PATH — never the KEK itself. This is the indirect handle the
+  # envelope-encryption layer resolves at runtime against the customer KMS/Vault.
+  # No KEK, token, or password literal is permitted in this value.
+  kms:
+    # "external" (KMS handle via env, default/production) | "secret" (mounted
+    # path from existingSecret, dev). Either way this is a reference, not a key.
+    provider: external
+    # Opaque KMS key handle/ARN/URI the envelope layer resolves (ADR-0032). NOT
+    # a key. Empty here = supplied via existingSecret `masterKeyRef` key in dev.
+    masterKeyRef: ""
+    # Key name inside existingSecret carrying the master-key reference when
+    # provider=secret (still a reference/handle, never the raw KEK).
+    masterKeyRefKey: master-key-ref
+
+# -- Per-service workload config (W4 GA contract, ADR-0029 §1 topology table).
+#    SINGLE-REPLICA by default (HA is P2 — ADR-0029 §1, Alt #3); `replicas` is
+#    the seam P2 widens, this wave ships no HPA/operator/PDB. Each service is
+#    `enabled` by default (data stores toggleable to point at external/operator-
+#    managed instances per ADR-0013 §4) EXCEPT ollama (opt-in, replicas 0). Every
+#    container carries resource requests+limits — never absent (ADR-0029 §3).
+#    The per-container securityContext is NOT restated here: T2 workloads pull it
+#    from `netops.hardenedSecurityContext` so the hardened default cannot drift.
+services:
+  # api: stateless uvicorn (D10 JWT, no server sessions). Reached ONLY via the
+  # frontend nginx reverse proxy (ADR-0012 §2), never directly from ingress.
+  api:
+    enabled: true
+    replicas: 1
+    port: 8000
+    # Service type. ClusterIP is the secure default (ADR-0029 §4 "all platform
+    # Services are ClusterIP"; the cert-manager TLS Ingress → frontend is the
+    # SINGLE front door). NodePort/LoadBalancer open a Service-level side door
+    # that bypasses the Ingress TLS termination — a WARNED opt-out (NOTES.txt).
+    type: ClusterIP
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 1Gi
+
+  # worker: celery over the five restricted-compliant queues. `packet` is the
+  # SINGLE deliberate omission — it is its own ADR-0031 workload (W3-owned), NOT
+  # a queue in this Deployment (ADR-0029 §1). `system` is the default queue and
+  # hosts the broker round-trip the readiness probe relies on — do not drop it.
+  worker:
+    enabled: true
+    replicas: 1
+    queues:
+      - discovery
+      - config
+      - docs
+      - topology
+      - system
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 1Gi
+
+  # frontend: nginx static Vite output + same-origin reverse proxy for /api + WS
+  # (ADR-0012 §2). The SINGLE ingress target (ADR-0029 §4).
+  frontend:
+    enabled: true
+    replicas: 1
+    port: 8080
+    # Service type. ClusterIP is the secure default (ADR-0029 §4) — the Ingress
+    # controller is the single TLS-terminated front door to frontend. Exposing it
+    # as NodePort/LoadBalancer creates a plaintext side door around the Ingress's
+    # ssl-redirect/HSTS — a WARNED opt-out (NOTES.txt). Keep ClusterIP.
+    type: ClusterIP
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  # postgres: pgvector data store. Toggleable — set enabled:false to point at an
+  # external/operator-managed instance (P2 → CloudNativePG, ADR-0013 §4). Sized
+  # above the batch worker per ADR-0029 §3 PriorityClass intent.
+  postgres:
+    enabled: true
+    replicas: 1
+    port: 5432
+    storage:
+      size: 20Gi
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+
+  # neo4j: topology projection store. Toggleable; rebuildable (D5).
+  neo4j:
+    enabled: true
+    replicas: 1
+    port: 7687
+    storage:
+      size: 10Gi
+    resources:
+      requests:
+        cpu: 250m
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+
+  # redis: celery broker + result backend. Toggleable; P2 → Sentinel.
+  redis:
+    enabled: true
+    replicas: 1
+    port: 6379
+    storage:
+      size: 2Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # ollama: local-LLM profile (ADR-0009). OPT-IN — enabled:false / replicas:0 by
+  # default; an external provider is the default posture. Enabling it warns
+  # (NOTES) and requires the networkPolicy.externalLlmEgress / ollama edge.
+  ollama:
+    enabled: false
+    replicas: 0
+    port: 11434
+    storage:
+      size: 20Gi
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: "4"
+        memory: 8Gi
+
+# -- Ingress + TLS (ADR-0029 §4 / ADR-0012 §2). The SINGLE front door: ONE
+#    HTTPS-only Ingress routing ALL paths to the `frontend` Service — NEVER a
+#    direct ingress → api door (nginx inside frontend is the same-origin reverse
+#    proxy for /api + WS, ADR-0012 §2; reintroducing a direct api backend would
+#    re-open the CORS surface this posture closes). TLS is cert-manager-managed:
+#    the chart references an Issuer/ClusterIssuer and renders a Certificate; NO
+#    private key EVER appears here or in Helm release history (ADR-0029 §6, Alt 6).
+#    ssl-redirect + HSTS are on by default; plaintext :80 only 308-redirects to
+#    :443. All platform Services stay ClusterIP — there is NO NodePort/LoadBalancer
+#    side door (ADR-0029 §4); a `services.<svc>.type` override is a warned opt-out.
+ingress:
+  # On by default (secure-by-default front door). Disabling renders NO Ingress
+  # and emits a NOTES warning — the platform is then unreachable until an
+  # external front door is wired (a conscious, warned opt-out, not the default).
+  enabled: true
+  # IngressClass the controller watches (e.g. "nginx"). Empty = the cluster's
+  # default IngressClass. Set to match your installed ingress controller.
+  className: nginx
+  # The external hostname the platform is served on (the TLS SNI + cert CN/SAN).
+  # Operators MUST set this to their real FQDN; the placeholder is a stand-in.
+  host: netops.example.com
+  # Annotations applied to the Ingress. The defaults enforce TLS-only:
+  #   - ssl-redirect/force-ssl-redirect: plaintext :80 → 308 redirect to :443.
+  #   - HSTS: the controller emits Strict-Transport-Security on HTTPS responses.
+  # These are ingress-nginx annotation keys; override the whole map for a
+  # different controller (keep an equivalent ssl-redirect + HSTS pair).
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/hsts: "true"
+    nginx.ingress.kubernetes.io/hsts-include-subdomains: "true"
+    nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+    # frontend serves plain HTTP inside the pod (nginx :8080); the Ingress
+    # terminates TLS and proxies to the ClusterIP Service over HTTP.
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+  tls:
+    # Name of the Secret holding the TLS keypair. cert-manager PROVISIONS this
+    # Secret from the Certificate below — it is NEVER templated from values, and
+    # no key material passes through Helm (ADR-0029 §4/§6). The Ingress only
+    # references the name; the Secret is owned by cert-manager.
+    secretName: netops-tls
+    # cert-manager Certificate provisioning (ADR-0029 §4). When enabled the chart
+    # renders a Certificate (certificate.yaml) referencing issuerRef below;
+    # cert-manager then issues into `secretName`. Disable ONLY if the TLS Secret
+    # is provisioned out-of-band (e.g. an org-wide cert pipeline) — then create
+    # `secretName` yourself; the Ingress still references it.
+    certManager:
+      enabled: true
+    # The Issuer/ClusterIssuer cert-manager uses to sign. REFERENCE ONLY — no key
+    # material. Operators point this at their cluster's issuer (ACME/Vault/CA).
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+      group: cert-manager.io
+
+# -- Non-secret application config (rendered into configmap.yaml as NETOPS_*
+#    env). NO credential material here — secrets are by-reference only (see the
+#    `secrets` map). These are the connection coordinates + behavioural flags the
+#    api/worker read at boot; the matching passwords come from `secrets`.
+config:
+  # Log verbosity (api/worker structured logging).
+  logLevel: INFO
+  # In-cluster service DNS coordinates the api/worker dial. Hosts default to the
+  # chart's own Service names; override when a data store is `enabled:false` and
+  # points at an external instance.
+  postgres:
+    host: netops-postgres
+    port: 5432
+    database: netops
+    user: netops
+  neo4j:
+    # bolt:// URI to the neo4j Service.
+    uri: bolt://netops-neo4j:7687
+    user: neo4j
+  redis:
+    host: netops-redis
+    port: 6379
+  # External LLM provider selection (ADR-0009). "ollama" routes to the in-cluster
+  # ollama Service when services.ollama.enabled; otherwise an external provider.
+  llm:
+    provider: ollama
+    ollamaHost: netops-ollama
+    ollamaPort: 11434
+  # OIDC/SSO non-secret coordinates (ADR-0028). The client SECRET is by-reference
+  # only (secrets.keys.oidcClientSecret); issuer/clientId are non-secret.
+  oidc:
+    enabled: false
+    issuer: ""
+    clientId: ""
 
 # -- Reusable hardened per-container securityContext (ADR-0029 §3 table).
 #    W4 services consume this via the `netops.hardenedSecurityContext` helper.
@@ -99,6 +387,30 @@ hardening:
 serviceAccounts:
   create: true
   automountServiceAccountToken: false
+
+# -- Pre-upgrade Alembic migration Job RBAC (ADR-0029 §5 — "the only namespaced
+#    Role is a tightly-scoped one for the Helm pre-upgrade migration Job").
+#    OPT-IN, DEFAULT OFF: the long-running api/worker pods talk to Postgres/Neo4j/
+#    Redis, NOT the K8s API, so they need ZERO RBAC in steady state. This Role is
+#    granted ONLY to a short-lived migration Job's ServiceAccount and ONLY when a
+#    Helm-managed migration hook needs to read its own ConfigMap during the
+#    expand/contract Alembic step (PRODUCTION.md §10). It is NAMESPACED ONLY — a
+#    Role + RoleBinding scoped to the release namespace; the chart ships ZERO
+#    ClusterRole / ClusterRoleBinding (ADR-0029 §5). When false, no RBAC object
+#    renders at all and the secure default (no K8s API access) holds.
+migrationJob:
+  rbac:
+    # Render the namespaced Role + RoleBinding + migration-job SA. Default OFF:
+    # the steady-state platform needs no K8s API access. Enable ONLY with a
+    # migration hook that must read its own ConfigMap (ADR-0029 §5).
+    enabled: false
+    # Name of the ServiceAccount the migration Job runs as (subject of the
+    # RoleBinding). automountServiceAccountToken stays false unless the Job
+    # genuinely needs the token; the Role itself is the least-privilege grant.
+    serviceAccountName: migration-job-sa
+    # ConfigMap name the Job is permitted to GET (its own migration config). The
+    # Role grants get/list/watch on THIS ConfigMap name only — nothing wider.
+    configMapName: ""
 
 # -- Admission policy (ADR-0029 §5). Kyverno ClusterPolicy by default; the
 #    chart also ships a ValidatingAdmissionPolicy fallback for clusters that
@@ -165,6 +477,48 @@ networkPolicy:
       app.kubernetes.io/name: netops
       app.kubernetes.io/component: redis
     port: 6379
+  # ---- W4 GA per-edge allow seams (ADR-0029 §2 edge table) -----------------
+  # The W4 networkpolicies.yaml renders the platform default-deny floor plus one
+  # additive allow per ADR-0029 §2 / PRODUCTION.md §3.1 arrow — NO edge that is
+  # not an arrow there. Each selector below is the dest workload's component
+  # label; the source is selected from the same chart's component labels. Ports
+  # match the §2 table. The data-store selectors reuse the postgres/broker shapes
+  # above (postgres:5432, redis:6379) and add neo4j:7687.
+  neo4j:
+    # Selector for the Neo4j workload the api + worker dial (topology projection,
+    # ADR-0029 §2 `A --> NEO`, `WD/WC/WX --> NEO`). W4 owns the Neo4j StatefulSet.
+    podSelectorLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: neo4j
+    port: 7687
+  # Selector for the ingress-controller pods permitted to reach the frontend
+  # (ADR-0029 §2 `LB --> FE` — the SOLE ingress front-door edge; the controller
+  # has NO direct edge to api per ADR-0012 §2). Defaults to the ingress-nginx
+  # controller labels; override for a different ingress namespace/controller.
+  # Both selectors are matched (namespace AND pod) so only the real controller —
+  # not any pod in that namespace — gets the frontend ingress allow.
+  ingressController:
+    namespaceSelectorLabels:
+      kubernetes.io/metadata.name: ingress-nginx
+    podSelectorLabels:
+      app.kubernetes.io/name: ingress-nginx
+  # External LLM-provider egress (ADR-0009 anthropic/openai/azure). OPT-IN,
+  # DEFAULT OFF: local-first / air-gapped is the default posture (ADR-0029 §2,
+  # ADR-0015 alt #2). When false the api/worker get NO external egress allow —
+  # only the in-cluster edges (PG/Neo4j/Redis/ollama) above. Enabling it renders
+  # an api/worker → external-LLM egress allow to the CIDRs/ports below and emits a
+  # NOTES warning. NEVER an empty-`to` allow: egress is confined to these CIDRs.
+  externalLlmEgress:
+    enabled: false
+    # CIDR(s) the external LLM provider endpoints resolve to. Operators MUST set
+    # these to their provider's real ranges — the public placeholder below is a
+    # documented stand-in, NOT a blanket internet allow. (No rule renders at all
+    # while enabled=false.)
+    cidrs:
+      - 0.0.0.0/0
+    # Provider HTTPS port (anthropic/openai/azure all terminate TLS on 443).
+    ports:
+      - 443
   # CIDR(s) the packet-CAPTURE workload is allowed to egress to: the device
   # management subnet(s) it must reach to drive SSH/monitor-session captures
   # (ADR-0031 §4 capture NetworkPolicy; PRODUCTION.md §5 "collector network
@@ -263,3 +617,38 @@ packet:
     # persistent pcap volume claim (ADR-0023 §3).
     emptyDir:
       sizeLimit: 2Gi
+
+# -- Seccomp-installer DaemonSet (W3 deferred minor, ADR-0031 §3).
+#    The packet-analysis pod uses a Localhost seccomp profile
+#    (netops/packet-analysis-seccomp.json). The kubelet must find that file at
+#    /var/lib/kubelet/seccomp/netops/packet-analysis-seccomp.json on the host.
+#    This DaemonSet copies the bundled profile to that path on each node that
+#    may run the packet-analysis pod. Default on (secure-by-default: omitting it
+#    causes the packet-analysis pod to crash on any node without a pre-seeded
+#    profile). Disable only if your nodes are pre-seeded out-of-band.
+seccompInstaller:
+  enabled: true
+  # -- Namespace the installer DaemonSet/ConfigMap/SA render into. It runs root +
+  #    DAC_OVERRIDE + a hostPath mount to write the kubelet seccomp profile, which
+  #    built-in PSA `restricted` HARD-REJECTS (pod annotations cannot exempt PSA).
+  #    So it MUST sit in a relaxed-PSA namespace; empty = the capture namespace
+  #    (enforce=privileged), the already-gated home for the seccomp/NET_RAW
+  #    deviation (ADR-0029 §3 / ADR-0031 §5). Override only to relocate to another
+  #    namespace whose PSA enforce level admits root+hostPath.
+  namespace: ""
+  # Image used to perform the node copy. busybox is minimal and widely available.
+  image:
+    repository: busybox
+    tag: "1.36.1"
+    pullPolicy: IfNotPresent
+  # Host path where kubelet stores seccomp profiles (standard kubelet default).
+  kubeletSeccompRoot: /var/lib/kubelet/seccomp
+  # Subdirectory under kubeletSeccompRoot where netops profiles are placed.
+  profileDir: netops
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi

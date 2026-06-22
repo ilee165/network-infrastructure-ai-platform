@@ -1,7 +1,9 @@
 netops chart installed (release: {{ .Release.Name }}, namespace: {{ .Release.Namespace }}).
 
-P1 W3 scaffold: packet-sandbox OS-isolation (ADR-0031) + K8s hardening round 1
-primitives (ADR-0029 §3/§5). The full per-service GA chart is W4.
+P1 GA chart: the full per-service platform (api/worker/frontend + toggleable
+postgres/neo4j/redis/ollama) with cert-manager TLS ingress, §3.1 NetworkPolicies,
+least-privilege RBAC + admission policy, and the packet-sandbox OS-isolation
+workloads (ADR-0031 / ADR-0029). SINGLE-REPLICA — not highly available (HA is P2).
 
 Secure-by-default posture (every control below is ON):
   - Namespace PSA: enforce/audit/warn = {{ .Values.namespaceLabels.podSecurity.enforce }}
@@ -17,8 +19,26 @@ Secure-by-default posture (every control below is ON):
 {{- if not .Values.hardening.enabled }}{{ $warn = append $warn "hardening.enabled=false — the reusable hardened securityContext is disabled." }}{{ end }}
 {{- if not .Values.networkPolicy.enabled }}{{ $warn = append $warn "networkPolicy.enabled=false — the packet-analysis default-deny egress policy is NOT applied; the parser has unrestricted egress." }}{{ end }}
 {{- if not .Values.admission.enabled }}{{ $warn = append $warn "admission.enabled=false — the no-latest + PSS-deviation allow-list is NOT enforced; the packet-sandbox NET_RAW deviation is no longer enforceably singular." }}{{ end }}
+{{- if and .Values.admission.enabled (not .Values.admission.signedImages.enabled) }}{{ $warn = append $warn "admission.signedImages.enabled=false — the cosign signed-image verify rule renders but is AUDIT-only (not blocking); unsigned images are admitted. This is the W3 default until W6 wires a real verifier key; set admission.signedImages.enabled=true with admission.signedImages.publicKeyConfigMap to ENFORCE (ADR-0029 §5)." }}{{ end }}
+{{- if .Values.migrationJob.rbac.enabled }}{{ $warn = append $warn "migrationJob.rbac.enabled=true — a namespaced Role + RoleBinding is granted to the migration Job SA (get/list/watch on its ConfigMap only). This is the ONLY K8s RBAC the chart grants; the long-running api/worker/frontend pods hold NONE. It is namespaced (no ClusterRole/ClusterRoleBinding). Disable after the migration hook if not needed (ADR-0029 §5)." }}{{ end }}
 {{- if not .Values.serviceAccounts.automountServiceAccountToken }}{{ else }}{{ $warn = append $warn "serviceAccounts.automountServiceAccountToken=true — workloads mount a K8s API token they do not need." }}{{ end }}
 {{- if not .Values.packet.analysis.securityContext.readOnlyRootFilesystem }}{{ $warn = append $warn "packet.analysis readOnlyRootFilesystem=false — the untrusted parser has a writable root filesystem." }}{{ end }}
+{{- /* W4 GA per-service opt-out warnings (ADR-0029 §0 — opt-out never opt-in). */ -}}
+{{- if not .Values.secrets.existingSecret }}{{ $warn = append $warn "secrets.existingSecret is empty — a GENERATED dev Secret (netops.io/dev-secret=true) is rendered with random placeholder credentials. This is DEV-ONLY: in production set secrets.existingSecret and populate it via the external-secrets operator or a CSI secrets-store backed by your KMS/Vault (ADR-0029 §6)." }}{{ end }}
+{{- if not .Values.services.postgres.enabled }}{{ $warn = append $warn "services.postgres.enabled=false — no in-chart Postgres StatefulSet; config.postgres.host MUST point at an external/operator-managed instance (ADR-0013 §4)." }}{{ end }}
+{{- if not .Values.services.neo4j.enabled }}{{ $warn = append $warn "services.neo4j.enabled=false — no in-chart Neo4j StatefulSet; config.neo4j.uri MUST point at an external instance (ADR-0013 §4)." }}{{ end }}
+{{- if not .Values.services.redis.enabled }}{{ $warn = append $warn "services.redis.enabled=false — no in-chart Redis StatefulSet; config.redis.host MUST point at an external broker or Celery has no broker (ADR-0013 §4)." }}{{ end }}
+{{- if .Values.services.ollama.enabled }}{{ $warn = append $warn "services.ollama.enabled=true — the local-LLM profile is OPT-IN (ADR-0009); ensure the api/worker→ollama NetworkPolicy edge is allowed and the node has the model cache capacity." }}{{ end }}
+{{- if .Values.networkPolicy.externalLlmEgress.enabled }}{{ $warn = append $warn "networkPolicy.externalLlmEgress.enabled=true — api+worker are granted egress to EXTERNAL LLM provider endpoints (ADR-0009). Local-first/air-gapped is the secure default; this leaves the namespace. Narrow networkPolicy.externalLlmEgress.cidrs to your provider's real ranges (the 0.0.0.0/0 placeholder is NOT a confined allow) (ADR-0029 §2)." }}{{ end }}
+{{- /* W4-T4 Ingress + TLS opt-out warnings (ADR-0029 §4 — TLS-only single front door). */ -}}
+{{- if not .Values.ingress.enabled }}{{ $warn = append $warn "ingress.enabled=false — NO Ingress is rendered; the platform has no front door and is unreachable until one is wired out-of-band. The cert-manager TLS Ingress → frontend is the secure default (ADR-0029 §4)." }}{{ end }}
+{{- if and .Values.ingress.enabled (not .Values.ingress.tls.certManager.enabled) }}{{ $warn = append $warn (printf "ingress.tls.certManager.enabled=false — the chart issues NO Certificate; you MUST provision the TLS Secret %q out-of-band or the Ingress has no keypair to terminate TLS with (ADR-0029 §4)." .Values.ingress.tls.secretName) }}{{ end }}
+{{- $svcTypeOptOut := list }}
+{{- range $svc := list "api" "frontend" }}{{- $t := (index $.Values.services $svc).type }}{{- if and $t (ne $t "ClusterIP") }}{{ $svcTypeOptOut = append $svcTypeOptOut (printf "%s=%s" $svc $t) }}{{ end }}{{- end }}
+{{- if $svcTypeOptOut }}{{ $warn = append $warn (printf "services.<svc>.type opted away from ClusterIP for [%s] — this opens a Service-level NodePort/LoadBalancer side door that BYPASSES the Ingress TLS termination + ssl-redirect/HSTS. All platform Services are ClusterIP by default; the cert-manager TLS Ingress → frontend is the SINGLE intended front door (ADR-0029 §4)." (join ", " $svcTypeOptOut)) }}{{ end }}
+{{- $replicaHint := list }}
+{{- range $svc := list "api" "worker" "frontend" "postgres" "neo4j" "redis" }}{{- if gt (int (index $.Values.services $svc).replicas) 1 }}{{ $replicaHint = append $replicaHint $svc }}{{ end }}{{- end }}
+{{- if $replicaHint }}{{ $warn = append $warn (printf "services replicas>1 set for [%s] — P1 GA is SINGLE-REPLICA / NOT highly-available (HA is P2: HPA/KEDA/operators/PDBs, ADR-0029 §1). Raising replicas alone gives no autoscaling or disruption budget; treat with care until P2." (join ", " $replicaHint)) }}{{ end }}
 
 {{- if $warn }}
 

@@ -179,13 +179,15 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
 
-  # Policy-as-test for the K8s/Helm declarative half (P1 W3, ADR-0031 +
-  # ADR-0029 §3/§5). This job is the evidence that flips the M5 PARTIAL
-  # packet-sandbox sign-off (ADR-0031 §7): it renders the chart and asserts every
-  # OS-isolation / hardening control on the rendered manifests. It runs
-  # independently of the image jobs (no `needs`) — the manifests do not depend on
-  # built images. trivy config scans the chart for IaC misconfig; cosign is N/A
-  # here (W3 adds no new image refs — the packet workloads reuse netops-backend).
+  # Chart-validation + policy-as-test for the K8s/Helm declarative half (P1 W4 GA
+  # chart, ADR-0029 §3/§5 + ADR-0031). This job is the G-SEC K8s-posture evidence:
+  # it renders the GA chart and asserts every OS-isolation / hardening control on
+  # the rendered manifests (helm lint → render → kubeconform → kube-linter →
+  # conftest → trivy config). It runs independently of the image jobs (no `needs`)
+  # — the manifests do not depend on built images. trivy config GATES on fixable
+  # HIGH/CRIT IaC misconfig (exit-code 1, ignore-unfixed) without duplicating
+  # conftest's policy semantics; cosign is W6 (no new image refs here — the packet
+  # + per-service workloads reuse netops-backend/-frontend).
   infra:
     name: infra (helm lint, kubeconform, kube-linter, conftest)
     runs-on: ubuntu-latest
@@ -225,8 +227,17 @@ jobs:
 
       - name: Render chart
         run: |
+          # pipefail so a `helm template` failure propagates through the `| tr`
+          # pipe instead of being masked by tr's exit 0 (a false-green gate);
+          # `test -s` then guards an empty render.
+          set -o pipefail
+          # Strip any CR bytes: conftest's multi-doc YAML splitter collapses a
+          # CRLF render to a SINGLE evaluated document, silently passing every
+          # deny rule (a false-green gate). Normalizing to LF keeps each rendered
+          # document evaluated independently (ADR-0029 §5).
           helm template netops deploy/kubernetes/netops \
-            --namespace netops --kube-version 1.29.0 > rendered.yaml
+            --namespace netops --kube-version 1.29.0 | tr -d '\r' > rendered.yaml
+          test -s rendered.yaml
           echo "## Rendered chart objects" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           grep -E '^kind:' rendered.yaml | sort | uniq -c >> "$GITHUB_STEP_SUMMARY"
@@ -250,20 +261,58 @@ jobs:
 
       # The policy-as-test gate: every ADR-0031 / ADR-0029 control asserted on
       # the rendered manifests. Fails the build on any violation.
+      #
+      # --all-namespaces evaluates EVERY rego package found under the policy dir
+      # unambiguously; the prior `--namespace netops.hardening --all-namespaces`
+      # pair was contradictory (a single explicit namespace AND "all"). The rego
+      # lives in one package (netops.hardening), so --all-namespaces runs it and
+      # any future package without an edit here (W4-T6 deferred-minor cleanup).
       - name: conftest (OPA policy-as-test)
         run: |
           conftest test rendered.yaml \
             --policy deploy/kubernetes/policy/rego \
-            --namespace netops.hardening \
             --all-namespaces
 
-      # IaC misconfiguration scan of the chart + compose (config target). No new
-      # image refs are introduced in W3, so trivy image / cosign verify are N/A.
-      - name: Trivy config scan (chart + compose)
+      # IaC misconfiguration scan (Trivy `config` target). GATING on its OWN
+      # findings: exit-code 1 on fixable HIGH/CRITICAL misconfig, mirroring the
+      # image-scan posture (ignore-unfixed). Scoped to IaC misconfig
+      # (scan-type: config) and does NOT duplicate conftest — conftest asserts
+      # our ADR-0029/0031 policy semantics; Trivy checks generic IaC
+      # best-practice misconfig.
+      #
+      # SCOPE (W4-T6 fix): the scan-ref is the RENDERED manifest this task
+      # hardens, NOT the raw chart dir. Trivy's Helm parser renders templates
+      # with empty/default values and flags HIGH/CRIT (missing securityContext /
+      # resource limits) that the chart actually mitigates at render time via
+      # _helpers.tpl — gating over `deploy/` (un-rendered templates +
+      # deploy/spatiumddi/, neither this task's artifact) is a false-positive
+      # CI-regression risk. We gate the rendered.yaml the rest of the job
+      # validated, plus deploy/docker (real compose + Dockerfile IaC this task
+      # touches). No new image refs in W3/W4, so trivy image / cosign are N/A.
+      # SANCTIONED-DEVIATION SUPPRESSION: deploy/kubernetes/.trivyignore lists the
+      # ADR-0031 exceptions (seccomp-installer root/host-path, packet-capture
+      # NET_RAW) that conftest already guards in a resource-scoped way. Trivy's
+      # generic IaC rules cannot encode those exceptions, so they are suppressed
+      # for THIS misconfig scan only (env scope) — the gate still fails on any
+      # NEW/unexpected HIGH/CRITICAL misconfig.
+      - name: Trivy config scan (rendered chart manifest)
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
+        with:
+          scan-type: config
+          scan-ref: rendered.yaml
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Trivy config scan (docker compose + Dockerfiles)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
-          scan-ref: deploy
+          scan-ref: deploy/docker
           severity: CRITICAL,HIGH
-          exit-code: "0"
+          ignore-unfixed: true
+          exit-code: "1"
           format: table

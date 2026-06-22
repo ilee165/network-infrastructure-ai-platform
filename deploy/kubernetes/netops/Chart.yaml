@@ -1,14 +1,16 @@
 apiVersion: v2
 name: netops
 description: >-
-  AI Network Operations Platform — Helm chart (production K8s target, ADR-0013 /
-  ADR-0029). P1 W3 scaffold: ships only the packet-sandbox OS-isolation
-  workloads (ADR-0031) and the K8s hardening-round-1 primitives (ADR-0029 §3/§5).
-  W4 extends this into the full per-service GA chart; the values keys here are
-  the seams W4 grows.
+  AI Network Operations Platform — GA Helm chart (production K8s target,
+  ADR-0013 / ADR-0029). Ships the full per-service workload set
+  (api/worker/frontend + toggleable postgres/neo4j/redis/ollama data stores),
+  the §3.1 topology NetworkPolicy edge-set, cert-manager TLS ingress,
+  least-privilege RBAC + admission policy, and the packet-sandbox OS-isolation
+  workloads (ADR-0031) — all hardened by default. P1 GA is single-replica (HA is
+  P2).
 type: application
-# Pre-1.0: this chart is a W3 scaffold, not yet the GA per-service chart.
-version: 0.1.0
+# P1 GA: the full per-service chart (single-replica; HA scale-out is P2).
+version: 1.0.0
 # Application version tracks the platform release the images are pinned to.
 appVersion: "p1"
 keywords:
@@ -16,6 +18,8 @@ keywords:
   - packet-sandbox
   - security-hardening
 home: https://github.com/ilee165/network-infrastructure-ai-platform
+# Optional chart icon (helm lint recommends one). SVG/PNG over HTTPS only.
+icon: https://raw.githubusercontent.com/ilee165/network-infrastructure-ai-platform/main/docs/assets/netops-icon.png
 maintainers:
   - name: wf-infra
 kubeVersion: ">=1.25.0-0"

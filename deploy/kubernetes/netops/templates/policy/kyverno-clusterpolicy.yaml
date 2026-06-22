@@ -61,8 +61,14 @@ spec:
             containers:
               - image: "*:*|*@sha256:*"
 
-{{- if .Values.admission.signedImages.enabled }}
-    # --- Rule 2: cosign signed-image verification (W6-wired verifier) ---
+    # --- Rule 2: cosign signed-image verification (ADR-0029 §5 rule 2) ---
+    # The rule ALWAYS RENDERS (so it is policy-tested in CI); ENFORCEMENT is
+    # gated by admission.signedImages.enabled (default OFF per W3). When disabled
+    # the rule is present but non-blocking (failureAction: Audit, required:false)
+    # so unsigned dev images are not blocked on day one; W6 wires the real
+    # verifier key and flips signedImages.enabled to make it Enforce. The
+    # publicKeys verifier is supplied via the named ConfigMap — NEVER a private
+    # key, only a public cosign verifier (ADR-0029 §5 / §6 secrets-by-reference).
     - name: verify-image-signatures
       match:
         any:
@@ -72,14 +78,21 @@ spec:
       verifyImages:
         - imageReferences:
             - "{{ .Values.images.backend.repository }}:*"
-          failureAction: Enforce
+          failureAction: {{ if .Values.admission.signedImages.enabled }}Enforce{{ else }}Audit{{ end }}
           verifyDigest: true
-          required: true
+          required: {{ .Values.admission.signedImages.enabled }}
           attestors:
             - entries:
+                {{- if .Values.admission.signedImages.publicKeyConfigMap }}
                 - keys:
-                    publicKeys: ""
-{{- end }}
+                    publicKeys: {{ printf "{{ '%s'.data.'cosign.pub' }}" .Values.admission.signedImages.publicKeyConfigMap | quote }}
+                {{- else }}
+                # No verifier wired yet (W6). Keyless placeholder; the rule is
+                # Audit-only until signedImages.enabled + a real key/identity.
+                - keyless:
+                    subject: ""
+                    issuer: ""
+                {{- end }}
 
     # --- Rule 3: PSS deviation allow-list — only the packet-CAPTURE workload may
     #     add NET_RAW/NET_ADMIN. Excluded by the NARROW net-raw label (capture

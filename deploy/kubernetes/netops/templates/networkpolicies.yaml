@@ -1,0 +1,352 @@
+{{- /*
+W4 platform NetworkPolicies (ADR-0029 §2 / PRODUCTION.md §3.1) — the firewall
+spec for the GA install namespace. The §3.1 topology diagram IS the firewall:
+every allow below maps edge-for-edge to a §2 arrow; there is NO allow that is not
+an arrow there, and NO empty-`to` (blanket) allow.
+
+Posture (secure-by-default, ADR-0029 §0 — opt-out never opt-in):
+- `default-deny-all` selects every pod in the install namespace and denies ALL
+  ingress + egress. Every policy below is additive on top of that floor.
+- DNS egress is allowed cluster-wide (kube-dns :53) — without it default-deny
+  breaks Service-name resolution for every pod.
+- Per-edge allows (ADR-0029 §2 table):
+    ingress-controller → frontend:8080   (LB --> FE, the SOLE ingress front door)
+    frontend           → api:8000        (nginx same-origin reverse proxy, ADR-0012 §2)
+    api                → postgres:5432    (A --> PG, P1 direct; PgBouncer is P2)
+    api                → neo4j:7687       (A --> NEO)
+    api                → redis:6379       (A --> RED)
+    worker             → postgres:5432    (WD/WC/WX --> PG)
+    worker             → neo4j:7687       (WD/WC/WX --> NEO)
+    worker             → redis:6379       (WD/WC/WX --> RED)
+    api,worker         → ollama:11434     (A -. LLM .-> OLL — ONLY if ollama enabled)
+- externalLlmEgress: OPT-IN, default off. When on, api+worker get a CONFINED
+  egress allow to the external LLM provider CIDRs:443 — never an empty-`to` rule.
+- NO blanket device-management egress: that is the packet-capture W3 policy
+  (packet-capture-networkpolicy.yaml), confined to the segmented capture namespace.
+
+The packet-capture / packet-analysis NetworkPolicies are W3-owned and live in
+their own templates; this file does NOT touch them.
+
+Disabling the whole set is a warned opt-out (`networkPolicy.enabled=false`,
+NOTES.txt) — never the default.
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "netops.fullname" . }}
+{{- $name := include "netops.name" . }}
+{{- $ns := .Release.Namespace }}
+# ---------------------------------------------------------------------------
+# default-deny-all — the posture floor (ADR-0029 §2 / PRODUCTION.md §9).
+# podSelector {} selects every pod in the namespace; with both policyTypes listed
+# and no allow rules here, ALL ingress and egress is denied unless an additive
+# policy below explicitly allows it.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-default-deny-all
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# ---------------------------------------------------------------------------
+# allow-dns-egress — every pod may reach kube-dns :53 UDP/TCP (otherwise
+# default-deny breaks name resolution). Confined to the kube-dns selector.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-dns-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceSelectorLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- if .Values.services.frontend.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-ingress-to-frontend — §2 `LB --> FE`. The ingress controller is the SOLE
+# front door; it reaches frontend:8080 only. Both the ingress namespace AND the
+# controller pod labels are matched so only the real controller is permitted.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-ingress-to-frontend
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "frontend") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressController.namespaceSelectorLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressController.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.services.frontend.port }}
+{{- end }}
+{{- if and .Values.services.api.enabled .Values.services.frontend.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-frontend-to-api — §2 frontend → api:8000. nginx same-origin reverse
+# proxy (ADR-0012 §2); this is the SOLE ingress path to api (no direct
+# ingress-controller → api door).
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-frontend-to-api
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "frontend") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.services.api.port }}
+{{- end }}
+{{- if .Values.services.api.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-api-egress — §2 `A --> PG`, `A --> NEO`, `A --> RED` (+ ollama if
+# enabled, below). Each `to` targets exactly one data-store component on its
+# canonical port. No empty-`to` rule.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-api-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # api → postgres:5432 (A --> PG; P1 direct, PgBouncer is a P2 insert).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+    # api → neo4j:7687 (A --> NEO).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.neo4j.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.neo4j.port }}
+    # api → redis:6379 (A --> RED).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.broker.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.broker.port }}
+    {{- if .Values.services.ollama.enabled }}
+    # api → ollama:11434 (A -. LLM .-> OLL — egress half of the §2 edge; the
+    # ollama-side ingress allow is allow-llm-to-ollama. Renders ONLY when ollama
+    # is enabled, so default-deny stays intact when the local-LLM profile is off).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "ollama") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.services.ollama.port }}
+    {{- end }}
+{{- end }}
+{{- if .Values.services.worker.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-worker-egress — §2 `WD/WC/WX --> {PG,NEO,RED}`. The worker consumes the
+# topology queue (→ Neo4j projection) and uses Redis as broker+backend. Each `to`
+# targets one data-store component on its canonical port. No empty-`to` rule.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-worker-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "worker") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # worker → postgres:5432 (WD/WC/WX --> PG).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+    # worker → neo4j:7687 (WD/WC/WX --> NEO; topology projection consumer).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.neo4j.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.neo4j.port }}
+    # worker → redis:6379 (WD/WC/WX --> RED; Celery broker + result backend).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.broker.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.broker.port }}
+    {{- if .Values.services.ollama.enabled }}
+    # worker → ollama:11434 (A -. LLM .-> OLL — egress half of the §2 edge; the
+    # ollama-side ingress allow is allow-llm-to-ollama. Renders ONLY when ollama
+    # is enabled, so default-deny stays intact when the local-LLM profile is off).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "ollama") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.services.ollama.port }}
+    {{- end }}
+{{- end }}
+{{- if .Values.services.ollama.enabled }}
+{{- if or .Values.services.api.enabled .Values.services.worker.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-llm-to-ollama — §2 `A -. LLM .-> OLL`. Renders ONLY when ollama is
+# enabled (opt-in local-LLM profile, ADR-0009). api and/or worker → ollama:11434.
+# When ollama is disabled this whole policy is absent — no dangling edge.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-llm-to-ollama
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "ollama") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- if .Values.services.api.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 14 }}
+        {{- end }}
+        {{- if .Values.services.worker.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "worker") | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.services.ollama.port }}
+{{- end }}
+{{- end }}
+{{- if .Values.networkPolicy.externalLlmEgress.enabled }}
+{{- if or .Values.services.api.enabled .Values.services.worker.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-external-llm-egress — OPT-IN (networkPolicy.externalLlmEgress.enabled),
+# DEFAULT OFF. api+worker → external LLM provider CIDRs:443 (ADR-0009
+# anthropic/openai/azure). CONFINED to the configured CIDRs — NEVER an empty-`to`
+# allow. Absent entirely while the opt-in is off (the secure default).
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-external-llm-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: external-llm-egress
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - {{ $name }}
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          {{- if .Values.services.api.enabled }}
+          - api
+          {{- end }}
+          {{- if .Values.services.worker.enabled }}
+          - worker
+          {{- end }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        {{- range .Values.networkPolicy.externalLlmEgress.cidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.externalLlmEgress.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

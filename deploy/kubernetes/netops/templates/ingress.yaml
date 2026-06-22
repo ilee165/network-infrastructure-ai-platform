@@ -1,0 +1,53 @@
+{{- /*
+Ingress — the SINGLE, HTTPS-only front door (ADR-0029 §4 / ADR-0012 §2).
+
+ALL paths route to the `frontend` Service ONLY. There is deliberately NO direct
+ingress → api backend: nginx inside the frontend container is the same-origin
+reverse proxy for all /api REST + /ws WebSocket traffic (ADR-0012 §2). Keeping
+API + WebSocket same-origin behind nginx eliminates the cross-origin (CORS)
+surface as a secure-by-default property; re-introducing a direct ingress→api
+door would re-open it, so this template renders exactly ONE backend (frontend).
+
+TLS-only (ADR-0029 §4):
+  - tls block references ingress.tls.secretName — the keypair cert-manager
+    provisions (certificate.yaml). No key material is templated from values.
+  - ssl-redirect + force-ssl-redirect annotations: plaintext :80 → 308 to :443.
+  - HSTS annotations: the controller emits Strict-Transport-Security on HTTPS.
+
+ClusterIP-only Services (ADR-0029 §4): the ingress controller is the single
+TLS-terminated front door; no NodePort/LoadBalancer side door is rendered.
+*/ -}}
+{{- if and .Values.ingress.enabled .Values.services.frontend.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "netops.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "frontend") | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # ALL paths → frontend ONLY (ADR-0012 §2 same-origin proxy). This is the
+          # chart's SOLE Ingress backend; never add a second path → api here.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "netops.fullname" . }}-frontend
+                port:
+                  number: {{ .Values.services.frontend.port }}
+{{- end }}

@@ -1,0 +1,24 @@
+{{- /*
+frontend ClusterIP Service (ADR-0029 §1 / §4).
+The SINGLE ingress target — the Ingress controller routes all traffic here.
+nginx inside the frontend container reverse-proxies /api + WS to the api Service.
+ClusterIP only (ADR-0029 §4 "all platform Services are ClusterIP").
+*/ -}}
+{{- if .Values.services.frontend.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "netops.fullname" . }}-frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "frontend") | nindent 4 }}
+spec:
+  type: {{ .Values.services.frontend.type | default "ClusterIP" }}
+  selector:
+    {{- include "netops.serviceSelector" (dict "ctx" . "component" "frontend") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.services.frontend.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

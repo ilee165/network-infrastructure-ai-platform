@@ -1,0 +1,168 @@
+{{- /*
+Postgres StatefulSet (ADR-0029 §1 — pgvector/pgvector:pg16, toggleable).
+Disable with services.postgres.enabled=false to point at an external/operator-
+managed instance (P2 → CloudNativePG, ADR-0013 §4). A NOTES warning is emitted
+when disabled.
+
+PostgreSQL writable paths (readOnlyRootFilesystem:true requires emptyDir for each
+path postgres writes that is NOT the data PVC):
+  /var/run/postgresql   — unix socket directory + .pid file
+  /tmp                  — Postgres temp files
+
+The data directory (/var/lib/postgresql/data) is the PVC mount — writable, no
+emptyDir needed there. However, postgres by default initialises PGDATA inside
+/var/lib/postgresql/data/pgdata (with initdb) and writes logs + conf there;
+we use the PVC for that path.
+
+Hardening:
+- runAsUser/runAsGroup 10001 (values.hardening) used for the postgres container;
+  the pgvector image must be run as a non-root user. Standard pgvector/pgvector
+  images support PGUSER / running non-root.
+- The postgres process needs a writable unix socket dir (/var/run/postgresql)
+  which we supply via emptyDir.
+- seccompProfile: RuntimeDefault (same as all general services).
+- resource requests + limits (ADR-0029 §3).
+- liveness: pg_isready exec probe (ADR-0029 §7).
+- readiness: same.
+- startupProbe: generous window for initdb on first boot.
+*/ -}}
+{{- if .Values.services.postgres.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "netops.fullname" . }}-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+spec:
+  replicas: {{ .Values.services.postgres.replicas }}
+  serviceName: {{ include "netops.fullname" . }}-postgres
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "postgres") | nindent 8 }}
+    spec:
+      serviceAccountName: postgres-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: postgres
+          image: {{ include "netops.image" (dict "img" .Values.images.postgres) }}
+          imagePullPolicy: {{ .Values.images.postgres.pullPolicy }}
+          ports:
+            - name: postgres
+              containerPort: {{ .Values.services.postgres.port }}
+              protocol: TCP
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "netops.fullname" . }}-config
+                  key: NETOPS_POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "netops.fullname" . }}-config
+                  key: NETOPS_POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if .Values.secrets.existingSecret }}{{ .Values.secrets.existingSecret }}{{ else }}{{ include "netops.fullname" . }}-dev-secrets{{ end }}
+                  key: {{ .Values.secrets.keys.postgresPassword }}
+            # Unix socket directory — postgres writes its .pid and socket here.
+            - name: PGHOST
+              value: /var/run/postgresql
+          resources:
+            {{- toYaml .Values.services.postgres.resources | nindent 12 }}
+          startupProbe:
+            exec:
+              # exec-probe argv runs directly (no shell) and does NOT undergo
+              # $(VAR) substitution — that only applies to container command/args.
+              # Wrap in `sh -c` so POSTGRES_USER/POSTGRES_DB expand at probe time
+              # (mirrors the redis template's documented pattern, ADR-0029 §7).
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            failureThreshold: 60
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              # exec-probe argv runs directly (no shell) and does NOT undergo
+              # $(VAR) substitution — that only applies to container command/args.
+              # Wrap in `sh -c` so POSTGRES_USER/POSTGRES_DB expand at probe time
+              # (mirrors the redis template's documented pattern, ADR-0029 §7).
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              # exec-probe argv runs directly (no shell) and does NOT undergo
+              # $(VAR) substitution — that only applies to container command/args.
+              # Wrap in `sh -c` so POSTGRES_USER/POSTGRES_DB expand at probe time
+              # (mirrors the redis template's documented pattern, ADR-0029 §7).
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            # Postgres data directory (PVC — persistent, writable).
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # Unix socket dir + pid file (emptyDir — non-persistent scratch).
+            - name: run
+              mountPath: /var/run/postgresql
+            # Postgres temp files.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "netops.componentLabels" (dict "ctx" . "component" "postgres") | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.services.postgres.storage.size }}
+---
+# Headless Service for the StatefulSet (stable DNS per pod) + a ClusterIP
+# Service for client connections (the api/worker dial the Service VIP).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "netops.fullname" . }}-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "netops.serviceSelector" (dict "ctx" . "component" "postgres") | nindent 4 }}
+  ports:
+    - name: postgres
+      port: {{ .Values.services.postgres.port }}
+      targetPort: postgres
+      protocol: TCP
+{{- end }}

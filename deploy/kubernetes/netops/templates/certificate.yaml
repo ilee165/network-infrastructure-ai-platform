@@ -1,0 +1,36 @@
+{{- /*
+cert-manager Certificate (ADR-0029 §4, Alt 6).
+
+cert-manager OWNS issuance and rotation: this Certificate references an
+Issuer/ClusterIssuer named in values (ingress.tls.issuerRef) and tells
+cert-manager to provision the TLS keypair into the Secret the Ingress references
+(ingress.tls.secretName). The chart NEVER templates a private key — no key
+material passes through values.yaml or Helm release history (ADR-0029 §6). This
+is why TLS is cert-manager-managed rather than a chart-rendered self-signed
+Secret (ADR-0029 Alt 6, Rejected).
+
+Renders only when ingress.tls.certManager.enabled (and the Ingress is enabled).
+Disable certManager ONLY when the TLS Secret is provisioned out-of-band — then
+the Ingress still references ingress.tls.secretName, but the chart issues no
+Certificate (the operator owns the Secret).
+*/ -}}
+{{- if and .Values.ingress.enabled .Values.ingress.tls.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "netops.fullname" . }}-tls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "frontend") | nindent 4 }}
+spec:
+  # cert-manager writes the issued keypair here; the Ingress tls block references
+  # the same name. The Secret is cert-manager-owned, never Helm-templated.
+  secretName: {{ .Values.ingress.tls.secretName }}
+  dnsNames:
+    - {{ .Values.ingress.host | quote }}
+  # Issuer/ClusterIssuer reference ONLY — no key material (ADR-0029 §4/§6).
+  issuerRef:
+    name: {{ .Values.ingress.tls.issuerRef.name }}
+    kind: {{ .Values.ingress.tls.issuerRef.kind }}
+    group: {{ .Values.ingress.tls.issuerRef.group }}
+{{- end }}

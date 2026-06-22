@@ -1,0 +1,142 @@
+{{- /*
+api Deployment (ADR-0029 §1 — stateless uvicorn, D10 JWT, no server sessions).
+Reached ONLY via the frontend nginx reverse proxy (ADR-0012 §2); the Ingress
+controller has NO direct edge to this service. Single-replica (P1 GA; HA is P2).
+
+Hardening contract:
+- securityContext from netops.hardenedSecurityContext (drop-ALL, runAsNonRoot,
+  readOnlyRootFilesystem, allowPrivilegeEscalation:false, seccomp RuntimeDefault).
+- Pod-level from netops.podSecurityContext.
+- emptyDir writable scratch: /tmp (uvicorn/Python tempfile) and /var/run (unix
+  sockets, uvicorn --uds path, and the process' pid file).
+- resource requests + limits (ADR-0029 §3 — never absent).
+- liveness /api/v1/health/live, readiness /api/v1/health/ready (ADR-0029 §7 /
+  ADR-0015 §4). startupProbe covers slow first boot / Alembic migration wait.
+- own ServiceAccount api-sa, automountServiceAccountToken:false (no K8s API
+  calls needed; ADR-0029 §5 / zero ClusterRoleBinding).
+- labels include app.kubernetes.io/component=api so T3 NetworkPolicies select it.
+*/ -}}
+{{- if .Values.services.api.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "netops.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "api") | nindent 4 }}
+spec:
+  replicas: {{ .Values.services.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "api") | nindent 8 }}
+    spec:
+      serviceAccountName: api-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: api
+          image: {{ include "netops.backendImage" . }}
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          command:
+            - uvicorn
+            - app.main:app
+            - --host
+            - "0.0.0.0"
+            - --port
+            - {{ .Values.services.api.port | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.services.api.port }}
+              protocol: TCP
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "netops.fullname" . }}-config
+          env:
+            {{- if .Values.secrets.existingSecret }}
+            - name: NETOPS_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: {{ .Values.secrets.keys.postgresPassword }}
+            - name: NETOPS_NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: {{ .Values.secrets.keys.neo4jAuth }}
+            - name: NETOPS_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: {{ .Values.secrets.keys.redisPassword }}
+            - name: NETOPS_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: {{ .Values.secrets.keys.oidcClientSecret }}
+            {{- else }}
+            - name: NETOPS_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.fullname" . }}-dev-secrets
+                  key: {{ .Values.secrets.keys.postgresPassword }}
+            - name: NETOPS_NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.fullname" . }}-dev-secrets
+                  key: {{ .Values.secrets.keys.neo4jAuth }}
+            - name: NETOPS_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.fullname" . }}-dev-secrets
+                  key: {{ .Values.secrets.keys.redisPassword }}
+            - name: NETOPS_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.fullname" . }}-dev-secrets
+                  key: {{ .Values.secrets.keys.oidcClientSecret }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.services.api.resources | nindent 12 }}
+          # startupProbe: generous window for first boot + Alembic migration (ADR-0029 §7).
+          startupProbe:
+            httpGet:
+              path: /api/v1/health/live
+              port: {{ .Values.services.api.port }}
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health/live
+              port: {{ .Values.services.api.port }}
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/ready
+              port: {{ .Values.services.api.port }}
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            # /tmp: uvicorn/Python tempfile scratch (readOnlyRootFilesystem requires emptyDir).
+            - name: tmp
+              mountPath: /tmp
+            # /var/run: unix sockets, uvicorn --uds, pidfiles.
+            - name: varrun
+              mountPath: /var/run
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: varrun
+          emptyDir:
+            sizeLimit: 16Mi
+{{- end }}
