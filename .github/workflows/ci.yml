@@ -339,14 +339,31 @@ jobs:
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
-      # SBOM (syft) per image — runs on EVERY build (PR + publish) over the local
-      # CI tag, retained as a build artifact (PRODUCTION.md §5 / G-SEC). SPDX-JSON
-      # is the portable format consumed by downstream attestation/audit tooling.
-      - name: SBOM (syft) — backend
+      # SBOM (syft) per image — runs on EVERY build (PR + publish), retained as a
+      # build artifact (PRODUCTION.md §5 / G-SEC). SPDX-JSON is the portable
+      # format consumed by downstream attestation/audit tooling.
+      #
+      # SOURCE differs by gate: on PRs the image is loaded into the local docker
+      # daemon (load:true, push:false) so we scan `docker:…:ci`. On the publish
+      # gate the buildx docker-container driver exports ONLY to the registry
+      # (push:true, load:false) — the :ci tag is NOT in the local daemon — so we
+      # scan the pushed registry image BY DIGEST (`registry:<image>@<digest>`).
+      # Scanning :ci on publish would fail image-not-found.
+      - name: SBOM (syft) — backend (PR)
+        if: steps.meta.outputs.publish != 'true'
         run: syft scan docker:netops-backend:ci -o spdx-json > sbom-backend.spdx.json
 
-      - name: SBOM (syft) — frontend
+      - name: SBOM (syft) — frontend (PR)
+        if: steps.meta.outputs.publish != 'true'
         run: syft scan docker:netops-frontend:ci -o spdx-json > sbom-frontend.spdx.json
+
+      - name: SBOM (syft) — backend (publish, by digest)
+        if: steps.meta.outputs.publish == 'true'
+        run: syft scan "registry:${{ steps.meta.outputs.backend_image }}@${{ steps.build_backend.outputs.digest }}" -o spdx-json > sbom-backend.spdx.json
+
+      - name: SBOM (syft) — frontend (publish, by digest)
+        if: steps.meta.outputs.publish == 'true'
+        run: syft scan "registry:${{ steps.meta.outputs.frontend_image }}@${{ steps.build_frontend.outputs.digest }}" -o spdx-json > sbom-frontend.spdx.json
 
       - name: Upload SBOM artifacts
         uses: actions/upload-artifact@v7
@@ -363,7 +380,11 @@ jobs:
       # ignore-unfixed keeps un-patchable base-OS CVEs from wedging the gate
       # (docs/security/2026-06-14-trivy-baseimage-cves.md). The gate is NOT
       # lowered — only sanctioned, expiring findings are suppressed.
-      - name: Trivy scan (backend image)
+      # image-ref differs by gate for the same reason as the SBOM steps: the :ci
+      # tag only exists in the local daemon on PRs (load:true). On publish the
+      # image lives ONLY in the registry, so Trivy scans it BY DIGEST.
+      - name: Trivy scan (backend image, PR)
+        if: steps.meta.outputs.publish != 'true'
         uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_IGNOREFILE: deploy/docker/.trivyignore-image
@@ -374,12 +395,37 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
 
-      - name: Trivy scan (frontend image)
+      - name: Trivy scan (frontend image, PR)
+        if: steps.meta.outputs.publish != 'true'
         uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_IGNOREFILE: deploy/docker/.trivyignore-image
         with:
           image-ref: netops-frontend:ci
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Trivy scan (backend image, publish by digest)
+        if: steps.meta.outputs.publish == 'true'
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/docker/.trivyignore-image
+        with:
+          image-ref: ${{ steps.meta.outputs.backend_image }}@${{ steps.build_backend.outputs.digest }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Trivy scan (frontend image, publish by digest)
+        if: steps.meta.outputs.publish == 'true'
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/docker/.trivyignore-image
+        with:
+          image-ref: ${{ steps.meta.outputs.frontend_image }}@${{ steps.build_frontend.outputs.digest }}
           format: table
           severity: CRITICAL,HIGH
           ignore-unfixed: true
@@ -410,7 +456,7 @@ jobs:
       # chain"). On publish we verify the just-signed images against the SAME
       # keyless identity the admission policy enforces (issuer + workflow-subject
       # regex), so a forged/unsigned image would fail here exactly as it is
-      # rejected at admission. On PRs (no signed image) this is a no-op skip.
+      # rejected at admission.
       - name: cosign verify signed images (publish only)
         if: steps.meta.outputs.publish == 'true'
         run: |
@@ -420,11 +466,51 @@ jobs:
             "${{ steps.meta.outputs.frontend_image }}:${{ github.sha }}"; do
             echo "::group::cosign verify ${img}"
             cosign verify \
-              --certificate-identity-regexp "^https://github.com/.+/.github/workflows/ci.yml@refs/.+$" \
+              --certificate-identity-regexp "^https://github\.com/ilee165/network-infrastructure-ai-platform/\.github/workflows/ci\.yml@refs/.+$" \
               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
               "${img}"
             echo "::endgroup::"
           done
+
+      # PR-path cosign exercise (spec test+gate plan: "cosign sign step runs on
+      # the main/tags path (dry-run/verify on PRs)"). PRs cannot push/sign (no
+      # protected-branch OIDC + packages scope), so instead we VERIFY the
+      # last-published :main image against the SAME pinned identity the admission
+      # policy enforces. This proves the cosign toolchain + identity-chain regex
+      # are wired correctly on every PR — a forged/unsigned image or a broken
+      # identity regex fails here, before merge, with no registry push.
+      #
+      # Bootstrap tolerance: before the first publish to main, the :main tag does
+      # not exist yet. A MISSING image (manifest/tag unknown) is treated as a skip
+      # so the very first PR is not wedged; ANY signature-verification failure
+      # (unsigned image present, or identity/issuer mismatch) is FATAL.
+      - name: cosign verify last-published image (PR dry-run of the chain)
+        if: steps.meta.outputs.publish != 'true'
+        env:
+          BACKEND_MAIN: "${{ steps.meta.outputs.backend_image }}:main"
+          FRONTEND_MAIN: "${{ steps.meta.outputs.frontend_image }}:main"
+        run: |
+          set -euo pipefail
+          status=0
+          for img in "${BACKEND_MAIN}" "${FRONTEND_MAIN}"; do
+            echo "::group::cosign verify (PR) ${img}"
+            out="$(cosign verify \
+              --certificate-identity-regexp "^https://github\.com/ilee165/network-infrastructure-ai-platform/\.github/workflows/ci\.yml@refs/.+$" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${img}" 2>&1)" && rc=0 || rc=$?
+            echo "${out}"
+            if [ "${rc}" -ne 0 ]; then
+              # Image not yet published (bootstrap) -> skip, not fail.
+              if echo "${out}" | grep -Eqi 'manifest unknown|not found|MANIFEST_UNKNOWN|name unknown|no such (manifest|host|image)|error: image .* not found'; then
+                echo "::notice::${img} not yet published to :main — skipping PR verify (bootstrap window). The chain wiring is still asserted once a :main image exists."
+              else
+                echo "::error::cosign verify FAILED for ${img} (unsigned or identity/issuer mismatch) — the signing/admission chain is misconfigured."
+                status=1
+              fi
+            fi
+            echo "::endgroup::"
+          done
+          exit "${status}"
 
   # Chart-validation + policy-as-test for the K8s/Helm declarative half (P1 W4 GA
   # chart, ADR-0029 §3/§5 + ADR-0031). This job is the G-SEC K8s-posture evidence:

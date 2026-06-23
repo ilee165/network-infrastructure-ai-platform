@@ -37,7 +37,7 @@ Retrieve + verify a published image's SBOM attestation:
 ```bash
 cosign verify-attestation \
   --type spdxjson \
-  --certificate-identity-regexp '^https://github.com/.+/.github/workflows/ci.yml@refs/.+$' \
+  --certificate-identity-regexp '^https://github\.com/ilee165/network-infrastructure-ai-platform/\.github/workflows/ci\.yml@refs/.+$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   ghcr.io/<owner>/netops-backend:<sha> \
   | jq -r '.payload | @base64d | fromjson | .predicate' > backend.sbom.spdx.json
@@ -63,7 +63,7 @@ logs, or rendered manifests (ADR-0011 §6 / ADR-0029 §6). The signing identity
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/.+/.github/workflows/ci.yml@refs/.+$' \
+  --certificate-identity-regexp '^https://github\.com/ilee165/network-infrastructure-ai-platform/\.github/workflows/ci\.yml@refs/.+$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   ghcr.io/<owner>/netops-backend:<sha>
 ```
@@ -89,7 +89,7 @@ security:
     keyless:
       enabled: true
       issuer: "https://token.actions.githubusercontent.com"
-      subjectRegExp: "^https://github\\.com/.+/\\.github/workflows/ci\\.yml@refs/.+$"
+      subjectRegExp: "^https://github\\.com/ilee165/network-infrastructure-ai-platform/\\.github/workflows/ci\\.yml@refs/.+$"
       rekorUrl: "https://rekor.sigstore.dev"
     imageReferences: [netops-backend, netops-frontend]
 ```
@@ -98,6 +98,14 @@ When `enabled: true` (default) the rule renders `failureAction: Enforce`,
 `required: true`, `verifyDigest: true` over **both** image refs, with the keyless
 attestor above. An **unsigned or forged-signature** image is **rejected** at
 admission; a tag-swap to an unsigned digest is rejected by `verifyDigest`.
+
+> **Forks MUST repoint the identity.** The default `subjectRegExp` (and the CI
+> `cosign verify`/`verify-attestation` `--certificate-identity-regexp` above) is
+> **pinned to `ilee165/network-infrastructure-ai-platform`** — a bare `.+`
+> owner/repo wildcard would admit a signature minted by *any* org's `ci.yml`.
+> Operators forking the repo MUST replace the `ilee165/network-infrastructure-ai-platform`
+> path with their own `owner/repo` in **all three** places (values
+> `subjectRegExp`, CI `ci.yml`, and these docs) so they stay consistent.
 
 Operators who prefer a long-lived cosign key-pair set
 `security.imageVerification.publicKeyPEM` (the **public** `cosign.pub` only) and

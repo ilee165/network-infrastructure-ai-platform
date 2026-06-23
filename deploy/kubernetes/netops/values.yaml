@@ -964,15 +964,18 @@ security:
     # Keyless (Sigstore/Fulcio + Rekor) verification identity — the GitHub
     # Actions OIDC workflow identity that cosign signs WITH in CI. These are
     # PUBLIC identity assertions, NOT secrets: the verifier checks that the
-    # signature was produced by THIS issuer + THIS workflow subject. Operators
-    # forking the repo MUST set `subject` to their own workflow ref.
+    # signature was produced by THIS issuer + THIS workflow subject. The default
+    # subjectRegExp is pinned to this repo; forks MUST repoint it (see below).
     keyless:
       enabled: true
       # OIDC issuer of the signing identity (GitHub Actions' Sigstore issuer).
       issuer: "https://token.actions.githubusercontent.com"
-      # Workflow-identity subject (regex). Pin to the repo's signing workflow ref
-      # so a signature from any OTHER workflow/repo does NOT satisfy the policy.
-      subjectRegExp: "^https://github\\.com/.+/\\.github/workflows/ci\\.yml@refs/.+$"
+      # Workflow-identity subject (regex). Pinned to THIS repo's signing workflow
+      # ref so a signature from any OTHER org/repo workflow does NOT satisfy the
+      # policy (the `.+` owner/repo wildcard would admit attacker-controlled
+      # forks). Operators forking the repo MUST repoint this to their own
+      # owner/repo ci.yml ref (and the matching CI verify regex + docs).
+      subjectRegExp: "^https://github\\.com/ilee165/network-infrastructure-ai-platform/\\.github/workflows/ci\\.yml@refs/.+$"
       # Rekor transparency-log URL the verifier checks the inclusion proof
       # against (public good instance by default; self-hosted forks point this at
       # their own Rekor). Reference only — no secret material.
