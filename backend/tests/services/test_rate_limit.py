@@ -17,7 +17,9 @@ from app.services.rate_limit import (
     api_principal_key,
     api_token_key,
     login_lockout_key,
+    login_lockout_state_key,
     login_source_key,
+    login_source_lock_key,
     oidc_callback_key,
 )
 from app.services.rate_limit.limiter import _Clock
@@ -236,6 +238,18 @@ def test_keys_are_distinct_per_dimension() -> None:
     assert oidc_callback_key("1.2.3.4").startswith("oidc:cb:")
 
 
+def test_lock_state_keys_are_distinct_from_failure_counter_keys() -> None:
+    """The duration-TTL lock keys must not collide with the failure-window counters."""
+    assert login_lockout_state_key("alice", "1.2.3.4") != login_lockout_key("alice", "1.2.3.4")
+    assert login_source_lock_key("1.2.3.4") != login_source_key("1.2.3.4")
+    assert login_lockout_state_key("alice", "1.2.3.4").startswith("login:lock:")
+    assert login_source_lock_key("1.2.3.4").startswith("login:srclock:")
+
+
 def test_login_keys_normalise_case_and_whitespace() -> None:
     assert login_lockout_key("Alice", "1.2.3.4") == login_lockout_key(" alice ", "1.2.3.4")
     assert login_source_key("1.2.3.4 ") == login_source_key("1.2.3.4")
+    assert login_lockout_state_key("Alice", "1.2.3.4") == login_lockout_state_key(
+        " alice ", "1.2.3.4"
+    )
+    assert login_source_lock_key("1.2.3.4 ") == login_source_lock_key("1.2.3.4")

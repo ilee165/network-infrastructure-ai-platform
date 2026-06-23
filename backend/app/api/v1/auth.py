@@ -244,27 +244,29 @@ async def _enforce_login_not_locked(
 ) -> None:
     """Reject the attempt up-front if this account+source is currently locked.
 
-    Reads (does not increment) the failed-attempt counter for the account+source
-    pair and the source-wide counter; if either has already reached the lockout
-    threshold within its window the attempt is refused with a generic 429 +
-    coarse ``Retry-After`` and an ``auth.login_locked`` audit row — before the
-    password is even checked, so a locked account+source costs an attacker
-    nothing further (and leaks no existence oracle).
+    Reads (does not increment) the dedicated lock-STATE keys for the
+    account+source pair and the source-wide flood; once the failure counter has
+    crossed threshold :func:`_record_login_failure` arms these lock keys with a
+    TTL of ``login_lockout_duration_secs``, so the lock holds for the FULL
+    configured duration (not merely the shorter failure window) and the advertised
+    ``Retry-After`` is truthful. If either lock is set the attempt is refused with
+    a generic 429 + coarse ``Retry-After`` and an ``auth.login_locked`` audit row
+    — before the password is even checked, so a locked account+source costs an
+    attacker nothing further (and leaks no existence oracle).
 
     **Fail-closed** (security — W6-T6 §4): if the lockout backend (Redis) is
     unavailable we deny the attempt rather than wave it through, so a Redis blip
     cannot hand out unlimited login attempts.
     """
     src = source if source is not None else "unknown"
-    threshold = settings.login_lockout_threshold
-    keys = (
-        rate_limit.login_lockout_key(username, src),
-        rate_limit.login_source_key(src),
+    lock_keys = (
+        rate_limit.login_lockout_state_key(username, src),
+        rate_limit.login_source_lock_key(src),
     )
     locked = False
     try:
-        for key in keys:
-            if await limiter.peek(key) >= threshold:
+        for key in lock_keys:
+            if await limiter.peek(key) >= 1:
                 locked = True
                 break
     except rate_limit.RateLimitBackendError as exc:
@@ -295,19 +297,36 @@ async def _record_login_failure(
 ) -> None:
     """Increment the failed-login counters for this account+source and source.
 
+    Each failure increments a short failure-WINDOW counter
+    (``login_lockout_window_secs``); the ``threshold``-th failure inside that
+    window arms a dedicated lock-STATE key with a TTL of
+    ``login_lockout_duration_secs``. The lock-state key — not the failure counter
+    — is what :func:`_enforce_login_not_locked` consults, so the lock holds for
+    the full configured *duration* and the advertised ``Retry-After`` is truthful
+    (the failure window merely controls how quickly failures accumulate).
+
     Best-effort: a backend outage on the *increment* path must not turn a normal
     bad-password 401 into a 500 (the up-front :func:`_enforce_login_not_locked`
-    is the fail-closed guard for the *next* attempt). The counters auto-expire
-    after the window, so a burst of failures locks the pair only transiently.
+    is the fail-closed guard for the *next* attempt).
     """
     src = source if source is not None else "unknown"
     window = settings.login_lockout_window_secs
+    duration = settings.login_lockout_duration_secs
     threshold = settings.login_lockout_threshold
     try:
-        await limiter.hit(
+        account = await limiter.hit(
             rate_limit.login_lockout_key(username, src), limit=threshold, window_secs=window
         )
-        await limiter.hit(rate_limit.login_source_key(src), limit=threshold, window_secs=window)
+        srcwide = await limiter.hit(
+            rate_limit.login_source_key(src), limit=threshold, window_secs=window
+        )
+        # Threshold crossed ⇒ arm the duration-TTL lock so it outlives the window.
+        if account.count >= threshold:
+            await limiter.hit(
+                rate_limit.login_lockout_state_key(username, src), limit=1, window_secs=duration
+            )
+        if srcwide.count >= threshold:
+            await limiter.hit(rate_limit.login_source_lock_key(src), limit=1, window_secs=duration)
     except rate_limit.RateLimitBackendError:
         # Swallow: the credentials were already wrong (401 stands); the lockout
         # guard fails closed independently on the next attempt's read path.
@@ -315,14 +334,16 @@ async def _record_login_failure(
 
 
 async def _clear_login_failures(limiter: RateLimiter, *, username: str, source: str | None) -> None:
-    """Clear the account+source failure counter after a successful login.
+    """Clear the account+source failure counter (and lock state) after success.
 
-    Source-wide counter is left intact: a single legitimate success must not
-    wipe the brute-force signal another account on the same source is generating.
+    Source-wide counter and lock are left intact: a single legitimate success
+    must not wipe the brute-force signal another account on the same source is
+    generating.
     """
     src = source if source is not None else "unknown"
     try:
         await limiter.reset(rate_limit.login_lockout_key(username, src))
+        await limiter.reset(rate_limit.login_lockout_state_key(username, src))
     except rate_limit.RateLimitBackendError:
         return
 

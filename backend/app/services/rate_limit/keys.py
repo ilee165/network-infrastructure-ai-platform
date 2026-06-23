@@ -36,6 +36,25 @@ def login_source_key(source: str) -> str:
     return f"login:src:{_norm(source)}"
 
 
+def login_lockout_state_key(username: str, source: str) -> str:
+    """Per-account + per-source lock-STATE key (distinct from the failure counter).
+
+    Set with a TTL of ``login_lockout_duration_secs`` once the failure counter
+    crosses threshold, so the lock holds for the full *duration* independently of
+    the shorter failure *window* — making the advertised ``Retry-After`` truthful.
+    """
+    return f"login:lock:{_norm(username)}:{_norm(source)}"
+
+
+def login_source_lock_key(source: str) -> str:
+    """Per-source lock-STATE key (source-wide), TTL = lockout duration.
+
+    Mirrors :func:`login_lockout_state_key` for the source-wide flood lock so a
+    tripped source lock also holds for the full configured duration.
+    """
+    return f"login:srclock:{_norm(source)}"
+
+
 def oidc_callback_key(source: str) -> str:
     """Per-source OIDC-callback budget key (ADR-0028 §2 flood blunting)."""
     return f"oidc:cb:{_norm(source)}"

@@ -149,7 +149,26 @@ async def test_lockout_is_audited_without_secret_material(
     assert row.detail.get("outcome") == "locked"
 
 
-async def test_lockout_expires_after_window(
+async def test_lockout_holds_for_full_duration_not_just_window(
+    lockout_client: httpx.AsyncClient,
+    users: dict[str, User],
+    lockout_clock: _AdvanceableClock,
+) -> None:
+    """The lock must hold for ``login_lockout_duration_secs`` (900s), NOT merely
+    the failure ``login_lockout_window_secs`` (300s) — otherwise the advertised
+    ``Retry-After: 900`` lies and the lock is weaker than configured (W6-T6)."""
+    for _ in range(3):
+        await _login(lockout_client, "viewer_user", "wrong")
+    assert (await _login(lockout_client, "viewer_user", "wrong")).status_code == 429
+
+    # Past the 300s failure window but BEFORE the 900s lock duration: STILL locked.
+    lockout_clock.advance(301)
+    still_locked = await _login(lockout_client, "viewer_user", TEST_PASSWORD)
+    assert still_locked.status_code == 429
+    assert int(still_locked.headers["retry-after"]) == 900
+
+
+async def test_lockout_expires_after_full_duration(
     lockout_client: httpx.AsyncClient,
     users: dict[str, User],
     lockout_clock: _AdvanceableClock,
@@ -158,8 +177,8 @@ async def test_lockout_expires_after_window(
         await _login(lockout_client, "viewer_user", "wrong")
     assert (await _login(lockout_client, "viewer_user", "wrong")).status_code == 429
 
-    # Advance past the failure window: counters expire, lock clears.
-    lockout_clock.advance(301)
+    # Advance past the FULL lock duration (900s): the lock auto-expires.
+    lockout_clock.advance(901)
     ok = await _login(lockout_client, "viewer_user", TEST_PASSWORD)
     assert ok.status_code == 200
 
