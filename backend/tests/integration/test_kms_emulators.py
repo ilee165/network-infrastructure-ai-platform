@@ -67,26 +67,41 @@ def test_aws_kms_localstack_roundtrip_and_replay_guard() -> None:
 
 
 def test_vault_transit_dev_roundtrip_replay_guard_and_version() -> None:
-    """Real hvac client against dev Vault Transit via the adapter: full contract."""
+    """Real hvac client against dev Vault Transit via the REAL builder: full contract.
+
+    Drives the production ``_build_vault_transit_client`` + ``_vault_login`` path
+    (NOT a hand-injected adapter): the provider is constructed with ``addr`` and
+    ``credential_ref=None`` so it builds its own hvac client + ``_VaultTransitClient``
+    adapter internally, exactly as a real deployment does. ``credential_ref=None``
+    makes ``_vault_login`` a no-op so the dev root token from ``VAULT_TOKEN``
+    (picked up by ``hvac.Client``) is used directly — there is no k8s-auth/AppRole
+    backend in the emulator. This proves the wrong-aad decrypt genuinely raises
+    ``DecryptionError`` because the transit key was provisioned ``derived=true``
+    (so Transit enforces ``context`` — the row-id AAD / cross-row replay guard).
+    """
     addr = os.environ["VAULT_ADDR"]
-    token = os.environ["VAULT_TOKEN"]
+    # hvac.Client reads VAULT_TOKEN from the environment; assert it is present so a
+    # misconfigured job fails loudly rather than as an opaque auth error.
+    assert os.environ.get("VAULT_TOKEN"), "VAULT_TOKEN must be set for the dev-Vault job"
     transit_key = os.environ.get("VAULT_TRANSIT_KEY", "netops-kek")
 
-    client = hvac.Client(url=addr, token=token)
-    assert client.is_authenticated()
+    from app.core.crypto import DecryptionError
 
-    from app.core.crypto import DecryptionError, _VaultTransitClient
-
-    adapter = _VaultTransitClient(client, mount="transit")
+    # REAL builder path: addr + credential_ref=None -> _build_vault_transit_client
+    # (lazy hvac import, _vault_login no-op, real _VaultTransitClient adapter).
     provider = HashiCorpVaultTransitKeyProvider(
-        transit_mount="transit", transit_key=transit_key, client=adapter
+        transit_mount="transit",
+        transit_key=transit_key,
+        addr=addr,
+        credential_ref=None,
     )
 
     dek = os.urandom(KEY_BYTES)
     wrapped = provider.wrap_dek(dek, aad=_AAD)
     assert provider.unwrap_dek(wrapped, aad=_AAD) == dek
 
-    # Native Transit context binds the row-id: a different aad must fail.
+    # Native Transit context binds the row-id: a different aad must fail. This is
+    # the security property under test (derived=true on the key) — do NOT weaken.
     with pytest.raises(DecryptionError):
         provider.unwrap_dek(wrapped, aad=_OTHER_AAD)
 

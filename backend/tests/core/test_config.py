@@ -57,3 +57,22 @@ def test_prod_rejects_default_secret_key() -> None:
 def test_prod_accepts_explicit_secret_key() -> None:
     settings = Settings(_env_file=None, env="prod", secret_key="a-strong-operator-chosen-key")
     assert settings.env == "prod"
+
+
+def test_is_prod_true_rejects_default_secret_key_even_when_env_dev() -> None:
+    """CR1: the default-secret guard keys off settings.production (NETOPS_IS_PROD)."""
+    with pytest.raises(ValidationError, match="NETOPS_SECRET_KEY"):
+        Settings(_env_file=None, env="dev", is_prod=True)
+
+
+def test_is_prod_true_accepts_explicit_secret_key() -> None:
+    settings = Settings(
+        _env_file=None, env="dev", is_prod=True, secret_key="a-strong-operator-chosen-key"
+    )
+    assert settings.production is True
+
+
+def test_is_prod_false_overrides_env_prod_and_allows_default_secret() -> None:
+    """Explicit NETOPS_IS_PROD=false declares non-prod even with NETOPS_ENV=prod."""
+    settings = Settings(_env_file=None, env="prod", is_prod=False)
+    assert settings.production is False

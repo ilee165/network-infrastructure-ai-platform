@@ -248,9 +248,12 @@ async def test_re_wrap_resumes_after_mid_pass_failure(engine: AsyncEngine) -> No
 async def test_re_wrap_partial_then_resume_with_durable_batches(engine: AsyncEngine) -> None:
     """Durable per-batch commits let a crashed pass resume on the un-migrated rows.
 
-    Drives the real resumable path: the pass commits per batch through an
-    autonomous sessionmaker. We migrate one batch, then assert a mixed-version
-    corpus (some rows still at the old version) and that the next pass finishes it.
+    Drives the REAL partial-then-resume path: a wrapping provider fails closed
+    after the first batch of 2 has been wrapped AND committed (durable per-batch
+    commit), so pass 1 raises mid-way and leaves a genuinely mixed-version corpus.
+    We assert exactly the first batch is durably migrated (a fresh session sees it
+    committed), then a clean pass 2 resumes on only the un-migrated rows and
+    finishes the corpus.
     """
     maker = async_sessionmaker(engine, expire_on_commit=False)
     client = _FakeVaultTransitClient(current_version=1)
@@ -263,20 +266,56 @@ async def test_re_wrap_partial_then_resume_with_durable_batches(engine: AsyncEng
     client.current_version = 2
     v2 = _vault_provider(client)
 
-    # Migrate exactly one batch of 2 by capping the worklist via a tiny batch and a
-    # provider failure injected after the first batch would be elaborate; instead
-    # run with batch_size=2 to completion, then assert idempotent re-run.
+    class _FailAfter:
+        """Delegates to a real provider but fails closed after *fail_after* wraps."""
+
+        def __init__(self, inner: KeyProvider, fail_after: int) -> None:
+            self._inner = inner
+            self._fail_after = fail_after
+            self._wraps = 0
+
+        @property
+        def kek_version(self) -> str:
+            return self._inner.kek_version
+
+        def wrap_dek(self, dek: bytes, *, aad: bytes) -> WrappedDek:
+            if self._wraps >= self._fail_after:
+                from app.core.crypto import KeyProviderUnavailable
+
+                raise KeyProviderUnavailable("TimeoutError")
+            self._wraps += 1
+            return self._inner.wrap_dek(dek, aad=aad)
+
+        def unwrap_dek(self, wrapped: WrappedDek, *, aad: bytes) -> bytes:
+            return self._inner.unwrap_dek(wrapped, aad=aad)
+
+    # Pass 1: fail after the first durable batch of 2 is wrapped + committed.
+    flaky = _FailAfter(v2, fail_after=2)
     async with maker() as session:
+        with pytest.raises(Exception):  # noqa: B017,PT011 — KeyProviderUnavailable
+            await rotation.re_wrap_keys(
+                session, flaky, actor="system:kek_rotation", batch_size=2, sessionmaker=maker
+            )
+
+    # A FRESH session proves the first batch is durably committed (mixed corpus).
+    async with maker() as mid:
+        rows = (await mid.execute(select(DeviceCredential))).scalars().all()
+        assert {r.kek_version for r in rows} == {"netops-kek:v1", "netops-kek:v2"}
+        assert sum(1 for r in rows if r.kek_version == "netops-kek:v2") == 2
+
+    # Pass 2: a clean provider resumes on only the un-migrated rows and finishes.
+    async with maker() as resume:
         result = await rotation.re_wrap_keys(
-            session, v2, actor="system:kek_rotation", batch_size=2, sessionmaker=maker
+            resume, v2, actor="system:kek_rotation", batch_size=2, sessionmaker=maker
         )
-    assert result.rows_migrated == 4
+    assert result.row_count == 2  # only the un-migrated rows remained
+    assert result.rows_migrated == 2
 
     async with maker() as verify:
         rows = (await verify.execute(select(DeviceCredential))).scalars().all()
         assert {r.kek_version for r in rows} == {"netops-kek:v2"}
         assert {r.id for r in rows} == set(cred_ids)
-        # Re-run on the migrated corpus updates zero rows.
+        # Re-run on the fully-migrated corpus updates zero rows.
         rerun = await rotation.re_wrap_keys(
             verify, v2, actor="system:kek_rotation", sessionmaker=maker
         )
@@ -461,6 +500,103 @@ async def test_rotation_status_empty_corpus(session: AsyncSession) -> None:
     assert status.rows_pending == 0
     assert status.from_version is None
     assert status.to_version == "v1"
+
+
+async def test_from_version_is_oldest_numeric_not_lexicographic(session: AsyncSession) -> None:
+    """minor #9: from_version is the oldest by numeric :vN, not string min (v10 < v9).
+
+    A lexicographic ``min`` over the string column would pick ``netops-kek:v10``
+    (``"1" < "9"``); the numeric-aware ordering correctly reports ``:v9`` as oldest.
+    """
+    client = _FakeVaultTransitClient(current_version=9)
+    v9 = _vault_provider(client)
+    await _create(session, v9, name="c-v9")
+    client.current_version = 10
+    v10 = _vault_provider(client)
+    await _create(session, v10, name="c-v10")
+
+    # Active is v11; both v9 and v10 rows are pending.
+    client.current_version = 11
+    v11 = _vault_provider(client)
+    status = await rotation.get_rotation_status(session, v11)
+    assert status.rows_pending == 2
+    assert status.from_version == "netops-kek:v9"  # numeric oldest, NOT "v10"
+
+
+async def test_re_wrap_rejects_non_positive_batch_size_before_any_audit(
+    session: AsyncSession,
+) -> None:
+    """CR7: batch_size<=0 raises BEFORE emitting any kek.rotate.* audit row."""
+    client = _FakeVaultTransitClient(current_version=1)
+    v1 = _vault_provider(client)
+    await _create(session, v1, name="c")
+    client.current_version = 2
+    v2 = _vault_provider(client)
+
+    with pytest.raises(ValueError, match="batch_size must be positive"):
+        await rotation.re_wrap_keys(session, v2, actor="system:kek_rotation", batch_size=0)
+
+    # No misleading "complete over zero rows" (or start) audit was emitted.
+    assert await _audit_rows(session, "kek.rotate.start") == []
+    assert await _audit_rows(session, "kek.rotate.complete") == []
+
+
+async def test_re_wrap_audits_interruption_on_mid_pass_outage(engine: AsyncEngine) -> None:
+    """minor #8: a mid-pass KMS outage writes a kek.rotate.interrupted audit row.
+
+    The wrapping provider fails closed after the first batch; the pass commits the
+    durable batch, re-raises, AND records kek.rotate.interrupted (versions/counts +
+    reason class only) so the outage is never a silent audit gap.
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    client = _FakeVaultTransitClient(current_version=1)
+    v1 = _vault_provider(client)
+    async with maker() as setup:
+        for i in range(4):
+            await _create(setup, v1, name=f"c{i}")
+        await setup.commit()
+
+    client.current_version = 2
+    v2 = _vault_provider(client)
+
+    class _FailAfter:
+        def __init__(self, inner: KeyProvider, fail_after: int) -> None:
+            self._inner = inner
+            self._fail_after = fail_after
+            self._wraps = 0
+
+        @property
+        def kek_version(self) -> str:
+            return self._inner.kek_version
+
+        def wrap_dek(self, dek: bytes, *, aad: bytes) -> WrappedDek:
+            if self._wraps >= self._fail_after:
+                from app.core.crypto import KeyProviderUnavailable
+
+                raise KeyProviderUnavailable("TimeoutError")
+            self._wraps += 1
+            return self._inner.wrap_dek(dek, aad=aad)
+
+        def unwrap_dek(self, wrapped: WrappedDek, *, aad: bytes) -> bytes:
+            return self._inner.unwrap_dek(wrapped, aad=aad)
+
+    flaky = _FailAfter(v2, fail_after=2)
+    async with maker() as session:
+        with pytest.raises(Exception):  # noqa: B017,PT011 — KeyProviderUnavailable
+            await rotation.re_wrap_keys(
+                session, flaky, actor="system:kek_rotation", batch_size=2, sessionmaker=maker
+            )
+
+    async with maker() as verify:
+        rows = await _audit_rows(verify, "kek.rotate.interrupted")
+        assert len(rows) == 1
+        detail = rows[0].detail
+        assert detail["from_version"] == "netops-kek:v1"
+        assert detail["to_version"] == "netops-kek:v2"
+        assert detail["rows_migrated"] == 2
+        assert detail["reason_class"] == "TimeoutError"
+        # No complete row — the pass did not finish.
+        assert await _audit_rows(verify, "kek.rotate.complete") == []
 
 
 # ---------------------------------------------------------------------------

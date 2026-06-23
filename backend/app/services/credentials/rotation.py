@@ -86,11 +86,28 @@ def _aad(credential_id: uuid.UUID) -> bytes:
     return str(credential_id).encode()
 
 
+def _version_sort_key(version: str) -> tuple[int, int, str]:
+    """Order key putting the OLDEST KEK version first across the ``<key>:vN`` scheme.
+
+    A ``func.min`` over the raw STRING column is lexicographically wrong: ``":v10"``
+    sorts before ``":v9"`` and ARNs do not order numerically at all (minor #9).
+    For the ``<key>:vN`` convention this parses the trailing integer so ``v9`` < ``v10``;
+    versions without that suffix (e.g. a bare KMS ARN) fall into a second bucket
+    ordered lexicographically — deterministic, and never numerically misranked.
+    """
+    prefix, sep, suffix = version.rpartition(":v")
+    if sep and suffix.isdigit():
+        return (0, int(suffix), prefix)
+    return (1, 0, version)
+
+
 async def get_rotation_status(session: AsyncSession, provider: KeyProvider) -> RotationStatus:
     """Report the corpus's KEK migration state — versions/counts only (ADR-0032 §6).
 
-    Reads aggregate counts/versions over ``device_credentials`` only; it never
-    selects, returns, or logs a wrapped-DEK / payload blob.
+    Reads aggregate counts + the DISTINCT set of pending versions over
+    ``device_credentials`` only; it never selects, returns, or logs a wrapped-DEK /
+    payload blob. ``from_version`` is the oldest pending KEK version by numeric
+    ``:vN`` ordering (minor #9), not a lexicographic string ``min``.
     """
     active = provider.kek_version
     rows_pending = (
@@ -100,13 +117,20 @@ async def get_rotation_status(session: AsyncSession, provider: KeyProvider) -> R
             .where(DeviceCredential.kek_version != active)
         )
     ).scalar_one()
-    from_version = (
-        await session.execute(
-            select(func.min(DeviceCredential.kek_version)).where(
-                DeviceCredential.kek_version != active
+    # The DISTINCT pending versions are low-cardinality (one per historical KEK),
+    # so ranking them in Python is cheap and lets us order by numeric version.
+    pending_versions = (
+        (
+            await session.execute(
+                select(DeviceCredential.kek_version)
+                .where(DeviceCredential.kek_version != active)
+                .distinct()
             )
         )
-    ).scalar_one()
+        .scalars()
+        .all()
+    )
+    from_version = min(pending_versions, key=_version_sort_key) if pending_versions else None
     return RotationStatus(from_version=from_version, to_version=active, rows_pending=rows_pending)
 
 
@@ -236,11 +260,34 @@ async def re_wrap_keys(
     callers pass an autonomous *sessionmaker* so the bracketing audit events and
     each migrated batch commit durably (the work survives a crash mid-pass).
 
+    ``row_count`` on ``kek.rotate.start`` is the pending count SNAPSHOT taken
+    before the loop; ``rows_migrated`` on ``kek.rotate.complete`` counts the CAS
+    re-wraps that actually fired. Under concurrent old-version inserts the two can
+    differ (a row inserted at the old version after the snapshot is still migrated
+    and counted in ``rows_migrated`` but not in the start ``row_count``); the start
+    value is the work *estimated* at the start, the complete value is the work
+    *done* (minor #10). The idempotent predicate makes a follow-up run sweep any
+    such late arrivals.
+
+    Args:
+        batch_size: Streaming worklist page size; MUST be positive. A non-positive
+            value is rejected up front (CR7) — before any audit — so a misconfigured
+            ``batch_size=0`` never emits a ``kek.rotate.complete`` over zero rows.
+
     Raises:
+        ValueError: If *batch_size* is not positive (rejected before any audit row).
         KeyProviderUnavailable: If the provider becomes unreachable mid-pass —
-            re-raised; already-migrated rows stay migrated (the predicate makes
-            the next run resume). The exception carries a coarse reason class only.
+            a ``kek.rotate.interrupted`` audit row is written (versions/counts only,
+            sibling to the other ``kek.*`` provider-unavailable paths, minor #8) and
+            the error is re-raised; already-migrated rows stay migrated (the
+            predicate makes the next run resume). The exception carries a coarse
+            reason class only.
     """
+    if batch_size <= 0:
+        # Reject BEFORE emitting kek.rotate.start so a misconfigured batch_size
+        # never produces a misleading "rotation complete over zero rows" audit (CR7).
+        raise ValueError("batch_size must be positive")
+
     active = provider.kek_version
     status = await get_rotation_status(session, provider)
     from_version = status.from_version
@@ -262,11 +309,26 @@ async def re_wrap_keys(
         for credential in batch:
             try:
                 migrated = await _rewrap_row(session, provider, credential)
-            except KeyProviderUnavailable:
+            except KeyProviderUnavailable as exc:
                 # Fail closed: persist whatever migrated so far so the next run
-                # resumes (the predicate excludes the already-migrated rows).
+                # resumes (the predicate excludes the already-migrated rows), and
+                # audit the interruption like the sibling provider-unavailable
+                # paths do — a mid-pass outage must not be a silent audit gap
+                # (minor #8). Versions/counts + coarse reason class only.
                 if sessionmaker is not None:
                     await session.commit()
+                await _audit_rotation_event(
+                    sessionmaker,
+                    session,
+                    actor=actor,
+                    action=audit.KEK_ROTATE_INTERRUPTED,
+                    detail={
+                        "from_version": from_version,
+                        "to_version": active,
+                        "rows_migrated": rows_migrated,
+                        "reason_class": exc.reason_class,
+                    },
+                )
                 raise
             if migrated:
                 rows_migrated += 1

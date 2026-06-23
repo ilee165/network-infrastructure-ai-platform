@@ -150,6 +150,12 @@ KEK_PROVIDER_SELECT: Final = "kek.provider.select"
 # ``kek.rotate.complete`` after = {to_version, rows_migrated}.
 KEK_ROTATE_START: Final = "kek.rotate.start"
 KEK_ROTATE_COMPLETE: Final = "kek.rotate.complete"
+# A re-wrap pass was interrupted by a mid-pass provider outage (ADR-0032 §4): the
+# committed batches stay migrated and the next run resumes, but the interruption
+# is audited so a KMS outage mid-rotation is never a silent audit gap (W6 minor
+# #8). ``detail`` = {from_version, to_version, rows_migrated, reason_class} —
+# versions/counts + coarse reason class only, never key/DEK/wrapped bytes.
+KEK_ROTATE_INTERRUPTED: Final = "kek.rotate.interrupted"
 
 
 async def record(

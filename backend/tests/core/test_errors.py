@@ -15,10 +15,39 @@ from app.core.errors import (
     NetOpsError,
     NotFoundError,
     PluginError,
+    RateLimitedError,
+    _problem_response,
     translate_llm_error,
     unhandled_error_handler,
 )
 from app.main import create_app
+
+
+def _bare_request(path: str = "/x") -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected_header"),
+    [(30, "30"), (1, "1"), (0, "1")],
+)
+def test_rate_limited_always_carries_retry_after(retry_after: int, expected_header: str) -> None:
+    """CR4: a 429 ALWAYS carries Retry-After, incl. a boundary 0 (coarse minimum 1)."""
+    response = _problem_response(
+        RateLimitedError("slow down", retry_after=retry_after), _bare_request()
+    )
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == expected_header
 
 
 @pytest.mark.parametrize(

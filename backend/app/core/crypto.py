@@ -435,7 +435,18 @@ class _KmsKeyProvider:
         raise NotImplementedError
 
     def _ping(self) -> None:
-        """Cheapest liveness check (a wrap/unwrap of a throwaway probe DEK)."""
+        """Liveness check: one wrap+unwrap round-trip of a throwaway probe DEK.
+
+        This is two backend calls (encrypt then decrypt) per probe — the only
+        backend-agnostic primitive that proves the KEK is both reachable AND
+        usable without ever exporting key material. Each call is on a fixed-size
+        ``KEY_BYTES`` probe and touches no credential row. Because the readiness
+        probe polls this, the per-poll cost is bounded but NOT free (minor #2):
+        operators must size the readiness ``periodSeconds`` against the backend's
+        request budget/latency rather than probing on a tight loop. A subclass
+        with a cheaper native liveness primitive (e.g. a key-metadata read) may
+        override this.
+        """
         probe = os.urandom(KEY_BYTES)
         self._unwrap(self._wrap(probe, aad=b"healthcheck"), aad=b"healthcheck")
 
@@ -520,8 +531,9 @@ class HashiCorpVaultTransitKeyProvider(_KmsKeyProvider):
     The row-id ``aad`` is bound **natively** via Transit ``context={row_id}`` —
     decrypt fails on a different context (cross-row replay guard). The short-lived
     token is obtained from a k8s-auth / AppRole login keyed by ``credential_ref``
-    (an INDIRECT handle, never a token value) and auto-renewed; the value of
-    ``credential_ref`` is never logged. ``kek_version`` is ``<key>:vN`` so an old
+    (an INDIRECT handle, never a token value), with a single best-effort renew at
+    login (NOT a background loop — the readiness gate is the expiry backstop); the
+    value of ``credential_ref`` is never logged. ``kek_version`` is ``<key>:vN`` so an old
     transit key version still decrypts after rotation (ADR-0032 §2 rotation model).
 
     The injected *client* is the :class:`_VaultTransitClient` adapter contract
@@ -724,7 +736,7 @@ def _build_aws_kms_client(key_arn: str) -> object:  # pragma: no cover - import 
         import boto3  # noqa: PLC0415
     except ImportError as exc:
         raise KekConfigurationError(
-            "VAULT_KEY_PROVIDER=aws requires the 'boto3' extra to be installed"
+            "NETOPS_VAULT_KEY_PROVIDER=aws requires the 'boto3' extra to be installed"
         ) from exc
     return boto3.client("kms")
 
@@ -788,15 +800,24 @@ def _read_sa_jwt() -> str | None:
 
 
 def _vault_login(client: object, credential_ref: str | None) -> None:
-    """Authenticate *client* via k8s-auth (default) or AppRole, then auto-renew.
+    """Authenticate *client* via k8s-auth (default) or AppRole, with a single renew.
 
     ``credential_ref`` is the INDIRECT login handle — a k8s-auth / AppRole **role**
     name, never a token value. The pod's projected ServiceAccount JWT is exchanged
-    for a short-lived Vault token; the lease is renewed in the background. The
-    ``credential_ref`` value is never logged (only its presence/absence drives the
-    branch). If no ServiceAccount JWT is present we fall back to AppRole using the
-    ref as the role id (the secret id arrives via the standard ``VAULT_*`` env /
-    the agent sidecar), so the platform never inlines a secret here.
+    for a short-lived Vault token. The ``credential_ref`` value is never logged
+    (only its presence/absence drives the branch). If no ServiceAccount JWT is
+    present we fall back to AppRole using the ref as the role id; the secret id
+    arrives via the standard ``VAULT_SECRET_ID`` env / the agent sidecar, so the
+    platform never inlines a secret here. A missing ``VAULT_SECRET_ID`` is a typed
+    :class:`KekConfigurationError` rather than a raw hvac error on a ``None`` secret
+    (minor #6).
+
+    Renewal is a **single best-effort ``renew_self`` at login**, NOT a background
+    auto-renew loop (CR2 / minor #5): there is no periodic renewal thread here. A
+    long-running process whose token nonetheless expires is caught by the
+    fail-closed readiness gate (``health()``), which pulls the replica from
+    rotation — the backstop the renew is not. A real periodic-renewal scheme is a
+    deliberate follow-up, not implied by this call.
     """
     if not credential_ref:
         return
@@ -805,10 +826,18 @@ def _vault_login(client: object, credential_ref: str | None) -> None:
         client.auth.kubernetes.login(role=credential_ref, jwt=jwt)  # type: ignore[attr-defined]
     else:
         secret_id = os.environ.get("VAULT_SECRET_ID")
+        if not secret_id:
+            # AppRole login needs a secret_id; ``approle.login(secret_id=None)``
+            # would raise a raw hvac error. Surface a typed config error instead
+            # (no secret value is ever inlined or logged) (minor #6).
+            raise KekConfigurationError(
+                "Vault AppRole login requires VAULT_SECRET_ID when no k8s-auth "
+                "ServiceAccount token is present"
+            )
         client.auth.approle.login(  # type: ignore[attr-defined]
             role_id=credential_ref, secret_id=secret_id
         )
-    # Best-effort lease renewal so a long-lived process keeps a valid token; the
+    # Single best-effort token renewal at login (NOT a background loop); the
     # fail-closed readiness gate catches an expired/unrenewable token as an outage.
     with contextlib.suppress(Exception):  # renewal is best-effort; readiness gate is the backstop
         client.auth.token.renew_self()  # type: ignore[attr-defined]
@@ -820,15 +849,16 @@ def _build_vault_transit_client(
     """Build an hvac-backed :class:`_VaultTransitClient` authenticated via ``credential_ref``.
 
     Lazy import keeps hvac OPTIONAL. The ``credential_ref`` is the INDIRECT login
-    handle (k8s-auth / AppRole role), exchanged for a short-lived, auto-renewed
-    token (:func:`_vault_login`); its value is never logged. The returned adapter
-    pins the real ``client.secrets.transit.*`` shape (base64 + ``mount_point``).
+    handle (k8s-auth / AppRole role), exchanged for a short-lived token with a
+    single best-effort renew at login (:func:`_vault_login` — no background renewal
+    loop); its value is never logged. The returned adapter pins the real
+    ``client.secrets.transit.*`` shape (base64 + ``mount_point``).
     """
     try:
         import hvac  # noqa: PLC0415
     except ImportError as exc:
         raise KekConfigurationError(
-            "VAULT_KEY_PROVIDER=vault requires the 'hvac' extra to be installed"
+            "NETOPS_VAULT_KEY_PROVIDER=vault requires the 'hvac' extra to be installed"
         ) from exc
     client = hvac.Client(url=addr)
     _vault_login(client, credential_ref)
@@ -882,7 +912,7 @@ def _build_azure_key_client(
         )
     except ImportError as exc:
         raise KekConfigurationError(
-            "VAULT_KEY_PROVIDER=azure requires the 'azure' extra to be installed"
+            "NETOPS_VAULT_KEY_PROVIDER=azure requires the 'azure' extra to be installed"
         ) from exc
     credential = DefaultAzureCredential()
     key = KeyClient(vault_url=vault_uri, credential=credential).get_key(key_name)
@@ -893,11 +923,16 @@ def _build_azure_key_client(
 def get_key_provider(settings: Settings, *, client: object | None = None) -> KeyProvider:
     """Build the configured :class:`KeyProvider` (ADR-0032 §2 config-only swap).
 
-    ``VAULT_KEY_PROVIDER`` selects the backend: ``aws`` / ``azure`` / ``vault``
-    (production KMS) or ``env`` / ``file`` (local fallback). When it is unset the
-    legacy selection applies (``kek`` wins over ``kek_file``) so an existing local
-    deployment is unchanged. *client* is a test-only injection point for the
-    low-level KMS client; production resolves it from the pod's ambient identity.
+    ``NETOPS_VAULT_KEY_PROVIDER`` selects the backend: ``aws`` / ``azure`` /
+    ``vault`` (production KMS) or ``env`` / ``file`` (local fallback). When it is
+    unset the legacy selection applies (``kek`` wins over ``kek_file``) so an
+    existing local deployment is unchanged. *client* is a test-only injection point
+    for the low-level KMS client; production resolves it from the pod's ambient
+    identity.
+
+    Operator-facing messages use the ``NETOPS_``-prefixed variable names (the
+    settings ``env_prefix``) so a misconfiguration points at the exact env var to
+    set (CR3).
 
     Raises:
         KekConfigurationError: If the selected backend's required settings are
@@ -907,13 +942,13 @@ def get_key_provider(settings: Settings, *, client: object | None = None) -> Key
     if selector == "aws":
         if not settings.aws_kms_key_arn:
             raise KekConfigurationError(
-                "VAULT_KEY_PROVIDER=aws requires NETOPS_AWS_KMS_KEY_ARN (the KMS key ARN)"
+                "NETOPS_VAULT_KEY_PROVIDER=aws requires NETOPS_AWS_KMS_KEY_ARN (the KMS key ARN)"
             )
         return AwsKmsKeyProvider(key_arn=settings.aws_kms_key_arn, client=client)
     if selector == "vault":
         if not settings.vault_transit_key or not settings.vault_credential_ref:
             raise KekConfigurationError(
-                "VAULT_KEY_PROVIDER=vault requires NETOPS_VAULT_TRANSIT_KEY and "
+                "NETOPS_VAULT_KEY_PROVIDER=vault requires NETOPS_VAULT_TRANSIT_KEY and "
                 "NETOPS_VAULT_CREDENTIAL_REF (an indirect login handle, never a token)"
             )
         return HashiCorpVaultTransitKeyProvider(
@@ -926,7 +961,7 @@ def get_key_provider(settings: Settings, *, client: object | None = None) -> Key
     if selector == "azure":
         if not settings.azure_key_vault_uri or not settings.azure_key_name:
             raise KekConfigurationError(
-                "VAULT_KEY_PROVIDER=azure requires NETOPS_AZURE_KEY_VAULT_URI and "
+                "NETOPS_VAULT_KEY_PROVIDER=azure requires NETOPS_AZURE_KEY_VAULT_URI and "
                 "NETOPS_AZURE_KEY_NAME"
             )
         return AzureKeyVaultKeyProvider(
@@ -944,8 +979,8 @@ def get_key_provider(settings: Settings, *, client: object | None = None) -> Key
     if settings.kek_file is not None:
         return FileKeyProvider(settings)
     raise KekConfigurationError(
-        "Credential vault KEK is not configured: set VAULT_KEY_PROVIDER to a KMS "
-        "backend (aws|azure|vault) or NETOPS_KEK / NETOPS_KEK_FILE for the local "
+        "Credential vault KEK is not configured: set NETOPS_VAULT_KEY_PROVIDER to a "
+        "KMS backend (aws|azure|vault) or NETOPS_KEK / NETOPS_KEK_FILE for the local "
         "fallback"
     )
 
@@ -1043,11 +1078,72 @@ def envelope_encrypt(plaintext: bytes, aad: bytes, provider: KeyProvider) -> Enc
     )
 
 
+class _EnvelopeOpener:
+    """Two-phase decrypt: key-access (KEK unwrap) is done; payload auth is pending.
+
+    Lets a caller audit the ``kek.unwrap`` key-access BEFORE the payload is
+    authenticated — so a payload-auth failure (wrong AAD / tampered ciphertext)
+    never loses the unwrap-access audit (CR9). The transient DEK is held only on
+    this object (redacted ``repr``, never returned/serialized) and is zeroized by
+    :meth:`authenticate` (success or failure). Construct via
+    :func:`begin_envelope_decrypt`; the DEK is unwrapped there (key access), then
+    exactly one :meth:`authenticate` completes (and zeroizes) it.
+    """
+
+    __slots__ = ("_aad", "_dek", "_secret")
+
+    def __init__(self, secret: EncryptedSecret, dek: bytearray, aad: bytes) -> None:
+        self._secret = secret
+        self._dek = dek
+        self._aad = aad
+
+    def __repr__(self) -> str:  # never expose the DEK
+        return f"<envelope-opener:{self._secret.kek_version}>"
+
+    def authenticate(self) -> bytes:
+        """Authenticate + return the payload plaintext, zeroizing the DEK after.
+
+        Raises:
+            DecryptionError: If payload GCM auth fails (wrong AAD or tampered data).
+        """
+        try:
+            return AESGCM(bytes(self._dek)).decrypt(
+                self._secret.nonce, self._secret.ciphertext, self._aad
+            )
+        except InvalidTag as exc:
+            raise DecryptionError(
+                "Secret payload failed authenticated decryption (wrong AAD or tampered data)"
+            ) from exc
+        finally:
+            _zeroize(self._dek)
+
+
+def begin_envelope_decrypt(
+    secret: EncryptedSecret, aad: bytes, provider: KeyProvider
+) -> _EnvelopeOpener:
+    """Perform ONLY the KEK->DEK unwrap (key access); defer payload authentication.
+
+    The returned :class:`_EnvelopeOpener` holds the transient DEK; the caller calls
+    :meth:`~_EnvelopeOpener.authenticate` to finish (and zeroize). Splitting the
+    unwrap from the payload auth lets the caller audit ``kek.unwrap`` immediately
+    after key access, before a payload-auth failure can abort (CR9).
+
+    Raises:
+        UnknownKekVersionError: If the provider cannot supply ``secret.kek_version``.
+        DecryptionError: If the WRAP layer fails authentication (wrong KEK/AAD —
+            cross-row replay guard). The payload auth is not reached here.
+        KeyProviderUnavailable: If the provider is unreachable (fail closed).
+    """
+    dek = bytearray(provider.unwrap_dek(secret._wrapped(), aad=aad))
+    return _EnvelopeOpener(secret, dek, aad)
+
+
 def envelope_decrypt(secret: EncryptedSecret, aad: bytes, provider: KeyProvider) -> bytes:
     """Decrypt *secret*, verifying *aad*; the inverse of :func:`envelope_encrypt`.
 
     The plaintext DEK is transient and zeroized after the single AESGCM op
-    (ADR-0032 §6 — no DEK cache).
+    (ADR-0032 §6 — no DEK cache). For the audited credential path that must record
+    key access even on a payload-auth failure, see :func:`begin_envelope_decrypt`.
 
     Raises:
         UnknownKekVersionError: If the provider cannot supply ``secret.kek_version``.
@@ -1055,15 +1151,7 @@ def envelope_decrypt(secret: EncryptedSecret, aad: bytes, provider: KeyProvider)
             wrong key, or tampered ciphertext).
         KeyProviderUnavailable: If the provider is unreachable (fail closed).
     """
-    dek = bytearray(provider.unwrap_dek(secret._wrapped(), aad=aad))
-    try:
-        return AESGCM(bytes(dek)).decrypt(secret.nonce, secret.ciphertext, aad)
-    except InvalidTag as exc:
-        raise DecryptionError(
-            "Secret payload failed authenticated decryption (wrong AAD or tampered data)"
-        ) from exc
-    finally:
-        _zeroize(dek)
+    return begin_envelope_decrypt(secret, aad, provider).authenticate()
 
 
 def rewrap(secret: EncryptedSecret, aad: bytes, provider: KeyProvider) -> EncryptedSecret:

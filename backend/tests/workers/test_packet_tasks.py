@@ -220,28 +220,33 @@ def _seed_ssh_device(db_url: str, provider: Any, *, secret: str) -> uuid.UUID:
 
     async def _go() -> uuid.UUID:
         engine = create_async_engine(db_url)
-        maker = async_sessionmaker(engine, expire_on_commit=False)
-        async with maker() as session:
-            cred = await credentials_service.create_credential(
-                session,
-                provider,
-                name="eos-ssh",
-                kind=CredentialKind.SSH,
-                username="netops",
-                secret=secret,
-                params={"port": 2222},
-                actor="test",
-            )
-            device = Device(
-                hostname="eos-1",
-                mgmt_ip="10.0.0.5",
-                vendor_id="eos",
-                status=DeviceStatus.REACHABLE,
-                credential_id=cred.id,
-            )
-            session.add(device)
-            await session.commit()
-            return device.id
+        try:
+            maker = async_sessionmaker(engine, expire_on_commit=False)
+            async with maker() as session:
+                cred = await credentials_service.create_credential(
+                    session,
+                    provider,
+                    name="eos-ssh",
+                    kind=CredentialKind.SSH,
+                    username="netops",
+                    secret=secret,
+                    params={"port": 2222},
+                    actor="test",
+                )
+                device = Device(
+                    hostname="eos-1",
+                    mgmt_ip="10.0.0.5",
+                    vendor_id="eos",
+                    status=DeviceStatus.REACHABLE,
+                    credential_id=cred.id,
+                )
+                session.add(device)
+                await session.commit()
+                return device.id
+        finally:
+            # CR11: dispose the engine so its connection pool is not leaked across
+            # runs (the engine is created per seed call inside this loop).
+            await engine.dispose()
 
     return asyncio.run(_go())
 

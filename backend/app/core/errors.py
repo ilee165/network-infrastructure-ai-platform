@@ -201,9 +201,13 @@ def _problem_response(error: NetOpsError, request: Request) -> JSONResponse:
     headers: dict[str, str] | None = None
     if error.status_code == 401:
         headers = {"WWW-Authenticate": "Bearer"}
-    elif isinstance(error, RateLimitedError) and error.retry_after > 0:
-        # RFC 7231 §7.1.3 Retry-After (delay-seconds form); coarse by design.
-        headers = {"Retry-After": str(error.retry_after)}
+    elif isinstance(error, RateLimitedError):
+        # RFC 7231 §7.1.3 Retry-After (delay-seconds form); coarse by design. A
+        # 429 must ALWAYS carry Retry-After so a client knows to back off — a
+        # boundary retry_after of 0 still emits a coarse minimum of 1 second
+        # rather than a header-less 429 (CR4).
+        retry_after = error.retry_after if error.retry_after > 0 else 1
+        headers = {"Retry-After": str(retry_after)}
     return JSONResponse(
         status_code=error.status_code,
         content=error.to_problem(instance=request.url.path),

@@ -270,10 +270,18 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _forbid_default_secret_in_prod(self) -> Settings:
-        """Secure by default: the baked-in dev key must never sign prod tokens."""
-        if self.env == "prod" and self.secret_key == _DEV_ONLY_SECRET_KEY:
+        """Secure by default: the baked-in dev key must never sign prod tokens.
+
+        Keyed off the effective :attr:`production` posture (``NETOPS_IS_PROD``
+        else ``env == 'prod'``), not the raw ``env``, so explicitly setting
+        ``NETOPS_IS_PROD=true`` also bars the dev key — a prod deploy can never
+        sign tokens with the insecure default regardless of how the posture was
+        declared.
+        """
+        if self.production and self.secret_key == _DEV_ONLY_SECRET_KEY:
             raise ValueError(
-                "NETOPS_SECRET_KEY must be set to a strong unique value when NETOPS_ENV=prod"
+                "NETOPS_SECRET_KEY must be set to a strong unique value in production "
+                "(NETOPS_ENV=prod or NETOPS_IS_PROD=true)"
             )
         return self
 

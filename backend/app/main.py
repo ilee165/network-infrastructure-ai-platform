@@ -103,6 +103,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # boot. The readiness probe refreshes this gauge on every poll.
             healthy = await asyncio.to_thread(lambda: provider.health().available)
             metrics.set_provider_healthy(healthy=healthy)
+            # CR6 (secure-by-default refuse-to-start): a selected PRODUCTION KMS
+            # that reports unhealthy at boot must FAIL startup, not merely record a
+            # 0 gauge and continue serving — a credential write/read would then
+            # fail closed on every request behind a "green" deploy. A local
+            # (non-production) provider is always reachable in-process, so this only
+            # gates real KMS backends.
+            if production_grade and not healthy:
+                raise RuntimeError(
+                    "selected production KEK provider "
+                    f"{type(provider).__name__!r} is unhealthy at startup; "
+                    "refusing to start (ADR-0032 §4 fail-closed)"
+                )
             # Startup banner: the active KEK backend + its production posture.
             logger.info(
                 "kek.provider.banner",

@@ -715,7 +715,7 @@ jobs:
             -d '{"type":"transit"}' || true   # already mounted is fine
           curl -sf -H "X-Vault-Token: ${VAULT_TOKEN}" -X POST \
             "${VAULT_ADDR}/v1/transit/keys/netops-kek" \
-            -d '{"type":"aes256-gcm96"}'
+            -d '{"type":"aes256-gcm96","derived":true}'
 
       - name: Exercise AWS + Vault providers against the emulators (RED gate)
         working-directory: backend

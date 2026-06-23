@@ -37,14 +37,17 @@ from app.core.crypto import (
     EncryptedSecret,
     KeyProvider,
     KeyProviderUnavailable,
-    envelope_decrypt,
+    begin_envelope_decrypt,
     envelope_encrypt,
     is_production_grade,
     rewrap,
 )
 from app.core.errors import NotFoundError
+from app.core.logging import get_logger
 from app.models.inventory import CredentialKind, DeviceCredential
 from app.services import audit
+
+_logger = get_logger(__name__)
 
 _TARGET_TYPE = "credential"
 
@@ -139,27 +142,44 @@ async def _audit_provider_unavailable(
     on the failure path). When *sessionmaker* is ``None`` (unit tests asserting
     on the same session, callers with no autonomous boundary), the row is flushed
     on the caller's session as before — non-durable, but behaviourally correct.
+
+    If the audit record/commit itself fails (e.g. the audit DB is also down) the
+    ORIGINAL :class:`KeyProviderUnavailable` is preserved and re-raised by the
+    caller — never replaced by the audit DB error (CR8); the lost audit row is
+    logged (coarse reason class only) but does not mask the fail-closed 503.
     """
-    if sessionmaker is not None:
-        async with sessionmaker() as audit_session:
-            await audit.record(
-                audit_session,
-                actor=actor,
-                action=audit.KEK_PROVIDER_UNAVAILABLE,
-                target_type=_TARGET_TYPE,
-                target_id=target_id,
-                detail={"reason_class": exc.reason_class},
-            )
-            await audit_session.commit()
-        return
-    await audit.record(
-        session,
-        actor=actor,
-        action=audit.KEK_PROVIDER_UNAVAILABLE,
-        target_type=_TARGET_TYPE,
-        target_id=target_id,
-        detail={"reason_class": exc.reason_class},
-    )
+    try:
+        if sessionmaker is not None:
+            async with sessionmaker() as audit_session:
+                await audit.record(
+                    audit_session,
+                    actor=actor,
+                    action=audit.KEK_PROVIDER_UNAVAILABLE,
+                    target_type=_TARGET_TYPE,
+                    target_id=target_id,
+                    detail={"reason_class": exc.reason_class},
+                )
+                await audit_session.commit()
+            return
+        await audit.record(
+            session,
+            actor=actor,
+            action=audit.KEK_PROVIDER_UNAVAILABLE,
+            target_type=_TARGET_TYPE,
+            target_id=target_id,
+            detail={"reason_class": exc.reason_class},
+        )
+    except Exception as audit_exc:  # noqa: BLE001 - never mask the original 503
+        # CR8: if the audit record/commit itself fails (e.g. the audit DB is also
+        # down), preserve the ORIGINAL KeyProviderUnavailable the caller must see
+        # -- a fail-closed 503 -- rather than letting the audit DB error replace
+        # it. The lost audit row is logged (coarse class only, no key material) but
+        # does not change the failure surfaced to the caller.
+        _logger.error(
+            "kek.provider.unavailable.audit_failed",
+            reason_class=exc.reason_class,
+            audit_error_class=type(audit_exc).__name__,
+        )
 
 
 async def audit_provider_select(
@@ -332,8 +352,15 @@ async def decrypt(
             as ``kek.provider.unavailable`` and re-raised so the dependent task
             fails and retries (Celery ``acks_late``); no plaintext is returned.
     """
+    # CR9: split the KEK->DEK unwrap (key access) from payload authentication so
+    # the kek.unwrap audit is written the moment key access happens — BEFORE the
+    # payload GCM auth can abort. envelope_decrypt() unwraps then authenticates in
+    # one call, so a tampered/wrong-AAD payload would lose the unwrap-access audit
+    # if we only audited after the full decrypt. A wrap-layer DecryptionError
+    # (cross-row replay) is raised by begin_envelope_decrypt() and never yields a
+    # usable DEK, so no key-access audit is owed there.
     try:
-        plaintext = envelope_decrypt(_envelope(credential), _aad(credential.id), provider)
+        opener = begin_envelope_decrypt(_envelope(credential), _aad(credential.id), provider)
     except KeyProviderUnavailable as exc:
         await _audit_provider_unavailable(
             session, exc, actor=actor, target_id=str(credential.id), sessionmaker=sessionmaker
@@ -347,6 +374,9 @@ async def decrypt(
         target_id=str(credential.id),
         detail={"kek_version": credential.kek_version, "reason": reason},
     )
+    # Payload authentication: a failure here (wrong AAD / tampered payload) still
+    # leaves the kek.unwrap key-access audit recorded above.
+    plaintext = opener.authenticate()
     await audit.record(
         session,
         actor=actor,
@@ -366,6 +396,19 @@ async def rotate_kek(
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> int:
     """Rewrap every credential's DEK under the provider's active KEK version.
+
+    .. note::
+        This is the **W6-T1 single-transaction** KEK-rotation path: it loads the
+        WHOLE corpus at once, has no batching and no compare-and-set, and audits a
+        per-credential ``credential.rotated`` + ``kek.wrap``. It suits a small
+        corpus rotated inside one caller-owned transaction. The **production /
+        at-scale** path is :func:`app.services.credentials.rotation.re_wrap_keys`
+        (W6-T3): streamed batches, per-row compare-and-set (so a concurrent
+        ``rotate_secret`` is never clobbered), durable per-batch commits, and
+        bracketing ``kek.rotate.start`` / ``kek.rotate.complete`` audit events.
+        The two are deliberately distinct, not divergent: same cheap-rewrap
+        semantics (payload never re-encrypted), different scale/concurrency
+        envelope (minor #1). New callers should prefer ``re_wrap_keys``.
 
     Cheap rotation per ADR-0011/ADR-0032 §3: only the wrapped DEK changes;
     payload ciphertext is never re-encrypted. Credentials already wrapped under

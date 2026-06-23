@@ -49,9 +49,12 @@ try:  # Optional observability dependency (D15) — degrade to no-ops if absent.
         "reported unavailable (drives the fail-closed readiness gate, ADR-0032 §4).",
     )
     _PROM_ENABLED = True
-except Exception:  # pragma: no cover - exercised only on a slim install
+except ImportError:  # pragma: no cover - exercised only on a slim install
     # No prometheus_client: keep the symbols present (callers reference them) but
-    # inert. The startup banner + readiness body remain the source of truth.
+    # inert. The startup banner + readiness body remain the source of truth. Only
+    # a missing dependency degrades to no-ops — a real registration/runtime error
+    # (e.g. a duplicate-series collision on the default REGISTRY) must surface, not
+    # silently disable observability (CR5).
     PROVIDER_PRODUCTION_GRADE = None
     PROVIDER_HEALTHY = None
     _PROM_ENABLED = False

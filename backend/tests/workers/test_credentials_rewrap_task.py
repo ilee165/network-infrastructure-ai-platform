@@ -123,3 +123,31 @@ def test_re_wrap_keys_task_on_migrated_corpus_is_a_no_op(
     assert summary["row_count"] == 0
     assert summary["from_version"] is None
     assert summary["to_version"] == "netops-kek:v1"
+
+
+def test_worker_key_provider_applies_production_grade_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR10: the worker's _key_provider enforces the same prod-grade KEK gate.
+
+    The Celery worker builds its provider independently of create_app(), so it must
+    refuse a local Env/File KEK under a production posture — otherwise a re-wrap
+    pass could run on a non-production KEK in prod, bypassing the refuse-to-start
+    guard the API composition root enforces (ADR-0032 §2).
+    """
+    import base64
+    import os
+
+    from app.core.config import Settings
+    from app.core.crypto import KEY_BYTES, EnvKeyProvider, LocalKeyProviderInProductionError
+
+    kek = base64.urlsafe_b64encode(os.urandom(KEY_BYTES)).decode("ascii")
+    prod_settings = Settings(  # type: ignore[arg-type]
+        _env_file=None, env="prod", secret_key="a-strong-prod-secret", is_prod=True, kek=kek
+    )
+    # Patch the names bound in the task module (it imports them directly).
+    monkeypatch.setattr(task, "get_settings", lambda: prod_settings)
+    monkeypatch.setattr(task, "get_key_provider", lambda settings: EnvKeyProvider(prod_settings))
+
+    with pytest.raises(LocalKeyProviderInProductionError):
+        task._key_provider()

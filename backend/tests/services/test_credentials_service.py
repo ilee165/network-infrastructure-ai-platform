@@ -391,6 +391,31 @@ async def test_decrypt_audits_kek_unwrap(session: AsyncSession) -> None:
     assert rows[0].detail == {"kek_version": "v1", "reason": "ssh"}
 
 
+async def test_decrypt_audits_kek_unwrap_even_when_payload_auth_fails(
+    session: AsyncSession,
+) -> None:
+    """CR9: a payload-auth failure still records the kek.unwrap key-access audit.
+
+    The DEK unwrap (key access) succeeds, but the payload GCM auth fails (the
+    ciphertext is tampered). The unwrap audit must already be written — key access
+    happened — so it is never lost to a downstream payload-auth abort.
+    """
+    provider = _provider()
+    credential = await _create(session, provider)
+    # Tamper ONLY the payload ciphertext: the DEK still unwraps (key access), but
+    # the payload GCM auth fails -> DecryptionError after the unwrap step.
+    credential.ciphertext = bytes(bytearray(credential.ciphertext)[:-1] + b"\x00")
+
+    with pytest.raises(DecryptionError):
+        await vault.decrypt(session, provider, credential, actor="system:discovery", reason="ssh")
+
+    unwrap_rows = await _audit_rows(session, "kek.unwrap")
+    assert len(unwrap_rows) == 1  # key access audited despite the payload failure
+    assert unwrap_rows[0].detail == {"kek_version": "v1", "reason": "ssh"}
+    # The success-only credential.decrypted audit is NOT written on the failure.
+    assert await _audit_rows(session, "credential.decrypted") == []
+
+
 async def test_rotate_kek_audits_kek_wrap_per_credential(session: AsyncSession) -> None:
     """KEK rotation emits a kek.wrap row per rewrapped credential (to-version only)."""
     old_kek, new_kek = os.urandom(KEY_BYTES), os.urandom(KEY_BYTES)
@@ -574,6 +599,36 @@ async def test_autonomous_sessionmaker_makes_worker_decrypt_audit_durable(
         assert rows[0].detail == {"reason_class": "TimeoutError"}
         # No decrypt audit row when the unwrap fails closed.
         assert await _audit_rows(verify_session, "credential.decrypted") == []
+
+
+async def test_provider_unavailable_preserves_original_error_when_audit_fails(
+    engine: AsyncEngine,
+) -> None:
+    """CR8: if the audit write fails on the fail-closed path, the ORIGINAL 503 wins.
+
+    The provider is down (KeyProviderUnavailable) AND the durable-audit sessionmaker
+    raises when used (audit DB also down). The caller must still see the
+    KeyProviderUnavailable — the fail-closed 503 — not the audit DB error.
+    """
+
+    class _ExplodingSessionmaker:
+        def __call__(self) -> object:
+            raise RuntimeError("audit DB unreachable")
+
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as request_session:
+        with pytest.raises(KeyProviderUnavailable):  # NOT RuntimeError
+            await vault.create_credential(
+                request_session,
+                _DownProvider(),
+                name="lab-ssh",
+                kind=CredentialKind.SSH,
+                username="netops",
+                secret=_SECRET,
+                params={"port": 22},
+                actor="user:alice",
+                sessionmaker=_ExplodingSessionmaker(),  # type: ignore[arg-type]
+            )
 
 
 async def test_autonomous_sessionmaker_reuses_caller_engine(engine: AsyncEngine) -> None:

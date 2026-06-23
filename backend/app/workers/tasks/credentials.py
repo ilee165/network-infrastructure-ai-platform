@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app import db
 from app.core.config import get_settings
-from app.core.crypto import KeyProvider, get_key_provider
+from app.core.crypto import KeyProvider, get_key_provider, require_production_grade
 from app.services import credentials as credentials_service
 from app.services.credentials.rotation import DEFAULT_BATCH_SIZE
 from app.workers.celery_app import celery_app
@@ -55,8 +55,19 @@ def _make_engine() -> AsyncEngine:
 
 
 def _key_provider() -> KeyProvider:
-    """Build the configured KEK provider (its active version is the rotate target)."""
-    return get_key_provider(get_settings())
+    """Build the configured KEK provider (its active version is the rotate target).
+
+    CR10: the worker builds its own provider (it does not go through
+    ``create_app()``), so it must apply the SAME ADR-0032 §2 production-grade gate
+    the API composition root enforces — otherwise a re-wrap pass could run against
+    a local Env/File KEK in production, bypassing the refuse-to-start guard. The
+    gate keys off the effective production posture only (``require_production_grade``
+    raises ``LocalKeyProviderInProductionError`` for a local provider in prod).
+    """
+    settings = get_settings()
+    provider = get_key_provider(settings)
+    require_production_grade(provider, is_prod=settings.production)
+    return provider
 
 
 @asynccontextmanager

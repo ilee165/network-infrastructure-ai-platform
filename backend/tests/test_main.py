@@ -95,6 +95,26 @@ async def test_startup_allows_kms_provider_in_production(
     assert grade["value"] is True
 
 
+async def test_startup_refuses_unhealthy_production_kms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR6: a production-grade KMS reporting unhealthy at boot must CRASH startup.
+
+    Secure-by-default refuse-to-start (ADR-0032 §4): an unreachable prod KMS at
+    boot must not merely set a 0 gauge and keep serving — every credential op would
+    then fail closed behind a green deploy. The lifespan raises a RuntimeError.
+    """
+    from app.core import crypto
+
+    unhealthy = crypto.FakeKmsKeyProvider(available=False)
+    monkeypatch.setattr(crypto, "get_key_provider", lambda settings: unhealthy)
+
+    app_ = create_app(_prod_settings(vault_key_provider="aws", aws_kms_key_arn="arn:x"))
+    with pytest.raises(RuntimeError, match="unhealthy at startup"):
+        async with app_.router.lifespan_context(app_):
+            pass  # pragma: no cover - the gate raises before this body runs
+
+
 async def test_startup_crashes_when_kms_backend_unbuildable_in_prod() -> None:
     """A prod KMS backend whose build fails must CRASH startup, never silently start.
 
