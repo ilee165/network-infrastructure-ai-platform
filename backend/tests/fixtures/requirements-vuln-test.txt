@@ -1,0 +1,21 @@
+# NEGATIVE-VALIDATION FIXTURE (P1 W6-T4) — NOT installed by the app or CI.
+#
+# A throwaway requirements file pinning a KNOWN-VULNERABLE package version, used
+# only to prove the pip-audit RED gate BITES on a vulnerable dependency. It is
+# NOT referenced by backend/pyproject.toml, the editable install, or any CI step
+# (the `backend` job audits the resolved environment, not this file). It exists
+# as committed evidence for the negative-validation procedure documented in
+# docs/security/supply-chain-scanning.md ("Local validation").
+#
+# Repeatable check (run inside the backend job environment / any host with pip):
+#
+#   pip install "pip-audit==2.7.3"
+#   pip-audit --strict --progress-spinner off -r backend/tests/fixtures/requirements-vuln-test.txt
+#
+# Expected: pip-audit reports multiple known advisories for jinja2==2.11.3 —
+# e.g. GHSA-h5c8-rqwp-cp95 (CVE-2024-22195), GHSA-h75v-3vvj-5mfj
+# (CVE-2024-34064), GHSA-cpwx-vrp4-4pq7 (CVE-2025-27516) — and EXITS NON-ZERO,
+# so the gate bites on a known-vulnerable dep. Bump the pin to a fixed jinja2
+# (>=3.1.6) and the same command exits 0. This pin is intentionally below the
+# fix; do NOT "upgrade" it.
+jinja2==2.11.3

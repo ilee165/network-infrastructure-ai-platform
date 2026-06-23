@@ -193,6 +193,14 @@ jobs:
     name: security-scan (gitleaks — tree + history)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # `needs` couples this gate into the graph so it cannot start before the main
+    # jobs and so the `all-gates` aggregator below transitively depends on it.
+    # Without this, security-scan was an orphan parallel job: a gitleaks failure
+    # only blocked merge if the repo admin had manually added it to the
+    # branch-protection required-checks list — i.e. advisory-in-practice. The
+    # single required check is now `all-gates` (see below), which enforces every
+    # gate atomically (P1 W6-T4: "a finding is a red gate, not advisory").
+    needs: [backend, frontend]
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@v7
@@ -201,10 +209,19 @@ jobs:
           # HEAD, to catch a secret that was committed and later removed.
           fetch-depth: 0
 
-      - name: Install gitleaks (pinned)
+      - name: Install gitleaks (pinned + checksum-verified)
         run: |
+          set -euo pipefail
+          # Pin BOTH the version AND the SHA-256 of the release tarball so the
+          # supply-chain scanner is not itself a supply-chain risk (ADR-0016 §5):
+          # a MITM/CDN substitution of the binary that scans the repo's full
+          # history is caught here before it ever runs. The expected digest is the
+          # gitleaks_8.21.2_linux_x64.tar.gz line from the upstream checksums file
+          # https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_checksums.txt
+          GITLEAKS_SHA256="5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba"
           curl -sSL -o /tmp/gitleaks.tar.gz \
             https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
           gitleaks version
 
@@ -417,3 +434,37 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
+
+  # Single required-check aggregator (P1 W6-T4). Branch protection should require
+  # ONLY this job; it transitively depends on every gate, so a failure or skip of
+  # ANY upstream job (dependency audits, secret scan, image/Trivy, chart/policy)
+  # blocks merge atomically — no per-job required-checks list to keep in sync and
+  # no orphan gate that is advisory-in-practice. `if: always()` makes this job run
+  # even when a dependency fails; it then inspects the `needs.*.result` values and
+  # FAILS unless every one is "success", so a failed OR skipped gate is a red gate.
+  all-gates:
+    name: all-gates (required-check aggregator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [backend, frontend, security-scan, docker, infra]
+    steps:
+      - name: Assert every gate succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          set -euo pipefail
+          echo "Upstream gate results: ${RESULTS}"
+          IFS=',' read -ra results <<< "${RESULTS}"
+          failed=0
+          for r in "${results[@]}"; do
+            if [ "$r" != "success" ]; then
+              echo "::error::a required gate did not succeed (result=${r})"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "all-gates: FAIL — one or more required gates did not succeed."
+            exit 1
+          fi
+          echo "all-gates: PASS — every required gate succeeded."

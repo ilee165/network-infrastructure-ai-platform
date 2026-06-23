@@ -1,0 +1,45 @@
+{
+  "$comment": [
+    "NEGATIVE-VALIDATION FIXTURE (P1 W6-T4) — NOT a real audit of this repo.",
+    "A synthetic `npm audit --json` (npm v7+ schema) carrying ONE high-severity",
+    "advisory whose GHSA id is deliberately NOT in frontend/.npm-audit-allowlist.json.",
+    "Piping this into scripts/npm-audit-gate.mjs MUST exit 1 (the gate BITES on a",
+    "known-vulnerable dep). GHSA-xxxx-xxxx-xxxx is a placeholder id chosen to never",
+    "match a real or allowlisted advisory. See docs/security/supply-chain-scanning.md",
+    "'Local validation'. This fixture is evidence-only; CI does not consume it."
+  ],
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "planted-vuln-pkg": {
+      "name": "planted-vuln-pkg",
+      "severity": "high",
+      "isDirect": true,
+      "via": [
+        {
+          "source": 9999999,
+          "name": "planted-vuln-pkg",
+          "dependency": "planted-vuln-pkg",
+          "title": "Planted high-severity advisory for gate negative-validation",
+          "url": "https://github.com/advisories/GHSA-xxxx-xxxx-xxxx",
+          "severity": "high",
+          "cwe": ["CWE-79"],
+          "range": "<1.0.0"
+        }
+      ],
+      "effects": [],
+      "range": "<1.0.0",
+      "nodes": ["node_modules/planted-vuln-pkg"],
+      "fixAvailable": true
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 1,
+      "critical": 0,
+      "total": 1
+    }
+  }
+}

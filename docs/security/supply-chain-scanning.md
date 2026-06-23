@@ -20,6 +20,24 @@ here — this task scans the *repository and its dependencies*.
 
 All three are **RED gates**: a finding fails the run. None is advisory.
 
+### Enforcement coupling (branch protection)
+
+A red gate only blocks merge if branch protection actually requires it. To avoid an
+orphan gate that is advisory-in-practice (a job with no `needs:` edge that a repo
+admin must remember to add to the required-checks list), the workflow ends with a
+single aggregator job, **`all-gates`**, that declares
+`needs: [backend, frontend, security-scan, docker, infra]` and runs with
+`if: always()`. It inspects every `needs.*.result` and **fails unless all are
+`success`** — so a failed *or skipped* gate blocks it.
+
+- **Branch protection must require exactly one check: `all-gates`.** Because it
+  transitively depends on every gate, requiring it enforces all gates atomically;
+  there is no per-job required-checks list to keep in sync.
+- `security-scan` (gitleaks) additionally carries `needs: [backend, frontend]` so
+  it is part of the graph rather than a free-floating parallel job — closing the
+  gap where a gitleaks failure did not block merge unless branch protection had
+  been manually updated.
+
 ## Why history, not just HEAD (gitleaks)
 
 A secret committed in an earlier commit and later removed is still recoverable from
@@ -101,6 +119,15 @@ mask a *real* planted secret).
   by pinned `v8.21.2` via direct release download (same pattern as the infra job's
   kubeconform/kube-linter/conftest), not the marketplace action — so the scan is not
   itself a supply-chain risk (ADR-0016 §5) and no marketplace license key is needed.
+- The gitleaks tarball download is **SHA-256-verified** before extraction
+  (`echo "<sha256>  /tmp/gitleaks.tar.gz" | sha256sum -c -`). The expected digest
+  (`5bc41815…f6ce` for `gitleaks_8.21.2_linux_x64.tar.gz`) is pinned in the workflow
+  as a documented constant from the upstream
+  `gitleaks_8.21.2_checksums.txt`, so a MITM/CDN substitution of the binary that
+  would scan the repo's full history is caught before it ever runs — the
+  supply-chain scanner is not itself a supply-chain vector. (The infra-job binary
+  downloads — kubeconform/kube-linter/conftest — predate this commit and remain a
+  tracked follow-up to pin the same way.)
 - GitHub Actions are pinned to the repo's existing `@vN` convention
   (`actions/checkout@v7`, `actions/setup-node@v6`, `actions/setup-python@v6`).
 - **Advisory-DB fetch:** pip-audit (OSV/PyPI) and npm audit (registry) fetch advisory
@@ -110,26 +137,60 @@ mask a *real* planted secret).
 
 ## Local validation (how these were proven to bite)
 
-`npm` and a pinned `gitleaks` binary run on a developer host; `pip-audit` could not be
-run on the authoring host (no `pip` in the local interpreter) and was validated via the
-CI-equivalent command.
+Each gate is validated two ways: (a) it PASSES on the current tree (clean, modulo the
+reviewed allowlist), and (b) it BITES — exits non-zero — on a **planted negative**,
+which is then reverted. Committed negative-validation fixtures (evidence-only; no CI
+step consumes them) make this repeatable on any host:
+
+| Gate | Planted-negative fixture | Repeatable check |
+|------|--------------------------|------------------|
+| **npm audit** | `frontend/scripts/__fixtures__/npm-audit-planted-vuln.json` (high GHSA not allowlisted) and `…/npm-audit-failed-run.json` (failed-audit error envelope) | `node frontend/scripts/npm-audit-gate.negative.mjs` |
+| **pip-audit** | `backend/tests/fixtures/requirements-vuln-test.txt` (`jinja2==2.11.3`, known-vulnerable) | `pip-audit --strict -r backend/tests/fixtures/requirements-vuln-test.txt` |
+| **gitleaks** | a realistic AWS key committed under a non-allowlisted path (throwaway commit) | `gitleaks detect --source . --config .gitleaks.toml --redact --exit-code 1` |
+
+**What was run on the authoring host (Windows + node v24, npm 11):**
 
 ```bash
-# npm audit gate — PASS on the clean tree with the reviewed allowlist:
+# npm audit gate — PASS on the live tree with the reviewed allowlist:
 cd frontend && npm audit --json | node scripts/npm-audit-gate.mjs        # exit 0
-#   negatives (each exits 1): drop an allowlist entry / expire an entry /
-#   inject a new high advisory into the JSON stream -> gate fails. (reverted)
+#   matched both allowlisted advisories (GHSA-2w69-…, GHSA-hmw2-…), no un-allowlisted high+.
+
+# npm audit gate — BITES on both planted negatives (each exits 1), reverts cleanly:
+node scripts/npm-audit-gate.negative.mjs                                 # exit 0 = all cases behaved
+#   * planted high GHSA not in allowlist            -> gate exits 1 (vulnerable dep caught)
+#   * failed-audit error envelope {"error":{...}}   -> gate exits 1 (NO false-green; see Req 4 fix)
+#   * clean-modulo-allowlist report                 -> gate exits 0
+```
+
+The npm-audit gate hardening (reject an error envelope / a report missing
+`auditReportVersion`+`vulnerabilities`) closes the false-green where a failed audit —
+masked by CI's `npm audit --json … || true` — would otherwise PASS with zero advisories.
+
+**pip-audit and gitleaks are NOT installed on the authoring host** (no `pip` in the
+local interpreter; no `gitleaks` binary), so their negatives are validated by the
+**CI-equivalent** commands below against the committed fixtures. The gitleaks
+planted-secret negative is performed on a throwaway commit (created, confirmed to trip
+`aws-access-token`, then reverted) rather than left in history.
+
+```bash
+# pip-audit gate — BITES on the committed vulnerable-dep fixture (run in the backend env):
+pip install "pip-audit==2.7.3"
+pip-audit --strict --progress-spinner off -r backend/tests/fixtures/requirements-vuln-test.txt
+#   -> reports known jinja2 2.11.3 advisories (e.g. GHSA-h5c8-rqwp-cp95 / CVE-2024-22195)
+#      and EXITS NON-ZERO. Bumping the pin to jinja2>=3.1.6 makes the same command exit 0.
+#      (the fixture is NOT installed by the app or any CI step.)
+# pip-audit gate — PASS on the real resolved env (no fixture file):
+pip-audit --strict --progress-spinner off   # + one --ignore-vuln per allowlist line
 
 # gitleaks gate — PASS over working tree + full history with the allowlist:
 gitleaks detect --source . --config .gitleaks.toml --redact --exit-code 1  # exit 0
-#   negative: a realistic (non-"EXAMPLE") AWS key committed under backend/app/
-#   (a non-allowlisted path) -> RuleID aws-access-token, exit 1. (reverted)
-#   control: default rules without the allowlist flag the test-fixture sentinels,
+#   negative (throwaway commit, reverted): a realistic (non-"EXAMPLE") AWS key committed
+#   under backend/app/ (a non-allowlisted path) -> RuleID aws-access-token, exit 1.
+#   control: default rules WITHOUT the allowlist flag the test-fixture sentinels,
 #   confirming the path-scoped allowlist is doing real, scoped work.
 
-# pip-audit gate — CI-equivalent (run inside the backend job environment):
-pip install "pip-audit==2.7.3"
-pip-audit --strict --progress-spinner off   # + one --ignore-vuln per allowlist line
+# gitleaks binary install is checksum-pinned; verify it bites on a tampered tarball:
+echo "<wrong-sha256>  /tmp/gitleaks.tar.gz" | sha256sum -c -            # exit 1 (mismatch caught)
 ```
 
 ## Related

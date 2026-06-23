@@ -43,6 +43,28 @@ try {
   fail(`stdin was not valid JSON (did you pipe \`npm audit --json\`?): ${e.message}`);
 }
 
+// --- validate the input is a GENUINE npm audit report, not an error envelope ---
+// CI masks npm's exit code (`npm audit --json > npm-audit.json || true`) so this
+// gate is the sole pass/fail authority. When `npm audit` fails (registry 5xx,
+// offline mirror, network blip) npm still emits VALID JSON — an error envelope
+// like {"error":{...}} — or a truncated report with no `vulnerabilities` block.
+// Accepting that as "zero advisories => PASS" is a false-green: the gate would
+// silently NOT BITE on a failed audit. A real report carries an
+// `auditReportVersion` (npm v7+ schema) AND a `vulnerabilities` object. Require
+// both, and reject any error envelope, so a failed audit is a RED gate.
+if (audit == null || typeof audit !== "object" || Array.isArray(audit)) {
+  fail("npm audit did not produce a JSON object report (audit run failed?)");
+}
+if (audit.error) {
+  const code = audit.error.code ?? audit.error.summary ?? JSON.stringify(audit.error);
+  fail(`npm audit reported an error, not a report (audit run failed?): ${code}`);
+}
+if (audit.auditReportVersion == null || audit.vulnerabilities == null) {
+  fail(
+    "npm audit output is not a complete report (missing auditReportVersion/vulnerabilities — audit run failed?)",
+  );
+}
+
 // --- load reviewed allowlist ---
 let allowlist;
 try {
