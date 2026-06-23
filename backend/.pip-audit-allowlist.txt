@@ -1,0 +1,22 @@
+# Reviewed pip-audit allowlist (P1 W6-T4, ADR-0016 D16 pipeline).
+#
+# pip-audit is wired as a RED gate in the CI `backend` job: it audits the
+# resolved backend environment (pip install -e "./backend[dev]") against the
+# PyPI / OSV advisory DB and fails the job on any known-vulnerable dependency.
+#
+# This file is the reviewed, EXPIRING allowlist (mirrors the .trivyignore
+# convention): NEVER a blanket ignore. Each line is one accepted advisory ID
+# (PYSEC-/GHSA-/CVE-) with a justification + a re-review date in the comment.
+# The CI step converts each non-comment, non-blank line into a `--ignore-vuln`
+# flag. Remove an entry once the dependency is bumped past the fix; do not let
+# an entry outlive its re-review date.
+#
+# Triage policy: docs/security/supply-chain-scanning.md.
+#
+# Format: one advisory ID per line. Comments (#) and blank lines are ignored.
+#
+# --- accepted advisories ---
+# Add an entry only when a vuln cannot be fixed immediately (no upstream fix, or
+# fix blocked by a pinned transitive), as:
+#   PYSEC-XXXX-YY    # <pkg> <reason>; re-review YYYY-MM-DD; fix tracked in <ref>
+GHSA-r374-rxx8-8654    # paramiko (transitive via netmiko); no upstream fix version published; SSH transport, re-review 2026-09-23; track upstream fix

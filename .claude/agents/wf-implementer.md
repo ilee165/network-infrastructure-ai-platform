@@ -15,6 +15,14 @@ Discipline:
 - Run ALL gates listed in your task prompt before committing. If a gate cannot
   be made green, do NOT commit broken work — report committed=false with a
   precise blocker description.
+- No vacuous coverage. A production code path must NOT be hidden behind
+  `# pragma: no cover` (or excluded from the suite) with only in-memory fakes
+  exercising it — that ships an unrun path that looks covered. If the real
+  backend/SDK cannot run on the build host, pin the real call shape with a
+  contract test (e.g. assert the exact SDK method, args, and result-object
+  access your prod path uses) and wire the live integration as a CI/emulator
+  gate; say in your summary which paths are host-limited. (P1 W6-T2: a fake-only
+  KMS provider hid broken Vault/Azure prod call shapes behind a pragma.)
 - Exactly ONE atomic commit: `git add` only your files, message format as the
   task prompt specifies. Never push. Never switch branches.
 - Secrets never appear in any log line, repr, API response, exception message,

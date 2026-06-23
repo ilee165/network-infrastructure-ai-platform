@@ -26,6 +26,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core.crypto import _StaticKeyProvider
 from app.core.errors import PluginError
 from app.models import (
     AuditLog,
@@ -52,14 +53,11 @@ RUNNING_CONFIG = "hostname r1\n!\nsnmp-server community PUBLIC_secret RO\nend\n"
 # ---------------------------------------------------------------------------
 
 
-class StaticKeyProvider:
-    """Single static KEK for unit tests (KeyProvider protocol)."""
+class StaticKeyProvider(_StaticKeyProvider):
+    """Single static KEK for unit tests (wrap/unwrap KeyProvider protocol)."""
 
-    def current_version(self) -> str:
-        return "test-v1"
-
-    def key(self, version: str) -> bytes:
-        return b"\x01" * 32
+    def __init__(self) -> None:
+        super().__init__(b"\x01" * 32, "test-v1")
 
 
 class FakeSshTransport:

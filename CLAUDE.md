@@ -158,6 +158,26 @@ Every feature must include:
 - Documentation
 - API documentation
 
+### Orchestrated builds
+
+Milestones are built with the multi-agent Workflow tool. The build process,
+role/model tiers, and cost policy live in `.claude/agents/README.md` and
+`.claude/workflows/README.md` — read them before launching a workflow. Standing
+discipline derived from prior milestones:
+
+- **Atomic commit per task** is the unit of resumability — committed work is
+  never re-paid and survives any mid-run kill.
+- **Arm a baseline-relative usage guard** on long runs (`budget.spent()` is
+  session-cumulative, not per-turn): stop near a ceiling, save via commits,
+  summarize.
+- **After a kill (session-limit OR transient API 5xx), trust git, not the
+  result object.** Salvage any coherent uncommitted tree (validate gates, then
+  commit) and focused-rerun only the gaps; never `reset --hard` to discard.
+- **Escalate every secret-surface role to the strong model** (KMS/KEK, auth,
+  credential vault, any pipeline touching secret material).
+- **Confirm a CI fix makes the gate RUN and BITE** — a gate failing at setup
+  masks the findings it would have produced.
+
 ## Consultant Agent
 
 If requirements are unclear:

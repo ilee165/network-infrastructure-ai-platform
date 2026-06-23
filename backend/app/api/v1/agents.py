@@ -45,6 +45,7 @@ from app.agents.framework.supervisor import SupervisorState
 from app.agents.framework.traces import ReasoningTrace, TraceStep
 from app.api.deps import (
     TOKEN_TYPE_ACCESS,
+    enforce_api_rate_limit,
     get_app_settings,
     get_db,
     get_sessionmaker,
@@ -101,6 +102,16 @@ from app.services.change_requests import ChangeRequestService
 from app.workers.celery_app import QUEUE_PACKET_CAPTURE, celery_app
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+#: W6-T6 per-principal/per-token API budget (PRODUCTION.md §5). Applied PER HTTP
+#: ROUTE here rather than as a router-level dependency, because this router also
+#: exposes the ``/{session_id}/stream`` WebSocket — and ``enforce_api_rate_limit``
+#: depends on an ``HTTPBearer`` scheme that cannot resolve on a WebSocket scope.
+#: A router-level dependency would attach to the WS route too and break it, so
+#: every HTTP ``@router.{get,post}`` below carries this explicitly while the
+#: ``@router.websocket`` route (its own single-use stream-ticket auth) is left
+#: unbound.
+_API_RATE_LIMIT: Final = [Depends(enforce_api_rate_limit)]
 
 Viewer = Annotated[User, Depends(require_role("viewer"))]
 Engineer = Annotated[User, Depends(require_role("engineer"))]
@@ -342,7 +353,12 @@ def _consume_ticket(ticket: str, session_id: uuid.UUID) -> uuid.UUID | None:
     return user_id
 
 
-@router.post("/{session_id}/stream-ticket", response_model=StreamTicketResponse, status_code=201)
+@router.post(
+    "/{session_id}/stream-ticket",
+    response_model=StreamTicketResponse,
+    status_code=201,
+    dependencies=_API_RATE_LIMIT,
+)
 async def create_stream_ticket(
     session_id: uuid.UUID,
     user: Viewer,
@@ -366,7 +382,7 @@ async def create_stream_ticket(
     return StreamTicketResponse(ticket=ticket)
 
 
-@router.post("", response_model=StartSessionResponse, status_code=201)
+@router.post("", response_model=StartSessionResponse, status_code=201, dependencies=_API_RATE_LIMIT)
 async def start_session(
     body: StartSessionRequest,
     user: Viewer,
@@ -435,7 +451,7 @@ async def start_session(
     )
 
 
-@router.get("/{session_id:uuid}", response_model=StartSessionResponse)
+@router.get("/{session_id:uuid}", response_model=StartSessionResponse, dependencies=_API_RATE_LIMIT)
 async def get_session(
     session_id: uuid.UUID,
     _user: Viewer,
@@ -631,7 +647,7 @@ async def _audit(
 # ===========================================================================
 
 
-@router.get("/changes", response_model=ChangeRequestListResponse)
+@router.get("/changes", response_model=ChangeRequestListResponse, dependencies=_API_RATE_LIMIT)
 async def list_change_requests(
     session: DbSession,
     _user: Engineer,
@@ -667,7 +683,7 @@ async def list_change_requests(
     )
 
 
-@router.get("/changes/{cr_id}", response_model=ChangeRequestRead)
+@router.get("/changes/{cr_id}", response_model=ChangeRequestRead, dependencies=_API_RATE_LIMIT)
 async def get_change_request(
     cr_id: uuid.UUID,
     _user: Engineer,
@@ -678,7 +694,9 @@ async def get_change_request(
     return ChangeRequestRead.model_validate(cr)
 
 
-@router.post("/changes/{cr_id}/submit", response_model=ChangeRequestRead)
+@router.post(
+    "/changes/{cr_id}/submit", response_model=ChangeRequestRead, dependencies=_API_RATE_LIMIT
+)
 async def submit_change_request(
     cr_id: uuid.UUID,
     body: ChangeDecisionRequest,
@@ -690,7 +708,9 @@ async def submit_change_request(
     return ChangeRequestRead.model_validate(cr)
 
 
-@router.post("/changes/{cr_id}/approve", response_model=ChangeRequestRead)
+@router.post(
+    "/changes/{cr_id}/approve", response_model=ChangeRequestRead, dependencies=_API_RATE_LIMIT
+)
 async def approve_change_request(
     cr_id: uuid.UUID,
     body: ChangeDecisionRequest,
@@ -718,7 +738,9 @@ async def approve_change_request(
     return ChangeRequestRead.model_validate(approved)
 
 
-@router.post("/changes/{cr_id}/reject", response_model=ChangeRequestRead)
+@router.post(
+    "/changes/{cr_id}/reject", response_model=ChangeRequestRead, dependencies=_API_RATE_LIMIT
+)
 async def reject_change_request(
     cr_id: uuid.UUID,
     body: ChangeDecisionRequest,
@@ -753,7 +775,12 @@ def _role_of(user: User) -> Role:
 # ===========================================================================
 
 
-@router.post("/captures", response_model=CaptureLaunchResponse, status_code=202)
+@router.post(
+    "/captures",
+    response_model=CaptureLaunchResponse,
+    status_code=202,
+    dependencies=_API_RATE_LIMIT,
+)
 async def launch_capture(
     body: CaptureLaunchRequest,
     session: DbSession,
@@ -841,7 +868,9 @@ def _capture_status(row: PcapMetadata) -> CaptureStatus:
     return CaptureStatus.COMPLETED
 
 
-@router.get("/captures/{capture_id}", response_model=CaptureStatusResponse)
+@router.get(
+    "/captures/{capture_id}", response_model=CaptureStatusResponse, dependencies=_API_RATE_LIMIT
+)
 async def get_capture(
     capture_id: uuid.UUID,
     session: DbSession,
@@ -864,7 +893,9 @@ async def get_capture(
     )
 
 
-@router.get("/captures/{capture_id}/analysis", response_model=PacketFindings)
+@router.get(
+    "/captures/{capture_id}/analysis", response_model=PacketFindings, dependencies=_API_RATE_LIMIT
+)
 async def get_capture_analysis(
     capture_id: uuid.UUID,
     session: DbSession,

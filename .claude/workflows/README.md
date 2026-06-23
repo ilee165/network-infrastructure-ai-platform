@@ -37,7 +37,15 @@ Ranked by expected impact:
    after a session-limit reset, not before one. On a halt, resume promptly —
    `resumeFromRunId` replays completed agents free, but in-flight work is
    lost. Never stop a running workflow mid-implementer unless the edit is
-   worth more than one implementer re-run (~250 KB).
+   worth more than one implementer re-run (~250 KB). **The resume cache is
+   same-session only**: after a session-limit kill that has since reset, do
+   NOT re-resume (it re-runs completed agents live and duplicates commits) —
+   recover via git as ground truth and a focused re-run of only the gaps
+   (`.claude/agents/README.md` item 6). The same applies to a **transient API
+   5xx (529/500) that kills an agent mid-task**: the returned result object
+   reports "blocked / 0 work", but the agent may have left a large, coherent,
+   uncommitted dirty tree — validate its gates and commit it (don't discard),
+   then focused-rerun only the not-started parts (P1 W6).
 3. **Batch sibling template tasks into one implementer call** (~5-8%).
    M1 ran cisco_iosxe and eos as separate full cycles; each re-read the same
    cisco_ios template. Group tasks that read the same context into one
@@ -56,9 +64,18 @@ Ranked by expected impact:
    AST-only and free. Compare M2 per-agent volume against the M1 baseline
    (~290 KB implementer / ~180 KB reviewer) to decide Phase 2 (doc/ADR
    ingestion for entity linking).
-7. **Optional, unproven**: haiku for `wf-verifier` on non-critical fix
-   rounds (the narrowest role, ~105 KB observed); a hard token ceiling via
-   the Workflow `budget` API when a turn sets one ("+500k" style directives).
+7. **Usage guard on long runs (required policy).** Arm a token guard before
+   a long workflow so it stops cleanly near a ceiling instead of being killed
+   mid-run. CAUTION: `budget.spent()` is **session/context-cumulative — it does
+   NOT reset per user turn and survives `/compact`**, so an *absolute* ceiling
+   below the already-spent total trips the guard instantly (0 agents) forever.
+   Use a **baseline-relative** guard: capture `const BASELINE = budget.spent()`
+   at the script top and gate on `budget.spent() - BASELINE >= ceiling*frac`,
+   so the ceiling means *this run's own allowance*. Atomic-commit-per-task is
+   the "save"; on trip, `log()` a summary and `return` the partial result
+   (P1 W6). `budget.total` is only set by an explicit "+Nk" turn directive.
+8. **Optional, unproven**: haiku for `wf-verifier` on non-critical fix
+   rounds (the narrowest role, ~105 KB observed).
 
 ## Standing mechanics
 

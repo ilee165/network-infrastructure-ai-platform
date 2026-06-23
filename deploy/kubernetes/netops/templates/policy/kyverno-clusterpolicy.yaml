@@ -61,14 +61,18 @@ spec:
             containers:
               - image: "*:*|*@sha256:*"
 
-    # --- Rule 2: cosign signed-image verification (ADR-0029 §5 rule 2) ---
-    # The rule ALWAYS RENDERS (so it is policy-tested in CI); ENFORCEMENT is
-    # gated by admission.signedImages.enabled (default OFF per W3). When disabled
-    # the rule is present but non-blocking (failureAction: Audit, required:false)
-    # so unsigned dev images are not blocked on day one; W6 wires the real
-    # verifier key and flips signedImages.enabled to make it Enforce. The
-    # publicKeys verifier is supplied via the named ConfigMap — NEVER a private
-    # key, only a public cosign verifier (ADR-0029 §5 / §6 secrets-by-reference).
+    # --- Rule 2: cosign signed-image verification (ADR-0029 §5 rule 2 /
+    #     P1 W6-T5) ---
+    # The rule ALWAYS RENDERS (so it is policy-tested in CI). ENFORCEMENT is
+    # driven by security.imageVerification.enabled (W6-T5 SECURE-BY-DEFAULT,
+    # default ON): Enforce/required when on, Audit/non-blocking when explicitly
+    # opted out (documented break-glass for the bootstrap window). The verifier
+    # is EITHER a public cosign key (named ConfigMap holding cosign.pub — NEVER a
+    # private key) OR keyless (Fulcio issuer + workflow-identity subject + Rekor),
+    # referenced via values, never inlined (ADR-0029 §5 / §6 secrets-by-reference).
+    # Covers BOTH images CI builds + signs (backend + frontend); verifyDigest
+    # pins the resolved digest so a tag-swap cannot smuggle an unsigned image.
+    {{- $iv := .Values.security.imageVerification }}
     - name: verify-image-signatures
       match:
         any:
@@ -77,21 +81,32 @@ spec:
                 - Pod
       verifyImages:
         - imageReferences:
-            - "{{ .Values.images.backend.repository }}:*"
-          failureAction: {{ if .Values.admission.signedImages.enabled }}Enforce{{ else }}Audit{{ end }}
+            {{- range $iv.imageReferences }}
+            - "{{ . }}:*"
+            {{- end }}
+          failureAction: {{ if $iv.enabled }}Enforce{{ else }}Audit{{ end }}
           verifyDigest: true
-          required: {{ .Values.admission.signedImages.enabled }}
+          required: {{ $iv.enabled }}
           attestors:
             - entries:
                 {{- if .Values.admission.signedImages.publicKeyConfigMap }}
                 - keys:
                     publicKeys: {{ printf "{{ '%s'.data.'cosign.pub' }}" .Values.admission.signedImages.publicKeyConfigMap | quote }}
+                    {{- if $iv.keyless.rekorUrl }}
+                    rekor:
+                      url: {{ $iv.keyless.rekorUrl | quote }}
+                    {{- end }}
                 {{- else }}
-                # No verifier wired yet (W6). Keyless placeholder; the rule is
-                # Audit-only until signedImages.enabled + a real key/identity.
+                # Keyless: verify the signature was produced by THIS OIDC issuer +
+                # workflow-identity subject (the CI signing identity), with a Rekor
+                # transparency-log inclusion proof. Public assertions, not secrets.
                 - keyless:
-                    subject: ""
-                    issuer: ""
+                    issuer: {{ $iv.keyless.issuer | quote }}
+                    subjectRegExp: {{ $iv.keyless.subjectRegExp | quote }}
+                    {{- if $iv.keyless.rekorUrl }}
+                    rekor:
+                      url: {{ $iv.keyless.rekorUrl | quote }}
+                    {{- end }}
                 {{- end }}
 
     # --- Rule 3: PSS deviation allow-list — only the packet-CAPTURE workload may

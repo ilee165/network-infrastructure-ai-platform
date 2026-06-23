@@ -21,12 +21,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import db
 from app.core import crypto, oidc
 from app.core.config import Settings
-from app.core.errors import AuthError, ForbiddenError
+from app.core.errors import AuthError, ForbiddenError, RateLimitedError
 from app.core.security import Role, decode_access_token
 from app.knowledge import Neo4jClient, get_client
 from app.models import DeviceCredential, User
 from app.services import credentials as credentials_service
+from app.services import rate_limit
+from app.services.audit import service as audit_service
 from app.services.oidc import InMemoryPendingAuthStore, PendingAuthStore
+from app.services.rate_limit import RateLimiter
 
 #: ADR-0010 RBAC rank order, derived from the canonical :class:`Role` enum so
 #: the API layer and the agent tool wrappers share one source of truth. Unknown
@@ -109,6 +112,120 @@ def get_pending_auth_store(request: Request) -> PendingAuthStore:
         store = InMemoryPendingAuthStore()
         request.app.state.oidc_pending_store = store
     return store
+
+
+def get_rate_limiter(request: Request) -> RateLimiter:
+    """The process-wide shared-counter rate limiter (W6-T6; ADR-0008 Redis).
+
+    Defaults to an in-process limiter (local-first / single-process / tests); a
+    :class:`~app.services.rate_limit.RedisRateLimiter` over the shared Redis is
+    bound on ``app.state`` at startup for multi-replica deployments so a limit
+    holds across ``api`` pods (D13) rather than resetting per pod. Tests override
+    this dependency to inject an in-memory limiter with a controllable clock.
+    """
+    limiter: RateLimiter | None = getattr(request.app.state, "rate_limiter", None)
+    if limiter is None:
+        limiter = rate_limit.InMemoryRateLimiter()
+        request.app.state.rate_limiter = limiter
+    return limiter
+
+
+async def _audit_rate_limited(
+    session: AsyncSession,
+    *,
+    actor: str,
+    source: str | None,
+    request_id: uuid.UUID | None,
+) -> None:
+    """Audit one ``auth.rate_limited`` outcome — ids/source only, no token bytes."""
+    await audit_service.record(
+        session,
+        actor=actor,
+        action=audit_service.AUTH_RATE_LIMITED,
+        target_type="api",
+        target_id=None,
+        detail={"source": source, "outcome": "rate_limited"},
+        request_id=request_id,
+    )
+    await session.commit()
+
+
+def _client_source(request: Request) -> str | None:
+    """Best-effort source identifier for a request (client IP), or ``None``."""
+    return request.client.host if request.client else None
+
+
+def _inbound_request_id(request: Request) -> uuid.UUID | None:
+    """Inbound ``X-Request-ID`` parsed as a UUID for the audit trail, or ``None``."""
+    raw = request.headers.get("X-Request-ID")
+    if raw is None:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        return None
+
+
+async def enforce_api_rate_limit(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)],
+    session: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
+) -> None:
+    """Enforce the per-principal AND per-token API request budget (W6-T6).
+
+    Keyed by ``user:<id>`` **and** the token id (``jti``) so neither a shared
+    account nor a single leaked token can exceed the budget; the shared Redis
+    backing (ADR-0008) makes the limit hold across replicas. The ``N+1``-th
+    request in a window raises :class:`RateLimitedError` (429 + coarse
+    ``Retry-After``) and audits ``auth.rate_limited``.
+
+    **Fail-open** on a backend (Redis) outage: a degraded limiter must not take
+    the API down (availability — W6-T6 §4). A backend error is swallowed and the
+    request is served; only the *enforced* path can reject.
+    """
+    # No / malformed token: leave authn to the route's own dependency. There is
+    # no principal to key on, and a global key would be a G-SCA hot key.
+    if credentials is None:
+        return
+    try:
+        claims = decode_access_token(credentials.credentials, settings)
+    except AuthError:
+        return
+    subject = str(claims.get("sub", "")) or None
+    jti = claims.get("jti")
+    keys: list[str] = []
+    if subject is not None:
+        keys.append(rate_limit.api_principal_key(subject))
+    if isinstance(jti, str) and jti:
+        keys.append(rate_limit.api_token_key(jti))
+    if not keys:
+        return
+
+    limit = settings.rate_limit_requests
+    window = settings.rate_limit_window_secs
+    worst: rate_limit.RateLimitResult | None = None
+    try:
+        for key in keys:
+            result = await limiter.hit(key, limit=limit, window_secs=window)
+            if result.allowed:
+                continue
+            if worst is None or result.retry_after_secs > worst.retry_after_secs:
+                worst = result
+    except rate_limit.RateLimitBackendError:
+        # FAIL OPEN (availability): serve the request when the limiter is down.
+        return
+
+    if worst is not None:
+        actor = f"user:{subject}" if subject is not None else "user:unknown"
+        await _audit_rate_limited(
+            session,
+            actor=actor,
+            source=_client_source(request),
+            request_id=_inbound_request_id(request),
+        )
+        raise RateLimitedError("Rate limit exceeded", retry_after=worst.retry_after_secs)
 
 
 async def resolve_oidc_client_secret(

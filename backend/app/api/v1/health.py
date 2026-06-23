@@ -83,7 +83,33 @@ async def _probe_redis(settings: Settings) -> None:
         await client.aclose()
 
 
-#: Probe registry — tests monkeypatch entries to simulate outages.
+def _make_kek_probe(provider: object) -> Probe:
+    """Build a readiness probe over an ALREADY-BUILT KEK provider (ADR-0032 §4, W6-T2).
+
+    The provider is constructed ONCE at startup (``app.state.key_provider``,
+    main.py) and reused here — the probe never re-builds the SDK client per poll
+    (which would re-login to Vault / re-run DefaultAzureCredential + a KeyClient
+    round-trip on every ``/ready`` and risk PROBE_TIMEOUT flapping). It calls
+    ``provider.health()`` on the cached instance; the blocking SDK round-trip is
+    offloaded to a worker thread so it cannot stall the event loop. An unreachable
+    KMS makes the probe fail so the replica is pulled from rotation (readiness →
+    degraded) while it stays *live* (liveness is unaffected) and alerts fire. The
+    0/1 ``vault_key_provider_healthy`` gauge is refreshed from the result either way.
+    """
+
+    async def _probe(settings: Settings) -> None:
+        from app.core import metrics
+
+        available = await asyncio.to_thread(lambda: provider.health().available)  # type: ignore[attr-defined]
+        metrics.set_provider_healthy(healthy=available)
+        if not available:
+            raise ConnectionError("key provider unreachable")
+
+    return _probe
+
+
+#: Probe registry — tests monkeypatch entries to simulate outages. The KEK probe
+#: is added per-request only when a provider is cached on app.state (see :func:`ready`).
 _PROBES: dict[str, Probe] = {
     "postgres": _probe_postgres,
     "neo4j": _probe_neo4j,
@@ -114,10 +140,21 @@ async def live() -> dict[str, str]:
 
 @router.get("/ready", response_model=ReadinessReport)
 async def ready(request: Request) -> ReadinessReport:
-    """Readiness: probe postgres/neo4j/redis concurrently and report each."""
+    """Readiness: probe postgres/neo4j/redis (+ the KEK provider) concurrently."""
     settings: Settings = request.app.state.settings
-    names = list(_PROBES)
-    results = await asyncio.gather(*(_run_probe(_PROBES[name], settings) for name in names))
+    probes = dict(_PROBES)
+    # ADR-0032 §4: an unreachable KMS pulls this replica from rotation. The probe
+    # runs against the provider BUILT ONCE at startup (app.state.key_provider) —
+    # never re-constructed per poll. When no provider is cached (a bare dev run
+    # with no KEK configured) the probe is omitted; tests may inject a "kek_provider"
+    # override into _PROBES to simulate outages without a real provider.
+    cached_provider = getattr(request.app.state, "key_provider", None)
+    if "kek_provider" in _PROBES:
+        probes["kek_provider"] = _PROBES["kek_provider"]
+    elif cached_provider is not None:
+        probes["kek_provider"] = _make_kek_probe(cached_provider)
+    names = list(probes)
+    results = await asyncio.gather(*(_run_probe(probes[name], settings) for name in names))
     dependencies = dict(zip(names, results, strict=True))
     overall: Literal["ok", "degraded"] = (
         "ok" if all(dep.status == "ok" for dep in dependencies.values()) else "degraded"

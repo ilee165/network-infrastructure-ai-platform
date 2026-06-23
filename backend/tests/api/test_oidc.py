@@ -464,3 +464,68 @@ async def test_no_token_or_secret_in_logs_or_response(
     )
     assert len(succeeded) == 1
     assert succeeded[0].detail is None
+
+
+# ---------------------------------------------------------------------------
+# Callback per-source rate-limit (W6-T6, ADR-0028 §2)
+# ---------------------------------------------------------------------------
+
+
+async def test_callback_flood_is_throttled_per_source(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    session: AsyncSession,
+    seeded: dict[str, Any],
+) -> None:
+    """A flood of forged callbacks from one source is throttled (429) at the budget."""
+    from app.services.rate_limit import InMemoryRateLimiter
+
+    # Tiny per-source budget + ONE shared limiter so the flood accumulates.
+    app.state.settings = app.state.settings.model_copy(
+        update={"oidc_callback_rate_limit": 3, "oidc_callback_window_secs": 60}
+    )
+    limiter = InMemoryRateLimiter()
+    app.dependency_overrides[deps.get_rate_limiter] = lambda: limiter
+
+    # budget=3: first three forged callbacks reach the (401) state check;
+    # the fourth is throttled before any token exchange.
+    statuses = [
+        (await client.get(f"{CALLBACK_URL}?code=x&state=forged-{i}")).status_code for i in range(4)
+    ]
+    assert statuses[:3] == [401, 401, 401]
+    assert statuses[3] == 429
+
+    rows = (
+        (await session.execute(select(AuditLog).where(AuditLog.action == "auth.rate_limited")))
+        .scalars()
+        .all()
+    )
+    assert len(rows) >= 1
+    assert rows[0].target_type == "oidc"
+    assert rows[0].detail is not None
+    assert rows[0].detail.get("outcome") == "rate_limited"
+
+
+async def test_single_legitimate_callback_not_throttled(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    session: AsyncSession,
+    seeded: dict[str, Any],
+    idp: FakeIdp,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One legitimate callback stays well under the per-source budget (no false block)."""
+    from app.services.rate_limit import InMemoryRateLimiter
+
+    app.state.settings = app.state.settings.model_copy(
+        update={"oidc_callback_rate_limit": 3, "oidc_callback_window_secs": 60}
+    )
+    limiter = InMemoryRateLimiter()
+    app.dependency_overrides[deps.get_rate_limiter] = lambda: limiter
+
+    state = await _begin_login(client)
+    nonce = _stored_nonce(app, state)
+    _stub_exchange(monkeypatch, idp.id_token(nonce=nonce, groups=["netops-engineers"]))
+    resp = await client.get(f"{CALLBACK_URL}?code=abc&state={state}")
+
+    assert resp.status_code == 200  # the limiter did not block a real login

@@ -80,6 +80,54 @@ class Settings(BaseSettings):
     #: Version label stored with every wrapped DEK; bump together with KEK rotation.
     kek_version: str = "v1"
 
+    # -- KMS backend selection + prod-grade gating (W6-T2, ADR-0032 §2) ---------
+    # Config-only swap (ADR-0032 Consequences): switching AWS<->Azure<->Vault is
+    # this one selector + the provider-scoped block below. The credential service
+    # never branches on the backend (D11). All auth is referenced indirectly — IAM
+    # role / managed identity / a vault ``credential_ref`` handle — NEVER a token,
+    # key, or secret inlined here (ADR-0032 §2/§6).
+    # --------------------------------------------------------------------------
+
+    #: Active KEK backend (``core/crypto.get_key_provider``). ``env``/``file`` are
+    #: the local in-process fallbacks (non-production); ``aws``/``azure``/``vault``
+    #: are the production KMS backends (W6-T2). ``None`` keeps the legacy
+    #: kek/kek_file selection so an existing local deployment is unchanged.
+    vault_key_provider: Literal["env", "file", "aws", "azure", "vault"] | None = None
+
+    #: Production posture gate (ADR-0032 §2, secure-by-default opt-out). When
+    #: ``True`` the credential service REFUSES to start on a local Env/File KEK
+    #: provider — a non-production KEK can never hide behind a green prod deploy.
+    #: Defaults to ``env == "prod"`` unless set explicitly.
+    is_prod: bool | None = None
+
+    # AWS KMS (``vault_key_provider=aws``): the key is referenced by ARN only;
+    # auth is IRSA / IAM role from the pod's ambient credential chain — no static
+    # access keys (ADR-0032 §2). ``aws_region`` is optional (boto3 resolves it
+    # from the environment / instance metadata when unset).
+    aws_kms_key_arn: str | None = None
+    aws_region: str | None = None
+
+    # Azure Key Vault (``vault_key_provider=azure``): the key is referenced by
+    # vault URI + key name; auth is the managed identity via DefaultAzureCredential
+    # — no client secret inlined. ``wrapKey``/``unwrapKey`` has no native AAD, so
+    # the row-id is bound by a local AESGCM inner layer (ADR-0032 §1, see crypto).
+    azure_key_vault_uri: str | None = None
+    azure_key_name: str | None = None
+
+    # HashiCorp Vault Transit (``vault_key_provider=vault``): the transit key is
+    # referenced by mount + key name; ``vault_credential_ref`` is the INDIRECT
+    # handle (k8s-auth role / AppRole id) the credential layer resolves into a
+    # short-lived, auto-renewed token — never a token value inlined here.
+    vault_addr: str | None = None
+    vault_transit_mount: str = "transit"
+    vault_transit_key: str | None = None
+    vault_credential_ref: str | None = None
+
+    @property
+    def production(self) -> bool:
+        """Effective production posture: explicit :attr:`is_prod` else ``env == 'prod'``."""
+        return self.env == "prod" if self.is_prod is None else self.is_prod
+
     #: Nightly config-backup schedule (Celery beat, ADR-0017 §1). UTC hour/minute
     #: the ``config.nightly_backup`` task fires at; operators retune cadence
     #: without code changes. Default 02:00 UTC (a low-traffic window).
@@ -153,6 +201,39 @@ class Settings(BaseSettings):
     #: Bounded ``exp``/``iat``/``nbf`` leeway for IdP tokens (seconds, §3).
     oidc_clock_skew_secs: int = 120
 
+    # -- Rate limiting + login throttle/lockout (W6-T6; PRODUCTION.md §5, ----
+    # ADR-0028 §2, ADR-0008 Redis). Every knob is a per-deployment, operator-
+    # managed dial with a secure default. The counters live on the shared Redis
+    # (ADR-0008) so a limit holds across ``api`` replicas (D13), not in-process.
+    # --------------------------------------------------------------------------
+
+    #: Authenticated-API request budget per principal/token within
+    #: :attr:`rate_limit_window_secs`. Keyed by ``user:<id>`` AND ``token:<jti>``
+    #: so neither a single shared account nor a single leaked token can exceed
+    #: it. The ``N+1``-th request inside the window gets ``429 + Retry-After``.
+    rate_limit_requests: int = 120
+    #: Fixed-window length (seconds) for the API request budget above.
+    rate_limit_window_secs: int = 60
+
+    #: Failed local break-glass logins (per account AND per source IP) allowed
+    #: inside :attr:`login_lockout_window_secs` before the account/source pair is
+    #: temporarily locked. Progressive: each failure inside the window counts;
+    #: the ``threshold``-th trips the lockout.
+    login_lockout_threshold: int = 5
+    #: Sliding-window length (seconds) over which failed logins accumulate.
+    login_lockout_window_secs: int = 300
+    #: Temporary lockout duration (seconds) once the threshold is reached. The
+    #: lock auto-expires — no operator action needed — but every lockout is
+    #: audited + alerting-friendly (``auth.login_locked``).
+    login_lockout_duration_secs: int = 900
+
+    #: OIDC callback budget PER SOURCE IP within
+    #: :attr:`oidc_callback_window_secs` (ADR-0028 §2): blunts ``code``/``state``
+    #: flooding without blocking a legitimate single callback.
+    oidc_callback_rate_limit: int = 30
+    #: Fixed-window length (seconds) for the OIDC callback budget above.
+    oidc_callback_window_secs: int = 60
+
     @property
     def oidc_enabled(self) -> bool:
         """OIDC is active only when an issuer + client id + secret-ref are set.
@@ -189,10 +270,18 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _forbid_default_secret_in_prod(self) -> Settings:
-        """Secure by default: the baked-in dev key must never sign prod tokens."""
-        if self.env == "prod" and self.secret_key == _DEV_ONLY_SECRET_KEY:
+        """Secure by default: the baked-in dev key must never sign prod tokens.
+
+        Keyed off the effective :attr:`production` posture (``NETOPS_IS_PROD``
+        else ``env == 'prod'``), not the raw ``env``, so explicitly setting
+        ``NETOPS_IS_PROD=true`` also bars the dev key — a prod deploy can never
+        sign tokens with the insecure default regardless of how the posture was
+        declared.
+        """
+        if self.production and self.secret_key == _DEV_ONLY_SECRET_KEY:
             raise ValueError(
-                "NETOPS_SECRET_KEY must be set to a strong unique value when NETOPS_ENV=prod"
+                "NETOPS_SECRET_KEY must be set to a strong unique value in production "
+                "(NETOPS_ENV=prod or NETOPS_IS_PROD=true)"
             )
         return self
 

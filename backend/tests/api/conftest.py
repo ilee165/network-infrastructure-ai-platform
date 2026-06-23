@@ -152,12 +152,16 @@ def make_token(settings: Settings) -> Callable[..., str]:
         *,
         token_type: str = "access",
         expires_delta: timedelta | None = None,
+        jti: str | None = None,
     ) -> str:
+        claims: dict[str, Any] = {"type": token_type, "roles": [user.role.name]}
+        if jti is not None:
+            claims["jti"] = jti
         return create_access_token(
             str(user.id),
             settings,
             expires_delta=expires_delta,
-            extra_claims={"type": token_type, "roles": [user.role.name]},
+            extra_claims=claims,
         )
 
     return _make

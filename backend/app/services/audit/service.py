@@ -60,6 +60,15 @@ AUTH_OIDC_ROLE_MAPPED: Final = "auth.oidc.role_mapped"
 # Logging in via the fenced local path while OIDC is enabled is the audited,
 # alerted break-glass recovery action (ADR-0028 §5).
 AUTH_LOCAL_BREAKGLASS_LOGIN: Final = "auth.local.breakglass_login"
+# W6-T6 rate-limit + login throttle/lockout audit vocabulary (PRODUCTION.md §5,
+# ADR-0028 §2). Each event carries the attempted ``actor`` (``user:<id>`` or the
+# attempted username), the source, the request id, and an outcome — and NEVER
+# any token material or raw claims, mirroring the ``auth.login_failed`` posture.
+# ``auth.rate_limited`` covers an API request or OIDC callback turned away for
+# exceeding its budget; ``auth.login_locked`` is the temporary, alerting-friendly
+# break-glass lockout once the failed-attempt threshold is crossed.
+AUTH_RATE_LIMITED: Final = "auth.rate_limited"
+AUTH_LOGIN_LOCKED: Final = "auth.login_locked"
 USER_CREATED: Final = "user.created"
 USER_UPDATED: Final = "user.updated"
 USER_ROLE_CHANGED: Final = "user.role_changed"
@@ -122,6 +131,31 @@ AUTOMATION_EXECUTION_REFUSED: Final = "automation.execution_refused"
 # entry. ``detail`` references the device by id and carries no packet payload or
 # credential material (the BPF filter is whitelist-validated, never secret).
 PACKET_CAPTURE_REQUESTED: Final = "packet.capture_requested"
+# P1 W6 KEK wrap/unwrap audit vocabulary (ADR-0032 §5). Every master-key (KEK)
+# operation on the credential-vault core path is audited in the same append-only
+# audit_log. ``detail`` carries identifiers and KEK versions ONLY — never DEK
+# bytes, KEK bytes, the wrapped blob, or a credential_ref value (ADR-0032 §6).
+KEK_WRAP: Final = "kek.wrap"
+KEK_UNWRAP: Final = "kek.unwrap"
+# The fail-closed gate tripped (ADR-0032 §4): the provider was unreachable, so no
+# row was written/read unwrapped. ``detail`` carries the coarse reason class only.
+KEK_PROVIDER_UNAVAILABLE: Final = "kek.provider.unavailable"
+# The active key provider/backend chosen at startup (ADR-0032 §5): after =
+# {provider, kek_version} — no key material.
+KEK_PROVIDER_SELECT: Final = "kek.provider.select"
+# P1 W6-T3 master-key rotation / DEK re-wrap pass (ADR-0032 §3/§5). The re-wrap
+# job brackets its work with these two events into the same append-only
+# audit_log. ``detail`` carries ids/versions/counts ONLY — never DEK/KEK/wrapped
+# bytes (ADR-0032 §6): ``kek.rotate.start`` before = {from_version, row_count},
+# ``kek.rotate.complete`` after = {to_version, rows_migrated}.
+KEK_ROTATE_START: Final = "kek.rotate.start"
+KEK_ROTATE_COMPLETE: Final = "kek.rotate.complete"
+# A re-wrap pass was interrupted by a mid-pass provider outage (ADR-0032 §4): the
+# committed batches stay migrated and the next run resumes, but the interruption
+# is audited so a KMS outage mid-rotation is never a silent audit gap (W6 minor
+# #8). ``detail`` = {from_version, to_version, rows_migrated, reason_class} —
+# versions/counts + coarse reason class only, never key/DEK/wrapped bytes.
+KEK_ROTATE_INTERRUPTED: Final = "kek.rotate.interrupted"
 
 
 async def record(

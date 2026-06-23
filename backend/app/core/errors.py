@@ -117,6 +117,24 @@ class ForbiddenError(NetOpsError):
     slug = "forbidden"
 
 
+class RateLimitedError(NetOpsError):
+    """Too many requests/attempts in a window (W6-T6; PRODUCTION.md §5).
+
+    Surfaces as ``429`` with a coarse ``Retry-After`` (seconds). The ``detail``
+    is deliberately generic: a throttled/locked response must not disclose
+    whether the principal exists or how close it was to the limit (no oracle).
+    """
+
+    status_code = 429
+    title = "Too Many Requests"
+    slug = "rate-limited"
+
+    def __init__(self, detail: str | None = None, *, retry_after: int = 0) -> None:
+        super().__init__(detail)
+        #: Coarse, window-bounded wait surfaced as the ``Retry-After`` header.
+        self.retry_after = max(0, retry_after)
+
+
 class PluginError(NetOpsError):
     """A vendor plugin operation failed (connection, command, or parse)."""
 
@@ -180,7 +198,16 @@ def translate_llm_error(exc: Exception) -> NetOpsError | None:
 
 
 def _problem_response(error: NetOpsError, request: Request) -> JSONResponse:
-    headers = {"WWW-Authenticate": "Bearer"} if error.status_code == 401 else None
+    headers: dict[str, str] | None = None
+    if error.status_code == 401:
+        headers = {"WWW-Authenticate": "Bearer"}
+    elif isinstance(error, RateLimitedError):
+        # RFC 7231 §7.1.3 Retry-After (delay-seconds form); coarse by design. A
+        # 429 must ALWAYS carry Retry-After so a client knows to back off — a
+        # boundary retry_after of 0 still emits a coarse minimum of 1 second
+        # rather than a header-less 429 (CR4).
+        retry_after = error.retry_after if error.retry_after > 0 else 1
+        headers = {"Retry-After": str(retry_after)}
     return JSONResponse(
         status_code=error.status_code,
         content=error.to_problem(instance=request.url.path),

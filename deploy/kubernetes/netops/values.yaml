@@ -855,6 +855,38 @@ config:
     enabled: false
     issuer: ""
     clientId: ""
+  # -- KEK backend + prod-grade gating (W6-T2, ADR-0032 §2). EVERY value here is
+  #    a non-secret REFERENCE — a key ARN, a vault URI/key name, a transit key,
+  #    or an INDIRECT credential_ref login handle (k8s-auth role / AppRole id).
+  #    No KEK, token, or password literal is ever permitted here (ADR-0029 §6 /
+  #    ADR-0032 §6). The credential service selects the backend by `keyProvider`
+  #    ONLY and never branches on it elsewhere.
+  kms:
+    # Production posture gate. ON by default IN-CHART so a prod deploy REFUSES to
+    # start on a local Env/File KEK (secure-by-default opt-out). Compose leaves it
+    # off (NETOPS_ENV=dev) for the local fallback.
+    isProd: true
+    # Active KEK backend: "" (legacy local Env/File) | aws | azure | vault. Set
+    # this AND the matching block below to run a production KMS backend.
+    keyProvider: ""
+    # AWS KMS (keyProvider=aws): key referenced by ARN; auth is IRSA/IAM role from
+    # the pod's ambient credentials — no static access keys.
+    aws:
+      keyArn: ""
+      region: ""
+    # Azure Key Vault (keyProvider=azure): key referenced by vault URI + name;
+    # auth is the pod managed identity (DefaultAzureCredential) — no client secret.
+    azure:
+      vaultUri: ""
+      keyName: ""
+    # HashiCorp Vault Transit (keyProvider=vault): transit key referenced by mount
+    # + name; credentialRef is the INDIRECT login handle exchanged for a
+    # short-lived, auto-renewed token — never a token value.
+    vault:
+      addr: ""
+      transitMount: transit
+      transitKey: ""
+      credentialRef: ""
 
 # -- Reusable hardened per-container securityContext (ADR-0029 §3 table).
 #    W4 services consume this via the `netops.hardenedSecurityContext` helper.
@@ -919,12 +951,16 @@ admission:
   failurePolicy: Fail
   # cosign signed-image verification (ADR-0029 §5 rule 2). The verifying key /
   # keyless identity is supplied here — NEVER a private key, only a public
-  # verifier. W6 SBOM/cosign CI feeds this; W3 ships the enforcement rule
-  # disabled-by-data until a real verifier is wired, so the rule renders and is
-  # policy-tested without blocking unsigned dev images on day one.
+  # verifier. W3 shipped the enforcement rule disabled-by-data; W6-T5 wires the
+  # real verifier and flips it ON by default (secure-by-default opt-out). The
+  # enforcement toggle is now DERIVED from `security.imageVerification.enabled`
+  # below (see admission template) — do not set both. `signedImages` is kept as
+  # the rendering seam for the Kyverno verify-images rule's verifier reference.
   signedImages:
-    enabled: false
-    # Public cosign key (PEM) or keyless issuer/subject. Reference only.
+    # Public cosign key ConfigMap NAME (the ConfigMap holds the PUBLIC
+    # `cosign.pub` PEM only — never a private key). When empty AND keyless is
+    # configured under security.imageVerification, the rule verifies keyless
+    # (Fulcio/Rekor) by issuer+subject instead. Reference only.
     publicKeyConfigMap: ""
   # The packet-sandbox workloads permitted a non-RuntimeDefault (Localhost)
   # seccomp profile: BOTH capture and analysis (the analysis parser legitimately
@@ -942,6 +978,52 @@ admission:
   netRawDeviationSelector:
     matchLabels:
       netops.io/net-raw: allowed
+
+# -- Image supply-chain verification (P1 W6-T5, PRODUCTION.md §5, ADR-0016 /
+#    ADR-0029 §5). SECURE-BY-DEFAULT, OPT-OUT: the cluster admits ONLY cosign-
+#    signed images. This drives the existing W4 Kyverno `verify-image-signatures`
+#    rule's enforcement (Audit -> Enforce) — it does NOT add a second controller.
+#    An unsigned/forged-signature image is REJECTED at admission.
+#
+#    Disabling (`enabled: false`) is a documented break-glass for the bootstrap
+#    window ONLY (see docs/security/image-supply-chain.md); leaving it off in
+#    production defeats the supply-chain gate.
+security:
+  imageVerification:
+    # On by default. When true, admission.signedImages enforcement flips to
+    # Enforce/required for the netops-backend + netops-frontend image refs.
+    enabled: true
+    # Keyless (Sigstore/Fulcio + Rekor) verification identity — the GitHub
+    # Actions OIDC workflow identity that cosign signs WITH in CI. These are
+    # PUBLIC identity assertions, NOT secrets: the verifier checks that the
+    # signature was produced by THIS issuer + THIS workflow subject. The default
+    # subjectRegExp is pinned to this repo; forks MUST repoint it (see below).
+    keyless:
+      enabled: true
+      # OIDC issuer of the signing identity (GitHub Actions' Sigstore issuer).
+      issuer: "https://token.actions.githubusercontent.com"
+      # Workflow-identity subject (regex). Pinned to THIS repo's signing workflow
+      # ref so a signature from any OTHER org/repo workflow does NOT satisfy the
+      # policy (the `.+` owner/repo wildcard would admit attacker-controlled
+      # forks). Operators forking the repo MUST repoint this to their own
+      # owner/repo ci.yml ref (and the matching CI verify regex + docs).
+      subjectRegExp: "^https://github\\.com/ilee165/network-infrastructure-ai-platform/\\.github/workflows/ci\\.yml@refs/.+$"
+      # Rekor transparency-log URL the verifier checks the inclusion proof
+      # against (public good instance by default; self-hosted forks point this at
+      # their own Rekor). Reference only — no secret material.
+      rekorUrl: "https://rekor.sigstore.dev"
+    # OPTIONAL key-ref verifier (alternative to keyless). The PUBLIC cosign
+    # verifier PEM (`cosign.pub`). When set AND
+    # admission.signedImages.publicKeyConfigMap is named, the chart renders a
+    # ConfigMap (templates/admission/image-verification-key.yaml) the Kyverno
+    # rule reads. This is the PUBLIC key only — a private signing key is NEVER
+    # placed here (ADR-0029 §6). Leave empty to use keyless verification.
+    publicKeyPEM: ""
+    # Image references the signature policy applies to (the two images CI builds,
+    # signs, and SBOM-attests). Tag-glob; verifyDigest pins the resolved digest.
+    imageReferences:
+      - netops-backend
+      - netops-frontend
 
 # -- Default-deny NetworkPolicies (ADR-0031 §4). W4 extends the allow edge-set
 #    (ADR-0029 §2). W3 ships the default-deny floor + the analysis egress allow.

@@ -46,6 +46,48 @@ jobs:
       - name: Install backend (editable, dev extras)
         run: pip install -e "./backend[dev]"
 
+      # Dependency-vulnerability gate (P1 W6-T4, ADR-0016 §, PRODUCTION.md §5).
+      # pip-audit audits the RESOLVED backend environment (the editable install
+      # above + dev extras) against the OSV/PyPI advisory DB and FAILS the job on
+      # any known-vulnerable dependency — a RED gate, not advisory.
+      #   - Pinned: pip-audit==2.7.3 (deterministic; the scan is not itself a
+      #     supply-chain risk, ADR-0016 §5).
+      #   - Reviewed, EXPIRING allowlist: backend/.pip-audit-allowlist.txt — each
+      #     accepted advisory ID is one line with a justification + re-review date
+      #     (mirrors the .trivyignore convention). Currently empty (no accepted
+      #     vulns); a populated line becomes a `--ignore-vuln` flag below.
+      #   - Advisory-DB fetch: pip-audit pulls OSV/PyPI advisories at run time.
+      #     In an air-gapped self-hosted fork, point it at a mirror via
+      #     PIP_AUDIT_* / --index-url (see docs/security/supply-chain-scanning.md).
+      - name: Install pip-audit (pinned)
+        run: pip install "pip-audit==2.7.3"
+
+      - name: Dependency audit (pip-audit) — RED gate
+        shell: bash
+        run: |
+          set -o pipefail
+          ignore_flags=()
+          while IFS= read -r line; do
+            line="${line%%#*}"
+            line="$(echo "$line" | tr -d '[:space:]')"
+            [ -z "$line" ] && continue
+            ignore_flags+=(--ignore-vuln "$line")
+          done < backend/.pip-audit-allowlist.txt
+          # Audit the RESOLVED third-party dependency set (no lockfile in repo).
+          # We cannot scan the live environment directly: it contains the local
+          # first-party project installed editable (netops-backend), which is not
+          # on PyPI. `--skip-editable` does NOT help under `--strict` — strict
+          # promotes the skip itself to a fatal ("distribution marked as editable",
+          # the PR #62 backend failure). Instead snapshot the environment with
+          # `pip freeze --exclude-editable` (every third-party dep, pinned; the
+          # editable first-party package omitted) and audit THAT under --strict.
+          # The gate is undiminished: all third-party deps are still audited and
+          # --strict still fails on any dep pip-audit cannot resolve. The excluded
+          # package is first-party with no PyPI advisory surface.
+          pip freeze --exclude-editable > /tmp/pip-audit-reqs.txt
+          pip-audit --strict --requirement /tmp/pip-audit-reqs.txt \
+            --progress-spinner off "${ignore_flags[@]}"
+
       - name: Lint (ruff check)
         working-directory: backend
         run: ruff check .
@@ -109,6 +151,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Dependency-vulnerability gate (P1 W6-T4, ADR-0016 §, PRODUCTION.md §5).
+      # npm has no native ignore file, so CI pipes `npm audit --json` through
+      # scripts/npm-audit-gate.mjs, which FAILS on any advisory at/above the
+      # `high` floor (aligned with the Trivy CRITICAL,HIGH posture) NOT covered by
+      # a non-expired entry in .npm-audit-allowlist.json. RED gate, not advisory.
+      #   - Reviewed, EXPIRING allowlist; an expired or stale entry fails the gate
+      #     so the allowlist cannot rot open (mirrors .trivyignore).
+      #   - `npm audit` itself returns non-zero when vulns exist, so `|| true`
+      #     hands the JSON to the gate which is the authoritative pass/fail.
+      #   - Advisory-DB fetch: npm audit queries the configured registry; an
+      #     air-gapped fork points `npm config set registry` at a mirror
+      #     (docs/security/supply-chain-scanning.md).
+      - name: Dependency audit (npm audit) — RED gate
+        shell: bash
+        run: |
+          set -o pipefail
+          npm audit --json > npm-audit.json || true
+          node scripts/npm-audit-gate.mjs < npm-audit.json
+
       - name: Lint (eslint)
         run: npm run lint
 
@@ -121,11 +182,96 @@ jobs:
       - name: Build (vite)
         run: npm run build
 
+  # Secret-scanning gate (P1 W6-T4, ADR-0011 §6 no-secret posture, PRODUCTION.md
+  # §5). gitleaks scans the WORKING TREE *and the full git HISTORY* — a secret
+  # committed earlier and later removed is still exposed in history (G-SEC
+  # credential-leak posture), so HEAD-only scanning is insufficient. A finding
+  # FAILS the job (RED gate, not advisory).
+  #
+  #   - History: `actions/checkout` with fetch-depth 0 fetches all commits;
+  #     `gitleaks detect` (NOT --no-git) walks the full commit graph by default.
+  #   - Reviewed allowlist: .gitleaks.toml extends the upstream default rule set
+  #     and adds only PATH-SCOPED allowances for known false-positive surfaces
+  #     (test-fixture sentinels, the generated lockfile). It never disables a rule
+  #     globally and never allowlists by secret-shaped regex — a real secret in
+  #     app/config/CI code still fails. (Mirrors the .trivyignore convention.)
+  #   - Offline/self-hosted-fork-friendly: the gitleaks binary is installed by
+  #     PINNED version via direct download (same pattern as the infra job's
+  #     kubeconform/kube-linter/conftest), not the marketplace action (which can
+  #     require a license key for orgs). No advisory-DB fetch — gitleaks is rule-
+  #     based, fully offline.
+  security-scan:
+    name: security-scan (gitleaks — tree + history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # `needs` couples this gate into the graph so it cannot start before the main
+    # jobs and so the `all-gates` aggregator below transitively depends on it.
+    # Without this, security-scan was an orphan parallel job: a gitleaks failure
+    # only blocked merge if the repo admin had manually added it to the
+    # branch-protection required-checks list — i.e. advisory-in-practice. The
+    # single required check is now `all-gates` (see below), which enforces every
+    # gate atomically (P1 W6-T4: "a finding is a red gate, not advisory").
+    needs: [backend, frontend]
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v7
+        with:
+          # fetch-depth 0 = all history; gitleaks must see every commit, not just
+          # HEAD, to catch a secret that was committed and later removed.
+          fetch-depth: 0
+
+      - name: Install gitleaks (pinned + checksum-verified)
+        run: |
+          set -euo pipefail
+          # Pin BOTH the version AND the SHA-256 of the release tarball so the
+          # supply-chain scanner is not itself a supply-chain risk (ADR-0016 §5):
+          # a MITM/CDN substitution of the binary that scans the repo's full
+          # history is caught here before it ever runs. The expected digest is the
+          # gitleaks_8.21.2_linux_x64.tar.gz line from the upstream checksums file
+          # https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_checksums.txt
+          GITLEAKS_SHA256="5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba"
+          curl -sSL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: gitleaks detect (working tree + full history) — RED gate
+        run: |
+          # `detect` (no --no-git) scans the whole commit history; the working
+          # tree is covered because HEAD's tree is part of that graph and any
+          # uncommitted change in a PR build is already committed on the PR ref.
+          # --redact keeps any matched secret OUT of the CI log (ADR-0011 §6 — no
+          # secret material in logs). exit-code 1 (gitleaks default) fails the job.
+          gitleaks detect \
+            --source . \
+            --config .gitleaks.toml \
+            --redact \
+            --verbose \
+            --exit-code 1
+
   docker:
-    name: docker (build images + Trivy scan)
+    name: docker (build + SBOM + Trivy + cosign sign)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [backend, frontend]
+    # Per-job permissions (P1 W6-T5). Default workflow token is contents:read.
+    #   - packages: write  — push the built images to GHCR on the main/tags gate
+    #     (ADR-0016 "push to registry on main/tags"); no-op on PRs (push skipped).
+    #   - id-token: write   — KEYLESS cosign signing: GitHub mints a short-lived
+    #     OIDC token, cosign exchanges it at Fulcio for an ephemeral cert. There
+    #     is NO long-lived private signing key anywhere in the repo or secrets
+    #     (ADR-0029 §6 secrets-by-reference) — the signing identity IS the
+    #     workflow's OIDC identity, recorded in the Rekor transparency log.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      # Registry + image coordinates. GHCR by default; a self-hosted fork points
+      # REGISTRY at its own registry. The repository owner is lower-cased per
+      # GHCR's naming rule in the publish step. No secret material here.
+      REGISTRY: ghcr.io
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -133,51 +279,256 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Images are built but never pushed from CI (push: false, load: true);
-      # registry publishing is a release-workflow concern (ADR-0016).
+      # Pinned supply-chain tooling (ADR-0016 §5 — the signer/SBOM generator must
+      # not itself be a supply-chain risk). syft + cosign are installed at a
+      # pinned version via their official actions, themselves pinned to a release.
+      - name: Install syft (SBOM, pinned)
+        uses: anchore/sbom-action/download-syft@v0.17.9
+        with:
+          syft-version: v1.18.1
+
+      - name: Install cosign (pinned)
+        uses: sigstore/cosign-installer@v3.7.0
+        with:
+          cosign-release: v2.4.1
+
+      # On main/tags the images are PUSHED to the registry so the published,
+      # immutable digest is the artifact we sign + verify. On PRs the build is
+      # load-only (push:false) — signing/pushing requires the protected branch's
+      # OIDC + packages scope, which forked-PR builds must not have.
+      - name: Compute publish flag + image base
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish=false
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && { [ "${GITHUB_REF}" = "refs/heads/main" ] || [ "${GITHUB_REF_TYPE}" = "tag" ]; }; then
+            publish=true
+          fi
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
+          echo "backend_image=${REGISTRY}/${owner}/netops-backend" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=${REGISTRY}/${owner}/netops-frontend" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR (publish only)
+        if: steps.meta.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN with packages:write — short-lived, scoped to this run;
+          # never a long-lived PAT inlined in the workflow (ADR-0011 §6).
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build (and push on the publish gate). PR path: load:true, push:false.
+      # Publish path: push:true so the immutable digest output feeds sign+verify.
       - name: Build backend image
+        id: build_backend
         uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/backend.Dockerfile
-          push: false
-          load: true
-          tags: netops-backend:ci
+          push: ${{ steps.meta.outputs.publish == 'true' }}
+          load: ${{ steps.meta.outputs.publish != 'true' }}
+          tags: |
+            netops-backend:ci
+            ${{ steps.meta.outputs.publish == 'true' && format('{0}:{1}', steps.meta.outputs.backend_image, github.sha) || '' }}
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
 
       - name: Build frontend image
+        id: build_frontend
         uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/frontend.Dockerfile
-          push: false
-          load: true
-          tags: netops-frontend:ci
+          push: ${{ steps.meta.outputs.publish == 'true' }}
+          load: ${{ steps.meta.outputs.publish != 'true' }}
+          tags: |
+            netops-frontend:ci
+            ${{ steps.meta.outputs.publish == 'true' && format('{0}:{1}', steps.meta.outputs.frontend_image, github.sha) || '' }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
-      - name: Trivy scan (backend image)
+      # SBOM (syft) per image — runs on EVERY build (PR + publish), retained as a
+      # build artifact (PRODUCTION.md §5 / G-SEC). SPDX-JSON is the portable
+      # format consumed by downstream attestation/audit tooling.
+      #
+      # SOURCE differs by gate: on PRs the image is loaded into the local docker
+      # daemon (load:true, push:false) so we scan `docker:…:ci`. On the publish
+      # gate the buildx docker-container driver exports ONLY to the registry
+      # (push:true, load:false) — the :ci tag is NOT in the local daemon — so we
+      # scan the pushed registry image BY DIGEST (`registry:<image>@<digest>`).
+      # Scanning :ci on publish would fail image-not-found.
+      - name: SBOM (syft) — backend (PR)
+        if: steps.meta.outputs.publish != 'true'
+        run: syft scan docker:netops-backend:ci -o spdx-json > sbom-backend.spdx.json
+
+      - name: SBOM (syft) — frontend (PR)
+        if: steps.meta.outputs.publish != 'true'
+        run: syft scan docker:netops-frontend:ci -o spdx-json > sbom-frontend.spdx.json
+
+      - name: SBOM (syft) — backend (publish, by digest)
+        if: steps.meta.outputs.publish == 'true'
+        run: syft scan "registry:${{ steps.meta.outputs.backend_image }}@${{ steps.build_backend.outputs.digest }}" -o spdx-json > sbom-backend.spdx.json
+
+      - name: SBOM (syft) — frontend (publish, by digest)
+        if: steps.meta.outputs.publish == 'true'
+        run: syft scan "registry:${{ steps.meta.outputs.frontend_image }}@${{ steps.build_frontend.outputs.digest }}" -o spdx-json > sbom-frontend.spdx.json
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-sboms
+          path: |
+            sbom-backend.spdx.json
+            sbom-frontend.spdx.json
+          if-no-files-found: error
+
+      # Trivy image-CVE gate — RAISED to CRITICAL + HIGH at release (PRODUCTION.md
+      # §5 / ADR-0016). Accepted findings flow ONLY through the reviewed
+      # deploy/docker/.trivyignore-image (justification + expiry per line);
+      # ignore-unfixed keeps un-patchable base-OS CVEs from wedging the gate
+      # (docs/security/2026-06-14-trivy-baseimage-cves.md). The gate is NOT
+      # lowered — only sanctioned, expiring findings are suppressed.
+      # image-ref differs by gate for the same reason as the SBOM steps: the :ci
+      # tag only exists in the local daemon on PRs (load:true). On publish the
+      # image lives ONLY in the registry, so Trivy scans it BY DIGEST.
+      - name: Trivy scan (backend image, PR)
+        if: steps.meta.outputs.publish != 'true'
         uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/docker/.trivyignore-image
         with:
           image-ref: netops-backend:ci
           format: table
           severity: CRITICAL,HIGH
-          # Fail only on CVEs that have a fix available; base-image OS packages
-          # with no upstream patch (Debian fix_deferred/affected) are out of our
-          # control and would otherwise wedge the gate. See
-          # docs/security/2026-06-14-trivy-baseimage-cves.md.
           ignore-unfixed: true
           exit-code: "1"
 
-      - name: Trivy scan (frontend image)
+      - name: Trivy scan (frontend image, PR)
+        if: steps.meta.outputs.publish != 'true'
         uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/docker/.trivyignore-image
         with:
           image-ref: netops-frontend:ci
           format: table
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
+
+      - name: Trivy scan (backend image, publish by digest)
+        if: steps.meta.outputs.publish == 'true'
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/docker/.trivyignore-image
+        with:
+          image-ref: ${{ steps.meta.outputs.backend_image }}@${{ steps.build_backend.outputs.digest }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Trivy scan (frontend image, publish by digest)
+        if: steps.meta.outputs.publish == 'true'
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/docker/.trivyignore-image
+        with:
+          image-ref: ${{ steps.meta.outputs.frontend_image }}@${{ steps.build_frontend.outputs.digest }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # cosign KEYLESS signing — ONLY on the publish gate, AFTER Trivy passes, so
+      # a CVE-failing image is never signed. We sign the pushed-by-digest image
+      # (cosign resolves the tag→digest), and attach the SBOM as a cosign
+      # attestation so provenance travels with the image (PROPOSED, PRODUCTION.md
+      # §5). COSIGN_EXPERIMENTAL/identity-token is the workflow OIDC — no key.
+      - name: cosign sign + attest (publish only)
+        if: steps.meta.outputs.publish == 'true'
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          for pair in \
+            "${{ steps.meta.outputs.backend_image }}:${{ github.sha }}|sbom-backend.spdx.json" \
+            "${{ steps.meta.outputs.frontend_image }}:${{ github.sha }}|sbom-frontend.spdx.json"; do
+            img="${pair%%|*}"; sbom="${pair##*|}"
+            echo "::group::cosign sign ${img}"
+            cosign sign --recursive "${img}"
+            cosign attest --recursive --type spdxjson --predicate "${sbom}" "${img}"
+            echo "::endgroup::"
+          done
+
+      # Prove the signature chain (PRODUCTION.md §5 "cosign verify proves the
+      # chain"). On publish we verify the just-signed images against the SAME
+      # keyless identity the admission policy enforces (issuer + workflow-subject
+      # regex), so a forged/unsigned image would fail here exactly as it is
+      # rejected at admission.
+      - name: cosign verify signed images (publish only)
+        if: steps.meta.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          for img in \
+            "${{ steps.meta.outputs.backend_image }}:${{ github.sha }}" \
+            "${{ steps.meta.outputs.frontend_image }}:${{ github.sha }}"; do
+            echo "::group::cosign verify ${img}"
+            cosign verify \
+              --certificate-identity-regexp "^https://github\.com/ilee165/network-infrastructure-ai-platform/\.github/workflows/ci\.yml@refs/.+$" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${img}"
+            echo "::endgroup::"
+          done
+
+      # PR-path cosign exercise (spec test+gate plan: "cosign sign step runs on
+      # the main/tags path (dry-run/verify on PRs)"). PRs cannot push/sign (no
+      # protected-branch OIDC + packages scope), so instead we VERIFY the
+      # last-published :main image against the SAME pinned identity the admission
+      # policy enforces. This proves the cosign toolchain + identity-chain regex
+      # are wired correctly on every PR — a forged/unsigned image or a broken
+      # identity regex fails here, before merge, with no registry push.
+      #
+      # Bootstrap tolerance: before the first publish to main, the :main tag does
+      # not exist yet. A MISSING image (manifest/tag unknown) is treated as a skip
+      # so the very first PR is not wedged; ANY signature-verification failure
+      # (unsigned image present, or identity/issuer mismatch) is FATAL.
+      - name: cosign verify last-published image (PR dry-run of the chain)
+        if: steps.meta.outputs.publish != 'true'
+        env:
+          BACKEND_MAIN: "${{ steps.meta.outputs.backend_image }}:main"
+          FRONTEND_MAIN: "${{ steps.meta.outputs.frontend_image }}:main"
+        run: |
+          set -euo pipefail
+          status=0
+          for img in "${BACKEND_MAIN}" "${FRONTEND_MAIN}"; do
+            echo "::group::cosign verify (PR) ${img}"
+            out="$(cosign verify \
+              --certificate-identity-regexp "^https://github\.com/ilee165/network-infrastructure-ai-platform/\.github/workflows/ci\.yml@refs/.+$" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${img}" 2>&1)" && rc=0 || rc=$?
+            echo "${out}"
+            if [ "${rc}" -ne 0 ]; then
+              # Image not yet published (bootstrap) -> skip, not fail. GHCR does
+              # not return a clean "manifest unknown" for an absent package: for a
+              # never-published (hence private/nonexistent) repo path it answers the
+              # token request with "DENIED: requested access to the resource is
+              # denied" / 401 unauthorized. Treat those as the bootstrap window too,
+              # so the first PR (before any :main image exists) is not wedged. This
+              # is a PR-only dry-run (if: publish != 'true'); the real sign+verify on
+              # the push-to-main path is unaffected, as is in-cluster admission.
+              if echo "${out}" | grep -Eqi 'manifest unknown|not found|MANIFEST_UNKNOWN|name unknown|no such (manifest|host|image)|error: image .* not found|denied|unauthorized|access to the resource is denied'; then
+                echo "::notice::${img} not yet published to :main — skipping PR verify (bootstrap window). The chain wiring is still asserted once a :main image exists."
+              else
+                echo "::error::cosign verify FAILED for ${img} (unsigned or identity/issuer mismatch) — the signing/admission chain is misconfigured."
+                status=1
+              fi
+            fi
+            echo "::endgroup::"
+          done
+          exit "${status}"
 
   # Chart-validation + policy-as-test for the K8s/Helm declarative half (P1 W4 GA
   # chart, ADR-0029 §3/§5 + ADR-0031). This job is the G-SEC K8s-posture evidence:
@@ -316,3 +667,151 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
+
+  # KMS-emulator integration gate (P1 W6-T2, ADR-0032 §2/§148). The offline
+  # backend job drives the providers via in-memory doubles + contract tests; THIS
+  # job is the real integration gate — it brings up the backend-shaped emulators
+  # (LocalStack KMS + dev Vault Transit), installs the cloud SDK extras, creates
+  # the keys, and exercises the REAL boto3/hvac adapters end-to-end. Azure has no
+  # first-party local wrapKey/unwrapKey emulator (documented exception): its real
+  # call shape is pinned by the contract test and a real Key Vault is lab-deferred.
+  kms-emulators:
+    name: kms-emulators (LocalStack KMS + dev Vault — provider integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install backend + KMS extras (aws + vault)
+        run: pip install -e "./backend[dev,kms-aws,kms-vault]"
+
+      # Bring up the emulators with a BOUNDED RETRY around the image pull + boot
+      # (#7). A transient registry blip on `docker compose pull`/`up` (image-pull
+      # 5xx, slow CDN) must not flake this REQUIRED gate — but the gate stays
+      # required and blocking: after the retry budget is exhausted we exit non-zero
+      # so a genuine boot failure still fails the job (never made non-blocking).
+      #   - `pull` is retried separately so an image-pull blip is recovered before
+      #     `up` even starts.
+      #   - `up -d --wait` blocks until every service with a healthcheck reports
+      #     healthy (localstack-kms + vault-transit define healthchecks in the
+      #     compose file), replacing the prior fixed curl-poll loop with a
+      #     healthcheck-gated wait. `--wait-timeout` bounds each attempt.
+      - name: Bring up KMS emulators (retry pull + healthcheck-gated up)
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose=(docker compose -f deploy/docker/docker-compose.kms-emulators.yml)
+          attempts=3
+          n=0
+          until [ "$n" -ge "$attempts" ]; do
+            n=$((n + 1))
+            echo "::group::emulator bring-up attempt ${n}/${attempts}"
+            if "${compose[@]}" pull --quiet && "${compose[@]}" up -d --wait --wait-timeout 120; then
+              echo "emulators healthy"; echo "::endgroup::"; exit 0
+            fi
+            echo "bring-up attempt ${n} failed; dumping status + tearing down before retry"
+            "${compose[@]}" ps || true
+            "${compose[@]}" down -v || true
+            echo "::endgroup::"
+            # backoff between attempts; `|| true` so the final no-sleep branch does
+            # not trip `set -e` when n == attempts.
+            [ "$n" -lt "$attempts" ] && sleep $((n * 5)) || true
+          done
+          echo "::error::KMS emulators failed to come up healthy after ${attempts} attempts"
+          exit 1
+
+      # Belt-and-suspenders readiness assert on the two API surfaces the providers
+      # call (LocalStack KMS health + Vault sys/health). `up --wait` already gated
+      # on container health; this confirms the HTTP endpoints answer before the
+      # provider exercise step.
+      - name: Confirm LocalStack KMS + dev Vault endpoints answer
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sf http://localhost:4566/_localstack/health >/dev/null
+          curl -sf http://localhost:8200/v1/sys/health >/dev/null
+
+      - name: Provision a LocalStack KMS key
+        id: kms
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          ARN=$(aws --endpoint-url=http://localhost:4566 kms create-key \
+            --query 'KeyMetadata.Arn' --output text)
+          echo "key_arn=${ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Provision the dev Vault Transit key
+        shell: bash
+        env:
+          VAULT_ADDR: http://localhost:8200
+          VAULT_TOKEN: dev-only-root-token
+        run: |
+          set -euo pipefail
+          curl -sf -H "X-Vault-Token: ${VAULT_TOKEN}" -X POST \
+            "${VAULT_ADDR}/v1/sys/mounts/transit" \
+            -d '{"type":"transit"}' || true   # already mounted is fine
+          curl -sf -H "X-Vault-Token: ${VAULT_TOKEN}" -X POST \
+            "${VAULT_ADDR}/v1/transit/keys/netops-kek" \
+            -d '{"type":"aes256-gcm96","derived":true}'
+
+      - name: Exercise AWS + Vault providers against the emulators (RED gate)
+        working-directory: backend
+        env:
+          KMS_EMULATOR_TEST: "1"
+          LOCALSTACK_KMS_ENDPOINT: http://localhost:4566
+          KMS_KEY_ARN: ${{ steps.kms.outputs.key_arn }}
+          VAULT_ADDR: http://localhost:8200
+          VAULT_TOKEN: dev-only-root-token
+          VAULT_TRANSIT_KEY: netops-kek
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
+        run: pytest tests/integration/test_kms_emulators.py -v
+
+      - name: Tear down emulators
+        if: always()
+        run: docker compose -f deploy/docker/docker-compose.kms-emulators.yml down -v
+
+  # Single required-check aggregator (P1 W6-T4). Branch protection should require
+  # ONLY this job; it transitively depends on every gate, so a failure or skip of
+  # ANY upstream job (dependency audits, secret scan, image/Trivy, chart/policy)
+  # blocks merge atomically — no per-job required-checks list to keep in sync and
+  # no orphan gate that is advisory-in-practice. `if: always()` makes this job run
+  # even when a dependency fails; it then inspects the `needs.*.result` values and
+  # FAILS unless every one is "success", so a failed OR skipped gate is a red gate.
+  all-gates:
+    name: all-gates (required-check aggregator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators]
+    steps:
+      - name: Assert every gate succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          set -euo pipefail
+          echo "Upstream gate results: ${RESULTS}"
+          IFS=',' read -ra results <<< "${RESULTS}"
+          failed=0
+          for r in "${results[@]}"; do
+            if [ "$r" != "success" ]; then
+              echo "::error::a required gate did not succeed (result=${r})"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "all-gates: FAIL — one or more required gates did not succeed."
+            exit 1
+          fi
+          echo "all-gates: PASS — every required gate succeeded."

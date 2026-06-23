@@ -63,6 +63,7 @@ def create_celery_app() -> Celery:
             "app.workers.tasks.topology",
             "app.workers.tasks.config",
             "app.workers.tasks.packet",
+            "app.workers.tasks.credentials",
         ],
         # M5+: ".docs"
     )
@@ -101,6 +102,10 @@ def create_celery_app() -> Celery:
             "docs.*": {"queue": QUEUE_DOCS},
             "topology.*": {"queue": QUEUE_TOPOLOGY},
             "system.*": {"queue": QUEUE_SYSTEM},
+            # KEK rotation re-wrap (W6-T3): an operator/KMS-triggered operational
+            # task (not a D8 work queue, not beat-coupled to DR) — runs on the
+            # default system queue.
+            "credentials.*": {"queue": QUEUE_SYSTEM},
         },
         # Celery-beat schedules (ADR-0017 §1): the nightly config backup fans out
         # one capture per reachable device at a configurable UTC time. Beat is run

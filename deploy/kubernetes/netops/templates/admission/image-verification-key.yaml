@@ -1,0 +1,37 @@
+{{- /*
+Image-verification cosign PUBLIC-key ConfigMap (P1 W6-T5, ADR-0029 §5 / §6).
+
+This is the OPTIONAL key-ref verifier seam consumed by the W4 Kyverno
+`verify-image-signatures` rule (templates/policy/kyverno-clusterpolicy.yaml) — it
+is NOT a second admission controller. The chart's secure-by-default verification
+is KEYLESS (security.imageVerification.keyless): the Sigstore issuer + the CI
+workflow-identity subject. Clusters that prefer a long-lived cosign key-pair
+instead supply the verifier here.
+
+CRITICAL: this ConfigMap holds ONLY the PUBLIC cosign verifier (`cosign.pub`
+PEM). A private signing key is NEVER placed in the chart, values, or a rendered
+manifest (ADR-0011 §6 / ADR-0029 §6 secrets-by-reference). The PUBLIC key is not
+secret material, so a ConfigMap (not a Secret) is correct. Operators paste their
+`cosign.pub` into security.imageVerification.publicKeyPEM (or, preferably, manage
+this ConfigMap out-of-band and point admission.signedImages.publicKeyConfigMap at
+it). Rendered only when a public key is actually supplied.
+*/ -}}
+{{- $iv := .Values.security.imageVerification -}}
+{{- if and .Values.admission.enabled (eq .Values.admission.engine "kyverno") $iv.publicKeyPEM .Values.admission.signedImages.publicKeyConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.admission.signedImages.publicKeyConfigMap }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    netops.io/image-verification: "cosign-public-key"
+  annotations:
+    netops.io/purpose: >-
+      Cosign PUBLIC verifier key for admission image-signature verification
+      (P1 W6-T5). Contains NO private key material.
+data:
+  # PUBLIC cosign verifier PEM only. The Kyverno verify-images rule reads
+  # `.data.'cosign.pub'` from this ConfigMap by name.
+  cosign.pub: |-
+    {{- $iv.publicKeyPEM | nindent 4 }}
+{{- end }}

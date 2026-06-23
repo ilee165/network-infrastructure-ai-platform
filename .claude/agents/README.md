@@ -27,14 +27,26 @@ runs; the prompt forbids modification).
 ## Escalation rule
 
 `opts.model` overrides the definition's model. For **security-critical tasks**
-(credential vault, auth/RBAC, any endpoint or pipeline that touches secret
-material, leak/exit-criteria tests), escalate every role to the strong model:
+(credential vault, KMS/KEK, auth/RBAC, any endpoint or pipeline that touches
+secret material, leak/exit-criteria tests), escalate every role to the strong
+model:
 
 ```js
-agent(prompt, { agentType: 'wf-spec-reviewer', model: 'fable', label, phase, schema })
+agent(prompt, { agentType: 'wf-spec-reviewer', model: STRONG, label, phase, schema })
 ```
 
-Nothing in a secret-handling pipeline runs on a downgraded model.
+**`STRONG` is the session's strong model, not a hard-coded literal.** Do NOT
+write `model: 'fable'`: `fable` is currently UNAVAILABLE, and a dead-model
+escalation does not error loudly — it silently returns a "clean" review (this
+caused 10 falsely-clean secret-surface ADR reviews in P1 W0). Use `'opus'` when
+the session runs Opus, so a `/model` switch + `resumeFromRunId` recovers the run.
+Track it as one session-scoped constant in the workflow script; never inline the
+model name per call.
+
+Nothing in a secret-handling pipeline runs on a downgraded model — and "the
+strong model is unreachable" counts as downgraded. If `STRONG` cannot be
+resolved to a live model, stop; do not let escalated reviews fall through to a
+dead or weaker model.
 
 ## Why sonnet reviews don't degrade quality
 
@@ -59,7 +71,19 @@ roles that design and write code.
    validated data, not prose to re-parse.
 6. **Atomic commits per task + `resumeFromRunId`** — restarts replay completed
    agents from cache. Keep (prompt, opts) byte-identical for completed calls;
-   never retro-edit a running workflow's already-executed calls.
+   never retro-edit a running workflow's already-executed calls. The cache is
+   **same-session only**: after a session-limit kill that has since reset, do
+   NOT re-resume — it re-runs completed agents live and duplicates commits.
+   Instead read **git as ground truth** (the result object is stale/filtered
+   after a kill), stash any partial tree (`git stash -u`, never `reset --hard`),
+   and author a **focused workflow for only the unfinished tasks**, feeding it the
+   cached review findings from the run's `.output` file (P1 W6). A **transient
+   API 5xx (529/500) that kills an agent mid-task** behaves the same way — the
+   result reports "blocked / 0 work" while the agent may have left a large,
+   coherent, *uncommitted* dirty tree. Don't discard it and don't blindly
+   re-run everything: validate the tree's gates, commit the salvageable part,
+   then focused-rerun only the not-started tasks (P1 W6 recovered a 37-min
+   opus implementer's work this way).
 7. **Sequential tasks that share files; parallel only within a task** (the two
    reviews) — avoids merge churn that burns fixer tokens.
 8. **Graph-first code location** — when `graphify-out/graph.json` exists at the
@@ -68,6 +92,22 @@ roles that design and write code.
    impact. The graph is a derived index: verify in source before editing, and
    run `graphify update .` after commits to keep it current. Absent graph =
    normal Grep/Read behavior (the file's existence is the feature flag).
+9. **Rebase before a new wave** — if the prior wave was squash-merged to main,
+   rebase the working branch onto `origin/main` BEFORE building the next wave.
+   `git log origin/main..<branch>` must show ONLY the new wave's commits; leftover
+   pre-squash history makes the PR CONFLICTING and GitHub skips CI. Recover an
+   already-built branch with `git rebase --onto origin/main <last-old-commit>`
+   onto a fresh branch (P1 W3/W6).
+10. **Arm a baseline-relative usage guard on long runs** (required policy —
+    the user denied an unguarded fold). `budget.spent()` is
+    session/context-cumulative — it does **not** reset per user turn and
+    survives `/compact`, so an *absolute* ceiling below the already-spent
+    total trips the guard instantly (0 agents) and waiting for "a fresh turn"
+    does nothing. Capture `const BASELINE = budget.spent()` at the script top
+    and gate on `budget.spent() - BASELINE >= ceiling*frac` so the ceiling is
+    *this run's own allowance*; on trip, `log()` a summary and `return` the
+    partial result (atomic commits are the save). See
+    `.claude/workflows/README.md` item 7 (P1 W6).
 
 ## Maintenance
 

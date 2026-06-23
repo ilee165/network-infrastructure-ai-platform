@@ -15,9 +15,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.api.deps import get_app_settings, get_db, require_role
+from app.api.deps import get_app_settings, get_db, get_sessionmaker, require_role
 from app.core import crypto
 from app.core.config import Settings
 from app.core.errors import ConflictError
@@ -27,6 +27,7 @@ from app.schemas.credentials import (
     CredentialListResponse,
     CredentialRead,
     CredentialRotate,
+    RotationStatusResponse,
 )
 from app.services import credentials as credentials_service
 
@@ -41,6 +42,7 @@ def get_key_provider(
 
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
+Sessionmaker = Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)]
 Engineer = Annotated[User, Depends(require_role("engineer"))]
 Viewer = Annotated[User, Depends(require_role("viewer"))]
 Provider = Annotated[crypto.KeyProvider, Depends(get_key_provider)]
@@ -52,7 +54,11 @@ def _actor(user: User) -> str:
 
 @router.post("", response_model=CredentialRead, status_code=201)
 async def create_credential(
-    body: CredentialCreate, session: DbSession, provider: Provider, user: Engineer
+    body: CredentialCreate,
+    session: DbSession,
+    sessionmaker: Sessionmaker,
+    provider: Provider,
+    user: Engineer,
 ) -> CredentialRead:
     """Encrypt and store a new credential; the service audits ``credential.created``."""
     existing = (
@@ -69,6 +75,7 @@ async def create_credential(
         secret=body.secret.get_secret_value(),
         params=body.params,
         actor=_actor(user),
+        sessionmaker=sessionmaker,
     )
     response = CredentialRead.model_validate(credential)
     await session.commit()
@@ -80,6 +87,7 @@ async def rotate_credential(
     credential_id: uuid.UUID,
     body: CredentialRotate,
     session: DbSession,
+    sessionmaker: Sessionmaker,
     provider: Provider,
     user: Engineer,
 ) -> CredentialRead:
@@ -90,6 +98,7 @@ async def rotate_credential(
         credential_id=credential_id,
         new_secret=body.secret.get_secret_value(),
         actor=_actor(user),
+        sessionmaker=sessionmaker,
     )
     response = CredentialRead.model_validate(credential)
     await session.commit()
@@ -120,3 +129,19 @@ async def list_credentials(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/rotation-status", response_model=RotationStatusResponse)
+async def rotation_status(
+    session: DbSession,
+    provider: Provider,
+    _user: Engineer,
+) -> RotationStatusResponse:
+    """KEK rotation status: versions/counts only (ADR-0032 §6) — never any blob.
+
+    Returns ``{from_version, to_version, rows_pending}`` so an operator can watch
+    a re-wrap pass drain to zero. Requires the ``engineer`` rank; the response
+    exposes no ``wrapped_dek`` / per-row ``kek_version`` field.
+    """
+    status = await credentials_service.get_rotation_status(session, provider)
+    return RotationStatusResponse.model_validate(status)

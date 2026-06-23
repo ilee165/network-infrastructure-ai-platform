@@ -41,3 +41,49 @@ data:
   {{- if .Values.secrets.kms.masterKeyRef }}
   NETOPS_KMS_MASTER_KEY_REF: {{ .Values.secrets.kms.masterKeyRef | quote }}
   {{- end }}
+  # Production posture gate (W6-T2, ADR-0032 §2). ON in-chart by default so the
+  # credential service REFUSES to start on a local Env/File KEK in production —
+  # a non-production KEK can never hide behind a green deploy. Off in compose.
+  # NOTE: do NOT use `| default true` on a bool — Helm's `default` treats the
+  # boolean `false` as empty and would silently force an explicit `isProd: false`
+  # opt-out back to true. Guard on whether the key is ABSENT (kindIs "invalid")
+  # instead: absent ⇒ true (secure default, values.yaml also ships true); present
+  # ⇒ honour the operator's explicit value (including an intentional false).
+  NETOPS_IS_PROD: {{ (kindIs "invalid" .Values.config.kms.isProd) | ternary true .Values.config.kms.isProd | quote }}
+  {{- with .Values.config.kms.keyProvider }}
+  # Active KEK backend (W6-T2): aws | azure | vault (production KMS) — the
+  # credential service selects by THIS value only; all auth below is referenced
+  # indirectly (IAM role / managed identity / credential_ref), never inlined.
+  NETOPS_VAULT_KEY_PROVIDER: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.kms.aws }}
+  {{- with .keyArn }}
+  NETOPS_AWS_KMS_KEY_ARN: {{ . | quote }}
+  {{- end }}
+  {{- with .region }}
+  NETOPS_AWS_REGION: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.config.kms.azure }}
+  {{- with .vaultUri }}
+  NETOPS_AZURE_KEY_VAULT_URI: {{ . | quote }}
+  {{- end }}
+  {{- with .keyName }}
+  NETOPS_AZURE_KEY_NAME: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.config.kms.vault }}
+  {{- with .addr }}
+  NETOPS_VAULT_ADDR: {{ . | quote }}
+  {{- end }}
+  {{- with .transitMount }}
+  NETOPS_VAULT_TRANSIT_MOUNT: {{ . | quote }}
+  {{- end }}
+  {{- with .transitKey }}
+  NETOPS_VAULT_TRANSIT_KEY: {{ . | quote }}
+  {{- end }}
+  {{- with .credentialRef }}
+  # INDIRECT login handle (k8s-auth role / AppRole id), NOT a token value.
+  NETOPS_VAULT_CREDENTIAL_REF: {{ . | quote }}
+  {{- end }}
+  {{- end }}

@@ -16,6 +16,7 @@ hostile filter is rejected by the sandbox and audited as a failure.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -204,6 +205,110 @@ def test_drive_eos_capture_waits_duration_between_start_and_stop(
     # copy follows stop; retrieve is last.
     assert timeline.index("copy capture netops flash:cap.pcap") > stop_idx
     assert timeline[-1] == f"retrieve {tmp_path / 'x.pcap'}"
+
+
+# ---------------------------------------------------------------------------
+# packet._load_ssh_context — real vault decrypt + durable fail-closed audit
+# ---------------------------------------------------------------------------
+
+
+def _seed_ssh_device(db_url: str, provider: Any, *, secret: str) -> uuid.UUID:
+    """Seed a REACHABLE EOS device with a real envelope-encrypted SSH credential."""
+    from app.models import Device, DeviceStatus
+    from app.models.inventory import CredentialKind
+    from app.services import credentials as credentials_service
+
+    async def _go() -> uuid.UUID:
+        engine = create_async_engine(db_url)
+        try:
+            maker = async_sessionmaker(engine, expire_on_commit=False)
+            async with maker() as session:
+                cred = await credentials_service.create_credential(
+                    session,
+                    provider,
+                    name="eos-ssh",
+                    kind=CredentialKind.SSH,
+                    username="netops",
+                    secret=secret,
+                    params={"port": 2222},
+                    actor="test",
+                )
+                device = Device(
+                    hostname="eos-1",
+                    mgmt_ip="10.0.0.5",
+                    vendor_id="eos",
+                    status=DeviceStatus.REACHABLE,
+                    credential_id=cred.id,
+                )
+                session.add(device)
+                await session.commit()
+                return device.id
+        finally:
+            # CR11: dispose the engine so its connection pool is not leaked across
+            # runs (the engine is created per seed call inside this loop).
+            await engine.dispose()
+
+    return asyncio.run(_go())
+
+
+def test_load_ssh_context_decrypts_real_credential(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real _load_ssh_context unwraps the vault credential into SSH params."""
+    import base64
+
+    from app.core.config import Settings
+    from app.core.crypto import KEY_BYTES, EnvKeyProvider
+
+    kek = base64.urlsafe_b64encode(os.urandom(KEY_BYTES)).decode("ascii")
+    provider = EnvKeyProvider(Settings(_env_file=None, kek=kek, kek_version="v1"))  # type: ignore[arg-type]
+    monkeypatch.setattr(tasks, "_key_provider", lambda: provider)
+
+    device_id = _seed_ssh_device(db_url, provider, secret="eos-cli-pass")
+
+    context = asyncio.run(tasks._load_ssh_context(device_id))
+
+    assert context.params.host == "10.0.0.5"
+    assert context.params.password == "eos-cli-pass"
+    assert context.params.port == 2222
+    # The decrypt was audited (committed on the worker session).
+    actions = {a.action for a in _fetch_all(db_url, AuditLog)}
+    assert "credential.decrypted" in actions
+
+
+def test_load_ssh_context_fail_closed_audit_is_durable(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A KMS outage at the packet decrypt site durably audits the tripped gate.
+
+    The decrypt site derives an autonomous sessionmaker (credentials.
+    autonomous_sessionmaker) so the kek.provider.unavailable row commits even
+    though the worker session is rolled back (Finding 3 — no silent audit loss).
+    """
+    import base64
+
+    from app.core.config import Settings
+    from app.core.crypto import KEY_BYTES, EnvKeyProvider, KeyProviderUnavailable
+
+    kek = base64.urlsafe_b64encode(os.urandom(KEY_BYTES)).decode("ascii")
+    healthy = EnvKeyProvider(Settings(_env_file=None, kek=kek, kek_version="v1"))  # type: ignore[arg-type]
+    monkeypatch.setattr(tasks, "_key_provider", lambda: healthy)
+    device_id = _seed_ssh_device(db_url, healthy, secret="eos-cli-pass")
+
+    class _DownProvider:
+        kek_version = "v1"
+
+        def unwrap_dek(self, wrapped: Any, *, aad: bytes) -> bytes:
+            raise KeyProviderUnavailable("TimeoutError")
+
+    monkeypatch.setattr(tasks, "_key_provider", lambda: _DownProvider())
+
+    with pytest.raises(KeyProviderUnavailable):
+        asyncio.run(tasks._load_ssh_context(device_id))
+
+    rows = [a for a in _fetch_all(db_url, AuditLog) if a.action == "kek.provider.unavailable"]
+    assert len(rows) == 1
+    assert rows[0].detail == {"reason_class": "TimeoutError"}
 
 
 # ---------------------------------------------------------------------------

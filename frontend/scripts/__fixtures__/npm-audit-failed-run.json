@@ -1,0 +1,14 @@
+{
+  "$comment": [
+    "NEGATIVE-VALIDATION FIXTURE (P1 W6-T4) — a FAILED `npm audit` run.",
+    "When npm audit cannot reach the registry it still emits VALID JSON (an error",
+    "envelope), and CI masks npm's non-zero exit via `|| true`. The gate must NOT",
+    "treat this as 'zero advisories => PASS' (a false-green). Piping this into",
+    "scripts/npm-audit-gate.mjs MUST exit 1. Evidence-only; CI does not consume it."
+  ],
+  "error": {
+    "code": "ENETUNREACH",
+    "summary": "request to https://registry.npmjs.org/-/npm/v1/security/audits/quick failed",
+    "detail": "simulated registry-unreachable failure for negative validation"
+  }
+}

@@ -9,10 +9,22 @@ description = "AI Network Operations Platform - modular-monolith backend (FastAP
 requires-python = ">=3.11"
 dependencies = [
     # Web / API (D2)
-    "fastapi",
+    # Capped <0.137: FastAPI 0.137.0 changed APIRouter.include_router to keep a
+    # lazy `_IncludedRouter` wrapper instead of flattening child routes into the
+    # parent's `.routes`. The W6-T6 rate-limit-wiring tests
+    # (tests/api/test_agents_rate_limit_wiring.py) introspect `app.routes` for the
+    # per-route API budget and require the flattened structure. 0.136.3 is the
+    # last flattening release and accepts starlette>=1.3.1 (the security floor
+    # below). Lift the cap once those tests traverse the nested structure.
+    # re-review 2026-09-23 (migrate the wiring tests, then allow >=0.137).
+    "fastapi>=0.136,<0.137",
     "uvicorn[standard]",
+    # starlette is FastAPI's transitive ASGI core; pin its security floor here.
+    # security: GHSA-82w8-qh3p-5jfq, GHSA-jp82-jpqv-5vv3 ; re-review 2026-09-23
+    "starlette>=1.3.1",
     "pydantic>=2",
-    "pydantic-settings",
+    # security: GHSA-4xgf-cpjx-pc3j ; re-review 2026-09-23
+    "pydantic-settings>=2.14.2",
     # Persistence (D4)
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg",
@@ -43,6 +55,10 @@ dependencies = [
     # Agent orchestration + multi-LLM (D3, D9)
     "langgraph",
     "langchain-core",
+    # langsmith is langchain-core's transitive telemetry client; pin its
+    # security floor here (langchain-core accepts it).
+    # security: GHSA-f4xh-w4cj-qxq8 ; re-review 2026-09-23
+    "langsmith>=0.8.18",
     "langchain-anthropic",
     "langchain-openai",
     "langchain-ollama",
@@ -68,6 +84,15 @@ dev = [
     # exercised by `integration`-marked tests against compose Postgres).
     "aiosqlite",
 ]
+
+# Production KMS backends (W6-T2, ADR-0032 §2). OPTIONAL by design: a deployment
+# installs ONLY the extra for its chosen backend (VAULT_KEY_PROVIDER), and the
+# local Env/File fallback (default) needs none of these. Each SDK is imported
+# lazily inside core/crypto so a slim install — and the offline unit suite, which
+# drives the providers via an in-memory fake — never requires them.
+kms-aws = ["boto3"]
+kms-azure = ["azure-identity", "azure-keyvault-keys"]
+kms-vault = ["hvac"]
 
 # Vendor plugin discovery group (D6 / ADR-0006). M1: first plugins (cisco_ios,
 # cisco_iosxe, eos) register here as
@@ -130,6 +155,12 @@ strict_equality = true
 module = [
     "asyncpg.*",
     "authlib.*",
+    # Optional KMS SDKs (W6-T2) — installed only per chosen backend; imported
+    # lazily in core/crypto, so they may be absent when mypy runs.
+    "azure.*",
+    "boto3.*",
+    "botocore.*",
+    "hvac.*",
     "celery.*",
     "kombu.*",
     "langchain_anthropic.*",

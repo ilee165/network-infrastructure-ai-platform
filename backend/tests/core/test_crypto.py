@@ -1,7 +1,8 @@
-"""Envelope-encryption tests (ADR-0011 Decision 1): KeyProviders + AES-256-GCM.
+"""Envelope-encryption tests (ADR-0011 §1, ADR-0032 §1/§4/§6).
 
-Pure unit tests — no Docker, no network, no database. Secret material must
-never appear in any exception message raised by ``app.core.crypto``.
+Wrap/unwrap KeyProviders + AES-256-GCM. Pure unit tests — no Docker, no
+network, no database. Secret/key material must never appear in any exception
+message, repr, or log line raised by ``app.core.crypto``.
 """
 
 from __future__ import annotations
@@ -12,21 +13,29 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from app.core.config import Settings
 from app.core.crypto import (
     KEY_BYTES,
     NONCE_BYTES,
+    WRAP_FORMAT_V1,
     DecryptionError,
     EncryptedSecret,
     EnvKeyProvider,
     FileKeyProvider,
     KekConfigurationError,
     KeyProvider,
+    KeyProviderError,
+    KeyProviderUnavailable,
+    ProviderHealth,
     UnknownKekVersionError,
+    WrappedDek,
     envelope_decrypt,
     envelope_encrypt,
     get_key_provider,
+    is_production_grade,
     rewrap,
 )
 
@@ -47,20 +56,57 @@ def _env_provider(kek_b64: str | None = None, version: str = "v1") -> EnvKeyProv
 
 
 class _RotatingProvider:
-    """Multi-version KeyProvider double (stands in for a future KMS provider)."""
+    """Multi-version wrap/unwrap KeyProvider double (stands in for a KMS provider).
+
+    Wraps in-process with AESGCM under the selected version's KEK, binding the
+    row-id ``aad`` exactly as the local providers do — so cross-row replay fails.
+    """
 
     def __init__(self, keys: dict[str, bytes], current: str) -> None:
         self._keys = keys
         self._current = current
 
-    def current_version(self) -> str:
+    @property
+    def kek_version(self) -> str:
         return self._current
 
-    def key(self, version: str) -> bytes:
+    def wrap_dek(self, dek: bytes, *, aad: bytes) -> WrappedDek:
+        nonce = os.urandom(NONCE_BYTES)
+        sealed = AESGCM(self._keys[self._current]).encrypt(nonce, dek, aad)
+        return WrappedDek(ciphertext=nonce + sealed, kek_version=self._current)
+
+    def unwrap_dek(self, wrapped: WrappedDek, *, aad: bytes) -> bytes:
         try:
-            return self._keys[version]
+            kek = self._keys[wrapped.kek_version]
         except KeyError:
-            raise UnknownKekVersionError(f"KEK version {version!r} is not available") from None
+            raise UnknownKekVersionError(
+                f"KEK version {wrapped.kek_version!r} is not available"
+            ) from None
+        nonce, sealed = wrapped.ciphertext[:NONCE_BYTES], wrapped.ciphertext[NONCE_BYTES:]
+        try:
+            return AESGCM(kek).decrypt(nonce, sealed, aad)
+        except InvalidTag as exc:
+            raise DecryptionError("wrapped DEK failed authentication") from exc
+
+    def health(self) -> ProviderHealth:
+        return ProviderHealth(available=True, kek_version=self._current)
+
+
+class _DownProvider:
+    """A provider that is unreachable: every wrap/unwrap fails closed (§4)."""
+
+    @property
+    def kek_version(self) -> str:
+        return "v1"
+
+    def wrap_dek(self, dek: bytes, *, aad: bytes) -> WrappedDek:
+        raise KeyProviderUnavailable("TimeoutError")
+
+    def unwrap_dek(self, wrapped: WrappedDek, *, aad: bytes) -> bytes:
+        raise KeyProviderUnavailable("TimeoutError")
+
+    def health(self) -> ProviderHealth:
+        return ProviderHealth(available=False, kek_version="v1", detail="unreachable")
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +167,159 @@ def test_encrypted_secret_repr_hides_blobs() -> None:
 
 
 # ---------------------------------------------------------------------------
+# wrap_dek / unwrap_dek contract (ADR-0032 §1)
+# ---------------------------------------------------------------------------
+
+
+def test_wrap_unwrap_roundtrips_with_matching_aad() -> None:
+    provider = _env_provider()
+    dek = os.urandom(KEY_BYTES)
+    wrapped = provider.wrap_dek(dek, aad=_AAD)
+    assert isinstance(wrapped, WrappedDek)
+    assert wrapped.kek_version == "v1"
+    assert provider.unwrap_dek(wrapped, aad=_AAD) == dek
+
+
+def test_unwrap_with_wrong_aad_fails_cross_row_replay_guard() -> None:
+    provider = _env_provider()
+    dek = os.urandom(KEY_BYTES)
+    wrapped = provider.wrap_dek(dek, aad=b"device_credentials:1")
+    with pytest.raises(DecryptionError):
+        provider.unwrap_dek(wrapped, aad=b"device_credentials:2")
+
+
+def test_unwrap_unknown_version_raises() -> None:
+    provider = _env_provider()
+    orphan = WrappedDek(ciphertext=os.urandom(NONCE_BYTES + 48), kek_version="v99")
+    with pytest.raises(UnknownKekVersionError):
+        provider.unwrap_dek(orphan, aad=_AAD)
+
+
+def test_wrapped_dek_repr_redacts_ciphertext() -> None:
+    wrapped = WrappedDek(ciphertext=b"\xde\xad\xbe\xef" * 8, kek_version="v7")
+    assert repr(wrapped) == "<wrapped:v7>"
+    assert repr(wrapped.ciphertext) not in repr(wrapped)
+
+
+def test_provider_health_reports_version() -> None:
+    provider = _env_provider(version="v5")
+    health = provider.health()
+    assert health.available is True
+    assert health.kek_version == "v5"
+
+
+# ---------------------------------------------------------------------------
+# Wrap-format discriminator + legacy (pre-W6-T1, aad=None) compatibility
+# ---------------------------------------------------------------------------
+
+
+def test_wrap_blob_carries_version_discriminator() -> None:
+    """New local wraps prepend the WRAP_FORMAT_V1 byte so the format is detectable."""
+    provider = _env_provider()
+    wrapped = provider.wrap_dek(os.urandom(KEY_BYTES), aad=_AAD)
+    assert wrapped.ciphertext[:1] == WRAP_FORMAT_V1
+
+
+def test_unwrap_reads_legacy_aad_none_wrap_without_version_byte() -> None:
+    """A pre-W6-T1 row (no version byte, DEK wrapped with aad=None) still unwraps.
+
+    Persisted KEK->DEK rows written before the AAD-at-wrap-layer change carried
+    ``nonce ‖ AESGCM(kek).encrypt(nonce, dek, None)`` with no discriminator. The
+    upgraded unwrap path must read them transparently (one-time backward compat),
+    otherwise such credentials become permanently unreadable.
+    """
+    kek_b64 = _kek_b64()
+    raw_kek = base64.urlsafe_b64decode(kek_b64)
+    provider = _env_provider(kek_b64)
+    dek = os.urandom(KEY_BYTES)
+
+    # Forge the exact legacy blob shape: no version byte, aad=None at the wrap.
+    nonce = os.urandom(NONCE_BYTES)
+    legacy_sealed = AESGCM(raw_kek).encrypt(nonce, dek, None)
+    legacy_wrapped = WrappedDek(ciphertext=nonce + legacy_sealed, kek_version="v1")
+
+    assert provider.unwrap_dek(legacy_wrapped, aad=_AAD) == dek
+
+
+def test_unwrap_reads_legacy_blob_whose_first_nonce_byte_is_v1_marker() -> None:
+    """A legacy v0 blob whose random nonce starts with 0x01 must NOT be misrouted.
+
+    A pre-W6-T1 row is ``nonce(12) ‖ AESGCM(kek).encrypt(nonce, dek, None)`` with
+    no version byte, so ~1/256 of them start with the WRAP_FORMAT_V1 marker (0x01)
+    purely by chance. Keying the discriminator on the marker byte alone would
+    misroute those into the v1 (aad=row_id) decode path and raise a spurious
+    DecryptionError, making ~0.4% of legacy credentials permanently unreadable.
+    v0 blobs are length-disjoint from v1 (60 vs 61 bytes), so the unwrap must also
+    check the fixed length and fall through to the legacy aad=None path.
+    """
+    kek_b64 = _kek_b64()
+    raw_kek = base64.urlsafe_b64decode(kek_b64)
+    provider = _env_provider(kek_b64)
+    dek = os.urandom(KEY_BYTES)
+
+    # Force the worst case: a legacy v0 blob whose first nonce byte equals the
+    # v1 marker. The blob length stays the v0 length (no version byte prepended).
+    nonce = b"\x01" + os.urandom(NONCE_BYTES - 1)
+    legacy_sealed = AESGCM(raw_kek).encrypt(nonce, dek, None)
+    legacy_blob = nonce + legacy_sealed
+    assert legacy_blob[:1] == WRAP_FORMAT_V1  # collides with the v1 marker
+    assert len(legacy_blob) == NONCE_BYTES + KEY_BYTES + 16  # v0 length (60 bytes)
+    legacy_wrapped = WrappedDek(ciphertext=legacy_blob, kek_version="v1")
+
+    assert provider.unwrap_dek(legacy_wrapped, aad=_AAD) == dek
+
+
+def test_legacy_row_rewraps_to_v1_format() -> None:
+    """A legacy aad=None envelope round-trips through decrypt and rewraps to v1."""
+    kek_b64 = _kek_b64()
+    raw_kek = base64.urlsafe_b64decode(kek_b64)
+    provider = _env_provider(kek_b64)
+
+    # Build a full legacy envelope: payload sealed under a DEK (with row-id AAD,
+    # unchanged across versions), DEK wrapped with aad=None and no version byte.
+    dek = os.urandom(KEY_BYTES)
+    payload_nonce = os.urandom(NONCE_BYTES)
+    ciphertext = AESGCM(dek).encrypt(payload_nonce, _PLAINTEXT, _AAD)
+    wrap_nonce = os.urandom(NONCE_BYTES)
+    legacy_wrap = AESGCM(raw_kek).encrypt(wrap_nonce, dek, None)
+    legacy = EncryptedSecret(
+        ciphertext=ciphertext,
+        nonce=payload_nonce,
+        wrapped_dek=legacy_wrap,
+        dek_nonce=wrap_nonce,
+        kek_version="v1",
+    )
+
+    assert envelope_decrypt(legacy, _AAD, provider) == _PLAINTEXT
+
+    migrated = rewrap(legacy, _AAD, provider)
+    # The migrated wrap now carries the v1 discriminator (dek_nonce holds the head).
+    assert migrated._wrapped().ciphertext[:1] == WRAP_FORMAT_V1
+    assert envelope_decrypt(migrated, _AAD, provider) == _PLAINTEXT
+
+
+# ---------------------------------------------------------------------------
+# Provider production-grade self-report (ADR-0032 §2/§5)
+# ---------------------------------------------------------------------------
+
+
+def test_local_providers_are_not_production_grade() -> None:
+    """Env/File local fallbacks self-report is_production_grade = False (ADR-0032 §2)."""
+    provider = _env_provider()
+    assert provider.is_production_grade is False
+    assert is_production_grade(provider) is False
+
+
+def test_is_production_grade_defaults_false_for_unknown_provider() -> None:
+    """An object lacking the attribute is treated as non-production (fail safe)."""
+
+    class _BareProvider:
+        pass
+
+    assert is_production_grade(_BareProvider()) is False  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
 # Authentication failures (AAD binding + tamper detection)
 # ---------------------------------------------------------------------------
 
@@ -160,7 +359,32 @@ def test_decrypt_with_unknown_kek_version_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Rewrap (cheap KEK rotation per ADR-0011)
+# Fail-closed (ADR-0032 §4)
+# ---------------------------------------------------------------------------
+
+
+def test_envelope_encrypt_fails_closed_when_provider_down() -> None:
+    with pytest.raises(KeyProviderUnavailable) as excinfo:
+        envelope_encrypt(_PLAINTEXT, _AAD, _DownProvider())
+    assert _PLAINTEXT.decode() not in str(excinfo.value)
+    assert excinfo.value.status_code == 503
+
+
+def test_envelope_decrypt_fails_closed_when_provider_down() -> None:
+    provider = _env_provider()
+    secret = envelope_encrypt(_PLAINTEXT, _AAD, provider)
+    with pytest.raises(KeyProviderUnavailable):
+        envelope_decrypt(secret, _AAD, _DownProvider())
+
+
+def test_key_provider_unavailable_is_a_key_provider_error() -> None:
+    exc = KeyProviderUnavailable("ConnectTimeout")
+    assert isinstance(exc, KeyProviderError)
+    assert exc.reason_class == "ConnectTimeout"
+
+
+# ---------------------------------------------------------------------------
+# Rewrap (cheap KEK rotation per ADR-0011/ADR-0032 §3)
 # ---------------------------------------------------------------------------
 
 
@@ -171,7 +395,7 @@ def test_rewrap_preserves_plaintext_and_changes_kek_version() -> None:
     assert secret.kek_version == "v1"
 
     rotated: KeyProvider = _RotatingProvider({"v1": old_kek, "v2": new_kek}, current="v2")
-    rewrapped = rewrap(secret, rotated)
+    rewrapped = rewrap(secret, _AAD, rotated)
 
     assert rewrapped.kek_version == "v2"
     assert rewrapped.wrapped_dek != secret.wrapped_dek
@@ -189,7 +413,7 @@ def test_rewrap_preserves_plaintext_and_changes_kek_version() -> None:
 def test_rewrap_under_same_version_still_roundtrips() -> None:
     provider = _env_provider()
     secret = envelope_encrypt(_PLAINTEXT, _AAD, provider)
-    rewrapped = rewrap(secret, provider)
+    rewrapped = rewrap(secret, _AAD, provider)
     assert rewrapped.kek_version == "v1"
     assert envelope_decrypt(rewrapped, _AAD, provider) == _PLAINTEXT
 
@@ -199,17 +423,19 @@ def test_rewrap_under_same_version_still_roundtrips() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_env_provider_loads_key() -> None:
+def test_env_provider_loads_key_and_wraps() -> None:
     kek = _kek_b64()
     provider = EnvKeyProvider(_settings(kek=kek, kek_version="v3"))
-    assert provider.current_version() == "v3"
-    assert provider.key("v3") == base64.urlsafe_b64decode(kek)
+    assert provider.kek_version == "v3"
+    dek = os.urandom(KEY_BYTES)
+    assert provider.unwrap_dek(provider.wrap_dek(dek, aad=_AAD), aad=_AAD) == dek
 
 
 def test_env_provider_rejects_unknown_version() -> None:
     provider = _env_provider()
+    orphan = WrappedDek(ciphertext=os.urandom(NONCE_BYTES + 48), kek_version="v2")
     with pytest.raises(UnknownKekVersionError):
-        provider.key("v2")
+        provider.unwrap_dek(orphan, aad=_AAD)
 
 
 def test_env_provider_requires_kek() -> None:
@@ -241,8 +467,7 @@ def test_file_provider_loads_key(tmp_path: Path) -> None:
     kek_path = tmp_path / "kek"
     kek_path.write_text(kek + "\n", encoding="utf-8")  # trailing newline is tolerated
     provider = FileKeyProvider(_settings(kek_file=kek_path))
-    assert provider.current_version() == "v1"
-    assert provider.key("v1") == base64.urlsafe_b64decode(kek)
+    assert provider.kek_version == "v1"
     secret = envelope_encrypt(_PLAINTEXT, _AAD, provider)
     assert envelope_decrypt(secret, _AAD, provider) == _PLAINTEXT
 
@@ -287,7 +512,7 @@ def test_factory_raises_clear_error_when_unconfigured() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Secrecy of exception messages
+# Secrecy of exception messages / no-key-material-leak (ADR-0032 §6 exit gate)
 # ---------------------------------------------------------------------------
 
 
@@ -301,7 +526,7 @@ def test_no_secret_material_in_any_exception_message() -> None:
         envelope_decrypt(secret, b"other-row", provider)
     raised.append(wrong_aad.value)
     with pytest.raises(UnknownKekVersionError) as unknown:
-        provider.key("v404")
+        provider.unwrap_dek(WrappedDek(ciphertext=os.urandom(60), kek_version="v404"), aad=_AAD)
     raised.append(unknown.value)
     with pytest.raises(KekConfigurationError) as unconfigured:
         get_key_provider(_settings(kek=None, kek_file=None))
@@ -313,6 +538,120 @@ def test_no_secret_material_in_any_exception_message() -> None:
         assert _PLAINTEXT.decode() not in message
         assert kek not in message
         assert repr(raw_kek) not in message
+
+
+def test_no_key_material_leak() -> None:
+    """ADR-0032 §6 exit gate: no DEK/KEK/wrapped bytes in repr, str, or errors.
+
+    Asserts the structural redactors and typed-error wrapping that keep key
+    material off every log/trace/response surface in this module.
+    """
+    kek_b64 = _kek_b64()
+    raw_kek = base64.urlsafe_b64decode(kek_b64)
+    provider = _env_provider(kek_b64)
+
+    dek = os.urandom(KEY_BYTES)
+    wrapped = provider.wrap_dek(dek, aad=_AAD)
+    secret = envelope_encrypt(_PLAINTEXT, _AAD, provider)
+
+    # 1. WrappedDek redacts its ciphertext in repr/str.
+    for rendered in (repr(wrapped), str(wrapped), f"{wrapped}", f"{wrapped!r}"):
+        assert rendered == "<wrapped:v1>"
+        assert repr(wrapped.ciphertext) not in rendered
+        assert repr(dek) not in rendered
+
+    # 2. EncryptedSecret repr never renders any blob field.
+    rendered_secret = repr(secret)
+    for blob in (secret.ciphertext, secret.wrapped_dek, secret.dek_nonce, secret.nonce):
+        assert repr(blob) not in rendered_secret
+    assert repr(raw_kek) not in rendered_secret
+
+    # 3. Provider errors are typed (KeyProviderError) and carry a coarse reason
+    #    class only — a raw backend exception never surfaces verbatim.
+    err = KeyProviderUnavailable("BotoCoreError")
+    assert isinstance(err, KeyProviderError)
+    assert err.reason_class == "BotoCoreError"
+    assert raw_kek.hex() not in (str(err) + repr(err))
+
+    # 4. No KEK/DEK bytes appear in any exception across the failure paths.
+    failures: list[BaseException] = []
+    with pytest.raises(DecryptionError) as wrong_aad:
+        provider.unwrap_dek(wrapped, aad=b"different-row")
+    failures.append(wrong_aad.value)
+    with pytest.raises(KeyProviderUnavailable) as down:
+        envelope_encrypt(_PLAINTEXT, _AAD, _DownProvider())
+    failures.append(down.value)
+    for exc in failures:
+        blob = str(exc) + repr(exc)
+        assert _PLAINTEXT.decode() not in blob
+        assert kek_b64 not in blob
+        assert repr(raw_kek) not in blob
+        assert repr(dek) not in blob
+
+
+def test_no_key_material_leak_kms_backends() -> None:
+    """ADR-0032 §6 exit gate, extended to the W6-T2 KMS backends.
+
+    Each production backend must (a) wrap a raw SDK exception in the typed
+    :class:`KeyProviderError` (reason class only — never the raw message), (b)
+    keep its key handle / vault URI / ``credential_ref`` value out of ``repr`` /
+    ``str`` / ``health().detail``, and (c) never echo the DEK or plaintext in any
+    error across the wrong-row / outage paths. The concrete in-process fakes that
+    drive these assertions live in ``test_kms_providers``; here we assert the
+    secret-surface invariants hold identically on all three.
+    """
+    from app.core.crypto import (
+        AwsKmsKeyProvider,
+        AzureKeyVaultKeyProvider,
+        FakeKmsKeyProvider,
+        HashiCorpVaultTransitKeyProvider,
+        KeyProviderError,
+    )
+    from tests.core.test_kms_providers import (
+        _FakeAwsKmsClient,
+        _FakeAzureKeyClient,
+        _FakeVaultTransitClient,
+    )
+
+    secret_ref = "super-secret-approle-role-id"
+    arn = "arn:aws:kms:us-east-1:000000000000:key/leak-test"
+    providers: list[KeyProvider] = [
+        AwsKmsKeyProvider(key_arn=arn, client=_FakeAwsKmsClient(arn)),
+        HashiCorpVaultTransitKeyProvider(
+            transit_mount="transit",
+            transit_key="netops-kek",
+            client=_FakeVaultTransitClient(),
+            credential_ref=secret_ref,
+        ),
+        AzureKeyVaultKeyProvider(
+            vault_uri="https://kv.vault.azure.net/",
+            key_name="netops-kek",
+            client=_FakeAzureKeyClient("netops-kek"),
+        ),
+        FakeKmsKeyProvider(),
+    ]
+    dek = os.urandom(KEY_BYTES)
+    for provider in providers:
+        wrapped = provider.wrap_dek(dek, aad=_AAD)
+        # 1. Cross-row replay raises the typed DecryptionError, no DEK in message.
+        with pytest.raises(DecryptionError) as wrong_row:
+            provider.unwrap_dek(wrapped, aad=b"device_credentials:other")
+        message = str(wrong_row.value) + repr(wrong_row.value)
+        assert repr(dek) not in message
+        assert secret_ref not in message
+
+        # 2. repr/str carry no credential_ref value.
+        for rendered in (repr(provider), str(provider)):
+            assert secret_ref not in rendered
+
+    # 3. A raw SDK exception is wrapped typed (reason class only) on every backend.
+    down_aws = AwsKmsKeyProvider(key_arn=arn, client=_FakeAwsKmsClient(arn))
+    down_aws._client.down = True  # type: ignore[attr-defined]
+    with pytest.raises(KeyProviderError) as boto_err:
+        down_aws.wrap_dek(dek, aad=_AAD)
+    raw = str(boto_err.value) + repr(boto_err.value)
+    assert "unreachable" not in raw
+    assert repr(dek) not in raw
 
 
 def test_encrypted_secret_is_frozen() -> None:
