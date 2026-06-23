@@ -59,7 +59,7 @@ a code edit.
 `require_production_grade(provider, is_prod=...)` refuses to start the credential
 service on a local Env/File provider in production:
 
-```
+```text
 RuntimeError: local KeyProvider 'EnvKeyProvider' is not permitted in production;
 configure a KMS backend (D11/ADR-0032 §2)
 ```
@@ -138,7 +138,7 @@ KMS.
 
 ## Reproduce locally (offline, no cloud)
 
-```
+```console
 cd backend
 .venv/Scripts/python.exe -m pytest tests/core/test_kms_providers.py \
   tests/core/test_kms_contract.py tests/core/test_crypto.py \
@@ -148,7 +148,7 @@ cd backend
 The CI `kms-emulators` job runs the live integration layer (not reproducible on a
 host without Docker + the SDK extras):
 
-```
+```console
 docker compose -f deploy/docker/docker-compose.kms-emulators.yml up -d
 pip install -e "./backend[dev,kms-aws,kms-vault]"
 # (create a LocalStack KMS key + the dev Vault transit key — see ci.yml)

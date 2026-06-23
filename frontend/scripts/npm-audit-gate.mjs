@@ -72,7 +72,17 @@ try {
 } catch (e) {
   fail(`could not read allowlist ${allowlistPath}: ${e.message}`);
 }
-const floor = SEV_ORDER[allowlist.severityFloor ?? "high"];
+// Validate severityFloor up front. An unrecognized value would otherwise make
+// `floor` undefined, and every `severity < undefined` comparison is false, so NO
+// findings would be collected — the gate would silently NOT BITE (false-green).
+// Fail fast instead (CR15).
+const severityFloor = allowlist.severityFloor ?? "high";
+if (!(severityFloor in SEV_ORDER)) {
+  fail(
+    `allowlist.severityFloor "${severityFloor}" is not one of ${Object.keys(SEV_ORDER).join(", ")}`,
+  );
+}
+const floor = SEV_ORDER[severityFloor];
 const today = new Date();
 const allowByGhsa = new Map();
 for (const entry of allowlist.allow ?? []) {
@@ -116,11 +126,22 @@ for (const f of findings) {
   entry.matched = true;
 }
 
-// stale-entry guard: an allowlist entry that matches no current finding is dead
-// weight that can later mask a new advisory — force re-review.
-const stale = [...allowByGhsa.values()].filter((e) => !e.matched && e.expDate >= today);
-for (const e of stale) {
-  blocking.push(`allowlist entry ${e.ghsa} matched no current advisory — stale, remove or re-review`);
+// allowlist-hygiene guards over EVERY entry (matched or not):
+//   - EXPIRED: an entry past its re-review date is an error whether or not it
+//     matched a current finding. The evaluate loop above only catches an expired
+//     entry when a live finding maps to it; an expired entry that matches NOTHING
+//     would otherwise slip through silently and could later mask a new advisory
+//     once its GHSA reappears (CR16). Expiry is enforced unconditionally here.
+//   - STALE: a NON-expired entry that matched no current finding is dead weight
+//     that can later mask a new advisory — force re-review.
+for (const e of allowByGhsa.values()) {
+  if (e.expDate < today) {
+    blocking.push(
+      `allowlist entry ${e.ghsa} EXPIRED ${e.expires} — re-review or remove (expiry enforced even when it matches no current advisory)`,
+    );
+  } else if (!e.matched) {
+    blocking.push(`allowlist entry ${e.ghsa} matched no current advisory — stale, remove or re-review`);
+  }
 }
 
 if (blocking.length) {

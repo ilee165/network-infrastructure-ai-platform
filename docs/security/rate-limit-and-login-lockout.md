@@ -17,11 +17,17 @@ than resetting per pod or diverging between pods.
 | **Login throttle / lockout** (local break-glass) | account **and** source IP | 5 fails / 300 s ⇒ lock 900 s | `429` + `Retry-After` |
 | **OIDC callback rate limit** | source IP | 30 / 60 s | `429` (generic OIDC failure) |
 
-The API limit is applied as a router dependency on every authenticated API
-router; it is **not** applied to the unauthenticated health probes (they carry no
-principal and must never be throttled) nor to the `auth` router (the login path
-has its own throttle/lockout, and the bearer-keyed API budget would double-count
-token-bearing `refresh`/`me` calls).
+The API limit is applied as a **route dependency** (`enforce_api_rate_limit`),
+attached to each protected route rather than as a single router-level middleware
+(`backend/app/api/deps.py`, wired in `backend/app/api/v1/__init__.py`). For most
+routers it is supplied once via `include_router(..., dependencies=[...])`, which
+FastAPI binds onto every route in that router; the `agents` router instead lists
+it per `@router.get/post` (`agents._API_RATE_LIMIT`) so its `@router.websocket`
+streaming route — whose `HTTPBearer` dependency cannot resolve on a WebSocket
+scope — is left unbound. It is **not** applied to the unauthenticated health
+probes (they carry no principal and must never be throttled) nor to the `auth`
+router (the login path has its own throttle/lockout, and the bearer-keyed API
+budget would double-count token-bearing `refresh`/`me` calls).
 
 The OIDC **callback** throttle is distinct from the **forced-JWKS-refresh**
 rate-limit (ADR-0028 §63, implemented in `app.core.oidc.JwksCache`): the former

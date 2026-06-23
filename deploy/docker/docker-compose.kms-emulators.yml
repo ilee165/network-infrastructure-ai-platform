@@ -38,16 +38,15 @@ services:
       timeout: 5s
       retries: 5
 
-  # Azure Key Vault — no first-party local emulator exists for wrapKey/unwrapKey,
-  # so an Azurite-style fake stands in for the KMS shape in CI. The provider's
-  # row-id binding does NOT depend on the backend (Azure has no native AAD): the
-  # inner-AESGCM layer in AzureKeyVaultKeyProvider binds it locally, so this fake
-  # only needs to wrap/unwrap the inner key. Replaced by real Key Vault in lab.
-  azurite-fake:
-    image: mcr.microsoft.com/azure-storage/azurite:latest
-    command: ["azurite", "--blobHost", "0.0.0.0", "--skipApiVersionCheck"]
-    ports:
-      - "10000:10000"
+  # Azure Key Vault — NO local emulator service is defined here ON PURPOSE.
+  # Azurite is BLOB/queue/table storage; it does NOT implement Key Vault's
+  # wrapKey/unwrapKey API, so an azurite container would be a dangling service
+  # implying KMS coverage that does not actually run (the kms-emulators job only
+  # installs/exercises kms-aws + kms-vault). The Azure provider's real call shape
+  # is instead pinned OFFLINE by the contract test (FakeKmsKeyProvider double in
+  # backend/app/core/crypto.py; AzureKeyVaultKeyProvider binds the row id locally
+  # via its inner-AESGCM layer, independent of the backend). A REAL Azure Key
+  # Vault is lab-deferred — see docs/roadmap/evidence/P1-W6-G-SEC-evidence.md.
 
   # HashiCorp Vault in -dev mode with the Transit secrets engine. Provider config:
   #   NETOPS_VAULT_KEY_PROVIDER=vault

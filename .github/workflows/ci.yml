@@ -75,7 +75,13 @@ jobs:
           done < backend/.pip-audit-allowlist.txt
           # Audit the installed environment (no lockfile in repo); --strict so a
           # dependency pip-audit cannot resolve is an error, not a silent skip.
-          pip-audit --strict --progress-spinner off "${ignore_flags[@]}"
+          # --skip-editable excludes the local editable project (netops-backend),
+          # which is not published to PyPI and so "cannot be audited" — under
+          # --strict that local-package miss is FATAL (the PR #62 backend failure).
+          # Skipping the editable first-party package does NOT weaken the gate: it
+          # has no PyPI advisory surface; every third-party dep is still audited and
+          # --strict still fails on any real dep that cannot be resolved.
+          pip-audit --strict --skip-editable --progress-spinner off "${ignore_flags[@]}"
 
       - name: Lint (ruff check)
         working-directory: backend
@@ -673,20 +679,49 @@ jobs:
       - name: Install backend + KMS extras (aws + vault)
         run: pip install -e "./backend[dev,kms-aws,kms-vault]"
 
-      - name: Bring up KMS emulators
-        run: docker compose -f deploy/docker/docker-compose.kms-emulators.yml up -d
-
-      - name: Wait for LocalStack KMS + dev Vault
+      # Bring up the emulators with a BOUNDED RETRY around the image pull + boot
+      # (#7). A transient registry blip on `docker compose pull`/`up` (image-pull
+      # 5xx, slow CDN) must not flake this REQUIRED gate — but the gate stays
+      # required and blocking: after the retry budget is exhausted we exit non-zero
+      # so a genuine boot failure still fails the job (never made non-blocking).
+      #   - `pull` is retried separately so an image-pull blip is recovered before
+      #     `up` even starts.
+      #   - `up -d --wait` blocks until every service with a healthcheck reports
+      #     healthy (localstack-kms + vault-transit define healthchecks in the
+      #     compose file), replacing the prior fixed curl-poll loop with a
+      #     healthcheck-gated wait. `--wait-timeout` bounds each attempt.
+      - name: Bring up KMS emulators (retry pull + healthcheck-gated up)
         shell: bash
         run: |
           set -euo pipefail
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:4566/_localstack/health >/dev/null \
-               && curl -sf http://localhost:8200/v1/sys/health >/dev/null; then
-              echo "emulators ready"; break
+          compose=(docker compose -f deploy/docker/docker-compose.kms-emulators.yml)
+          attempts=3
+          n=0
+          until [ "$n" -ge "$attempts" ]; do
+            n=$((n + 1))
+            echo "::group::emulator bring-up attempt ${n}/${attempts}"
+            if "${compose[@]}" pull --quiet && "${compose[@]}" up -d --wait --wait-timeout 120; then
+              echo "emulators healthy"; echo "::endgroup::"; exit 0
             fi
-            echo "waiting for emulators ($i)..."; sleep 2
+            echo "bring-up attempt ${n} failed; dumping status + tearing down before retry"
+            "${compose[@]}" ps || true
+            "${compose[@]}" down -v || true
+            echo "::endgroup::"
+            # backoff between attempts; `|| true` so the final no-sleep branch does
+            # not trip `set -e` when n == attempts.
+            [ "$n" -lt "$attempts" ] && sleep $((n * 5)) || true
           done
+          echo "::error::KMS emulators failed to come up healthy after ${attempts} attempts"
+          exit 1
+
+      # Belt-and-suspenders readiness assert on the two API surfaces the providers
+      # call (LocalStack KMS health + Vault sys/health). `up --wait` already gated
+      # on container health; this confirms the HTTP endpoints answer before the
+      # provider exercise step.
+      - name: Confirm LocalStack KMS + dev Vault endpoints answer
+        shell: bash
+        run: |
+          set -euo pipefail
           curl -sf http://localhost:4566/_localstack/health >/dev/null
           curl -sf http://localhost:8200/v1/sys/health >/dev/null
 

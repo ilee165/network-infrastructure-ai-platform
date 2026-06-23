@@ -53,7 +53,7 @@ Per-task workflow pattern (P1-PLAN §3): **1 implementer → 2 parallel reviewer
 
 Three **disjoint streams** run concurrently across owners; only the two reviews inside a task serialize.
 
-```
+```text
 KMS stream  (wf-implementer, Python, crypto.py + credentials/service.py — SHARED files ⇒ serial):
     T1  ──►  T2  ──►  T3
             (T3 needs T2's deterministic fake + kek_version model; run T2 then T3)
