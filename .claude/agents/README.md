@@ -77,7 +77,13 @@ roles that design and write code.
    Instead read **git as ground truth** (the result object is stale/filtered
    after a kill), stash any partial tree (`git stash -u`, never `reset --hard`),
    and author a **focused workflow for only the unfinished tasks**, feeding it the
-   cached review findings from the run's `.output` file (P1 W6).
+   cached review findings from the run's `.output` file (P1 W6). A **transient
+   API 5xx (529/500) that kills an agent mid-task** behaves the same way — the
+   result reports "blocked / 0 work" while the agent may have left a large,
+   coherent, *uncommitted* dirty tree. Don't discard it and don't blindly
+   re-run everything: validate the tree's gates, commit the salvageable part,
+   then focused-rerun only the not-started tasks (P1 W6 recovered a 37-min
+   opus implementer's work this way).
 7. **Sequential tasks that share files; parallel only within a task** (the two
    reviews) — avoids merge churn that burns fixer tokens.
 8. **Graph-first code location** — when `graphify-out/graph.json` exists at the
@@ -92,6 +98,16 @@ roles that design and write code.
    pre-squash history makes the PR CONFLICTING and GitHub skips CI. Recover an
    already-built branch with `git rebase --onto origin/main <last-old-commit>`
    onto a fresh branch (P1 W3/W6).
+10. **Arm a baseline-relative usage guard on long runs** (required policy —
+    the user denied an unguarded fold). `budget.spent()` is
+    session/context-cumulative — it does **not** reset per user turn and
+    survives `/compact`, so an *absolute* ceiling below the already-spent
+    total trips the guard instantly (0 agents) and waiting for "a fresh turn"
+    does nothing. Capture `const BASELINE = budget.spent()` at the script top
+    and gate on `budget.spent() - BASELINE >= ceiling*frac` so the ceiling is
+    *this run's own allowance*; on trip, `log()` a summary and `return` the
+    partial result (atomic commits are the save). See
+    `.claude/workflows/README.md` item 7 (P1 W6).
 
 ## Maintenance
 
