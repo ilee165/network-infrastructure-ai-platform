@@ -121,7 +121,7 @@ mask a *real* planted secret).
   itself a supply-chain risk (ADR-0016 §5) and no marketplace license key is needed.
 - The gitleaks tarball download is **SHA-256-verified** before extraction
   (`echo "<sha256>  /tmp/gitleaks.tar.gz" | sha256sum -c -`). The expected digest
-  (`5bc41815…f6ce` for `gitleaks_8.21.2_linux_x64.tar.gz`) is pinned in the workflow
+  (`5bc41815…e3ba` for `gitleaks_8.21.2_linux_x64.tar.gz`) is pinned in the workflow
   as a documented constant from the upstream
   `gitleaks_8.21.2_checksums.txt`, so a MITM/CDN substitution of the binary that
   would scan the repo's full history is caught before it ever runs — the
