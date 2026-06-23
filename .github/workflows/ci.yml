@@ -511,8 +511,15 @@ jobs:
               "${img}" 2>&1)" && rc=0 || rc=$?
             echo "${out}"
             if [ "${rc}" -ne 0 ]; then
-              # Image not yet published (bootstrap) -> skip, not fail.
-              if echo "${out}" | grep -Eqi 'manifest unknown|not found|MANIFEST_UNKNOWN|name unknown|no such (manifest|host|image)|error: image .* not found'; then
+              # Image not yet published (bootstrap) -> skip, not fail. GHCR does
+              # not return a clean "manifest unknown" for an absent package: for a
+              # never-published (hence private/nonexistent) repo path it answers the
+              # token request with "DENIED: requested access to the resource is
+              # denied" / 401 unauthorized. Treat those as the bootstrap window too,
+              # so the first PR (before any :main image exists) is not wedged. This
+              # is a PR-only dry-run (if: publish != 'true'); the real sign+verify on
+              # the push-to-main path is unaffected, as is in-cluster admission.
+              if echo "${out}" | grep -Eqi 'manifest unknown|not found|MANIFEST_UNKNOWN|name unknown|no such (manifest|host|image)|error: image .* not found|denied|unauthorized|access to the resource is denied'; then
                 echo "::notice::${img} not yet published to :main — skipping PR verify (bootstrap window). The chain wiring is still asserted once a :main image exists."
               else
                 echo "::error::cosign verify FAILED for ${img} (unsigned or identity/issuer mismatch) — the signing/admission chain is misconfigured."
