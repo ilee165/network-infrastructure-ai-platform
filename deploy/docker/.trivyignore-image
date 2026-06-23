@@ -1,0 +1,21 @@
+# Trivy IMAGE-CVE ignore list — P1 W6-T5.
+#
+# Scope: the `docker` job's image scans (netops-backend:ci / netops-frontend:ci)
+# ONLY. This is SEPARATE from deploy/kubernetes/.trivyignore (which suppresses
+# IaC-misconfig findings for the infra job's `trivy config` scan, a different
+# finding type). Keeping them apart prevents a misconfig suppression from ever
+# silencing a real CVE and vice-versa.
+#
+# Gate posture (NOT lowered): the image scan fails on CRITICAL **and** HIGH
+# (severity: CRITICAL,HIGH) with ignore-unfixed (un-patchable base-OS CVEs with
+# no upstream fix are out of our control — see
+# docs/security/2026-06-14-trivy-baseimage-cves.md). A finding is suppressed ONLY
+# by adding it BELOW with a justification + a re-review/expiry date. An entry
+# without both is a review defect. This file is currently EMPTY of accepted
+# findings: the raise to CRITICAL,HIGH is clean on the current images, so nothing
+# is suppressed. Never add a blanket/severity-wide ignore — only specific CVE IDs.
+#
+# Format (one per accepted finding):
+#   CVE-YYYY-NNNNN  # <why accepted> — re-review <YYYY-MM-DD>
+#
+# --- accepted findings (none) ---

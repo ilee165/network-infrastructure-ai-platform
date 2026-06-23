@@ -383,19 +383,106 @@ deny contains msg if {
 }
 
 # The signed-image (cosign) verify rule must ALWAYS render (ADR-0029 §5 rule 2 —
-# rule present, enforcement gated by admission.signedImages.enabled, default off
-# per W3). Its absence means the supply-chain enforcement rule was dropped.
+# rule present, enforcement driven by security.imageVerification.enabled, default
+# ON per W6-T5). Its absence means the supply-chain enforcement rule was dropped.
 deny contains msg if {
 	input.kind == "ClusterPolicy"
 	input.metadata.name == "netops-hardening-baseline"
 	not policy_has_verify_images(input)
-	msg := "admission ClusterPolicy must include the cosign signed-image verify rule (verify-image-signatures); it renders always, enforcement gated by admission.signedImages.enabled (ADR-0029 §5)"
+	msg := "admission ClusterPolicy must include the cosign signed-image verify rule (verify-image-signatures); it renders always, enforcement driven by security.imageVerification.enabled (ADR-0029 §5 / P1 W6-T5)"
+}
+
+# P1 W6-T5 SECURE-BY-DEFAULT: the verify-images rule must ENFORCE (not Audit) and
+# be required, so an unsigned/forged image is REJECTED at admission. Asserted on
+# the default-rendered chart: failureAction Enforce + required true + verifyDigest
+# (a tag-swap to an unsigned digest is also rejected). This is the "signed admits /
+# unsigned rejects" guard — it fails the build if verification is silently flipped
+# to Audit-only or made non-blocking by default.
+deny contains msg if {
+	input.kind == "ClusterPolicy"
+	input.metadata.name == "netops-hardening-baseline"
+	some r in input.spec.rules
+	r.name == "verify-image-signatures"
+	some vi in r.verifyImages
+	vi.failureAction != "Enforce"
+	msg := sprintf("verify-image-signatures must Enforce by default (secure-by-default), got failureAction=%q (P1 W6-T5 / ADR-0029 §5)", [vi.failureAction])
+}
+
+deny contains msg if {
+	input.kind == "ClusterPolicy"
+	input.metadata.name == "netops-hardening-baseline"
+	some r in input.spec.rules
+	r.name == "verify-image-signatures"
+	some vi in r.verifyImages
+	vi.required != true
+	msg := "verify-image-signatures must be required:true by default — a verification it cannot perform must REJECT, not skip (P1 W6-T5)"
+}
+
+deny contains msg if {
+	input.kind == "ClusterPolicy"
+	input.metadata.name == "netops-hardening-baseline"
+	some r in input.spec.rules
+	r.name == "verify-image-signatures"
+	some vi in r.verifyImages
+	vi.verifyDigest != true
+	msg := "verify-image-signatures must verifyDigest:true so a tag-swap to an unsigned digest is rejected (P1 W6-T5)"
+}
+
+# The verifier must be REAL, not the W3 empty-string placeholder that admitted
+# everything: either a keyless issuer+subject pair or a publicKeys key-ref. An
+# empty issuer with empty subject is a no-op attestor and would admit unsigned
+# images even under Enforce — this guard rejects that misconfiguration.
+deny contains msg if {
+	input.kind == "ClusterPolicy"
+	input.metadata.name == "netops-hardening-baseline"
+	some r in input.spec.rules
+	r.name == "verify-image-signatures"
+	some vi in r.verifyImages
+	not verify_images_has_real_attestor(vi)
+	msg := "verify-image-signatures must carry a real attestor (keyless issuer+subject OR a publicKeys key-ref), not an empty placeholder (P1 W6-T5)"
+}
+
+# Both CI-built images (backend + frontend) must be covered by the signature
+# policy — signing only one leaves the other an unsigned-image admission hole.
+deny contains msg if {
+	input.kind == "ClusterPolicy"
+	input.metadata.name == "netops-hardening-baseline"
+	some r in input.spec.rules
+	r.name == "verify-image-signatures"
+	some required_image in {"netops-backend", "netops-frontend"}
+	not verify_images_covers(r, required_image)
+	msg := sprintf("verify-image-signatures must cover the %q image reference (P1 W6-T5)", [required_image])
 }
 
 policy_has_verify_images(policy) if {
 	some r in policy.spec.rules
 	r.name == "verify-image-signatures"
 	r.verifyImages
+}
+
+# A real keyless attestor: non-empty issuer AND a non-empty subject matcher.
+verify_images_has_real_attestor(vi) if {
+	some attestor in vi.attestors
+	some entry in attestor.entries
+	entry.keyless.issuer != ""
+	keyless_has_subject(entry.keyless)
+}
+
+# A real key-ref attestor: a non-empty publicKeys reference.
+verify_images_has_real_attestor(vi) if {
+	some attestor in vi.attestors
+	some entry in attestor.entries
+	entry.keys.publicKeys != ""
+}
+
+keyless_has_subject(kl) if kl.subjectRegExp != ""
+
+keyless_has_subject(kl) if kl.subject != ""
+
+verify_images_covers(rule, image) if {
+	some vi in rule.verifyImages
+	some ref in vi.imageReferences
+	startswith(ref, image)
 }
 
 has_rule(policy, name) if {

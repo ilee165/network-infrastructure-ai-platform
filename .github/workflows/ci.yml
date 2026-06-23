@@ -240,10 +240,27 @@ jobs:
             --exit-code 1
 
   docker:
-    name: docker (build images + Trivy scan)
+    name: docker (build + SBOM + Trivy + cosign sign)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [backend, frontend]
+    # Per-job permissions (P1 W6-T5). Default workflow token is contents:read.
+    #   - packages: write  — push the built images to GHCR on the main/tags gate
+    #     (ADR-0016 "push to registry on main/tags"); no-op on PRs (push skipped).
+    #   - id-token: write   — KEYLESS cosign signing: GitHub mints a short-lived
+    #     OIDC token, cosign exchanges it at Fulcio for an ephemeral cert. There
+    #     is NO long-lived private signing key anywhere in the repo or secrets
+    #     (ADR-0029 §6 secrets-by-reference) — the signing identity IS the
+    #     workflow's OIDC identity, recorded in the Rekor transparency log.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      # Registry + image coordinates. GHCR by default; a self-hosted fork points
+      # REGISTRY at its own registry. The repository owner is lower-cased per
+      # GHCR's naming rule in the publish step. No secret material here.
+      REGISTRY: ghcr.io
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -251,51 +268,163 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Images are built but never pushed from CI (push: false, load: true);
-      # registry publishing is a release-workflow concern (ADR-0016).
+      # Pinned supply-chain tooling (ADR-0016 §5 — the signer/SBOM generator must
+      # not itself be a supply-chain risk). syft + cosign are installed at a
+      # pinned version via their official actions, themselves pinned to a release.
+      - name: Install syft (SBOM, pinned)
+        uses: anchore/sbom-action/download-syft@v0.17.9
+        with:
+          syft-version: v1.18.1
+
+      - name: Install cosign (pinned)
+        uses: sigstore/cosign-installer@v3.7.0
+        with:
+          cosign-release: v2.4.1
+
+      # On main/tags the images are PUSHED to the registry so the published,
+      # immutable digest is the artifact we sign + verify. On PRs the build is
+      # load-only (push:false) — signing/pushing requires the protected branch's
+      # OIDC + packages scope, which forked-PR builds must not have.
+      - name: Compute publish flag + image base
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish=false
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && { [ "${GITHUB_REF}" = "refs/heads/main" ] || [ "${GITHUB_REF_TYPE}" = "tag" ]; }; then
+            publish=true
+          fi
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
+          echo "backend_image=${REGISTRY}/${owner}/netops-backend" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=${REGISTRY}/${owner}/netops-frontend" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR (publish only)
+        if: steps.meta.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN with packages:write — short-lived, scoped to this run;
+          # never a long-lived PAT inlined in the workflow (ADR-0011 §6).
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build (and push on the publish gate). PR path: load:true, push:false.
+      # Publish path: push:true so the immutable digest output feeds sign+verify.
       - name: Build backend image
+        id: build_backend
         uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/backend.Dockerfile
-          push: false
-          load: true
-          tags: netops-backend:ci
+          push: ${{ steps.meta.outputs.publish == 'true' }}
+          load: ${{ steps.meta.outputs.publish != 'true' }}
+          tags: |
+            netops-backend:ci
+            ${{ steps.meta.outputs.publish == 'true' && format('{0}:{1}', steps.meta.outputs.backend_image, github.sha) || '' }}
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
 
       - name: Build frontend image
+        id: build_frontend
         uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/frontend.Dockerfile
-          push: false
-          load: true
-          tags: netops-frontend:ci
+          push: ${{ steps.meta.outputs.publish == 'true' }}
+          load: ${{ steps.meta.outputs.publish != 'true' }}
+          tags: |
+            netops-frontend:ci
+            ${{ steps.meta.outputs.publish == 'true' && format('{0}:{1}', steps.meta.outputs.frontend_image, github.sha) || '' }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
+      # SBOM (syft) per image — runs on EVERY build (PR + publish) over the local
+      # CI tag, retained as a build artifact (PRODUCTION.md §5 / G-SEC). SPDX-JSON
+      # is the portable format consumed by downstream attestation/audit tooling.
+      - name: SBOM (syft) — backend
+        run: syft scan docker:netops-backend:ci -o spdx-json > sbom-backend.spdx.json
+
+      - name: SBOM (syft) — frontend
+        run: syft scan docker:netops-frontend:ci -o spdx-json > sbom-frontend.spdx.json
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-sboms
+          path: |
+            sbom-backend.spdx.json
+            sbom-frontend.spdx.json
+          if-no-files-found: error
+
+      # Trivy image-CVE gate — RAISED to CRITICAL + HIGH at release (PRODUCTION.md
+      # §5 / ADR-0016). Accepted findings flow ONLY through the reviewed
+      # deploy/docker/.trivyignore-image (justification + expiry per line);
+      # ignore-unfixed keeps un-patchable base-OS CVEs from wedging the gate
+      # (docs/security/2026-06-14-trivy-baseimage-cves.md). The gate is NOT
+      # lowered — only sanctioned, expiring findings are suppressed.
       - name: Trivy scan (backend image)
         uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/docker/.trivyignore-image
         with:
           image-ref: netops-backend:ci
           format: table
           severity: CRITICAL,HIGH
-          # Fail only on CVEs that have a fix available; base-image OS packages
-          # with no upstream patch (Debian fix_deferred/affected) are out of our
-          # control and would otherwise wedge the gate. See
-          # docs/security/2026-06-14-trivy-baseimage-cves.md.
           ignore-unfixed: true
           exit-code: "1"
 
       - name: Trivy scan (frontend image)
         uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/docker/.trivyignore-image
         with:
           image-ref: netops-frontend:ci
           format: table
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
+
+      # cosign KEYLESS signing — ONLY on the publish gate, AFTER Trivy passes, so
+      # a CVE-failing image is never signed. We sign the pushed-by-digest image
+      # (cosign resolves the tag→digest), and attach the SBOM as a cosign
+      # attestation so provenance travels with the image (PROPOSED, PRODUCTION.md
+      # §5). COSIGN_EXPERIMENTAL/identity-token is the workflow OIDC — no key.
+      - name: cosign sign + attest (publish only)
+        if: steps.meta.outputs.publish == 'true'
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          for pair in \
+            "${{ steps.meta.outputs.backend_image }}:${{ github.sha }}|sbom-backend.spdx.json" \
+            "${{ steps.meta.outputs.frontend_image }}:${{ github.sha }}|sbom-frontend.spdx.json"; do
+            img="${pair%%|*}"; sbom="${pair##*|}"
+            echo "::group::cosign sign ${img}"
+            cosign sign --recursive "${img}"
+            cosign attest --recursive --type spdxjson --predicate "${sbom}" "${img}"
+            echo "::endgroup::"
+          done
+
+      # Prove the signature chain (PRODUCTION.md §5 "cosign verify proves the
+      # chain"). On publish we verify the just-signed images against the SAME
+      # keyless identity the admission policy enforces (issuer + workflow-subject
+      # regex), so a forged/unsigned image would fail here exactly as it is
+      # rejected at admission. On PRs (no signed image) this is a no-op skip.
+      - name: cosign verify signed images (publish only)
+        if: steps.meta.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          for img in \
+            "${{ steps.meta.outputs.backend_image }}:${{ github.sha }}" \
+            "${{ steps.meta.outputs.frontend_image }}:${{ github.sha }}"; do
+            echo "::group::cosign verify ${img}"
+            cosign verify \
+              --certificate-identity-regexp "^https://github.com/.+/.github/workflows/ci.yml@refs/.+$" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${img}"
+            echo "::endgroup::"
+          done
 
   # Chart-validation + policy-as-test for the K8s/Helm declarative half (P1 W4 GA
   # chart, ADR-0029 §3/§5 + ADR-0031). This job is the G-SEC K8s-posture evidence:
