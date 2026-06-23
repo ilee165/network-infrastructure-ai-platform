@@ -71,7 +71,13 @@ roles that design and write code.
    validated data, not prose to re-parse.
 6. **Atomic commits per task + `resumeFromRunId`** — restarts replay completed
    agents from cache. Keep (prompt, opts) byte-identical for completed calls;
-   never retro-edit a running workflow's already-executed calls.
+   never retro-edit a running workflow's already-executed calls. The cache is
+   **same-session only**: after a session-limit kill that has since reset, do
+   NOT re-resume — it re-runs completed agents live and duplicates commits.
+   Instead read **git as ground truth** (the result object is stale/filtered
+   after a kill), stash any partial tree (`git stash -u`, never `reset --hard`),
+   and author a **focused workflow for only the unfinished tasks**, feeding it the
+   cached review findings from the run's `.output` file (P1 W6).
 7. **Sequential tasks that share files; parallel only within a task** (the two
    reviews) — avoids merge churn that burns fixer tokens.
 8. **Graph-first code location** — when `graphify-out/graph.json` exists at the
@@ -80,6 +86,12 @@ roles that design and write code.
    impact. The graph is a derived index: verify in source before editing, and
    run `graphify update .` after commits to keep it current. Absent graph =
    normal Grep/Read behavior (the file's existence is the feature flag).
+9. **Rebase before a new wave** — if the prior wave was squash-merged to main,
+   rebase the working branch onto `origin/main` BEFORE building the next wave.
+   `git log origin/main..<branch>` must show ONLY the new wave's commits; leftover
+   pre-squash history makes the PR CONFLICTING and GitHub skips CI. Recover an
+   already-built branch with `git rebase --onto origin/main <last-old-commit>`
+   onto a fresh branch (P1 W3/W6).
 
 ## Maintenance
 
