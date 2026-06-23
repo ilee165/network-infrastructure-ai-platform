@@ -73,15 +73,20 @@ jobs:
             [ -z "$line" ] && continue
             ignore_flags+=(--ignore-vuln "$line")
           done < backend/.pip-audit-allowlist.txt
-          # Audit the installed environment (no lockfile in repo); --strict so a
-          # dependency pip-audit cannot resolve is an error, not a silent skip.
-          # --skip-editable excludes the local editable project (netops-backend),
-          # which is not published to PyPI and so "cannot be audited" — under
-          # --strict that local-package miss is FATAL (the PR #62 backend failure).
-          # Skipping the editable first-party package does NOT weaken the gate: it
-          # has no PyPI advisory surface; every third-party dep is still audited and
-          # --strict still fails on any real dep that cannot be resolved.
-          pip-audit --strict --skip-editable --progress-spinner off "${ignore_flags[@]}"
+          # Audit the RESOLVED third-party dependency set (no lockfile in repo).
+          # We cannot scan the live environment directly: it contains the local
+          # first-party project installed editable (netops-backend), which is not
+          # on PyPI. `--skip-editable` does NOT help under `--strict` — strict
+          # promotes the skip itself to a fatal ("distribution marked as editable",
+          # the PR #62 backend failure). Instead snapshot the environment with
+          # `pip freeze --exclude-editable` (every third-party dep, pinned; the
+          # editable first-party package omitted) and audit THAT under --strict.
+          # The gate is undiminished: all third-party deps are still audited and
+          # --strict still fails on any dep pip-audit cannot resolve. The excluded
+          # package is first-party with no PyPI advisory surface.
+          pip freeze --exclude-editable > /tmp/pip-audit-reqs.txt
+          pip-audit --strict --requirement /tmp/pip-audit-reqs.txt \
+            --progress-spinner off "${ignore_flags[@]}"
 
       - name: Lint (ruff check)
         working-directory: backend
