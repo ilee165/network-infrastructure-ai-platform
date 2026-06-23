@@ -253,9 +253,12 @@ class PostgresTraceRecorder:
            because layer 1 covers all in-process concurrency.
         """
         row_id = _trace_uuid(trace_id)
-        if trace_id not in self._ordinal_locks:
-            self._ordinal_locks[trace_id] = asyncio.Lock()
-        async with self._ordinal_locks[trace_id], self._sessionmaker() as session:
+        # ``setdefault`` is atomic w.r.t. the event loop (no await between the
+        # lookup and the insert), so two concurrent callers for the same trace
+        # always observe and share the SAME lock — closing the check-then-create
+        # window of the prior ``if not in`` form.
+        lock = self._ordinal_locks.setdefault(trace_id, asyncio.Lock())
+        async with lock, self._sessionmaker() as session:
             # Cross-process lock: hold the parent row until commit so that
             # another DB connection cannot race past the COUNT query.
             row = (

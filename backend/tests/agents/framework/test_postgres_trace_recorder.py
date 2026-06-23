@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import NullPool, event, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -43,9 +44,26 @@ from app.models.base import Base
 
 
 @pytest.fixture()
-async def engine() -> AsyncIterator[AsyncEngine]:
-    """In-memory async SQLite engine with the full model schema created."""
-    engine = create_async_engine("sqlite+aiosqlite://")
+async def engine(tmp_path: Path) -> AsyncIterator[AsyncEngine]:
+    """File-backed async SQLite engine with the full model schema created.
+
+    Uses a file URL with ``NullPool`` (one real connection per session, like the
+    repo's other concurrency-sensitive fixtures, e.g. the topology rebuild test)
+    rather than the default in-memory ``StaticPool`` — which is a single shared
+    connection. ``test_concurrent_record_step_yields_distinct_ordinals`` fires two
+    ``record_step`` calls via ``asyncio.gather``; on one shared connection those
+    two AsyncSessions interleave within a single transaction and can drop a row
+    (the flaky ``assert 1 == 2`` seen on CI's Linux/py3.12 runner, never locally).
+    Separate connections + SQLite file write-locking give real per-connection
+    transaction isolation, so the recorder's in-process lock + ``SELECT … FOR
+    UPDATE`` path is exercised faithfully and deterministically across platforms.
+    """
+    db_path = tmp_path / "trace_recorder_test.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{db_path.as_posix()}",
+        poolclass=NullPool,
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
 
     @event.listens_for(engine.sync_engine, "connect")
     def _enable_sqlite_fks(dbapi_connection: Any, _record: Any) -> None:
