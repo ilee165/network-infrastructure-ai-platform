@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import credentials as credentials_routes
+from app.core.crypto import _StaticKeyProvider
 from app.models import AuditLog, DeviceCredential
 from app.services import credentials as credentials_service
 
@@ -26,15 +27,11 @@ SECRET_SENTINEL = "SENTINEL-hunter2-3c1f9a"
 ROTATED_SENTINEL = "SENTINEL-rotated-77e0bd"
 
 
-class _StaticProvider:
-    """Minimal KeyProvider: one fixed 32-byte KEK, version ``test-v1``."""
+class _StaticProvider(_StaticKeyProvider):
+    """Minimal wrap/unwrap KeyProvider: one fixed 32-byte KEK, version ``test-v1``."""
 
-    def current_version(self) -> str:
-        return "test-v1"
-
-    def key(self, version: str) -> bytes:
-        assert version == "test-v1"
-        return b"\x42" * 32
+    def __init__(self) -> None:
+        super().__init__(b"\x42" * 32, "test-v1")
 
 
 @pytest.fixture()

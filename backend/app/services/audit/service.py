@@ -122,6 +122,18 @@ AUTOMATION_EXECUTION_REFUSED: Final = "automation.execution_refused"
 # entry. ``detail`` references the device by id and carries no packet payload or
 # credential material (the BPF filter is whitelist-validated, never secret).
 PACKET_CAPTURE_REQUESTED: Final = "packet.capture_requested"
+# P1 W6 KEK wrap/unwrap audit vocabulary (ADR-0032 §5). Every master-key (KEK)
+# operation on the credential-vault core path is audited in the same append-only
+# audit_log. ``detail`` carries identifiers and KEK versions ONLY — never DEK
+# bytes, KEK bytes, the wrapped blob, or a credential_ref value (ADR-0032 §6).
+KEK_WRAP: Final = "kek.wrap"
+KEK_UNWRAP: Final = "kek.unwrap"
+# The fail-closed gate tripped (ADR-0032 §4): the provider was unreachable, so no
+# row was written/read unwrapped. ``detail`` carries the coarse reason class only.
+KEK_PROVIDER_UNAVAILABLE: Final = "kek.provider.unavailable"
+# The active key provider/backend chosen at startup (ADR-0032 §5): after =
+# {provider, kek_version} — no key material.
+KEK_PROVIDER_SELECT: Final = "kek.provider.select"
 
 
 async def record(

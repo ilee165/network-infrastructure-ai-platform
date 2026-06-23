@@ -13,16 +13,22 @@ import uuid
 
 import pytest
 import structlog.testing
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.crypto import (
     KEY_BYTES,
+    NONCE_BYTES,
     DecryptionError,
     EnvKeyProvider,
     KeyProvider,
+    KeyProviderUnavailable,
+    ProviderHealth,
     UnknownKekVersionError,
+    WrappedDek,
 )
 from app.core.errors import NotFoundError
 from app.models import AuditLog
@@ -43,20 +49,56 @@ def _provider(version: str = "v1") -> EnvKeyProvider:
 
 
 class _RotatingProvider:
-    """Multi-version KeyProvider double (stands in for a future KMS provider)."""
+    """Multi-version wrap/unwrap KeyProvider double (stands in for a KMS provider)."""
 
     def __init__(self, keys: dict[str, bytes], current: str) -> None:
         self._keys = keys
         self._current = current
 
-    def current_version(self) -> str:
+    @property
+    def kek_version(self) -> str:
         return self._current
 
-    def key(self, version: str) -> bytes:
+    def wrap_dek(self, dek: bytes, *, aad: bytes) -> WrappedDek:
+        nonce = os.urandom(NONCE_BYTES)
+        sealed = AESGCM(self._keys[self._current]).encrypt(nonce, dek, aad)
+        return WrappedDek(ciphertext=nonce + sealed, kek_version=self._current)
+
+    def unwrap_dek(self, wrapped: WrappedDek, *, aad: bytes) -> bytes:
         try:
-            return self._keys[version]
+            kek = self._keys[wrapped.kek_version]
         except KeyError:
-            raise UnknownKekVersionError(f"KEK version {version!r} is not available") from None
+            raise UnknownKekVersionError(
+                f"KEK version {wrapped.kek_version!r} is not available"
+            ) from None
+        nonce, sealed = wrapped.ciphertext[:NONCE_BYTES], wrapped.ciphertext[NONCE_BYTES:]
+        try:
+            return AESGCM(kek).decrypt(nonce, sealed, aad)
+        except InvalidTag as exc:
+            raise DecryptionError("wrapped DEK failed authentication") from exc
+
+    def health(self) -> ProviderHealth:
+        return ProviderHealth(available=True, kek_version=self._current)
+
+
+class _DownProvider:
+    """A provider that is unreachable; every wrap/unwrap fails closed (ADR-0032 §4)."""
+
+    def __init__(self, version: str = "v1") -> None:
+        self._version = version
+
+    @property
+    def kek_version(self) -> str:
+        return self._version
+
+    def wrap_dek(self, dek: bytes, *, aad: bytes) -> WrappedDek:
+        raise KeyProviderUnavailable("TimeoutError")
+
+    def unwrap_dek(self, wrapped: WrappedDek, *, aad: bytes) -> bytes:
+        raise KeyProviderUnavailable("TimeoutError")
+
+    def health(self) -> ProviderHealth:
+        return ProviderHealth(available=False, kek_version=self._version, detail="unreachable")
 
 
 async def _create(
@@ -316,3 +358,138 @@ async def test_no_plaintext_in_structlog_capture_across_lifecycle(session: Async
     assert _SECRET not in blob
     assert _ROTATED_SECRET not in blob
     assert "DecryptedSecret(b" not in blob
+
+
+# ---------------------------------------------------------------------------
+# KEK wrap/unwrap audit (ADR-0032 §5) — identifiers/versions only
+# ---------------------------------------------------------------------------
+
+
+async def test_create_audits_kek_wrap_with_version_only(session: AsyncSession) -> None:
+    """create_credential emits one kek.wrap row carrying the KEK version, no bytes."""
+    provider = _provider()
+    credential = await _create(session, provider)
+
+    rows = await _audit_rows(session, "kek.wrap")
+    assert len(rows) == 1
+    entry = rows[0]
+    assert entry.target_id == str(credential.id)
+    assert entry.detail == {"kek_version": "v1"}
+    assert _SECRET not in str(entry.detail)
+
+
+async def test_decrypt_audits_kek_unwrap(session: AsyncSession) -> None:
+    """decrypt emits a kek.unwrap row alongside credential.decrypted."""
+    provider = _provider()
+    credential = await _create(session, provider)
+
+    await vault.decrypt(session, provider, credential, actor="system:discovery", reason="ssh")
+
+    rows = await _audit_rows(session, "kek.unwrap")
+    assert len(rows) == 1
+    assert rows[0].target_id == str(credential.id)
+    assert rows[0].detail == {"kek_version": "v1", "reason": "ssh"}
+
+
+async def test_rotate_kek_audits_kek_wrap_per_credential(session: AsyncSession) -> None:
+    """KEK rotation emits a kek.wrap row per rewrapped credential (to-version only)."""
+    old_kek, new_kek = os.urandom(KEY_BYTES), os.urandom(KEY_BYTES)
+    v1_provider = _RotatingProvider({"v1": old_kek}, current="v1")
+    creds = [
+        await _create(session, v1_provider, name=f"c{i}", secret=f"{_SECRET}{i}") for i in range(2)
+    ]
+
+    rotated = _RotatingProvider({"v1": old_kek, "v2": new_kek}, current="v2")
+    await vault.rotate_kek(session, rotated, actor="user:admin")
+
+    rows = await _audit_rows(session, "kek.wrap")
+    # 2 on create (v1) + 2 on rewrap (v2).
+    rewrap_rows = [r for r in rows if r.detail == {"kek_version": "v2"}]
+    assert len(rewrap_rows) == 2
+    assert {r.target_id for r in rewrap_rows} == {str(c.id) for c in creds}
+
+
+# ---------------------------------------------------------------------------
+# Fail closed (ADR-0032 §4) — provider unreachable
+# ---------------------------------------------------------------------------
+
+
+async def test_create_fails_closed_no_row_written(session: AsyncSession) -> None:
+    """An unreachable provider makes create raise 503 and persist no credential row."""
+    with pytest.raises(KeyProviderUnavailable) as excinfo:
+        await _create(session, _DownProvider())
+    assert excinfo.value.status_code == 503
+    assert _SECRET not in str(excinfo.value)
+    await session.flush()
+    rows = (await session.execute(select(DeviceCredential))).scalars().all()
+    assert rows == []
+
+
+async def test_create_fails_closed_audits_provider_unavailable(session: AsyncSession) -> None:
+    """The tripped fail-closed gate is audited with the reason class only, no secret."""
+    with pytest.raises(KeyProviderUnavailable):
+        await _create(session, _DownProvider())
+
+    rows = await _audit_rows(session, "kek.provider.unavailable")
+    assert len(rows) == 1
+    assert rows[0].detail == {"reason_class": "TimeoutError"}
+    assert _SECRET not in str(rows[0].detail)
+    # No credential.created / kek.wrap row was written on the failed write.
+    assert await _audit_rows(session, "credential.created") == []
+    assert await _audit_rows(session, "kek.wrap") == []
+
+
+async def test_decrypt_fails_closed_when_provider_down(session: AsyncSession) -> None:
+    """decrypt raises 503 (so the dependent task retries) and audits the gate."""
+    provider = _provider()
+    credential = await _create(session, provider)
+
+    with pytest.raises(KeyProviderUnavailable):
+        await vault.decrypt(
+            session, _DownProvider(), credential, actor="system:discovery", reason="ssh"
+        )
+
+    rows = await _audit_rows(session, "kek.provider.unavailable")
+    assert len(rows) == 1
+    assert rows[0].target_id == str(credential.id)
+    # No decrypt audit row when the unwrap fails closed.
+    assert await _audit_rows(session, "credential.decrypted") == []
+
+
+async def test_rotate_secret_fails_closed_when_provider_down(session: AsyncSession) -> None:
+    """rotate_secret raises 503 and audits the gate; the payload is left unchanged."""
+    provider = _provider()
+    credential = await _create(session, provider)
+    old_ciphertext = credential.ciphertext
+
+    with pytest.raises(KeyProviderUnavailable):
+        await vault.rotate_secret(
+            session,
+            _DownProvider(),
+            credential_id=credential.id,
+            new_secret=_ROTATED_SECRET,
+            actor="user:carol",
+        )
+
+    assert credential.ciphertext == old_ciphertext  # payload untouched
+    rows = await _audit_rows(session, "kek.provider.unavailable")
+    assert len(rows) == 1
+    assert rows[0].target_id == str(credential.id)
+    assert _ROTATED_SECRET not in str(rows[0].detail)
+    assert await _audit_rows(session, "credential.rotated") == []
+
+
+async def test_rotate_kek_fails_closed_when_provider_down(session: AsyncSession) -> None:
+    """rotate_kek raises 503 mid-pass and audits the gate; no row is mutated."""
+    old_kek = os.urandom(KEY_BYTES)
+    v1_provider = _RotatingProvider({"v1": old_kek}, current="v1")
+    credential = await _create(session, v1_provider)
+    wrapped_before = credential.wrapped_dek
+
+    with pytest.raises(KeyProviderUnavailable):
+        await vault.rotate_kek(session, _DownProvider(version="v2"), actor="user:admin")
+
+    assert credential.wrapped_dek == wrapped_before
+    rows = await _audit_rows(session, "kek.provider.unavailable")
+    assert len(rows) == 1
+    assert rows[0].target_id == str(credential.id)
