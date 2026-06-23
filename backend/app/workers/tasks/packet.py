@@ -513,7 +513,12 @@ async def _load_ssh_context(device_id: UUID) -> _EosCaptureContext:
         if row is None or row.kind is not CredentialKind.SSH:
             raise ValueError(f"device {device_id} has no usable SSH credential")
         secret = await credentials.decrypt(
-            session, _key_provider(), row, actor=_ACTOR, reason="packet_capture"
+            session,
+            _key_provider(),
+            row,
+            actor=_ACTOR,
+            reason="packet_capture",
+            sessionmaker=credentials.autonomous_sessionmaker(session),
         )
         params = SshParams(
             host=device.mgmt_ip,

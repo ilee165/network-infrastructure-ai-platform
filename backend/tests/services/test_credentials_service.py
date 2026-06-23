@@ -535,6 +535,56 @@ async def test_provider_unavailable_audit_survives_caller_rollback(engine: Async
         assert creds == []
 
 
+async def test_autonomous_sessionmaker_makes_worker_decrypt_audit_durable(
+    engine: AsyncEngine,
+) -> None:
+    """A worker decrypt that fails closed durably audits via autonomous_sessionmaker.
+
+    The worker decrypt sites own an AsyncSession but no explicit sessionmaker, so
+    they derive one with :func:`vault.autonomous_sessionmaker` (bound to the same
+    engine). On the fail-closed path the caller's transaction is rolled back, yet
+    the ``kek.provider.unavailable`` row must survive — a read on a *fresh* session
+    sees it. Without the derived autonomous sessionmaker the row would roll back
+    with the doomed transaction and be silently lost (the dead-audit gap).
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as setup_session:
+        credential = await _create(setup_session, _provider())
+        await setup_session.commit()
+
+    async with maker() as worker_session:
+        row = await worker_session.get(DeviceCredential, credential.id)
+        assert row is not None
+        with pytest.raises(KeyProviderUnavailable):
+            await vault.decrypt(
+                worker_session,
+                _DownProvider(),
+                row,
+                actor="system:discovery",
+                reason="discovery",
+                sessionmaker=vault.autonomous_sessionmaker(worker_session),
+            )
+        # The worker session would never commit the decrypt audit on this path.
+        await worker_session.rollback()
+
+    async with maker() as verify_session:
+        rows = await _audit_rows(verify_session, "kek.provider.unavailable")
+        assert len(rows) == 1
+        assert rows[0].target_id == str(credential.id)
+        assert rows[0].detail == {"reason_class": "TimeoutError"}
+        # No decrypt audit row when the unwrap fails closed.
+        assert await _audit_rows(verify_session, "credential.decrypted") == []
+
+
+async def test_autonomous_sessionmaker_reuses_caller_engine(engine: AsyncEngine) -> None:
+    """autonomous_sessionmaker binds the new sessionmaker to the caller's engine."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as session:
+        derived = vault.autonomous_sessionmaker(session)
+        async with derived() as derived_session:
+            assert derived_session.bind is engine
+
+
 # ---------------------------------------------------------------------------
 # Provider-selection audit (ADR-0032 §5) — kek.provider.select
 # ---------------------------------------------------------------------------

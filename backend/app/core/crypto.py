@@ -300,7 +300,16 @@ class _StaticKeyProvider:
                 f"(provider holds {self._version!r})"
             )
         blob = wrapped.ciphertext
-        if blob[:1] == WRAP_FORMAT_V1:
+        # A v1 blob is exactly ``WRAP_FORMAT_V1 ‖ nonce ‖ GCM(dek, aad)`` with the
+        # DEK always KEY_BYTES and a 128-bit GCM tag, so its length is fixed. A
+        # legacy v0 blob (``nonce ‖ GCM(dek, None)``, no version byte) is one byte
+        # shorter and length-disjoint, but ~1/256 of them start with a random
+        # nonce byte equal to WRAP_FORMAT_V1. Disambiguate on the fixed length AND
+        # the marker so such a v0 blob is not misrouted into the v1 (aad=row_id)
+        # path — which would fail GCM auth and make ~0.4% of legacy rows look
+        # tampered. Otherwise fall through to the legacy aad=None path.
+        v1_len = 1 + NONCE_BYTES + KEY_BYTES + 16  # marker ‖ nonce ‖ DEK ‖ GCM tag
+        if len(blob) == v1_len and blob[:1] == WRAP_FORMAT_V1:
             body, wrap_aad = blob[1:], aad
         else:
             # Legacy v0: no version byte, DEK wrapped with aad=None (pre-W6-T1).

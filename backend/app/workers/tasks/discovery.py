@@ -218,7 +218,12 @@ async def _prepare(
                 )
                 continue
             secret = await credentials.decrypt(
-                session, provider, row, actor=_ACTOR, reason="discovery"
+                session,
+                provider,
+                row,
+                actor=_ACTOR,
+                reason="discovery",
+                sessionmaker=credentials.autonomous_sessionmaker(session),
             )
             materialized.append(
                 _MaterializedCredential(

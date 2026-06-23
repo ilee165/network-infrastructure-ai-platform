@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.crypto import (
     EncryptedSecret,
@@ -96,6 +96,24 @@ def _store(credential: DeviceCredential, envelope: EncryptedSecret) -> None:
     credential.wrapped_dek = envelope.wrapped_dek
     credential.dek_nonce = envelope.dek_nonce
     credential.kek_version = envelope.kek_version
+
+
+def autonomous_sessionmaker(session: AsyncSession) -> async_sessionmaker[AsyncSession]:
+    """Derive an autonomous sessionmaker bound to *session*'s engine (ADR-0032 §4/§5).
+
+    Production callers that own an :class:`AsyncSession` but no separate
+    sessionmaker (notably the worker decrypt sites, whose session is created
+    inside a private context manager) use this to obtain the independent
+    transaction the durable fail-closed audit needs. It reuses the same
+    :class:`~sqlalchemy.ext.asyncio.AsyncEngine` (``session.bind``), so the
+    ``kek.provider.unavailable`` row commits on its own short-lived session while
+    the caller's doomed transaction rolls back — never lost on the one path that
+    rolls the caller back.
+    """
+    bind = session.bind
+    if not isinstance(bind, AsyncEngine):  # pragma: no cover - all prod sessions bind an engine
+        raise RuntimeError("credential session is not bound to an AsyncEngine")
+    return async_sessionmaker(bind, expire_on_commit=False)
 
 
 async def _audit_provider_unavailable(

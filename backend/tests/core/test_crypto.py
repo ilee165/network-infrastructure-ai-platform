@@ -241,6 +241,34 @@ def test_unwrap_reads_legacy_aad_none_wrap_without_version_byte() -> None:
     assert provider.unwrap_dek(legacy_wrapped, aad=_AAD) == dek
 
 
+def test_unwrap_reads_legacy_blob_whose_first_nonce_byte_is_v1_marker() -> None:
+    """A legacy v0 blob whose random nonce starts with 0x01 must NOT be misrouted.
+
+    A pre-W6-T1 row is ``nonce(12) ‖ AESGCM(kek).encrypt(nonce, dek, None)`` with
+    no version byte, so ~1/256 of them start with the WRAP_FORMAT_V1 marker (0x01)
+    purely by chance. Keying the discriminator on the marker byte alone would
+    misroute those into the v1 (aad=row_id) decode path and raise a spurious
+    DecryptionError, making ~0.4% of legacy credentials permanently unreadable.
+    v0 blobs are length-disjoint from v1 (60 vs 61 bytes), so the unwrap must also
+    check the fixed length and fall through to the legacy aad=None path.
+    """
+    kek_b64 = _kek_b64()
+    raw_kek = base64.urlsafe_b64decode(kek_b64)
+    provider = _env_provider(kek_b64)
+    dek = os.urandom(KEY_BYTES)
+
+    # Force the worst case: a legacy v0 blob whose first nonce byte equals the
+    # v1 marker. The blob length stays the v0 length (no version byte prepended).
+    nonce = b"\x01" + os.urandom(NONCE_BYTES - 1)
+    legacy_sealed = AESGCM(raw_kek).encrypt(nonce, dek, None)
+    legacy_blob = nonce + legacy_sealed
+    assert legacy_blob[:1] == WRAP_FORMAT_V1  # collides with the v1 marker
+    assert len(legacy_blob) == NONCE_BYTES + KEY_BYTES + 16  # v0 length (60 bytes)
+    legacy_wrapped = WrappedDek(ciphertext=legacy_blob, kek_version="v1")
+
+    assert provider.unwrap_dek(legacy_wrapped, aad=_AAD) == dek
+
+
 def test_legacy_row_rewraps_to_v1_format() -> None:
     """A legacy aad=None envelope round-trips through decrypt and rewraps to v1."""
     kek_b64 = _kek_b64()

@@ -174,7 +174,12 @@ async def _load_context(device_id: UUID) -> _CaptureContext | None:
             )
             return None
         secret = await credentials.decrypt(
-            session, _key_provider(), row, actor=_ACTOR, reason="config_backup"
+            session,
+            _key_provider(),
+            row,
+            actor=_ACTOR,
+            reason="config_backup",
+            sessionmaker=credentials.autonomous_sessionmaker(session),
         )
         context = _CaptureContext(
             mgmt_ip=device.mgmt_ip,
