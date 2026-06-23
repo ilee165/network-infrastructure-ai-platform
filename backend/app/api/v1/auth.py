@@ -56,6 +56,7 @@ from app.api.deps import (
     get_db,
     get_jwks_cache,
     get_pending_auth_store,
+    get_rate_limiter,
     require_role,
     resolve_oidc_client_secret,
 )
@@ -67,6 +68,7 @@ from app.core.errors import (
     BadRequestError,
     ConflictError,
     NotFoundError,
+    RateLimitedError,
 )
 from app.core.security import (
     Role as RoleEnum,
@@ -80,9 +82,11 @@ from app.core.security import (
 from app.llm.providers import KNOWN_PROFILES
 from app.models import Role, SystemSetting, User
 from app.services import oidc as oidc_service
+from app.services import rate_limit
 from app.services.audit import service as audit_service
 from app.services.auth_sessions import service as session_service
 from app.services.oidc import PendingAuthStore
+from app.services.rate_limit import RateLimiter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -134,7 +138,14 @@ def _issue_tokens(user: User, sid: uuid.UUID, settings: Settings, response: Resp
     session survives a refresh, while the changing ``jti`` keeps every emitted
     token distinct. The access token is unchanged (``type=access`` + ``roles``).
     """
-    access_claims: dict[str, object] = {"type": TOKEN_TYPE_ACCESS, "roles": [user.role.name]}
+    # ``jti`` makes every access token individually identifiable so the W6-T6
+    # API rate-limiter can key a per-token budget (``token:<jti>``) without ever
+    # handling the token bytes themselves.
+    access_claims: dict[str, object] = {
+        "type": TOKEN_TYPE_ACCESS,
+        "roles": [user.role.name],
+        "jti": str(uuid.uuid4()),
+    }
     # ADR-0028 §2: a federated session carries the IdP-anchored principal as
     # first-class claims so downstream four-eyes/audit read it from the token
     # without a DB round-trip. Local accounts have neither, and omit them.
@@ -190,6 +201,132 @@ async def _audit_login_failed(session: AsyncSession, username: str) -> None:
     await session.commit()
 
 
+# One generic detail for a throttled/locked login — coarse, and revealing
+# nothing about whether the account exists or how many attempts remain (no
+# oracle), mirroring ``_BAD_CREDENTIALS``.
+_LOGIN_THROTTLED: Final = "Too many login attempts; try again later"
+
+
+async def _audit_login_locked(
+    session: AsyncSession,
+    *,
+    username: str,
+    source: str | None,
+    request_id: uuid.UUID | None,
+) -> None:
+    """Audit ``auth.login_locked`` — attempted username + source only, never secrets.
+
+    The lockout is temporary and alerting-friendly (break-glass already alerts,
+    ADR-0028 §84); the audit row carries the attempted ``actor`` and source so an
+    operator can correlate a brute-force attempt without learning a password or
+    whether the account is real.
+    """
+    await audit_service.record(
+        session,
+        actor=f"user:{username}",
+        action=audit_service.AUTH_LOGIN_LOCKED,
+        target_type="user",
+        target_id=None,
+        detail={"source": source, "outcome": "locked"},
+        request_id=request_id,
+    )
+    await session.commit()
+
+
+async def _enforce_login_not_locked(
+    limiter: RateLimiter,
+    settings: Settings,
+    *,
+    username: str,
+    source: str | None,
+    session: AsyncSession,
+    request_id: uuid.UUID | None,
+) -> None:
+    """Reject the attempt up-front if this account+source is currently locked.
+
+    Reads (does not increment) the failed-attempt counter for the account+source
+    pair and the source-wide counter; if either has already reached the lockout
+    threshold within its window the attempt is refused with a generic 429 +
+    coarse ``Retry-After`` and an ``auth.login_locked`` audit row — before the
+    password is even checked, so a locked account+source costs an attacker
+    nothing further (and leaks no existence oracle).
+
+    **Fail-closed** (security — W6-T6 §4): if the lockout backend (Redis) is
+    unavailable we deny the attempt rather than wave it through, so a Redis blip
+    cannot hand out unlimited login attempts.
+    """
+    src = source if source is not None else "unknown"
+    threshold = settings.login_lockout_threshold
+    keys = (
+        rate_limit.login_lockout_key(username, src),
+        rate_limit.login_source_key(src),
+    )
+    locked = False
+    try:
+        for key in keys:
+            if await limiter.peek(key) >= threshold:
+                locked = True
+                break
+    except rate_limit.RateLimitBackendError as exc:
+        # FAIL CLOSED (security): no unlimited attempts during a Redis outage.
+        raise RateLimitedError(
+            _LOGIN_THROTTLED,
+            retry_after=settings.login_lockout_duration_secs,
+        ) from exc
+    if locked:
+        await _audit_login_locked(
+            session,
+            username=username,
+            source=source,
+            request_id=request_id,
+        )
+        raise RateLimitedError(
+            _LOGIN_THROTTLED,
+            retry_after=settings.login_lockout_duration_secs,
+        )
+
+
+async def _record_login_failure(
+    limiter: RateLimiter,
+    settings: Settings,
+    *,
+    username: str,
+    source: str | None,
+) -> None:
+    """Increment the failed-login counters for this account+source and source.
+
+    Best-effort: a backend outage on the *increment* path must not turn a normal
+    bad-password 401 into a 500 (the up-front :func:`_enforce_login_not_locked`
+    is the fail-closed guard for the *next* attempt). The counters auto-expire
+    after the window, so a burst of failures locks the pair only transiently.
+    """
+    src = source if source is not None else "unknown"
+    window = settings.login_lockout_window_secs
+    threshold = settings.login_lockout_threshold
+    try:
+        await limiter.hit(
+            rate_limit.login_lockout_key(username, src), limit=threshold, window_secs=window
+        )
+        await limiter.hit(rate_limit.login_source_key(src), limit=threshold, window_secs=window)
+    except rate_limit.RateLimitBackendError:
+        # Swallow: the credentials were already wrong (401 stands); the lockout
+        # guard fails closed independently on the next attempt's read path.
+        return
+
+
+async def _clear_login_failures(limiter: RateLimiter, *, username: str, source: str | None) -> None:
+    """Clear the account+source failure counter after a successful login.
+
+    Source-wide counter is left intact: a single legitimate success must not
+    wipe the brute-force signal another account on the same source is generating.
+    """
+    src = source if source is not None else "unknown"
+    try:
+        await limiter.reset(rate_limit.login_lockout_key(username, src))
+    except rate_limit.RateLimitBackendError:
+        return
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(
     body: LoginRequest,
@@ -197,6 +334,7 @@ async def login(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_app_settings)],
+    limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
 ) -> TokenResponse:
     """Authenticate with username/password; issue access token + refresh cookie.
 
@@ -205,16 +343,36 @@ async def login(
     inactive account) raises one generic :class:`AuthError`, keeps the
     constant-time verification path, and writes an ``auth.login_failed`` audit
     row that does not reveal which mode occurred.
+
+    W6-T6: the break-glass local path is brute-force protected. Before the
+    password is checked, a temporary lockout for this account+source (or a
+    source-wide flood) is enforced fail-closed (Redis outage ⇒ deny, never
+    unlimited attempts); each genuine failure increments the counters; a success
+    clears the account+source counter. A locked attempt returns a generic 429 —
+    no account-existence oracle — and audits ``auth.login_locked`` (alerting).
     """
+    source = request.client.host if request.client else None
+    request_id = _request_id(request)
+    await _enforce_login_not_locked(
+        limiter,
+        settings,
+        username=body.username,
+        source=source,
+        session=session,
+        request_id=request_id,
+    )
+
     user = (
         await session.execute(select(User).where(User.username == body.username))
     ).scalar_one_or_none()
     if user is None:
         verify_password(body.password, _DUMMY_PASSWORD_HASH)  # timing equalizer
         await _audit_login_failed(session, body.username)
+        await _record_login_failure(limiter, settings, username=body.username, source=source)
         raise AuthError(_BAD_CREDENTIALS)
     if not verify_password(body.password, user.password_hash) or not user.is_active:
         await _audit_login_failed(session, body.username)
+        await _record_login_failure(limiter, settings, username=body.username, source=source)
         raise AuthError(_BAD_CREDENTIALS)
     # ADR-0028 §5 break-glass: when OIDC is enabled the local-login path is
     # fenced to the ``admin`` role only — it is the audited, alerted recovery
@@ -222,8 +380,10 @@ async def login(
     # denied with the same generic 401 (no oracle for the fence).
     if settings.oidc_enabled and user.role.name != RoleEnum.ADMIN.value:
         await _audit_login_failed(session, body.username)
+        await _record_login_failure(limiter, settings, username=body.username, source=source)
         raise AuthError(_BAD_CREDENTIALS)
 
+    await _clear_login_failures(limiter, username=body.username, source=source)
     refresh_session = await session_service.create_session(
         session,
         user=user,
@@ -404,6 +564,49 @@ def _request_id(request: Request) -> uuid.UUID | None:
         return None
 
 
+async def _enforce_oidc_callback_rate_limit(
+    limiter: RateLimiter,
+    settings: Settings,
+    *,
+    source: str | None,
+    session: AsyncSession,
+    request_id: uuid.UUID | None,
+) -> None:
+    """Per-source OIDC-callback budget (ADR-0028 §2): blunt code/``state`` flooding.
+
+    Distinct from the JWKS forced-refresh rate-limit (ADR-0028 §63, handled in
+    :class:`app.core.oidc.JwksCache`): this caps callback *hits* per source so a
+    flood of forged ``code``/``state`` cannot drive token exchanges, while a
+    single legitimate callback stays well under the budget. Over-budget ⇒ generic
+    429 + coarse ``Retry-After``, audited ``auth.rate_limited`` (source only).
+
+    **Fail-open** (availability): a backend outage must not break legitimate SSO
+    logins — the §3 fail-closed claim-validation still gates access on every
+    callback, so an un-throttled callback cannot itself mint a bad session.
+    """
+    src = source if source is not None else "unknown"
+    try:
+        result = await limiter.hit(
+            rate_limit.oidc_callback_key(src),
+            limit=settings.oidc_callback_rate_limit,
+            window_secs=settings.oidc_callback_window_secs,
+        )
+    except rate_limit.RateLimitBackendError:
+        return  # fail open: do not block SSO on a limiter outage
+    if not result.allowed:
+        await audit_service.record(
+            session,
+            actor=f"oidc:source:{src}",
+            action=audit_service.AUTH_RATE_LIMITED,
+            target_type="oidc",
+            target_id=None,
+            detail={"source": source, "outcome": "rate_limited"},
+            request_id=request_id,
+        )
+        await session.commit()
+        raise RateLimitedError(_INVALID_OIDC, retry_after=result.retry_after_secs)
+
+
 @router.get("/oidc/login")
 async def oidc_login(
     request: Request,
@@ -455,6 +658,7 @@ async def oidc_callback(
     pending_store: Annotated[PendingAuthStore, Depends(get_pending_auth_store)],
     jwks_cache: Annotated[oidc.JwksCache, Depends(get_jwks_cache)],
     provider: Annotated[crypto.KeyProvider, Depends(get_key_provider)],
+    limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
     code: str | None = None,
 ) -> TokenResponse:
     """Complete the OIDC login: validate, JIT-provision, mint the platform JWT.
@@ -465,12 +669,24 @@ async def oidc_callback(
     audit ``auth.oidc.login_failed`` with a coarse reason — never token material.
     On success it mints the SAME platform JWT + refresh cookie as local login,
     so ``require_role`` / four-eyes are unchanged.
+
+    W6-T6: a per-source callback budget (ADR-0028 §2) blunts ``code``/``state``
+    flooding before any token exchange; it fails open so a limiter outage cannot
+    break legitimate SSO (claim validation below still fails closed).
     """
     if not settings.oidc_enabled:
         raise NotFoundError(_OIDC_DISABLED)
     request_id = _request_id(request)
     issuer = str(settings.oidc_issuer)
     client_id = str(settings.oidc_client_id)
+
+    await _enforce_oidc_callback_rate_limit(
+        limiter,
+        settings,
+        source=request.client.host if request.client else None,
+        session=session,
+        request_id=request_id,
+    )
 
     pending = await pending_store.consume(state)
     if pending is None or code is None:

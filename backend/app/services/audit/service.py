@@ -60,6 +60,15 @@ AUTH_OIDC_ROLE_MAPPED: Final = "auth.oidc.role_mapped"
 # Logging in via the fenced local path while OIDC is enabled is the audited,
 # alerted break-glass recovery action (ADR-0028 §5).
 AUTH_LOCAL_BREAKGLASS_LOGIN: Final = "auth.local.breakglass_login"
+# W6-T6 rate-limit + login throttle/lockout audit vocabulary (PRODUCTION.md §5,
+# ADR-0028 §2). Each event carries the attempted ``actor`` (``user:<id>`` or the
+# attempted username), the source, the request id, and an outcome — and NEVER
+# any token material or raw claims, mirroring the ``auth.login_failed`` posture.
+# ``auth.rate_limited`` covers an API request or OIDC callback turned away for
+# exceeding its budget; ``auth.login_locked`` is the temporary, alerting-friendly
+# break-glass lockout once the failed-attempt threshold is crossed.
+AUTH_RATE_LIMITED: Final = "auth.rate_limited"
+AUTH_LOGIN_LOCKED: Final = "auth.login_locked"
 USER_CREATED: Final = "user.created"
 USER_UPDATED: Final = "user.updated"
 USER_ROLE_CHANGED: Final = "user.role_changed"

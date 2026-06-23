@@ -5,7 +5,9 @@ Run locally with::
     uvicorn app.main:app --reload
 
 Per REPO-STRUCTURE §3.2 row 14, this module imports only ``core`` and ``api``
-(plus ``db`` for the engine-disposal shutdown hook).
+(plus ``db`` for the engine-disposal shutdown hook, and ``services.rate_limit``
+to bind the shared Redis-backed rate limiter on ``app.state`` at startup so a
+limit holds across ``api`` replicas — W6-T6).
 """
 
 from __future__ import annotations
@@ -43,12 +45,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     logger = get_logger("app.main")
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
         logger.info(
             "startup",
             env=app_settings.env,
             llm_profile=app_settings.llm_profile,
         )
+        # W6-T6: bind the shared Redis-backed rate limiter so the API budget +
+        # login lockout hold across ``api`` replicas (ADR-0008, D13). The client
+        # is lazy (no connection opened until the first command), so this is safe
+        # even when Redis is briefly unreachable at boot; the API limiter then
+        # fails open and the login lockout fails closed, per design.
+        from redis.asyncio import from_url
+
+        from app.services.rate_limit import RedisRateLimiter
+
+        app_.state.rate_limiter = RedisRateLimiter(from_url(app_settings.redis_url))
         # M1 placeholder hook: initialize the shared async DB engine pool and
         # run a startup connectivity check once domain models land.
         # M2 placeholder hook: initialize the shared Neo4j driver (knowledge/).

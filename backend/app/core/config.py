@@ -153,6 +153,39 @@ class Settings(BaseSettings):
     #: Bounded ``exp``/``iat``/``nbf`` leeway for IdP tokens (seconds, §3).
     oidc_clock_skew_secs: int = 120
 
+    # -- Rate limiting + login throttle/lockout (W6-T6; PRODUCTION.md §5, ----
+    # ADR-0028 §2, ADR-0008 Redis). Every knob is a per-deployment, operator-
+    # managed dial with a secure default. The counters live on the shared Redis
+    # (ADR-0008) so a limit holds across ``api`` replicas (D13), not in-process.
+    # --------------------------------------------------------------------------
+
+    #: Authenticated-API request budget per principal/token within
+    #: :attr:`rate_limit_window_secs`. Keyed by ``user:<id>`` AND ``token:<jti>``
+    #: so neither a single shared account nor a single leaked token can exceed
+    #: it. The ``N+1``-th request inside the window gets ``429 + Retry-After``.
+    rate_limit_requests: int = 120
+    #: Fixed-window length (seconds) for the API request budget above.
+    rate_limit_window_secs: int = 60
+
+    #: Failed local break-glass logins (per account AND per source IP) allowed
+    #: inside :attr:`login_lockout_window_secs` before the account/source pair is
+    #: temporarily locked. Progressive: each failure inside the window counts;
+    #: the ``threshold``-th trips the lockout.
+    login_lockout_threshold: int = 5
+    #: Sliding-window length (seconds) over which failed logins accumulate.
+    login_lockout_window_secs: int = 300
+    #: Temporary lockout duration (seconds) once the threshold is reached. The
+    #: lock auto-expires — no operator action needed — but every lockout is
+    #: audited + alerting-friendly (``auth.login_locked``).
+    login_lockout_duration_secs: int = 900
+
+    #: OIDC callback budget PER SOURCE IP within
+    #: :attr:`oidc_callback_window_secs` (ADR-0028 §2): blunts ``code``/``state``
+    #: flooding without blocking a legitimate single callback.
+    oidc_callback_rate_limit: int = 30
+    #: Fixed-window length (seconds) for the OIDC callback budget above.
+    oidc_callback_window_secs: int = 60
+
     @property
     def oidc_enabled(self) -> bool:
         """OIDC is active only when an issuer + client id + secret-ref are set.
