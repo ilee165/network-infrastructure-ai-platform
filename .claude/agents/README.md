@@ -27,14 +27,26 @@ runs; the prompt forbids modification).
 ## Escalation rule
 
 `opts.model` overrides the definition's model. For **security-critical tasks**
-(credential vault, auth/RBAC, any endpoint or pipeline that touches secret
-material, leak/exit-criteria tests), escalate every role to the strong model:
+(credential vault, KMS/KEK, auth/RBAC, any endpoint or pipeline that touches
+secret material, leak/exit-criteria tests), escalate every role to the strong
+model:
 
 ```js
-agent(prompt, { agentType: 'wf-spec-reviewer', model: 'fable', label, phase, schema })
+agent(prompt, { agentType: 'wf-spec-reviewer', model: STRONG, label, phase, schema })
 ```
 
-Nothing in a secret-handling pipeline runs on a downgraded model.
+**`STRONG` is the session's strong model, not a hard-coded literal.** Do NOT
+write `model: 'fable'`: `fable` is currently UNAVAILABLE, and a dead-model
+escalation does not error loudly — it silently returns a "clean" review (this
+caused 10 falsely-clean secret-surface ADR reviews in P1 W0). Use `'opus'` when
+the session runs Opus, so a `/model` switch + `resumeFromRunId` recovers the run.
+Track it as one session-scoped constant in the workflow script; never inline the
+model name per call.
+
+Nothing in a secret-handling pipeline runs on a downgraded model — and "the
+strong model is unreachable" counts as downgraded. If `STRONG` cannot be
+resolved to a live model, stop; do not let escalated reviews fall through to a
+dead or weaker model.
 
 ## Why sonnet reviews don't degrade quality
 

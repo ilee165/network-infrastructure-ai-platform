@@ -9,7 +9,10 @@ single atomic-commit unit that runs the **P1-PLAN.md §3 per-task pattern**:
 
 Escalation rule (P1-PLAN.md §2, `.claude/agents/README.md`): every secret-surface task
 (KEK/credential/audit/auth, leak/exit-criteria tests) escalates **reviewers + fixer to the
-strong model (`fable`)**; nothing in a secret pipeline runs on a downgraded model.
+session strong model**; nothing in a secret pipeline runs on a downgraded model.
+**`fable` is UNAVAILABLE — escalate to `opus` (the live strong model).** A dead-model
+escalation returns a silently "clean" review (P1 W0 false-clean root cause); never inline
+`model: 'fable'`. See `.claude/agents/README.md` → Escalation rule.
 
 ## Carry-forward from W4 — READ BEFORE STARTING (`../P1-W4-LESSONS.md`)
 

@@ -29,6 +29,19 @@ Discipline:
   `conftest test`, `trivy config`/`trivy image`, and `cosign verify` where the
   task signs or verifies images. If a gate cannot be made green, do NOT commit;
   report committed=false with a precise blocker.
+- Introducing a NEW gating tool (e.g. pip-audit, npm audit, gitleaks, syft,
+  cosign, a raised Trivy threshold)? Prove it twice before wiring it as a red
+  gate: (1) it passes clean on the current tree (or with a justified, expiring
+  allowlist entry — never a blanket ignore), and (2) it BITES — a planted
+  negative (dummy secret, known-vuln pinned dep, unsigned image) fails the gate
+  — then revert the negative. Run the tool LOCALLY first where it installs;
+  where it cannot run on this host (helm/trivy/cosign tooling absent), say so
+  explicitly and lean on a rendered/emulated equivalent rather than assuming the
+  CI run will pass (P1 W4 lesson L1: the local gate set is not the CI gate set).
+- Raising or scoping an existing gate (e.g. Trivy CRITICAL → CRITICAL+HIGH):
+  scope-suppress only sanctioned deviations via the reviewed ignore file on the
+  one affected step, and back each suppression with a stronger conftest/OPA rule;
+  never globalize or weaken the gate (P1 W4 lesson L2).
 - Exactly ONE atomic commit: `git add` only your files, message format as the
   task prompt specifies. Never push. Never switch branches.
 - Secret material (KMS key refs, registry creds, IdP client secrets, backup
