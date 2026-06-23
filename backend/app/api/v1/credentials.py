@@ -27,6 +27,7 @@ from app.schemas.credentials import (
     CredentialListResponse,
     CredentialRead,
     CredentialRotate,
+    RotationStatusResponse,
 )
 from app.services import credentials as credentials_service
 
@@ -128,3 +129,19 @@ async def list_credentials(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/rotation-status", response_model=RotationStatusResponse)
+async def rotation_status(
+    session: DbSession,
+    provider: Provider,
+    _user: Engineer,
+) -> RotationStatusResponse:
+    """KEK rotation status: versions/counts only (ADR-0032 §6) — never any blob.
+
+    Returns ``{from_version, to_version, rows_pending}`` so an operator can watch
+    a re-wrap pass drain to zero. Requires the ``engineer`` rank; the response
+    exposes no ``wrapped_dek`` / per-row ``kek_version`` field.
+    """
+    status = await credentials_service.get_rotation_status(session, provider)
+    return RotationStatusResponse.model_validate(status)

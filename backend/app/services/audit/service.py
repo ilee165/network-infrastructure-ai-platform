@@ -143,6 +143,13 @@ KEK_PROVIDER_UNAVAILABLE: Final = "kek.provider.unavailable"
 # The active key provider/backend chosen at startup (ADR-0032 §5): after =
 # {provider, kek_version} — no key material.
 KEK_PROVIDER_SELECT: Final = "kek.provider.select"
+# P1 W6-T3 master-key rotation / DEK re-wrap pass (ADR-0032 §3/§5). The re-wrap
+# job brackets its work with these two events into the same append-only
+# audit_log. ``detail`` carries ids/versions/counts ONLY — never DEK/KEK/wrapped
+# bytes (ADR-0032 §6): ``kek.rotate.start`` before = {from_version, row_count},
+# ``kek.rotate.complete`` after = {to_version, rows_migrated}.
+KEK_ROTATE_START: Final = "kek.rotate.start"
+KEK_ROTATE_COMPLETE: Final = "kek.rotate.complete"
 
 
 async def record(

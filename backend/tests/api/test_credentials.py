@@ -254,3 +254,60 @@ class TestCredentialRotate:
             headers=auth_headers(role),
         )
         assert response.status_code == 403
+
+
+class TestRotationStatus:
+    """KEK rotation-status endpoint (W6-T3): versions/counts only, engineer+ RBAC."""
+
+    async def test_engineer_reads_versions_and_counts_only(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+    ) -> None:
+        await _create_credential(client, auth_headers("engineer"))
+        response = await client.get(
+            "/api/v1/credentials/rotation-status", headers=auth_headers("engineer")
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        # The active provider version matches every freshly-created row → zero pending.
+        assert body == {"from_version": None, "to_version": "test-v1", "rows_pending": 0}
+        # Structural no-blob contract: never a wrapped_dek / per-row kek_version field.
+        forbidden = {"wrapped_dek", "dek_nonce", "ciphertext", "nonce", "kek_version"}
+        assert forbidden.isdisjoint(body.keys())
+
+    async def test_empty_corpus_reports_zero_pending(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+    ) -> None:
+        response = await client.get(
+            "/api/v1/credentials/rotation-status", headers=auth_headers("admin")
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "from_version": None,
+            "to_version": "test-v1",
+            "rows_pending": 0,
+        }
+
+    @pytest.mark.parametrize("role", ["viewer", "operator"])
+    async def test_below_engineer_is_403(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+        role: str,
+    ) -> None:
+        response = await client.get(
+            "/api/v1/credentials/rotation-status", headers=auth_headers(role)
+        )
+        assert response.status_code == 403
+
+    async def test_unauthenticated_is_401(
+        self, client: httpx.AsyncClient, key_provider: _StaticProvider
+    ) -> None:
+        response = await client.get("/api/v1/credentials/rotation-status")
+        assert response.status_code == 401

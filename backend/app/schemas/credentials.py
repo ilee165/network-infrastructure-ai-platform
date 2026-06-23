@@ -22,6 +22,7 @@ __all__ = [
     "CredentialListResponse",
     "CredentialRead",
     "CredentialRotate",
+    "RotationStatusResponse",
 ]
 
 
@@ -72,3 +73,20 @@ class CredentialListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class RotationStatusResponse(BaseModel):
+    """Master-key (KEK) rotation status — versions/counts only (ADR-0032 §6).
+
+    Deliberately carries **no** blob: ``from_version`` is the oldest KEK version
+    still referenced by an un-migrated credential (``None`` once the corpus is
+    fully migrated to the active KEK), ``to_version`` is the active KEK, and
+    ``rows_pending`` is how many credentials still await re-wrap. There is no
+    field exposing ``wrapped_dek`` or a per-row ``kek_version``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    from_version: str | None
+    to_version: str
+    rows_pending: int
