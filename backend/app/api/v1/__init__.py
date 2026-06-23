@@ -23,17 +23,19 @@ from app.api.v1 import (
 )
 
 #: W6-T6 per-principal/per-token API rate limit (PRODUCTION.md §5). Applied to
-#: the authenticated HTTP API routers only. Deliberately NOT applied to:
+#: the authenticated HTTP API routers only. Deliberately NOT applied at the
+#: router level to:
 #: - ``health`` — unauthenticated probes must never be throttled and carry no
 #:   principal to key on;
 #: - ``auth`` — the login path has its own throttle/lockout, and the bearer-keyed
 #:   API budget would be a no-op for an unauthenticated login while double-counting
 #:   token-bearing refresh/me calls;
-#: - ``agents`` — it exposes a WebSocket streaming route (``/stream``) with its own
-#:   stream-ticket auth, and an HTTP-only ``HTTPBearer`` router dependency cannot be
-#:   resolved on a WebSocket scope. Its HTTP routes are reachable through the same
-#:   shared limiter when rate-limiting is extended to per-route deps in a follow-up;
-#:   leaving the WS route unbroken is the correctness priority here.
+#: - ``agents`` — it exposes a WebSocket streaming route (``/stream``) whose
+#:   ``HTTPBearer``-based dependency cannot resolve on a WebSocket scope, so a
+#:   router-level dependency would break it. Its authenticated HTTP routes ARE
+#:   budgeted: ``agents`` applies this limit per-route on every ``@router.{get,
+#:   post}`` (see ``app.api.v1.agents._API_RATE_LIMIT``), leaving only the
+#:   ``@router.websocket`` route unbound.
 _api_rate_limit = [Depends(enforce_api_rate_limit)]
 
 api_router = APIRouter()
