@@ -83,7 +83,40 @@ async def _probe_redis(settings: Settings) -> None:
         await client.aclose()
 
 
-#: Probe registry — tests monkeypatch entries to simulate outages.
+async def _probe_kek_provider(settings: Settings) -> None:
+    """Drive the fail-closed KEK-provider readiness gate (ADR-0032 §4, W6-T2).
+
+    Builds the configured :class:`~app.core.crypto.KeyProvider` and asks for its
+    ``health()``; an unreachable KMS makes this probe fail so the replica is
+    pulled from rotation (readiness → degraded) while it stays *live* (liveness is
+    unaffected) and alerts fire. The 0/1 ``vault_key_provider_healthy`` gauge is
+    refreshed from the result either way. The provider build itself runs in a
+    worker thread so a blocking SDK call cannot stall the event loop.
+    """
+    from app.core import crypto, metrics
+
+    def _check() -> bool:
+        provider = crypto.get_key_provider(settings)
+        return provider.health().available
+
+    available = await asyncio.to_thread(_check)
+    metrics.set_provider_healthy(healthy=available)
+    if not available:
+        raise ConnectionError("key provider unreachable")
+
+
+def _kek_provider_configured(settings: Settings) -> bool:
+    """Whether a KEK provider is configured (so the readiness probe applies).
+
+    With no provider configured (a bare dev run) the KEK probe is omitted — the
+    credential vault is simply unused — so readiness stays exactly the data-store
+    set. Any KMS backend or local KEK turns the probe on.
+    """
+    return bool(settings.vault_key_provider or settings.kek or settings.kek_file)
+
+
+#: Probe registry — tests monkeypatch entries to simulate outages. The KEK probe
+#: is added per-request only when a provider is configured (see :func:`ready`).
 _PROBES: dict[str, Probe] = {
     "postgres": _probe_postgres,
     "neo4j": _probe_neo4j,
@@ -114,10 +147,14 @@ async def live() -> dict[str, str]:
 
 @router.get("/ready", response_model=ReadinessReport)
 async def ready(request: Request) -> ReadinessReport:
-    """Readiness: probe postgres/neo4j/redis concurrently and report each."""
+    """Readiness: probe postgres/neo4j/redis (+ the KEK provider) concurrently."""
     settings: Settings = request.app.state.settings
-    names = list(_PROBES)
-    results = await asyncio.gather(*(_run_probe(_PROBES[name], settings) for name in names))
+    probes = dict(_PROBES)
+    if _kek_provider_configured(settings):
+        # ADR-0032 §4: an unreachable KMS pulls this replica from rotation.
+        probes["kek_provider"] = _PROBES.get("kek_provider", _probe_kek_provider)
+    names = list(probes)
+    results = await asyncio.gather(*(_run_probe(probes[name], settings) for name in names))
     dependencies = dict(zip(names, results, strict=True))
     overall: Literal["ok", "degraded"] = (
         "ok" if all(dep.status == "ok" for dep in dependencies.values()) else "degraded"

@@ -69,6 +69,15 @@ dev = [
     "aiosqlite",
 ]
 
+# Production KMS backends (W6-T2, ADR-0032 §2). OPTIONAL by design: a deployment
+# installs ONLY the extra for its chosen backend (VAULT_KEY_PROVIDER), and the
+# local Env/File fallback (default) needs none of these. Each SDK is imported
+# lazily inside core/crypto so a slim install — and the offline unit suite, which
+# drives the providers via an in-memory fake — never requires them.
+kms-aws = ["boto3"]
+kms-azure = ["azure-identity", "azure-keyvault-keys"]
+kms-vault = ["hvac"]
+
 # Vendor plugin discovery group (D6 / ADR-0006). M1: first plugins (cisco_ios,
 # cisco_iosxe, eos) register here as
 #   <vendor_id> = "app.plugins.vendors.<vendor_id>.plugin:<Vendor>Plugin"
@@ -130,6 +139,12 @@ strict_equality = true
 module = [
     "asyncpg.*",
     "authlib.*",
+    # Optional KMS SDKs (W6-T2) — installed only per chosen backend; imported
+    # lazily in core/crypto, so they may be absent when mypy runs.
+    "azure.*",
+    "boto3.*",
+    "botocore.*",
+    "hvac.*",
     "celery.*",
     "kombu.*",
     "langchain_anthropic.*",

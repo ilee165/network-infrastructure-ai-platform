@@ -1,0 +1,73 @@
+# AI Network Operations Platform — KMS-backend emulators (P1 W6-T2, ADR-0032 §2).
+#
+# Local/CI emulators for the three production KMS backends so the AWS / Azure /
+# Vault wrap/unwrap paths can be exercised against a *backend-shaped* service
+# without a real cloud account. The OFFLINE unit suite does NOT need these — it
+# drives the providers via the deterministic in-memory `FakeKmsKeyProvider`
+# (see backend/app/core/crypto.py). These containers back the optional
+# integration/emulator validation; real-cloud-KMS validation is lab-deferred and
+# documented in docs/roadmap/evidence/P1-W6-G-SEC-evidence.md.
+#
+# Run from the REPOSITORY ROOT:
+#
+#   docker compose -f deploy/docker/docker-compose.kms-emulators.yml up -d
+#
+# IMPORTANT (secure by default, ADR-0032 §6): every credential below is a
+# THROWAWAY DEV-ONLY value for the emulator and is referenced indirectly by the
+# provider config (key ARN / vault URI+key / transit key + credential_ref). No
+# production key, token, or secret is present in this file.
+
+name: netops-kms-emulators
+
+services:
+  # AWS KMS via LocalStack — exposes the `kms` API on :4566. Provider config:
+  #   NETOPS_VAULT_KEY_PROVIDER=aws
+  #   NETOPS_AWS_KMS_KEY_ARN=<arn of a key created in localstack>
+  # Auth in the emulator is the LocalStack dummy chain; in prod it is IRSA/IAM
+  # role (no static keys — the provider never reads access keys from config).
+  localstack-kms:
+    image: localstack/localstack:3
+    environment:
+      SERVICES: kms
+      DEBUG: "0"
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Azure Key Vault — no first-party local emulator exists for wrapKey/unwrapKey,
+  # so an Azurite-style fake stands in for the KMS shape in CI. The provider's
+  # row-id binding does NOT depend on the backend (Azure has no native AAD): the
+  # inner-AESGCM layer in AzureKeyVaultKeyProvider binds it locally, so this fake
+  # only needs to wrap/unwrap the inner key. Replaced by real Key Vault in lab.
+  azurite-fake:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    command: ["azurite", "--blobHost", "0.0.0.0", "--skipApiVersionCheck"]
+    ports:
+      - "10000:10000"
+
+  # HashiCorp Vault in -dev mode with the Transit secrets engine. Provider config:
+  #   NETOPS_VAULT_KEY_PROVIDER=vault
+  #   NETOPS_VAULT_ADDR=http://localhost:8200
+  #   NETOPS_VAULT_TRANSIT_KEY=netops-kek
+  #   NETOPS_VAULT_CREDENTIAL_REF=<k8s-auth role / AppRole id — INDIRECT handle>
+  # The dev root token below is a THROWAWAY emulator value; production auths via
+  # k8s-auth/AppRole exchanged for a short-lived, auto-renewed token, never a
+  # token inlined in config.
+  vault-transit:
+    image: hashicorp/vault:1.16
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: dev-only-root-token
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    ports:
+      - "8200:8200"
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

@@ -80,6 +80,54 @@ class Settings(BaseSettings):
     #: Version label stored with every wrapped DEK; bump together with KEK rotation.
     kek_version: str = "v1"
 
+    # -- KMS backend selection + prod-grade gating (W6-T2, ADR-0032 §2) ---------
+    # Config-only swap (ADR-0032 Consequences): switching AWS<->Azure<->Vault is
+    # this one selector + the provider-scoped block below. The credential service
+    # never branches on the backend (D11). All auth is referenced indirectly — IAM
+    # role / managed identity / a vault ``credential_ref`` handle — NEVER a token,
+    # key, or secret inlined here (ADR-0032 §2/§6).
+    # --------------------------------------------------------------------------
+
+    #: Active KEK backend (``core/crypto.get_key_provider``). ``env``/``file`` are
+    #: the local in-process fallbacks (non-production); ``aws``/``azure``/``vault``
+    #: are the production KMS backends (W6-T2). ``None`` keeps the legacy
+    #: kek/kek_file selection so an existing local deployment is unchanged.
+    vault_key_provider: Literal["env", "file", "aws", "azure", "vault"] | None = None
+
+    #: Production posture gate (ADR-0032 §2, secure-by-default opt-out). When
+    #: ``True`` the credential service REFUSES to start on a local Env/File KEK
+    #: provider — a non-production KEK can never hide behind a green prod deploy.
+    #: Defaults to ``env == "prod"`` unless set explicitly.
+    is_prod: bool | None = None
+
+    # AWS KMS (``vault_key_provider=aws``): the key is referenced by ARN only;
+    # auth is IRSA / IAM role from the pod's ambient credential chain — no static
+    # access keys (ADR-0032 §2). ``aws_region`` is optional (boto3 resolves it
+    # from the environment / instance metadata when unset).
+    aws_kms_key_arn: str | None = None
+    aws_region: str | None = None
+
+    # Azure Key Vault (``vault_key_provider=azure``): the key is referenced by
+    # vault URI + key name; auth is the managed identity via DefaultAzureCredential
+    # — no client secret inlined. ``wrapKey``/``unwrapKey`` has no native AAD, so
+    # the row-id is bound by a local AESGCM inner layer (ADR-0032 §1, see crypto).
+    azure_key_vault_uri: str | None = None
+    azure_key_name: str | None = None
+
+    # HashiCorp Vault Transit (``vault_key_provider=vault``): the transit key is
+    # referenced by mount + key name; ``vault_credential_ref`` is the INDIRECT
+    # handle (k8s-auth role / AppRole id) the credential layer resolves into a
+    # short-lived, auto-renewed token — never a token value inlined here.
+    vault_addr: str | None = None
+    vault_transit_mount: str = "transit"
+    vault_transit_key: str | None = None
+    vault_credential_ref: str | None = None
+
+    @property
+    def production(self) -> bool:
+        """Effective production posture: explicit :attr:`is_prod` else ``env == 'prod'``."""
+        return self.env == "prod" if self.is_prod is None else self.is_prod
+
     #: Nightly config-backup schedule (Celery beat, ADR-0017 §1). UTC hour/minute
     #: the ``config.nightly_backup`` task fires at; operators retune cadence
     #: without code changes. Default 02:00 UTC (a low-traffic window).

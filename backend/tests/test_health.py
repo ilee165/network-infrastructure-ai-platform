@@ -105,3 +105,85 @@ async def test_ready_times_out_hung_probe(
     assert body["status"] == "degraded"
     assert body["dependencies"]["postgres"]["status"] == "error"
     assert "TimeoutError" in body["dependencies"]["postgres"]["error"]
+
+
+# ---------------------------------------------------------------------------
+# KEK-provider readiness gate (P1 W6-T2, ADR-0032 §4)
+# ---------------------------------------------------------------------------
+
+
+async def test_ready_omits_kek_probe_when_no_provider_configured(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare dev run (no KEK configured) keeps exactly the data-store deps."""
+    _patch_all_probes(monkeypatch, _ok_probe)
+    response = await client.get("/api/v1/health/ready")
+    body = response.json()
+    assert set(body["dependencies"]) == EXPECTED_DEPENDENCIES
+    assert "kek_provider" not in body["dependencies"]
+
+
+def _settings_with_kek() -> Settings:
+    import base64
+    import os
+
+    kek = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")
+    return Settings(_env_file=None, env="dev", secret_key="t", kek=kek)
+
+
+async def test_ready_includes_kek_probe_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured KEK provider adds a ``kek_provider`` readiness dependency."""
+    from app.main import create_app
+
+    _patch_all_probes(monkeypatch, _ok_probe)
+    app_ = create_app(_settings_with_kek())
+    transport = httpx.ASGITransport(app=app_)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as test_client:
+        response = await test_client.get("/api/v1/health/ready")
+    body = response.json()
+    assert "kek_provider" in body["dependencies"]
+    assert body["dependencies"]["kek_provider"]["status"] == "ok"
+    assert body["status"] == "ok"
+
+
+async def test_ready_degrades_when_kek_provider_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreachable KMS makes readiness degrade and sets the healthy gauge to 0.
+
+    Liveness is unaffected (this endpoint is readiness only) — the replica stays
+    LIVE while being pulled from rotation (ADR-0032 §4).
+    """
+    _patch_all_probes(monkeypatch, _ok_probe)
+
+    recorded: dict[str, bool] = {}
+
+    def _record(*, healthy: bool) -> None:
+        recorded["healthy"] = healthy
+
+    monkeypatch.setattr("app.core.metrics.set_provider_healthy", _record)
+
+    async def _down_kek(settings: Settings) -> None:
+        from app.core import metrics
+
+        metrics.set_provider_healthy(healthy=False)
+        raise ConnectionError("key provider unreachable")
+
+    monkeypatch.setitem(health._PROBES, "kek_provider", _down_kek)
+
+    from app.main import create_app
+
+    app_ = create_app(_settings_with_kek())
+    transport = httpx.ASGITransport(app=app_)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as test_client:
+        ready_resp = await test_client.get("/api/v1/health/ready")
+        live_resp = await test_client.get("/api/v1/health/live")
+    body = ready_resp.json()
+    assert body["status"] == "degraded"
+    assert body["dependencies"]["kek_provider"]["status"] == "error"
+    assert recorded["healthy"] is False
+    # Liveness stays OK — the replica is pulled from rotation but not killed.
+    assert live_resp.status_code == 200
+    assert live_resp.json() == {"status": "ok"}

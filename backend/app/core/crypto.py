@@ -122,6 +122,18 @@ class KeyProviderUnavailable(KeyProviderError):
     slug = "key-provider-unavailable"
 
 
+class LocalKeyProviderInProductionError(RuntimeError):
+    """A non-production local KEK provider was selected in production (ADR-0032 §2).
+
+    The credential service refuses to start (secure-by-default opt-out): an
+    in-process Env/File KEK is a local fallback only, never a production backend,
+    so it can never hide behind a green prod deploy. Configure a KMS backend
+    (``VAULT_KEY_PROVIDER=aws|azure|vault``). A :class:`RuntimeError` (not a
+    :class:`NetOpsError`) because this is a deployment misconfiguration that must
+    crash startup loudly, not surface as an HTTP problem.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class WrappedDek:
     """A DEK wrapped under the active KEK (ADR-0032 §1).
@@ -335,21 +347,463 @@ class FileKeyProvider(_StaticKeyProvider):
         )
 
 
-def get_key_provider(settings: Settings) -> KeyProvider:
-    """Build the configured :class:`KeyProvider` (``kek`` wins over ``kek_file``).
+# ---------------------------------------------------------------------------
+# KMS backends (W6-T2, ADR-0032 §2). AWS / Azure / Vault Transit each implement
+# the SAME wrap/unwrap contract behind a thin, injectable low-level client so
+# the boto3 / azure / hvac SDKs (a) stay an OPTIONAL dependency and (b) are the
+# ONLY place that touches the network — the wrap/unwrap logic (incl. the Azure
+# inner-AESGCM AAD layer) is exercised by unit tests against an in-memory fake.
+#
+# No KEK export, no GenerateDataKey (carried from W6-T1): the DEK is generated
+# locally (``envelope_encrypt``) and the KEK never leaves the KMS. Raw SDK
+# exceptions are wrapped as a typed :class:`KeyProviderError` so a backend's
+# request/response context never surfaces verbatim (ADR-0032 §6).
+# ---------------------------------------------------------------------------
+
+#: Class names of SDK exceptions that mean the backend is unreachable (a 503
+#: fail-closed condition) rather than a request-level error. Matched on the
+#: exception type's name so this module never has to import the cloud SDKs.
+_UNAVAILABLE_EXC_NAMES: frozenset[str] = frozenset(
+    {
+        "ConnectionError",
+        "ConnectTimeout",
+        "ConnectTimeoutError",
+        "ConnectionClosedError",
+        "EndpointConnectionError",
+        "ReadTimeout",
+        "ReadTimeoutError",
+        "Timeout",
+        "TimeoutError",
+        "VaultDown",
+        "ServiceRequestError",
+        "ServiceRequestTimeoutError",
+    }
+)
+
+
+def _is_unavailable(exc: Exception) -> bool:
+    """Whether *exc* (a raw SDK error) means the backend is unreachable (§4)."""
+    return type(exc).__name__ in _UNAVAILABLE_EXC_NAMES
+
+
+class _KmsKeyProvider:
+    """Shared base for the production KMS backends (ADR-0032 §2).
+
+    Subclasses implement :meth:`_wrap` / :meth:`_unwrap` / :meth:`_ping` against
+    their injected low-level client; this base centralises the no-leak posture:
+    a raw SDK exception is wrapped as :class:`KeyProviderUnavailable` (unreachable)
+    or :class:`KeyProviderError` (any other backend reason), carrying only the
+    exception's class name — never its message, request context, or key material.
+    ``health()`` reports liveness without ever surfacing the backend's raw error.
+    """
+
+    _version: str
+
+    def __init__(self, client: object) -> None:
+        self._client = client
+
+    @property
+    def kek_version(self) -> str:
+        """Stable id of the active wrapping key, stored on each credential row."""
+        return self._version
+
+    @property
+    def is_production_grade(self) -> bool:
+        """A real KMS backend is production-grade (ADR-0032 §2)."""
+        return True
+
+    def __repr__(self) -> str:
+        # Class + kek_version only — never a key handle/ARN/URI/credential_ref.
+        return f"<{type(self).__name__}:{self._version}>"
+
+    # -- subclass hooks ------------------------------------------------------
+    def _wrap(self, dek: bytes, *, aad: bytes) -> bytes:
+        raise NotImplementedError
+
+    def _unwrap(self, ciphertext: bytes, *, aad: bytes) -> bytes:
+        raise NotImplementedError
+
+    def _ping(self) -> None:
+        """Cheapest liveness check (a wrap/unwrap of a throwaway probe DEK)."""
+        probe = os.urandom(KEY_BYTES)
+        self._unwrap(self._wrap(probe, aad=b"healthcheck"), aad=b"healthcheck")
+
+    # -- contract ------------------------------------------------------------
+    def wrap_dek(self, dek: bytes, *, aad: bytes) -> WrappedDek:
+        try:
+            ciphertext = self._wrap(dek, aad=aad)
+        except (KeyProviderError, DecryptionError):
+            raise
+        except Exception as exc:  # noqa: BLE001 — wrap ALL raw SDK errors typed
+            if _is_unavailable(exc):
+                raise KeyProviderUnavailable(type(exc).__name__) from exc
+            raise KeyProviderError(type(exc).__name__) from exc
+        return WrappedDek(ciphertext=ciphertext, kek_version=self._version)
+
+    def unwrap_dek(self, wrapped: WrappedDek, *, aad: bytes) -> bytes:
+        try:
+            return self._unwrap(wrapped.ciphertext, aad=aad)
+        except (KeyProviderError, DecryptionError):
+            raise
+        except Exception as exc:  # noqa: BLE001 — wrap ALL raw SDK errors typed
+            if _is_unavailable(exc):
+                raise KeyProviderUnavailable(type(exc).__name__) from exc
+            raise KeyProviderError(type(exc).__name__) from exc
+
+    def health(self) -> ProviderHealth:
+        try:
+            self._ping()
+        except Exception as exc:  # noqa: BLE001 — coarse reason class only
+            return ProviderHealth(
+                available=False, kek_version=self._version, detail=type(exc).__name__
+            )
+        return ProviderHealth(available=True, kek_version=self._version)
+
+
+class AwsKmsKeyProvider(_KmsKeyProvider):
+    """AWS KMS backend (ADR-0032 §2): ``kms:Encrypt`` / ``kms:Decrypt``.
+
+    The row-id ``aad`` is bound **natively** via ``EncryptionContext={row_id}`` —
+    Decrypt fails on a different context, so a wrapped DEK cannot be replayed onto
+    another row (cross-row replay guard). Auth is IRSA / IAM role from the pod's
+    ambient credential chain (boto3 default provider) — NO static access keys; the
+    key is referenced by ARN only. ``kek_version`` is the key ARN.
+    """
+
+    def __init__(self, *, key_arn: str, client: object | None = None) -> None:
+        self._key_arn = key_arn
+        self._version = key_arn
+        super().__init__(client if client is not None else _build_aws_kms_client(key_arn))
+
+    def _context(self, aad: bytes) -> dict[str, str]:
+        # EncryptionContext values are strings; the row-id AAD is UTF-8 text.
+        return {"row_id": aad.decode("utf-8")}
+
+    def _wrap(self, dek: bytes, *, aad: bytes) -> bytes:
+        resp = self._client.encrypt(  # type: ignore[attr-defined]
+            KeyId=self._key_arn, Plaintext=dek, EncryptionContext=self._context(aad)
+        )
+        blob = resp["CiphertextBlob"]
+        return bytes(blob)
+
+    def _unwrap(self, ciphertext: bytes, *, aad: bytes) -> bytes:
+        try:
+            resp = self._client.decrypt(  # type: ignore[attr-defined]
+                CiphertextBlob=ciphertext, EncryptionContext=self._context(aad)
+            )
+        except Exception as exc:  # noqa: BLE001
+            if _is_unavailable(exc):
+                raise
+            # A context mismatch (cross-row replay) or invalid ciphertext is a
+            # KMS InvalidCiphertextException — surface the cross-row guard as the
+            # same typed DecryptionError every backend uses, never the raw text.
+            raise DecryptionError(
+                "Wrapped DEK failed AWS KMS decryption (wrong row-id context or tampered data)"
+            ) from exc
+        return bytes(resp["Plaintext"])
+
+
+class HashiCorpVaultTransitKeyProvider(_KmsKeyProvider):
+    """HashiCorp Vault Transit backend (ADR-0032 §2): ``transit/encrypt|decrypt``.
+
+    The row-id ``aad`` is bound **natively** via Transit ``context={row_id}`` —
+    decrypt fails on a different context (cross-row replay guard). The short-lived
+    token is obtained from a k8s-auth / AppRole login keyed by ``credential_ref``
+    (an INDIRECT handle, never a token value) and auto-renewed; the value of
+    ``credential_ref`` is never logged. ``kek_version`` is ``<key>:vN`` so an old
+    transit key version still decrypts after rotation (ADR-0032 §2 rotation model).
+    """
+
+    def __init__(
+        self,
+        *,
+        transit_mount: str,
+        transit_key: str,
+        client: object | None = None,
+        addr: str | None = None,
+        credential_ref: str | None = None,
+    ) -> None:
+        self._mount = transit_mount
+        self._key = transit_key
+        # credential_ref is stored only to drive token login/renew; it is NEVER
+        # rendered in repr/health/errors (a name-mangled attribute keeps it out of
+        # any default dataclass-style introspection).
+        self.__credential_ref = credential_ref
+        resolved = (
+            client if client is not None else _build_vault_transit_client(addr, credential_ref)
+        )
+        super().__init__(resolved)
+        # The active transit key version; ``<key>:vN`` is the stored kek_version.
+        self._key_version = self._read_key_version()
+        self._version = f"{self._key}:v{self._key_version}"
+
+    def _read_key_version(self) -> int:
+        version = getattr(self._client, "current_version", 1)
+        return int(version)
+
+    def _context(self, aad: bytes) -> bytes:
+        return aad
+
+    def _wrap(self, dek: bytes, *, aad: bytes) -> bytes:
+        resp = self._client.encrypt_data(  # type: ignore[attr-defined]
+            name=self._key, plaintext=dek, context=self._context(aad)
+        )
+        ciphertext: str = resp["data"]["ciphertext"]
+        return ciphertext.encode("utf-8")
+
+    def _unwrap(self, ciphertext: bytes, *, aad: bytes) -> bytes:
+        try:
+            resp = self._client.decrypt_data(  # type: ignore[attr-defined]
+                name=self._key,
+                ciphertext=ciphertext.decode("utf-8"),
+                context=self._context(aad),
+            )
+        except Exception as exc:  # noqa: BLE001
+            if _is_unavailable(exc):
+                raise
+            raise DecryptionError(
+                "Wrapped DEK failed Vault Transit decryption (wrong row-id context "
+                "or tampered data)"
+            ) from exc
+        return bytes(resp["data"]["plaintext"])
+
+
+class AzureKeyVaultKeyProvider(_KmsKeyProvider):
+    """Azure Key Vault backend (ADR-0032 §2): ``wrapKey`` / ``unwrapKey``.
+
+    Azure ``wrapKey``/``unwrapKey`` (RSA-OAEP / AES-KW) has **no native AAD**, so
+    the row-id is bound by a **local AESGCM inner layer**: a fresh random
+    256-bit *inner key* seals the DEK with ``aad=row_id`` (fresh 96-bit nonce);
+    the inner key — not the DEK — is sent to ``wrapKey``. ``unwrapKey`` reverses
+    it and the AESGCM open **fails on a row-id mismatch**, giving the identical
+    cross-row replay guard the native backends get. The single-blob schema is
+    unchanged (ADR-0032 §1):
+
+        ``WrappedDek.ciphertext = inner-nonce ‖ wrapped-inner-key ‖ inner-ciphertext``
+
+    Auth is the pod managed identity (``DefaultAzureCredential``) — no client
+    secret inlined; the key is referenced by vault URI + key name.
+    """
+
+    #: kek_version for Azure: the inner-AESGCM layer is the active wrap and the
+    #: Key Vault key wraps the inner key; the configured key name labels rotation.
+    def __init__(
+        self,
+        *,
+        vault_uri: str,
+        key_name: str,
+        client: object | None = None,
+    ) -> None:
+        self._vault_uri = vault_uri
+        self._key_name = key_name
+        self._version = f"{key_name}:azure-aesgcm-v1"
+        super().__init__(
+            client if client is not None else _build_azure_key_client(vault_uri, key_name)
+        )
+
+    def _wrap(self, dek: bytes, *, aad: bytes) -> bytes:
+        inner_key = AESGCM.generate_key(bit_length=KEY_BYTES * 8)
+        inner_nonce = os.urandom(NONCE_BYTES)
+        inner_ciphertext = AESGCM(inner_key).encrypt(inner_nonce, dek, aad)
+        wrapped_inner = self._client.wrap_key(key=inner_key)  # type: ignore[attr-defined]
+        return inner_nonce + bytes(wrapped_inner) + inner_ciphertext
+
+    def _unwrap(self, ciphertext: bytes, *, aad: bytes) -> bytes:
+        # Blob layout: inner-nonce(12) ‖ wrapped-inner-key(var) ‖ inner-ciphertext.
+        # The DEK is always exactly KEY_BYTES, and AESGCM appends a 128-bit tag,
+        # so the inner ciphertext is a fixed KEY_BYTES+16 tail; the wrapped inner
+        # key (AES-KW / RSA-OAEP fixed output) is everything between the nonce and
+        # that tail — no length prefix needed, the schema stays a single blob.
+        inner_nonce = ciphertext[:NONCE_BYTES]
+        body = ciphertext[NONCE_BYTES:]
+        inner_ct_len = KEY_BYTES + 16  # AESGCM ciphertext = plaintext + 128-bit tag
+        wrapped_inner = body[:-inner_ct_len]
+        inner_ciphertext = body[-inner_ct_len:]
+        try:
+            inner_key = self._client.unwrap_key(  # type: ignore[attr-defined]
+                encrypted_key=wrapped_inner
+            )
+        except Exception as exc:  # noqa: BLE001
+            if _is_unavailable(exc):
+                raise
+            raise DecryptionError(
+                "Azure Key Vault could not unwrap the inner key (tampered data)"
+            ) from exc
+        try:
+            return AESGCM(bytes(inner_key)).decrypt(inner_nonce, inner_ciphertext, aad)
+        except InvalidTag as exc:
+            raise DecryptionError(
+                "Wrapped DEK failed inner-AESGCM authentication (wrong row-id aad or tampered data)"
+            ) from exc
+
+
+class FakeKmsKeyProvider(_KmsKeyProvider):
+    """Deterministic in-memory KMS double for unit tests (ADR-0032 Negative).
+
+    Production-grade by self-report (so prod-gating tests can exercise the allow
+    path) yet fully in-process: it wraps the DEK with a process-local AESGCM key,
+    binding the row-id ``aad`` natively so the cross-row replay guard holds. Set
+    ``available=False`` to simulate an unreachable KMS (fail-closed tests).
+    """
+
+    def __init__(self, *, available: bool = True, version: str = "fake-kms:v1") -> None:
+        self._version = version
+        self._kek = AESGCM.generate_key(bit_length=KEY_BYTES * 8)
+        self._available = available
+        super().__init__(client=object())
+
+    def _wrap(self, dek: bytes, *, aad: bytes) -> bytes:
+        if not self._available:
+            raise ConnectionError("fake kms unreachable")
+        nonce = os.urandom(NONCE_BYTES)
+        return nonce + AESGCM(self._kek).encrypt(nonce, dek, aad)
+
+    def _unwrap(self, ciphertext: bytes, *, aad: bytes) -> bytes:
+        if not self._available:
+            raise ConnectionError("fake kms unreachable")
+        nonce, sealed = ciphertext[:NONCE_BYTES], ciphertext[NONCE_BYTES:]
+        try:
+            return AESGCM(self._kek).decrypt(nonce, sealed, aad)
+        except InvalidTag as exc:
+            raise DecryptionError(
+                "Wrapped DEK failed authenticated decryption (wrong row-id aad or tampered data)"
+            ) from exc
+
+
+def _build_aws_kms_client(key_arn: str) -> object:  # pragma: no cover - needs boto3 + cloud
+    """Build a boto3 ``kms`` client from the pod's ambient IAM/IRSA credentials.
+
+    Lazy import keeps boto3 an OPTIONAL dependency (installed only where the AWS
+    backend is selected); no static access keys — boto3's default provider chain
+    resolves IRSA / instance-role credentials.
+    """
+    try:
+        import boto3  # noqa: PLC0415
+    except ImportError as exc:
+        raise KekConfigurationError(
+            "VAULT_KEY_PROVIDER=aws requires the 'boto3' extra to be installed"
+        ) from exc
+    return boto3.client("kms")
+
+
+def _build_vault_transit_client(
+    addr: str | None, credential_ref: str | None
+) -> object:  # pragma: no cover - needs hvac + a live Vault
+    """Build an hvac client authenticated via k8s-auth / AppRole (``credential_ref``).
+
+    Lazy import keeps hvac OPTIONAL. The ``credential_ref`` is the INDIRECT login
+    handle (role id), exchanged for a short-lived, auto-renewed token; its value
+    is never logged.
+    """
+    try:
+        import hvac  # noqa: PLC0415
+    except ImportError as exc:
+        raise KekConfigurationError(
+            "VAULT_KEY_PROVIDER=vault requires the 'hvac' extra to be installed"
+        ) from exc
+    return hvac.Client(url=addr)
+
+
+def _build_azure_key_client(
+    vault_uri: str, key_name: str
+) -> object:  # pragma: no cover - needs azure SDK + cloud
+    """Build an azure-keyvault-keys ``CryptographyClient`` via managed identity.
+
+    Lazy import keeps the azure SDK OPTIONAL; ``DefaultAzureCredential`` resolves
+    the pod's managed identity — no client secret inlined.
+    """
+    try:
+        from azure.identity import DefaultAzureCredential  # noqa: PLC0415
+        from azure.keyvault.keys import KeyClient  # noqa: PLC0415
+        from azure.keyvault.keys.crypto import CryptographyClient  # noqa: PLC0415
+    except ImportError as exc:
+        raise KekConfigurationError(
+            "VAULT_KEY_PROVIDER=azure requires the 'azure' extra to be installed"
+        ) from exc
+    credential = DefaultAzureCredential()
+    key = KeyClient(vault_url=vault_uri, credential=credential).get_key(key_name)
+    return CryptographyClient(key, credential=credential)
+
+
+def get_key_provider(settings: Settings, *, client: object | None = None) -> KeyProvider:
+    """Build the configured :class:`KeyProvider` (ADR-0032 §2 config-only swap).
+
+    ``VAULT_KEY_PROVIDER`` selects the backend: ``aws`` / ``azure`` / ``vault``
+    (production KMS) or ``env`` / ``file`` (local fallback). When it is unset the
+    legacy selection applies (``kek`` wins over ``kek_file``) so an existing local
+    deployment is unchanged. *client* is a test-only injection point for the
+    low-level KMS client; production resolves it from the pod's ambient identity.
 
     Raises:
-        KekConfigurationError: If neither ``NETOPS_KEK`` nor ``NETOPS_KEK_FILE``
-            is configured — the credential vault cannot operate without a KEK.
+        KekConfigurationError: If the selected backend's required settings are
+            missing, or no KEK is configured at all.
     """
+    selector = settings.vault_key_provider
+    if selector == "aws":
+        if not settings.aws_kms_key_arn:
+            raise KekConfigurationError(
+                "VAULT_KEY_PROVIDER=aws requires NETOPS_AWS_KMS_KEY_ARN (the KMS key ARN)"
+            )
+        return AwsKmsKeyProvider(key_arn=settings.aws_kms_key_arn, client=client)
+    if selector == "vault":
+        if not settings.vault_transit_key or not settings.vault_credential_ref:
+            raise KekConfigurationError(
+                "VAULT_KEY_PROVIDER=vault requires NETOPS_VAULT_TRANSIT_KEY and "
+                "NETOPS_VAULT_CREDENTIAL_REF (an indirect login handle, never a token)"
+            )
+        return HashiCorpVaultTransitKeyProvider(
+            transit_mount=settings.vault_transit_mount,
+            transit_key=settings.vault_transit_key,
+            addr=settings.vault_addr,
+            credential_ref=settings.vault_credential_ref,
+            client=client,
+        )
+    if selector == "azure":
+        if not settings.azure_key_vault_uri or not settings.azure_key_name:
+            raise KekConfigurationError(
+                "VAULT_KEY_PROVIDER=azure requires NETOPS_AZURE_KEY_VAULT_URI and "
+                "NETOPS_AZURE_KEY_NAME"
+            )
+        return AzureKeyVaultKeyProvider(
+            vault_uri=settings.azure_key_vault_uri,
+            key_name=settings.azure_key_name,
+            client=client,
+        )
+    if selector == "file":
+        return FileKeyProvider(settings)
+    if selector == "env":
+        return EnvKeyProvider(settings)
+    # Legacy selection (no explicit VAULT_KEY_PROVIDER): kek wins over kek_file.
     if settings.kek is not None:
         return EnvKeyProvider(settings)
     if settings.kek_file is not None:
         return FileKeyProvider(settings)
     raise KekConfigurationError(
-        "Credential vault KEK is not configured: set NETOPS_KEK (urlsafe-base64, "
-        "32 bytes decoded) or NETOPS_KEK_FILE (path to a file containing it)"
+        "Credential vault KEK is not configured: set VAULT_KEY_PROVIDER to a KMS "
+        "backend (aws|azure|vault) or NETOPS_KEK / NETOPS_KEK_FILE for the local "
+        "fallback"
     )
+
+
+def require_production_grade(provider: KeyProvider, *, is_prod: bool) -> None:
+    """Refuse to start on a local KEK provider in production (ADR-0032 §2).
+
+    Secure-by-default opt-out: when *is_prod* is true and *provider* is not a
+    production-grade KMS backend, raise :class:`LocalKeyProviderInProductionError`
+    so the credential service crashes startup loudly rather than silently running
+    a non-production KEK behind a green deploy. The credential service stays
+    provider-agnostic: this gate keys off ``is_production_grade`` only and never
+    branches on which backend is configured.
+
+    Raises:
+        LocalKeyProviderInProductionError: If a local provider is selected in prod.
+    """
+    if is_prod and not is_production_grade(provider):
+        name = type(provider).__name__
+        raise LocalKeyProviderInProductionError(
+            f"local KeyProvider {name!r} is not permitted in production; configure "
+            f"a KMS backend (D11/ADR-0032 §2)"
+        )
 
 
 def is_production_grade(provider: KeyProvider) -> bool:

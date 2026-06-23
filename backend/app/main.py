@@ -61,20 +61,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from app.services.rate_limit import RedisRateLimiter
 
         app_.state.rate_limiter = RedisRateLimiter(from_url(app_settings.redis_url))
-        # P1 W6-T1 (ADR-0032 §5): audit the active KEK provider/backend chosen at
-        # startup as ``kek.provider.select`` — identifiers/versions only, never key
-        # material. Best-effort: a misconfigured/unreachable KEK or DB at boot must
-        # not crash the api; the credential paths fail closed in their own right.
-        from app.core.crypto import get_key_provider
+        # P1 W6-T1/T2 (ADR-0032 §2/§5): select the active KEK provider, enforce the
+        # prod-grade gate, surface its posture on the startup banner + /metrics, and
+        # audit ``kek.provider.select`` (identifiers/versions only, never key bytes).
+        from app.core import metrics
+        from app.core.crypto import (
+            get_key_provider,
+            is_production_grade,
+            require_production_grade,
+        )
         from app.services import credentials as credentials_service
 
         try:
             provider = get_key_provider(app_settings)
-            await credentials_service.audit_provider_select(
-                db.get_sessionmaker(), provider, actor="system:startup"
+        except Exception:  # noqa: BLE001
+            # An unconfigured KEK at boot must not crash a local/dev run (the
+            # credential paths fail closed in their own right); skip the banner /
+            # gate / audit when no provider is built.
+            provider = None
+        if provider is not None:
+            # ADR-0032 §2 prod gate: refuse to start on a local provider in prod —
+            # this RuntimeError is intentionally NOT swallowed so a non-production
+            # KEK can never run behind a green prod deploy.
+            require_production_grade(provider, is_prod=app_settings.production)
+            production_grade = is_production_grade(provider)
+            metrics.set_provider_production_grade(production_grade=production_grade)
+            metrics.set_provider_healthy(healthy=provider.health().available)
+            # Startup banner: the active KEK backend + its production posture.
+            logger.info(
+                "kek.provider.banner",
+                provider=type(provider).__name__,
+                kek_version=provider.kek_version,
+                production_grade=production_grade,
+                is_prod=app_settings.production,
             )
-        except Exception as exc:  # noqa: BLE001  (boot best-effort: never crash on audit)
-            logger.warning("kek.provider.select.audit_skipped", reason_class=type(exc).__name__)
+            try:
+                await credentials_service.audit_provider_select(
+                    db.get_sessionmaker(), provider, actor="system:startup"
+                )
+            except Exception as exc:  # noqa: BLE001  (boot best-effort: never crash on audit)
+                logger.warning("kek.provider.select.audit_skipped", reason_class=type(exc).__name__)
         # M1 placeholder hook: initialize the shared async DB engine pool and
         # run a startup connectivity check once domain models land.
         # M2 placeholder hook: initialize the shared Neo4j driver (knowledge/).

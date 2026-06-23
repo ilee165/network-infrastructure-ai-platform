@@ -855,6 +855,38 @@ config:
     enabled: false
     issuer: ""
     clientId: ""
+  # -- KEK backend + prod-grade gating (W6-T2, ADR-0032 §2). EVERY value here is
+  #    a non-secret REFERENCE — a key ARN, a vault URI/key name, a transit key,
+  #    or an INDIRECT credential_ref login handle (k8s-auth role / AppRole id).
+  #    No KEK, token, or password literal is ever permitted here (ADR-0029 §6 /
+  #    ADR-0032 §6). The credential service selects the backend by `keyProvider`
+  #    ONLY and never branches on it elsewhere.
+  kms:
+    # Production posture gate. ON by default IN-CHART so a prod deploy REFUSES to
+    # start on a local Env/File KEK (secure-by-default opt-out). Compose leaves it
+    # off (NETOPS_ENV=dev) for the local fallback.
+    isProd: true
+    # Active KEK backend: "" (legacy local Env/File) | aws | azure | vault. Set
+    # this AND the matching block below to run a production KMS backend.
+    keyProvider: ""
+    # AWS KMS (keyProvider=aws): key referenced by ARN; auth is IRSA/IAM role from
+    # the pod's ambient credentials — no static access keys.
+    aws:
+      keyArn: ""
+      region: ""
+    # Azure Key Vault (keyProvider=azure): key referenced by vault URI + name;
+    # auth is the pod managed identity (DefaultAzureCredential) — no client secret.
+    azure:
+      vaultUri: ""
+      keyName: ""
+    # HashiCorp Vault Transit (keyProvider=vault): transit key referenced by mount
+    # + name; credentialRef is the INDIRECT login handle exchanged for a
+    # short-lived, auto-renewed token — never a token value.
+    vault:
+      addr: ""
+      transitMount: transit
+      transitKey: ""
+      credentialRef: ""
 
 # -- Reusable hardened per-container securityContext (ADR-0029 §3 table).
 #    W4 services consume this via the `netops.hardenedSecurityContext` helper.

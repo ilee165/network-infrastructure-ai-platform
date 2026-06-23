@@ -561,6 +561,71 @@ def test_no_key_material_leak() -> None:
         assert repr(dek) not in blob
 
 
+def test_no_key_material_leak_kms_backends() -> None:
+    """ADR-0032 §6 exit gate, extended to the W6-T2 KMS backends.
+
+    Each production backend must (a) wrap a raw SDK exception in the typed
+    :class:`KeyProviderError` (reason class only — never the raw message), (b)
+    keep its key handle / vault URI / ``credential_ref`` value out of ``repr`` /
+    ``str`` / ``health().detail``, and (c) never echo the DEK or plaintext in any
+    error across the wrong-row / outage paths. The concrete in-process fakes that
+    drive these assertions live in ``test_kms_providers``; here we assert the
+    secret-surface invariants hold identically on all three.
+    """
+    from app.core.crypto import (
+        AwsKmsKeyProvider,
+        AzureKeyVaultKeyProvider,
+        FakeKmsKeyProvider,
+        HashiCorpVaultTransitKeyProvider,
+        KeyProviderError,
+    )
+    from tests.core.test_kms_providers import (
+        _FakeAwsKmsClient,
+        _FakeAzureKeyClient,
+        _FakeVaultTransitClient,
+    )
+
+    secret_ref = "super-secret-approle-role-id"
+    arn = "arn:aws:kms:us-east-1:000000000000:key/leak-test"
+    providers: list[KeyProvider] = [
+        AwsKmsKeyProvider(key_arn=arn, client=_FakeAwsKmsClient(arn)),
+        HashiCorpVaultTransitKeyProvider(
+            transit_mount="transit",
+            transit_key="netops-kek",
+            client=_FakeVaultTransitClient(),
+            credential_ref=secret_ref,
+        ),
+        AzureKeyVaultKeyProvider(
+            vault_uri="https://kv.vault.azure.net/",
+            key_name="netops-kek",
+            client=_FakeAzureKeyClient("netops-kek"),
+        ),
+        FakeKmsKeyProvider(),
+    ]
+    dek = os.urandom(KEY_BYTES)
+    for provider in providers:
+        wrapped = provider.wrap_dek(dek, aad=_AAD)
+        # 1. Cross-row replay raises the typed DecryptionError, no DEK in message.
+        with pytest.raises(DecryptionError) as wrong_row:
+            provider.unwrap_dek(wrapped, aad=b"device_credentials:other")
+        message = str(wrong_row.value) + repr(wrong_row.value)
+        assert repr(dek) not in message
+        assert secret_ref not in message
+
+        # 2. repr/str carry no credential_ref value.
+        for rendered in (repr(provider), str(provider)):
+            assert secret_ref not in rendered
+
+    # 3. A raw SDK exception is wrapped typed (reason class only) on every backend.
+    down_aws = AwsKmsKeyProvider(key_arn=arn, client=_FakeAwsKmsClient(arn))
+    down_aws._client.down = True  # type: ignore[attr-defined]
+    with pytest.raises(KeyProviderError) as boto_err:
+        down_aws.wrap_dek(dek, aad=_AAD)
+    raw = str(boto_err.value) + repr(boto_err.value)
+    assert "unreachable" not in raw
+    assert repr(dek) not in raw
+
+
 def test_encrypted_secret_is_frozen() -> None:
     provider = _env_provider()
     secret = envelope_encrypt(_PLAINTEXT, _AAD, provider)
