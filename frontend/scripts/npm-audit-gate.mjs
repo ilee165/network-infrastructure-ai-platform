@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+// npm-audit gate (P1 W6-T4, ADR-0016 D16 pipeline).
+//
+// npm audit has no native ignore file. This script makes `npm audit` a RED gate
+// with a REVIEWED, EXPIRING allowlist (mirrors the .trivyignore convention):
+//
+//   npm audit --json | node scripts/npm-audit-gate.mjs
+//
+// It exits 1 (fails the CI job) when any advisory at or above the configured
+// severity floor is present and is NOT covered by a non-expired allowlist entry
+// in .npm-audit-allowlist.json. It exits 0 only when every such advisory is
+// explicitly, currently allowlisted. It also exits 1 if an allowlist entry is
+// EXPIRED or matches NOTHING (stale entry => re-review), so the allowlist cannot
+// silently rot open.
+//
+// Offline/self-hosted-fork-friendly: pure Node stdlib, no network, no extra deps.
+// Triage policy: docs/security/supply-chain-scanning.md.
+
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const SEV_ORDER = { info: 0, low: 1, moderate: 2, high: 3, critical: 4 };
+const here = dirname(fileURLToPath(import.meta.url));
+const allowlistPath = join(here, "..", ".npm-audit-allowlist.json");
+
+function fail(msg) {
+  console.error(`npm-audit-gate: ${msg}`);
+  process.exit(1);
+}
+
+// --- read npm audit --json from stdin ---
+let raw = "";
+try {
+  raw = readFileSync(0, "utf8");
+} catch (e) {
+  fail(`could not read npm audit JSON from stdin: ${e.message}`);
+}
+let audit;
+try {
+  audit = JSON.parse(raw);
+} catch (e) {
+  fail(`stdin was not valid JSON (did you pipe \`npm audit --json\`?): ${e.message}`);
+}
+
+// --- load reviewed allowlist ---
+let allowlist;
+try {
+  allowlist = JSON.parse(readFileSync(allowlistPath, "utf8"));
+} catch (e) {
+  fail(`could not read allowlist ${allowlistPath}: ${e.message}`);
+}
+const floor = SEV_ORDER[allowlist.severityFloor ?? "high"];
+const today = new Date();
+const allowByGhsa = new Map();
+for (const entry of allowlist.allow ?? []) {
+  if (!entry.ghsa) fail(`allowlist entry missing "ghsa": ${JSON.stringify(entry)}`);
+  if (!entry.expires) fail(`allowlist entry ${entry.ghsa} missing "expires" (re-review date)`);
+  if (!entry.justification) fail(`allowlist entry ${entry.ghsa} missing "justification"`);
+  const exp = new Date(entry.expires);
+  if (Number.isNaN(exp.getTime())) fail(`allowlist entry ${entry.ghsa} has invalid "expires"`);
+  allowByGhsa.set(entry.ghsa, { ...entry, expDate: exp, matched: false });
+}
+
+// --- collect advisories at/above the floor from the npm audit report (npm v7+ schema) ---
+// Each vulnerability's `via` array holds either advisory objects (with .url/.source)
+// or strings (names of other vulnerable packages). We key on the GHSA id parsed
+// from the advisory URL so the allowlist is stable across npm-version output churn.
+const findings = []; // { ghsa, package, severity }
+for (const [pkg, vuln] of Object.entries(audit.vulnerabilities ?? {})) {
+  for (const via of vuln.via ?? []) {
+    if (typeof via !== "object" || !via.url) continue;
+    const m = /GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}/i.exec(via.url);
+    if (!m) continue;
+    if ((SEV_ORDER[via.severity] ?? 0) < floor) continue;
+    findings.push({ ghsa: m[0], package: via.title ? `${pkg} (${via.title})` : pkg, severity: via.severity });
+  }
+}
+
+// --- evaluate ---
+const blocking = [];
+for (const f of findings) {
+  const entry = allowByGhsa.get(f.ghsa);
+  if (!entry) {
+    blocking.push(`${f.severity.toUpperCase()} ${f.ghsa} in ${f.package} — NOT allowlisted`);
+    continue;
+  }
+  if (entry.expDate < today) {
+    blocking.push(
+      `${f.severity.toUpperCase()} ${f.ghsa} in ${f.package} — allowlist entry EXPIRED ${entry.expires} (re-review)`,
+    );
+    continue;
+  }
+  entry.matched = true;
+}
+
+// stale-entry guard: an allowlist entry that matches no current finding is dead
+// weight that can later mask a new advisory — force re-review.
+const stale = [...allowByGhsa.values()].filter((e) => !e.matched && e.expDate >= today);
+for (const e of stale) {
+  blocking.push(`allowlist entry ${e.ghsa} matched no current advisory — stale, remove or re-review`);
+}
+
+if (blocking.length) {
+  console.error(`npm-audit-gate: FAIL (severity floor = ${allowlist.severityFloor})`);
+  for (const b of blocking) console.error(`  - ${b}`);
+  process.exit(1);
+}
+
+const allowed = [...allowByGhsa.values()].filter((e) => e.matched).map((e) => e.ghsa);
+console.log(
+  `npm-audit-gate: PASS — no un-allowlisted advisories at/above ${allowlist.severityFloor}.` +
+    (allowed.length ? ` Allowlisted (reviewed, non-expired): ${allowed.join(", ")}.` : ""),
+);
+process.exit(0);

@@ -1,0 +1,33 @@
+{
+  "$comment": [
+    "Reviewed npm-audit allowlist (P1 W6-T4, ADR-0016 D16 pipeline).",
+    "npm audit has no native ignore file, so CI runs `npm audit --json` and pipes",
+    "it through scripts/npm-audit-gate.mjs, which FAILS on any advisory at or above",
+    "the configured severity floor (high) whose GHSA id is NOT listed below.",
+    "This mirrors the reviewed .trivyignore convention: never a blanket ignore —",
+    "every entry has a justification + an expiry (re-review) date. An entry past",
+    "its expiry makes the gate fail until it is re-reviewed and renewed or removed.",
+    "Triage policy: docs/security/supply-chain-scanning.md."
+  ],
+  "severityFloor": "high",
+  "allow": [
+    {
+      "ghsa": "GHSA-2w69-qvjg-hvjx",
+      "package": "@remix-run/router",
+      "via": "react-router-dom (direct prod dep), react-router (transitive)",
+      "severity": "high",
+      "advisory": "React Router XSS via open redirects",
+      "justification": "Fix requires react-router-dom>=6.30.4 which npm reports is OUTSIDE the pinned 6.30.0 dependency range; the dep-version bump is out of scope for W6-T4 (no while-here bumps) and is tracked for the W6 frontend dep-bump pass. The platform does not currently consume untrusted redirect targets in router config; reachability is low. Accepted pending the bump.",
+      "expires": "2026-09-30"
+    },
+    {
+      "ghsa": "GHSA-hmw2-7cc7-3qxx",
+      "package": "form-data",
+      "via": "transitive (dev-only: @testing-library / jsdom test toolchain)",
+      "severity": "high",
+      "advisory": "form-data CRLF injection via unescaped multipart field names",
+      "justification": "Present only in the dev/test dependency tree (not shipped in the vite production bundle). Fix is a transitive bump pending upstream test-tooling release. Not part of the deployed artifact; no runtime exposure.",
+      "expires": "2026-09-30"
+    }
+  ]
+}

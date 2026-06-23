@@ -46,6 +46,37 @@ jobs:
       - name: Install backend (editable, dev extras)
         run: pip install -e "./backend[dev]"
 
+      # Dependency-vulnerability gate (P1 W6-T4, ADR-0016 §, PRODUCTION.md §5).
+      # pip-audit audits the RESOLVED backend environment (the editable install
+      # above + dev extras) against the OSV/PyPI advisory DB and FAILS the job on
+      # any known-vulnerable dependency — a RED gate, not advisory.
+      #   - Pinned: pip-audit==2.7.3 (deterministic; the scan is not itself a
+      #     supply-chain risk, ADR-0016 §5).
+      #   - Reviewed, EXPIRING allowlist: backend/.pip-audit-allowlist.txt — each
+      #     accepted advisory ID is one line with a justification + re-review date
+      #     (mirrors the .trivyignore convention). Currently empty (no accepted
+      #     vulns); a populated line becomes a `--ignore-vuln` flag below.
+      #   - Advisory-DB fetch: pip-audit pulls OSV/PyPI advisories at run time.
+      #     In an air-gapped self-hosted fork, point it at a mirror via
+      #     PIP_AUDIT_* / --index-url (see docs/security/supply-chain-scanning.md).
+      - name: Install pip-audit (pinned)
+        run: pip install "pip-audit==2.7.3"
+
+      - name: Dependency audit (pip-audit) — RED gate
+        shell: bash
+        run: |
+          set -o pipefail
+          ignore_flags=()
+          while IFS= read -r line; do
+            line="${line%%#*}"
+            line="$(echo "$line" | tr -d '[:space:]')"
+            [ -z "$line" ] && continue
+            ignore_flags+=(--ignore-vuln "$line")
+          done < backend/.pip-audit-allowlist.txt
+          # Audit the installed environment (no lockfile in repo); --strict so a
+          # dependency pip-audit cannot resolve is an error, not a silent skip.
+          pip-audit --strict --progress-spinner off "${ignore_flags[@]}"
+
       - name: Lint (ruff check)
         working-directory: backend
         run: ruff check .
@@ -109,6 +140,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Dependency-vulnerability gate (P1 W6-T4, ADR-0016 §, PRODUCTION.md §5).
+      # npm has no native ignore file, so CI pipes `npm audit --json` through
+      # scripts/npm-audit-gate.mjs, which FAILS on any advisory at/above the
+      # `high` floor (aligned with the Trivy CRITICAL,HIGH posture) NOT covered by
+      # a non-expired entry in .npm-audit-allowlist.json. RED gate, not advisory.
+      #   - Reviewed, EXPIRING allowlist; an expired or stale entry fails the gate
+      #     so the allowlist cannot rot open (mirrors .trivyignore).
+      #   - `npm audit` itself returns non-zero when vulns exist, so `|| true`
+      #     hands the JSON to the gate which is the authoritative pass/fail.
+      #   - Advisory-DB fetch: npm audit queries the configured registry; an
+      #     air-gapped fork points `npm config set registry` at a mirror
+      #     (docs/security/supply-chain-scanning.md).
+      - name: Dependency audit (npm audit) — RED gate
+        shell: bash
+        run: |
+          set -o pipefail
+          npm audit --json > npm-audit.json || true
+          node scripts/npm-audit-gate.mjs < npm-audit.json
+
       - name: Lint (eslint)
         run: npm run lint
 
@@ -120,6 +170,57 @@ jobs:
 
       - name: Build (vite)
         run: npm run build
+
+  # Secret-scanning gate (P1 W6-T4, ADR-0011 §6 no-secret posture, PRODUCTION.md
+  # §5). gitleaks scans the WORKING TREE *and the full git HISTORY* — a secret
+  # committed earlier and later removed is still exposed in history (G-SEC
+  # credential-leak posture), so HEAD-only scanning is insufficient. A finding
+  # FAILS the job (RED gate, not advisory).
+  #
+  #   - History: `actions/checkout` with fetch-depth 0 fetches all commits;
+  #     `gitleaks detect` (NOT --no-git) walks the full commit graph by default.
+  #   - Reviewed allowlist: .gitleaks.toml extends the upstream default rule set
+  #     and adds only PATH-SCOPED allowances for known false-positive surfaces
+  #     (test-fixture sentinels, the generated lockfile). It never disables a rule
+  #     globally and never allowlists by secret-shaped regex — a real secret in
+  #     app/config/CI code still fails. (Mirrors the .trivyignore convention.)
+  #   - Offline/self-hosted-fork-friendly: the gitleaks binary is installed by
+  #     PINNED version via direct download (same pattern as the infra job's
+  #     kubeconform/kube-linter/conftest), not the marketplace action (which can
+  #     require a license key for orgs). No advisory-DB fetch — gitleaks is rule-
+  #     based, fully offline.
+  security-scan:
+    name: security-scan (gitleaks — tree + history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v7
+        with:
+          # fetch-depth 0 = all history; gitleaks must see every commit, not just
+          # HEAD, to catch a secret that was committed and later removed.
+          fetch-depth: 0
+
+      - name: Install gitleaks (pinned)
+        run: |
+          curl -sSL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: gitleaks detect (working tree + full history) — RED gate
+        run: |
+          # `detect` (no --no-git) scans the whole commit history; the working
+          # tree is covered because HEAD's tree is part of that graph and any
+          # uncommitted change in a PR build is already committed on the PR ref.
+          # --redact keeps any matched secret OUT of the CI log (ADR-0011 §6 — no
+          # secret material in logs). exit-code 1 (gitleaks default) fails the job.
+          gitleaks detect \
+            --source . \
+            --config .gitleaks.toml \
+            --redact \
+            --verbose \
+            --exit-code 1
 
   docker:
     name: docker (build images + Trivy scan)
