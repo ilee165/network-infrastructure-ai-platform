@@ -1,7 +1,7 @@
 # P1 Build Plan — Production Hardening (Post-MVP)
 
 **Project:** AI Network Operations Platform
-**Status:** IN PROGRESS — W0–W2 shipped (PR #50, `5c85eee P1 W0-W2: design gate (ADRs 0025-0032) + Vendor Wave 1 plugins + OIDC/SSO`); later waves ongoing.
+**Status:** IN PROGRESS — W0–W6 merged to main (PRs #50/#58/#59/#60/#61/#62; W6 = `01e46c9`). Only **W7** (prompt-injection evals, ADR-0033) remains — the phase-exit gate.
 **Authority:** Bound by `CLAUDE.md`, `docs/architecture/DECISIONS-BRIEF.md` (D1–D16), and `docs/roadmap/PRODUCTION.md` §1–§11. Entry condition satisfied: MVP exit = M5 merged (PR #25).
 **Scope source:** `PRODUCTION.md` Phase **P1** = Vendor Wave 1 + Platform track (K8s/Helm GA, OIDC/SSO, backup/DR baseline, K8s hardening round 1) + the M5-deferred packet-sandbox OS-isolation half.
 

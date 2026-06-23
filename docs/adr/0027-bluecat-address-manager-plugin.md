@@ -1,6 +1,6 @@
 # ADR-0027: BlueCat Address Manager DDI Plugin
 
-**Status:** Proposed | **Date:** 2026-06-20 | **Milestone:** P1 W0 (Vendor Wave 1 — `bluecat`; `P1-PLAN.md` W0/W1, `PRODUCTION.md` §2.2)
+**Status:** Accepted | **Date:** 2026-06-20 | **Milestone:** P1 W0 (Vendor Wave 1 — `bluecat`; `P1-PLAN.md` W0/W1, `PRODUCTION.md` §2.2)
 
 ## Context
 

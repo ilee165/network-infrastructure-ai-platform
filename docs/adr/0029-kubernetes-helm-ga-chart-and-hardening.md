@@ -1,6 +1,6 @@
 # ADR-0029: Kubernetes/Helm GA Chart and Hardening Round 1
 
-**Status:** Proposed | **Date:** 2026-06-20 | **Milestone:** P1 W0
+**Status:** Accepted | **Date:** 2026-06-20 | **Milestone:** P1 W0
 
 ## Context
 

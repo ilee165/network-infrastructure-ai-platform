@@ -1,6 +1,6 @@
 # ADR-0032: KMS-Backed Master Key and Rotation
 
-**Status:** Proposed | **Date:** 2026-06-20 | **Milestone:** P1 W0
+**Status:** Accepted | **Date:** 2026-06-20 | **Milestone:** P1 W0
 
 ## Context
 
