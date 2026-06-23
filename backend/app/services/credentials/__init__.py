@@ -2,6 +2,7 @@
 
 from app.services.credentials.service import (
     DecryptedSecret,
+    audit_provider_select,
     create_credential,
     decrypt,
     rotate_kek,
@@ -10,6 +11,7 @@ from app.services.credentials.service import (
 
 __all__ = [
     "DecryptedSecret",
+    "audit_provider_select",
     "create_credential",
     "decrypt",
     "rotate_kek",

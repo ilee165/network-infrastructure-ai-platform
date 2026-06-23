@@ -16,7 +16,7 @@ import structlog.testing
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.core.crypto import (
@@ -493,3 +493,70 @@ async def test_rotate_kek_fails_closed_when_provider_down(session: AsyncSession)
     rows = await _audit_rows(session, "kek.provider.unavailable")
     assert len(rows) == 1
     assert rows[0].target_id == str(credential.id)
+
+
+# ---------------------------------------------------------------------------
+# Durable fail-closed audit (ADR-0032 §4/§5) — survives caller rollback
+# ---------------------------------------------------------------------------
+
+
+async def test_provider_unavailable_audit_survives_caller_rollback(engine: AsyncEngine) -> None:
+    """The kek.provider.unavailable row persists even when the caller rolls back.
+
+    Reproduces the real fail-closed path (ADR-0032 §4/§5): create raises 503, the
+    caller's transaction is rolled back (the route never reaches ``commit``), yet
+    the append-only audit row must remain durably written via the autonomous
+    sessionmaker. A read on a *fresh* session sees the committed row.
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as request_session:
+        with pytest.raises(KeyProviderUnavailable):
+            await vault.create_credential(
+                request_session,
+                _DownProvider(),
+                name="lab-ssh",
+                kind=CredentialKind.SSH,
+                username="netops",
+                secret=_SECRET,
+                params={"port": 22},
+                actor="user:alice",
+                sessionmaker=maker,
+            )
+        # The route would never commit on this path — simulate the rollback.
+        await request_session.rollback()
+
+    async with maker() as verify_session:
+        rows = await _audit_rows(verify_session, "kek.provider.unavailable")
+        assert len(rows) == 1
+        assert rows[0].detail == {"reason_class": "TimeoutError"}
+        assert _SECRET not in str(rows[0].detail)
+        # No credential row was persisted on the failed write.
+        creds = (await verify_session.execute(select(DeviceCredential))).scalars().all()
+        assert creds == []
+
+
+# ---------------------------------------------------------------------------
+# Provider-selection audit (ADR-0032 §5) — kek.provider.select
+# ---------------------------------------------------------------------------
+
+
+async def test_audit_provider_select_writes_durable_row(engine: AsyncEngine) -> None:
+    """audit_provider_select durably writes the ADR-0032 §5 shape, ids/versions only."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    provider = _provider(version="v1")
+
+    await vault.audit_provider_select(maker, provider, actor="system:startup")
+
+    async with maker() as verify_session:
+        rows = await _audit_rows(verify_session, "kek.provider.select")
+        assert len(rows) == 1
+        entry = rows[0]
+        assert entry.actor == "system:startup"
+        assert entry.detail == {
+            "provider": "EnvKeyProvider",
+            "kek_version": "v1",
+            "is_production_grade": False,
+        }
+        # No KEK bytes anywhere in the row.
+        kek_b64 = base64.urlsafe_b64encode(provider._kek).decode("ascii")  # type: ignore[attr-defined]
+        assert kek_b64 not in str(entry.detail)

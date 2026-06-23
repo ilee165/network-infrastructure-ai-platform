@@ -20,6 +20,7 @@ from app.core.config import Settings
 from app.core.crypto import (
     KEY_BYTES,
     NONCE_BYTES,
+    WRAP_FORMAT_V1,
     DecryptionError,
     EncryptedSecret,
     EnvKeyProvider,
@@ -34,6 +35,7 @@ from app.core.crypto import (
     envelope_decrypt,
     envelope_encrypt,
     get_key_provider,
+    is_production_grade,
     rewrap,
 )
 
@@ -204,6 +206,89 @@ def test_provider_health_reports_version() -> None:
     health = provider.health()
     assert health.available is True
     assert health.kek_version == "v5"
+
+
+# ---------------------------------------------------------------------------
+# Wrap-format discriminator + legacy (pre-W6-T1, aad=None) compatibility
+# ---------------------------------------------------------------------------
+
+
+def test_wrap_blob_carries_version_discriminator() -> None:
+    """New local wraps prepend the WRAP_FORMAT_V1 byte so the format is detectable."""
+    provider = _env_provider()
+    wrapped = provider.wrap_dek(os.urandom(KEY_BYTES), aad=_AAD)
+    assert wrapped.ciphertext[:1] == WRAP_FORMAT_V1
+
+
+def test_unwrap_reads_legacy_aad_none_wrap_without_version_byte() -> None:
+    """A pre-W6-T1 row (no version byte, DEK wrapped with aad=None) still unwraps.
+
+    Persisted KEK->DEK rows written before the AAD-at-wrap-layer change carried
+    ``nonce ‖ AESGCM(kek).encrypt(nonce, dek, None)`` with no discriminator. The
+    upgraded unwrap path must read them transparently (one-time backward compat),
+    otherwise such credentials become permanently unreadable.
+    """
+    kek_b64 = _kek_b64()
+    raw_kek = base64.urlsafe_b64decode(kek_b64)
+    provider = _env_provider(kek_b64)
+    dek = os.urandom(KEY_BYTES)
+
+    # Forge the exact legacy blob shape: no version byte, aad=None at the wrap.
+    nonce = os.urandom(NONCE_BYTES)
+    legacy_sealed = AESGCM(raw_kek).encrypt(nonce, dek, None)
+    legacy_wrapped = WrappedDek(ciphertext=nonce + legacy_sealed, kek_version="v1")
+
+    assert provider.unwrap_dek(legacy_wrapped, aad=_AAD) == dek
+
+
+def test_legacy_row_rewraps_to_v1_format() -> None:
+    """A legacy aad=None envelope round-trips through decrypt and rewraps to v1."""
+    kek_b64 = _kek_b64()
+    raw_kek = base64.urlsafe_b64decode(kek_b64)
+    provider = _env_provider(kek_b64)
+
+    # Build a full legacy envelope: payload sealed under a DEK (with row-id AAD,
+    # unchanged across versions), DEK wrapped with aad=None and no version byte.
+    dek = os.urandom(KEY_BYTES)
+    payload_nonce = os.urandom(NONCE_BYTES)
+    ciphertext = AESGCM(dek).encrypt(payload_nonce, _PLAINTEXT, _AAD)
+    wrap_nonce = os.urandom(NONCE_BYTES)
+    legacy_wrap = AESGCM(raw_kek).encrypt(wrap_nonce, dek, None)
+    legacy = EncryptedSecret(
+        ciphertext=ciphertext,
+        nonce=payload_nonce,
+        wrapped_dek=legacy_wrap,
+        dek_nonce=wrap_nonce,
+        kek_version="v1",
+    )
+
+    assert envelope_decrypt(legacy, _AAD, provider) == _PLAINTEXT
+
+    migrated = rewrap(legacy, _AAD, provider)
+    # The migrated wrap now carries the v1 discriminator (dek_nonce holds the head).
+    assert migrated._wrapped().ciphertext[:1] == WRAP_FORMAT_V1
+    assert envelope_decrypt(migrated, _AAD, provider) == _PLAINTEXT
+
+
+# ---------------------------------------------------------------------------
+# Provider production-grade self-report (ADR-0032 §2/§5)
+# ---------------------------------------------------------------------------
+
+
+def test_local_providers_are_not_production_grade() -> None:
+    """Env/File local fallbacks self-report is_production_grade = False (ADR-0032 §2)."""
+    provider = _env_provider()
+    assert provider.is_production_grade is False
+    assert is_production_grade(provider) is False
+
+
+def test_is_production_grade_defaults_false_for_unknown_provider() -> None:
+    """An object lacking the attribute is treated as non-production (fail safe)."""
+
+    class _BareProvider:
+        pass
+
+    assert is_production_grade(_BareProvider()) is False  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

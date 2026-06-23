@@ -48,6 +48,21 @@ KEY_BYTES = 32
 #: GCM standard 96-bit nonce size (bytes).
 NONCE_BYTES = 12
 
+#: Local-provider wrap-format discriminator (ADR-0032 §1). A single leading
+#: version byte on ``WrappedDek.ciphertext`` for the in-process providers makes
+#: the wrap format detectable so a future change fails loudly instead of
+#: silently mis-decrypting. ``v1`` is the row-id-AAD-bound GCM wrap shipped in
+#: P1 W6-T1 (``nonce ‖ AESGCM(kek).encrypt(nonce, dek, aad=row_id)``).
+#:
+#: ``v0`` is the *legacy, pre-W6-T1* shape that wrapped the DEK with ``aad=None``
+#: and carried **no** version byte (``nonce ‖ AESGCM(kek).encrypt(nonce, dek,
+#: None)``). It is recognised on unwrap only — never produced — so any
+#: ``device_credentials`` row written before W6-T1 stays readable across the
+#: upgrade (one-time, transparent backfill: a subsequent ``rewrap``/rotate
+#: re-stores it in ``v1``). KMS backends (W6-T2) carry their own version in the
+#: opaque ``kek_version`` and do not use this local discriminator.
+WRAP_FORMAT_V1 = b"\x01"
+
 
 class KekConfigurationError(NetOpsError):
     """The credential-vault KEK is missing or malformed (deployment problem)."""
@@ -153,6 +168,18 @@ class KeyProvider(Protocol):
         """Stable id of the *active* wrapping key, stored on each row."""
         ...
 
+    @property
+    def is_production_grade(self) -> bool:
+        """Whether this provider is a production-grade KEK backend (ADR-0032 §2).
+
+        ``False`` for the in-process :class:`EnvKeyProvider` / :class:`FileKeyProvider`
+        local fallbacks (the KEK is held as bytes in env/file); a real KMS backend
+        (W6-T2) reports ``True``. Surfaced on the ``kek.provider.select`` audit row,
+        the startup banner, and ``/metrics`` so a non-prod KEK cannot hide behind a
+        green deploy.
+        """
+        ...
+
     def wrap_dek(self, dek: bytes, *, aad: bytes) -> WrappedDek:
         """Wrap *dek* under the active KEK, binding *aad* (the credential row id).
 
@@ -222,18 +249,32 @@ class _StaticKeyProvider:
         """Return the configured KEK version (``NETOPS_KEK_VERSION``, default ``v1``)."""
         return self._version
 
+    @property
+    def is_production_grade(self) -> bool:
+        """Local in-process KEK is a non-production fallback (ADR-0032 §2)."""
+        return False
+
     def wrap_dek(self, dek: bytes, *, aad: bytes) -> WrappedDek:
         """AESGCM-wrap *dek* under the in-process KEK, binding *aad*.
 
-        The 96-bit nonce is prepended to the GCM output so the single
-        ``WrappedDek.ciphertext`` blob is self-contained.
+        The blob is ``WRAP_FORMAT_V1 ‖ nonce ‖ GCM(dek, aad)``: a one-byte
+        wrap-format discriminator (so the format is detectable, ADR-0032 §1),
+        then the 96-bit nonce, then the AAD-bound GCM output — self-contained in
+        the single ``WrappedDek.ciphertext`` column.
         """
         nonce = os.urandom(NONCE_BYTES)
         sealed = AESGCM(self._kek).encrypt(nonce, dek, aad)
-        return WrappedDek(ciphertext=nonce + sealed, kek_version=self._version)
+        return WrappedDek(ciphertext=WRAP_FORMAT_V1 + nonce + sealed, kek_version=self._version)
 
     def unwrap_dek(self, wrapped: WrappedDek, *, aad: bytes) -> bytes:
         """Unwrap *wrapped* if its version matches and *aad* authenticates.
+
+        Reads the leading wrap-format byte: a ``WRAP_FORMAT_V1`` blob is the
+        AAD-bound GCM wrap (W6-T1). A blob with **no** recognised version byte is
+        treated as the legacy pre-W6-T1 ``v0`` shape and unwrapped with
+        ``aad=None`` so credentials written before the AAD-at-wrap-layer change
+        stay readable across the upgrade (one-time transparent compatibility; a
+        later ``rewrap`` re-stores them in ``v1``).
 
         Raises:
             UnknownKekVersionError: For any other version — restore the matching
@@ -246,9 +287,15 @@ class _StaticKeyProvider:
                 f"KEK version {wrapped.kek_version!r} is not available "
                 f"(provider holds {self._version!r})"
             )
-        nonce, sealed = wrapped.ciphertext[:NONCE_BYTES], wrapped.ciphertext[NONCE_BYTES:]
+        blob = wrapped.ciphertext
+        if blob[:1] == WRAP_FORMAT_V1:
+            body, wrap_aad = blob[1:], aad
+        else:
+            # Legacy v0: no version byte, DEK wrapped with aad=None (pre-W6-T1).
+            body, wrap_aad = blob, None
+        nonce, sealed = body[:NONCE_BYTES], body[NONCE_BYTES:]
         try:
-            return AESGCM(self._kek).decrypt(nonce, sealed, aad)
+            return AESGCM(self._kek).decrypt(nonce, sealed, wrap_aad)
         except InvalidTag as exc:
             raise DecryptionError(
                 "Wrapped DEK failed authenticated decryption (wrong KEK, wrong AAD, "
@@ -303,6 +350,17 @@ def get_key_provider(settings: Settings) -> KeyProvider:
         "Credential vault KEK is not configured: set NETOPS_KEK (urlsafe-base64, "
         "32 bytes decoded) or NETOPS_KEK_FILE (path to a file containing it)"
     )
+
+
+def is_production_grade(provider: KeyProvider) -> bool:
+    """Whether *provider* is a production-grade KEK backend (ADR-0032 §2).
+
+    Reads ``provider.is_production_grade`` when present (the Protocol property),
+    defaulting to ``False`` (fail safe: an unknown provider is treated as a
+    non-production local fallback so a non-prod KEK can never hide behind a green
+    deploy). Used for the ``kek.provider.select`` audit row and the startup gate.
+    """
+    return bool(getattr(provider, "is_production_grade", False))
 
 
 @dataclass(frozen=True, slots=True)

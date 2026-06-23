@@ -61,6 +61,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from app.services.rate_limit import RedisRateLimiter
 
         app_.state.rate_limiter = RedisRateLimiter(from_url(app_settings.redis_url))
+        # P1 W6-T1 (ADR-0032 §5): audit the active KEK provider/backend chosen at
+        # startup as ``kek.provider.select`` — identifiers/versions only, never key
+        # material. Best-effort: a misconfigured/unreachable KEK or DB at boot must
+        # not crash the api; the credential paths fail closed in their own right.
+        from app.core.crypto import get_key_provider
+        from app.services import credentials as credentials_service
+
+        try:
+            provider = get_key_provider(app_settings)
+            await credentials_service.audit_provider_select(
+                db.get_sessionmaker(), provider, actor="system:startup"
+            )
+        except Exception as exc:  # noqa: BLE001  (boot best-effort: never crash on audit)
+            logger.warning("kek.provider.select.audit_skipped", reason_class=type(exc).__name__)
         # M1 placeholder hook: initialize the shared async DB engine pool and
         # run a startup connectivity check once domain models land.
         # M2 placeholder hook: initialize the shared Neo4j driver (knowledge/).

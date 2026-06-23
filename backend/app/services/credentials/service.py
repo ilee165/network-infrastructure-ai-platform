@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.crypto import (
     EncryptedSecret,
@@ -39,6 +39,7 @@ from app.core.crypto import (
     KeyProviderUnavailable,
     envelope_decrypt,
     envelope_encrypt,
+    is_production_grade,
     rewrap,
 )
 from app.core.errors import NotFoundError
@@ -46,6 +47,9 @@ from app.models.inventory import CredentialKind, DeviceCredential
 from app.services import audit
 
 _TARGET_TYPE = "credential"
+
+#: Audit ``target_type`` for the provider-level (non-row) KEK events.
+_PROVIDER_TARGET_TYPE = "key_provider"
 
 _REDACTED = "DecryptedSecret(****)"
 
@@ -100,12 +104,36 @@ async def _audit_provider_unavailable(
     *,
     actor: str,
     target_id: str | None,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
-    """Audit a tripped fail-closed gate (ADR-0032 §4/§5): reason class only.
+    """Durably audit a tripped fail-closed gate (ADR-0032 §4/§5): reason class only.
 
     ``detail`` carries the coarse machine ``reason_class`` and nothing else —
     never key bytes, the wrapped blob, or a ``credential_ref`` value.
+
+    The fail-closed gate is the one path where the caller's transaction is
+    *rolled back* (no row was written, the exception propagates to a route that
+    never commits). The required append-only ``audit_log`` row must therefore be
+    persisted **independently** of that doomed transaction: when *sessionmaker*
+    is supplied, the row is written in a separate short-lived session that
+    commits before the gate exception re-raises (``audit_log`` is append-only, so
+    an autonomous commit is sound — there is no sibling write to be atomic with
+    on the failure path). When *sessionmaker* is ``None`` (unit tests asserting
+    on the same session, callers with no autonomous boundary), the row is flushed
+    on the caller's session as before — non-durable, but behaviourally correct.
     """
+    if sessionmaker is not None:
+        async with sessionmaker() as audit_session:
+            await audit.record(
+                audit_session,
+                actor=actor,
+                action=audit.KEK_PROVIDER_UNAVAILABLE,
+                target_type=_TARGET_TYPE,
+                target_id=target_id,
+                detail={"reason_class": exc.reason_class},
+            )
+            await audit_session.commit()
+        return
     await audit.record(
         session,
         actor=actor,
@@ -114,6 +142,39 @@ async def _audit_provider_unavailable(
         target_id=target_id,
         detail={"reason_class": exc.reason_class},
     )
+
+
+async def audit_provider_select(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    provider: KeyProvider,
+    *,
+    actor: str,
+) -> None:
+    """Durably audit the active KEK provider/backend selection (ADR-0032 §5).
+
+    Emitted when the platform chooses its active provider at startup. ``detail``
+    (the ADR-0032 §5 ``after`` shape) carries identifiers/versions only —
+    ``{provider: <class name>, kek_version, is_production_grade}`` — never key
+    bytes, the wrapped blob, or a ``credential_ref`` value.
+
+    Written in its own short-lived session that commits immediately so the row
+    survives independent of any request transaction (it is emitted at startup
+    where there is no caller-owned transaction boundary).
+    """
+    async with sessionmaker() as session:
+        await audit.record(
+            session,
+            actor=actor,
+            action=audit.KEK_PROVIDER_SELECT,
+            target_type=_PROVIDER_TARGET_TYPE,
+            target_id=type(provider).__name__,
+            detail={
+                "provider": type(provider).__name__,
+                "kek_version": provider.kek_version,
+                "is_production_grade": is_production_grade(provider),
+            },
+        )
+        await session.commit()
 
 
 async def create_credential(
@@ -126,6 +187,7 @@ async def create_credential(
     secret: str,
     params: dict[str, Any] | None,
     actor: str,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> DeviceCredential:
     """Encrypt *secret* under a fresh DEK and persist a new credential row.
 
@@ -134,15 +196,21 @@ async def create_credential(
     Audits ``credential.created`` and ``kek.wrap``; the detail carries metadata
     and the KEK version only, never the secret.
 
+    *sessionmaker* lets the fail-closed ``kek.provider.unavailable`` audit row be
+    persisted durably in its own transaction (the caller's transaction rolls back
+    on this path — ADR-0032 §4/§5); routes pass it, unit tests may omit it.
+
     Raises:
-        KeyProviderUnavailable: If the provider is unreachable — audited as
-            ``kek.provider.unavailable`` and re-raised; **no row is written**.
+        KeyProviderUnavailable: If the provider is unreachable — audited durably
+            as ``kek.provider.unavailable`` and re-raised; **no row is written**.
     """
     credential_id = uuid.uuid4()
     try:
         envelope = envelope_encrypt(secret.encode("utf-8"), _aad(credential_id), provider)
     except KeyProviderUnavailable as exc:
-        await _audit_provider_unavailable(session, exc, actor=actor, target_id=str(credential_id))
+        await _audit_provider_unavailable(
+            session, exc, actor=actor, target_id=str(credential_id), sessionmaker=sessionmaker
+        )
         raise
     credential = DeviceCredential(
         id=credential_id,
@@ -179,15 +247,17 @@ async def rotate_secret(
     credential_id: uuid.UUID,
     new_secret: str,
     actor: str,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> DeviceCredential:
     """Replace the secret payload: fresh DEK, fresh nonces, same row-id AAD.
 
-    Audits ``credential.rotated`` and ``kek.wrap``.
+    Audits ``credential.rotated`` and ``kek.wrap``. *sessionmaker* makes the
+    fail-closed ``kek.provider.unavailable`` audit row durable (ADR-0032 §4/§5).
 
     Raises:
         NotFoundError: If *credential_id* does not exist.
-        KeyProviderUnavailable: If the provider is unreachable — audited as
-            ``kek.provider.unavailable`` and re-raised; the payload is unchanged.
+        KeyProviderUnavailable: If the provider is unreachable — audited durably
+            as ``kek.provider.unavailable`` and re-raised; the payload is unchanged.
     """
     credential = await session.get(DeviceCredential, credential_id)
     if credential is None:
@@ -195,7 +265,9 @@ async def rotate_secret(
     try:
         envelope = envelope_encrypt(new_secret.encode("utf-8"), _aad(credential.id), provider)
     except KeyProviderUnavailable as exc:
-        await _audit_provider_unavailable(session, exc, actor=actor, target_id=str(credential.id))
+        await _audit_provider_unavailable(
+            session, exc, actor=actor, target_id=str(credential.id), sessionmaker=sessionmaker
+        )
         raise
     _store(credential, envelope)
     await audit.record(
@@ -224,25 +296,30 @@ async def decrypt(
     *,
     actor: str,
     reason: str,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> DecryptedSecret:
     """Decrypt *credential*'s payload, auditing ``kek.unwrap`` + ``credential.decrypted``.
 
     Intended callers are the device transports / discovery engine only — every
     plaintext access leaves an audit row saying who needed it and why.
+    *sessionmaker* makes the fail-closed ``kek.provider.unavailable`` audit row
+    durable (ADR-0032 §4/§5).
 
     Raises:
         DecryptionError: If authentication fails (ciphertext moved to another
             row, tampered data, or wrong key).
         UnknownKekVersionError: If the provider cannot supply the KEK version
             the stored DEK is wrapped under.
-        KeyProviderUnavailable: If the provider is unreachable — audited as
-            ``kek.provider.unavailable`` and re-raised so the dependent task
+        KeyProviderUnavailable: If the provider is unreachable — audited durably
+            as ``kek.provider.unavailable`` and re-raised so the dependent task
             fails and retries (Celery ``acks_late``); no plaintext is returned.
     """
     try:
         plaintext = envelope_decrypt(_envelope(credential), _aad(credential.id), provider)
     except KeyProviderUnavailable as exc:
-        await _audit_provider_unavailable(session, exc, actor=actor, target_id=str(credential.id))
+        await _audit_provider_unavailable(
+            session, exc, actor=actor, target_id=str(credential.id), sessionmaker=sessionmaker
+        )
         raise
     await audit.record(
         session,
@@ -268,6 +345,7 @@ async def rotate_kek(
     provider: KeyProvider,
     *,
     actor: str,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> int:
     """Rewrap every credential's DEK under the provider's active KEK version.
 
@@ -275,13 +353,14 @@ async def rotate_kek(
     payload ciphertext is never re-encrypted. Credentials already wrapped under
     the provider's active KEK version are skipped (no rewrap, no audit row).
     Audits ``credential.rotated`` and ``kek.wrap`` per rewrapped credential and
-    returns the number of credentials rewrapped.
+    returns the number of credentials rewrapped. *sessionmaker* makes the
+    fail-closed ``kek.provider.unavailable`` audit row durable (ADR-0032 §4/§5).
 
     Raises:
         UnknownKekVersionError: If any stored ``kek_version`` cannot be supplied
             by *provider* (the old KEK is needed to unwrap).
-        KeyProviderUnavailable: If the provider is unreachable — audited as
-            ``kek.provider.unavailable`` and re-raised; no rows are mutated.
+        KeyProviderUnavailable: If the provider is unreachable — audited durably
+            as ``kek.provider.unavailable`` and re-raised; no rows are mutated.
     """
     active_version = provider.kek_version
     credentials = (await session.execute(select(DeviceCredential))).scalars().all()
@@ -294,7 +373,11 @@ async def rotate_kek(
             rewrapped = rewrap(_envelope(credential), _aad(credential.id), provider)
         except KeyProviderUnavailable as exc:
             await _audit_provider_unavailable(
-                session, exc, actor=actor, target_id=str(credential.id)
+                session,
+                exc,
+                actor=actor,
+                target_id=str(credential.id),
+                sessionmaker=sessionmaker,
             )
             raise
         _store(credential, rewrapped)
