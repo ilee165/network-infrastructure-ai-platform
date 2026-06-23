@@ -64,6 +64,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # P1 W6-T1/T2 (ADR-0032 §2/§5): select the active KEK provider, enforce the
         # prod-grade gate, surface its posture on the startup banner + /metrics, and
         # audit ``kek.provider.select`` (identifiers/versions only, never key bytes).
+        import asyncio
+
         from app.core import metrics
         from app.core.crypto import (
             get_key_provider,
@@ -72,13 +74,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         from app.services import credentials as credentials_service
 
+        # A KMS backend (aws|azure|vault) is a PRODUCTION KEK selection: if its
+        # build fails (missing ARN, absent SDK extra, unreachable backend at boot)
+        # startup MUST crash loudly — swallowing it would silently start with no
+        # KEK provider and defeat the ADR-0032 §2 refuse-to-start gate. Only an
+        # unset/local selector (None|env|file) in a NON-prod run may degrade to
+        # "no provider built" (a bare dev run; the credential paths fail closed in
+        # their own right). In prod, get_key_provider's own KekConfigurationError
+        # propagates so a misconfigured local KEK also crashes boot.
+        kms_backend_selected = app_settings.vault_key_provider in ("aws", "azure", "vault")
         try:
             provider = get_key_provider(app_settings)
         except Exception:  # noqa: BLE001
-            # An unconfigured KEK at boot must not crash a local/dev run (the
-            # credential paths fail closed in their own right); skip the banner /
-            # gate / audit when no provider is built.
+            if kms_backend_selected or app_settings.production:
+                raise  # never hide a broken prod-KEK build behind a green deploy
             provider = None
+        app_.state.key_provider = provider
         if provider is not None:
             # ADR-0032 §2 prod gate: refuse to start on a local provider in prod —
             # this RuntimeError is intentionally NOT swallowed so a non-production
@@ -86,7 +97,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             require_production_grade(provider, is_prod=app_settings.production)
             production_grade = is_production_grade(provider)
             metrics.set_provider_production_grade(production_grade=production_grade)
-            metrics.set_provider_healthy(healthy=provider.health().available)
+            # The provider's health() is a synchronous boto3/hvac/azure network
+            # round-trip; offload it to a worker thread (matching the readiness
+            # probe) so the blocking SDK call never stalls the async event loop at
+            # boot. The readiness probe refreshes this gauge on every poll.
+            healthy = await asyncio.to_thread(lambda: provider.health().available)
+            metrics.set_provider_healthy(healthy=healthy)
             # Startup banner: the active KEK backend + its production posture.
             logger.info(
                 "kek.provider.banner",

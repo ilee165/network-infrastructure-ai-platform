@@ -44,7 +44,12 @@ data:
   # Production posture gate (W6-T2, ADR-0032 §2). ON in-chart by default so the
   # credential service REFUSES to start on a local Env/File KEK in production —
   # a non-production KEK can never hide behind a green deploy. Off in compose.
-  NETOPS_IS_PROD: {{ .Values.config.kms.isProd | default true | quote }}
+  # NOTE: do NOT use `| default true` on a bool — Helm's `default` treats the
+  # boolean `false` as empty and would silently force an explicit `isProd: false`
+  # opt-out back to true. Guard on whether the key is ABSENT (kindIs "invalid")
+  # instead: absent ⇒ true (secure default, values.yaml also ships true); present
+  # ⇒ honour the operator's explicit value (including an intentional false).
+  NETOPS_IS_PROD: {{ (kindIs "invalid" .Values.config.kms.isProd) | ternary true .Values.config.kms.isProd | quote }}
   {{- with .Values.config.kms.keyProvider }}
   # Active KEK backend (W6-T2): aws | azure | vault (production KMS) — the
   # credential service selects by THIS value only; all auth below is referenced

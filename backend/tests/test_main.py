@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import Settings
-from app.core.crypto import LocalKeyProviderInProductionError
+from app.core.crypto import KekConfigurationError, LocalKeyProviderInProductionError
 from app.main import create_app
 
 
@@ -89,5 +89,30 @@ async def test_startup_allows_kms_provider_in_production(
 
     app_ = create_app(_prod_settings(vault_key_provider="aws", aws_kms_key_arn="arn:x"))
     async with app_.router.lifespan_context(app_):
-        pass  # lifespan entered without the prod gate tripping
+        # lifespan entered without the prod gate tripping; the built provider is
+        # stashed on app.state for the readiness probe to reuse (not rebuilt per poll).
+        assert app_.state.key_provider is fake
     assert grade["value"] is True
+
+
+async def test_startup_crashes_when_kms_backend_unbuildable_in_prod() -> None:
+    """A prod KMS backend whose build fails must CRASH startup, never silently start.
+
+    ADR-0032 §2 refuse-to-start: selecting VAULT_KEY_PROVIDER=aws in prod but
+    failing to build it (here: no key ARN) must NOT be swallowed into provider=None
+    — that would start the platform with no KEK and defeat the gate. The
+    KekConfigurationError propagates out of the lifespan.
+    """
+    app_ = create_app(_prod_settings(vault_key_provider="aws"))  # no aws_kms_key_arn
+    with pytest.raises(KekConfigurationError):
+        async with app_.router.lifespan_context(app_):
+            pass  # pragma: no cover - the build raises before this body runs
+
+
+async def test_startup_unconfigured_kek_in_dev_starts_without_provider() -> None:
+    """A bare dev run (no KEK, not prod) degrades to no provider — does NOT crash."""
+    app_ = create_app(
+        Settings(_env_file=None, env="dev", secret_key="t", is_prod=False)  # type: ignore[arg-type]
+    )
+    async with app_.router.lifespan_context(app_):
+        assert app_.state.key_provider is None

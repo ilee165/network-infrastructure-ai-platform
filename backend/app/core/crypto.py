@@ -32,8 +32,10 @@ verbatim.
 from __future__ import annotations
 
 import base64
+import contextlib
 import os
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from cryptography.exceptions import InvalidTag
@@ -521,6 +523,12 @@ class HashiCorpVaultTransitKeyProvider(_KmsKeyProvider):
     (an INDIRECT handle, never a token value) and auto-renewed; the value of
     ``credential_ref`` is never logged. ``kek_version`` is ``<key>:vN`` so an old
     transit key version still decrypts after rotation (ADR-0032 §2 rotation model).
+
+    The injected *client* is the :class:`_VaultTransitClient` adapter contract
+    (``encrypt_data`` / ``decrypt_data`` / ``read_key_version`` taking **raw**
+    bytes + the bound mount). The adapter — not this provider — owns the real
+    hvac shape (Transit's base64 plaintext/context wire encoding, ``mount_point``,
+    ``read_key``); tests inject an in-memory double of that same adapter contract.
     """
 
     def __init__(
@@ -539,16 +547,20 @@ class HashiCorpVaultTransitKeyProvider(_KmsKeyProvider):
         # any default dataclass-style introspection).
         self.__credential_ref = credential_ref
         resolved = (
-            client if client is not None else _build_vault_transit_client(addr, credential_ref)
+            client
+            if client is not None
+            else _build_vault_transit_client(addr, transit_mount, credential_ref)
         )
         super().__init__(resolved)
         # The active transit key version; ``<key>:vN`` is the stored kek_version.
+        # Read from the live key (real hvac: read_key()["data"]["latest_version"])
+        # so a real KEK rotation moves kek_version and the T3 worklist predicate
+        # (WHERE kek_version != active) actually fires — never a hardcoded v1.
         self._key_version = self._read_key_version()
         self._version = f"{self._key}:v{self._key_version}"
 
     def _read_key_version(self) -> int:
-        version = getattr(self._client, "current_version", 1)
-        return int(version)
+        return int(self._client.read_key_version(name=self._key))  # type: ignore[attr-defined]
 
     def _context(self, aad: bytes) -> bytes:
         return aad
@@ -592,10 +604,15 @@ class AzureKeyVaultKeyProvider(_KmsKeyProvider):
 
     Auth is the pod managed identity (``DefaultAzureCredential``) — no client
     secret inlined; the key is referenced by vault URI + key name.
+
+    The injected *client* is the :class:`_AzureKeyClient` adapter contract
+    (``wrap_key`` / ``unwrap_key`` taking raw bytes + ``key_version``). The
+    adapter — not this provider — pins the real azure shape:
+    ``wrap_key(KeyWrapAlgorithm.rsa_oaep_256, key).encrypted_key`` /
+    ``unwrap_key(KeyWrapAlgorithm.rsa_oaep_256, encrypted_key).key`` and the live
+    ``key.properties.version``; tests inject an in-memory double of it.
     """
 
-    #: kek_version for Azure: the inner-AESGCM layer is the active wrap and the
-    #: Key Vault key wraps the inner key; the configured key name labels rotation.
     def __init__(
         self,
         *,
@@ -605,16 +622,21 @@ class AzureKeyVaultKeyProvider(_KmsKeyProvider):
     ) -> None:
         self._vault_uri = vault_uri
         self._key_name = key_name
-        self._version = f"{key_name}:azure-aesgcm-v1"
-        super().__init__(
-            client if client is not None else _build_azure_key_client(vault_uri, key_name)
-        )
+        resolved = client if client is not None else _build_azure_key_client(vault_uri, key_name)
+        super().__init__(resolved)
+        # kek_version reflects the REAL Key Vault key version fetched at build
+        # (key.properties.version) so a key rotation moves kek_version and the T3
+        # worklist predicate fires — never a hardcoded ``azure-aesgcm-v1``. The
+        # inner-AESGCM layer is the active row-id wrap; the configured key wraps
+        # the inner key, so the wrapping-key version is the Key Vault key version.
+        key_version = self._client.key_version()  # type: ignore[attr-defined]
+        self._version = f"{key_name}:{key_version}"
 
     def _wrap(self, dek: bytes, *, aad: bytes) -> bytes:
         inner_key = AESGCM.generate_key(bit_length=KEY_BYTES * 8)
         inner_nonce = os.urandom(NONCE_BYTES)
         inner_ciphertext = AESGCM(inner_key).encrypt(inner_nonce, dek, aad)
-        wrapped_inner = self._client.wrap_key(key=inner_key)  # type: ignore[attr-defined]
+        wrapped_inner = self._client.wrap_key(inner_key)  # type: ignore[attr-defined]
         return inner_nonce + bytes(wrapped_inner) + inner_ciphertext
 
     def _unwrap(self, ciphertext: bytes, *, aad: bytes) -> bytes:
@@ -629,9 +651,7 @@ class AzureKeyVaultKeyProvider(_KmsKeyProvider):
         wrapped_inner = body[:-inner_ct_len]
         inner_ciphertext = body[-inner_ct_len:]
         try:
-            inner_key = self._client.unwrap_key(  # type: ignore[attr-defined]
-                encrypted_key=wrapped_inner
-            )
+            inner_key = self._client.unwrap_key(wrapped_inner)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001
             if _is_unavailable(exc):
                 raise
@@ -679,12 +699,26 @@ class FakeKmsKeyProvider(_KmsKeyProvider):
             ) from exc
 
 
-def _build_aws_kms_client(key_arn: str) -> object:  # pragma: no cover - needs boto3 + cloud
+# ---------------------------------------------------------------------------
+# Real-SDK adapters. Each ``_build_*`` returns a thin adapter that maps the
+# provider's raw-bytes contract onto the EXACT cloud-SDK call shape (the only
+# place that imports boto3 / hvac / azure). The contract tests in
+# ``tests/core/test_kms_contract.py`` pin these shapes against a mock SDK client
+# so the prod path is covered without a live cloud (the CI emulator job is the
+# real integration gate); the offline unit suite drives the providers via the
+# in-memory adapter doubles in ``tests/core/test_kms_providers.py``.
+# ---------------------------------------------------------------------------
+
+
+def _build_aws_kms_client(key_arn: str) -> object:  # pragma: no cover - import needs boto3 extra
     """Build a boto3 ``kms`` client from the pod's ambient IAM/IRSA credentials.
 
     Lazy import keeps boto3 an OPTIONAL dependency (installed only where the AWS
     backend is selected); no static access keys — boto3's default provider chain
-    resolves IRSA / instance-role credentials.
+    resolves IRSA / instance-role credentials. The boto3 ``kms`` client already
+    speaks the provider's ``encrypt(KeyId=, Plaintext=, EncryptionContext=)`` /
+    ``decrypt(CiphertextBlob=, EncryptionContext=)`` shape natively, so it is
+    returned directly (no adapter needed); the shape is pinned by a contract test.
     """
     try:
         import boto3  # noqa: PLC0415
@@ -695,14 +729,100 @@ def _build_aws_kms_client(key_arn: str) -> object:  # pragma: no cover - needs b
     return boto3.client("kms")
 
 
+class _VaultTransitClient:
+    """Adapter mapping the provider's raw-bytes contract onto real hvac Transit.
+
+    Transit's HTTP API takes **base64** ``plaintext`` / ``context`` and returns a
+    base64 ``plaintext`` on decrypt, and the calls are namespaced under
+    ``client.secrets.transit.*`` with an explicit ``mount_point``. This adapter
+    owns exactly that translation — base64 in/out + the bound mount — so the
+    provider stays a clean raw-bytes caller and the offline tests inject an
+    in-memory double of *this* contract. The active version is read from the live
+    key (``read_key()["data"]["latest_version"]``) so rotation is visible.
+    """
+
+    def __init__(self, client: object, mount: str) -> None:
+        self._client = client
+        self._mount = mount
+
+    def encrypt_data(self, *, name: str, plaintext: bytes, context: bytes) -> dict[str, object]:
+        resp = self._client.secrets.transit.encrypt_data(  # type: ignore[attr-defined]
+            name=name,
+            plaintext=base64.b64encode(plaintext).decode("ascii"),
+            context=base64.b64encode(context).decode("ascii"),
+            mount_point=self._mount,
+        )
+        return {"data": {"ciphertext": resp["data"]["ciphertext"]}}
+
+    def decrypt_data(self, *, name: str, ciphertext: str, context: bytes) -> dict[str, object]:
+        resp = self._client.secrets.transit.decrypt_data(  # type: ignore[attr-defined]
+            name=name,
+            ciphertext=ciphertext,
+            context=base64.b64encode(context).decode("ascii"),
+            mount_point=self._mount,
+        )
+        return {"data": {"plaintext": base64.b64decode(resp["data"]["plaintext"])}}
+
+    def read_key_version(self, *, name: str) -> int:
+        resp = self._client.secrets.transit.read_key(  # type: ignore[attr-defined]
+            name=name, mount_point=self._mount
+        )
+        return int(resp["data"]["latest_version"])
+
+
+#: Standard projected-ServiceAccount-token path inside a K8s pod (k8s-auth).
+_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+
+def _read_sa_jwt() -> str | None:
+    """Return the pod's projected ServiceAccount JWT, or ``None`` outside K8s.
+
+    A thin, easily-stubbed indirection: this is the only place that reads the
+    token file, so the value never enters a log line, and tests can override the
+    k8s-vs-AppRole branch without filesystem games.
+    """
+    try:
+        return Path(_SA_TOKEN_PATH).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _vault_login(client: object, credential_ref: str | None) -> None:
+    """Authenticate *client* via k8s-auth (default) or AppRole, then auto-renew.
+
+    ``credential_ref`` is the INDIRECT login handle — a k8s-auth / AppRole **role**
+    name, never a token value. The pod's projected ServiceAccount JWT is exchanged
+    for a short-lived Vault token; the lease is renewed in the background. The
+    ``credential_ref`` value is never logged (only its presence/absence drives the
+    branch). If no ServiceAccount JWT is present we fall back to AppRole using the
+    ref as the role id (the secret id arrives via the standard ``VAULT_*`` env /
+    the agent sidecar), so the platform never inlines a secret here.
+    """
+    if not credential_ref:
+        return
+    jwt = _read_sa_jwt()
+    if jwt is not None:
+        client.auth.kubernetes.login(role=credential_ref, jwt=jwt)  # type: ignore[attr-defined]
+    else:
+        secret_id = os.environ.get("VAULT_SECRET_ID")
+        client.auth.approle.login(  # type: ignore[attr-defined]
+            role_id=credential_ref, secret_id=secret_id
+        )
+    # Best-effort lease renewal so a long-lived process keeps a valid token; the
+    # fail-closed readiness gate catches an expired/unrenewable token as an outage.
+    with contextlib.suppress(Exception):  # renewal is best-effort; readiness gate is the backstop
+        client.auth.token.renew_self()  # type: ignore[attr-defined]
+
+
 def _build_vault_transit_client(
-    addr: str | None, credential_ref: str | None
-) -> object:  # pragma: no cover - needs hvac + a live Vault
-    """Build an hvac client authenticated via k8s-auth / AppRole (``credential_ref``).
+    addr: str | None, mount: str, credential_ref: str | None
+) -> object:  # pragma: no cover - import needs hvac extra + a live Vault
+    """Build an hvac-backed :class:`_VaultTransitClient` authenticated via ``credential_ref``.
 
     Lazy import keeps hvac OPTIONAL. The ``credential_ref`` is the INDIRECT login
-    handle (role id), exchanged for a short-lived, auto-renewed token; its value
-    is never logged.
+    handle (k8s-auth / AppRole role), exchanged for a short-lived, auto-renewed
+    token (:func:`_vault_login`); its value is never logged. The returned adapter
+    pins the real ``client.secrets.transit.*`` shape (base64 + ``mount_point``).
     """
     try:
         import hvac  # noqa: PLC0415
@@ -710,28 +830,64 @@ def _build_vault_transit_client(
         raise KekConfigurationError(
             "VAULT_KEY_PROVIDER=vault requires the 'hvac' extra to be installed"
         ) from exc
-    return hvac.Client(url=addr)
+    client = hvac.Client(url=addr)
+    _vault_login(client, credential_ref)
+    return _VaultTransitClient(client, mount)
+
+
+class _AzureKeyClient:
+    """Adapter mapping the provider's raw-bytes contract onto real azure crypto.
+
+    Azure ``wrapKey``/``unwrapKey`` is
+    ``CryptographyClient.wrap_key(algorithm, key) -> WrapResult.encrypted_key`` and
+    ``unwrap_key(algorithm, encrypted_key) -> UnwrapResult.key`` — a pinned
+    ``rsa_oaep_256`` algorithm and result-object attribute access, NOT
+    ``wrap_key(key=...)`` / ``bytes(result)``. This adapter owns that shape so the
+    provider stays a raw-bytes caller; the offline tests inject a double of it.
+    """
+
+    def __init__(self, crypto_client: object, algorithm: object, key_version: str) -> None:
+        self._crypto = crypto_client
+        self._algorithm = algorithm
+        self._key_version = key_version
+
+    def wrap_key(self, key: bytes) -> bytes:
+        result = self._crypto.wrap_key(self._algorithm, key)  # type: ignore[attr-defined]
+        return bytes(result.encrypted_key)
+
+    def unwrap_key(self, encrypted_key: bytes) -> bytes:
+        result = self._crypto.unwrap_key(self._algorithm, encrypted_key)  # type: ignore[attr-defined]
+        return bytes(result.key)
+
+    def key_version(self) -> str:
+        return self._key_version
 
 
 def _build_azure_key_client(
     vault_uri: str, key_name: str
-) -> object:  # pragma: no cover - needs azure SDK + cloud
-    """Build an azure-keyvault-keys ``CryptographyClient`` via managed identity.
+) -> object:  # pragma: no cover - import needs azure extra + cloud
+    """Build an :class:`_AzureKeyClient` over a ``CryptographyClient`` via managed identity.
 
     Lazy import keeps the azure SDK OPTIONAL; ``DefaultAzureCredential`` resolves
-    the pod's managed identity — no client secret inlined.
+    the pod's managed identity — no client secret inlined. The fetched key's real
+    ``properties.version`` becomes the wrapping-key version (so a rotation moves
+    ``kek_version``); the adapter pins the ``wrap_key(rsa_oaep_256, ...)`` shape.
     """
     try:
         from azure.identity import DefaultAzureCredential  # noqa: PLC0415
         from azure.keyvault.keys import KeyClient  # noqa: PLC0415
-        from azure.keyvault.keys.crypto import CryptographyClient  # noqa: PLC0415
+        from azure.keyvault.keys.crypto import (  # noqa: PLC0415
+            CryptographyClient,
+            KeyWrapAlgorithm,
+        )
     except ImportError as exc:
         raise KekConfigurationError(
             "VAULT_KEY_PROVIDER=azure requires the 'azure' extra to be installed"
         ) from exc
     credential = DefaultAzureCredential()
     key = KeyClient(vault_url=vault_uri, credential=credential).get_key(key_name)
-    return CryptographyClient(key, credential=credential)
+    crypto_client = CryptographyClient(key, credential=credential)
+    return _AzureKeyClient(crypto_client, KeyWrapAlgorithm.rsa_oaep_256, key.properties.version)
 
 
 def get_key_provider(settings: Settings, *, client: object | None = None) -> KeyProvider:

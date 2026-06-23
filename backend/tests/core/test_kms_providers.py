@@ -95,18 +95,28 @@ class _FakeAwsKmsClient:
 
 
 class _FakeVaultTransitClient:
-    """hvac ``secrets.transit`` shape: encrypt/decrypt with native ``context``.
+    """In-memory double of the ``_VaultTransitClient`` ADAPTER contract.
 
-    Reproduces Transit versioned keys: ciphertext is ``vault:v<N>:<token>``;
-    decrypt accepts any version still present (old versions readable, ADR-0032
-    §2). ``context`` (the row-id AAD) is bound natively — decrypt fails on a
-    mismatch.
+    The adapter (not the provider) owns the real hvac shape — base64 plaintext/
+    context, ``mount_point``, ``read_key``. This double mirrors the *adapter's*
+    raw-bytes contract (``encrypt_data`` / ``decrypt_data`` / ``read_key_version``
+    taking bytes), so the provider's wrap/unwrap logic is exercised exactly as in
+    prod; the base64/mount translation itself is pinned by the contract test in
+    ``test_kms_contract.py``. Reproduces Transit versioned keys: ciphertext is
+    ``vault:v<N>:<token>``; decrypt accepts any version still present (old
+    versions readable, ADR-0032 §2). ``context`` (the row-id AAD) is bound
+    natively — decrypt fails on a mismatch.
     """
 
     def __init__(self, current_version: int = 1) -> None:
         self.current_version = current_version
         self._store: dict[str, tuple[bytes, bytes]] = {}
         self.down = False
+
+    def read_key_version(self, *, name: str) -> int:
+        if self.down:
+            raise ConnectionError("vault unreachable")
+        return self.current_version
 
     def encrypt_data(self, *, name: str, plaintext: bytes, context: bytes) -> dict[str, object]:
         if self.down:
@@ -129,26 +139,36 @@ class _FakeVaultTransitClient:
 
 
 class _FakeAzureKeyClient:
-    """azure-keyvault-keys ``CryptographyClient`` shape: wrapKey/unwrapKey.
+    """In-memory double of the ``_AzureKeyClient`` ADAPTER contract.
 
-    Deliberately has NO ``context``/AAD parameter — Azure ``wrapKey``/``unwrapKey``
-    has no native AAD. The provider must bind the row-id via its own AESGCM inner
-    layer; this fake only wraps/unwraps the raw inner key with no row binding.
+    The adapter (not the provider) owns the real azure shape —
+    ``wrap_key(KeyWrapAlgorithm.rsa_oaep_256, key).encrypted_key`` /
+    ``unwrap_key(...).key`` and ``key.properties.version``. This double mirrors
+    the adapter's raw-bytes contract (``wrap_key(key)`` -> bytes, ``unwrap_key``,
+    ``key_version()``), so the provider's inner-AESGCM layer is exercised exactly
+    as in prod; the real algorithm/result-attribute shape is pinned by the
+    contract test. Deliberately has NO ``context``/AAD parameter — Azure
+    ``wrapKey``/``unwrapKey`` has no native AAD; the provider binds the row-id via
+    its own AESGCM inner layer.
     """
 
-    def __init__(self, key_name: str) -> None:
+    def __init__(self, key_name: str, key_version: str = "azkv-v1") -> None:
         self._key_name = key_name
+        self._key_version = key_version
         self._store: dict[bytes, bytes] = {}
         self.down = False
 
-    def wrap_key(self, *, key: bytes) -> bytes:
+    def key_version(self) -> str:
+        return self._key_version
+
+    def wrap_key(self, key: bytes) -> bytes:
         if self.down:
             raise ConnectionError("azure unreachable")
         token = os.urandom(16)
         self._store[token] = key
         return token
 
-    def unwrap_key(self, *, encrypted_key: bytes) -> bytes:
+    def unwrap_key(self, encrypted_key: bytes) -> bytes:
         if self.down:
             raise ConnectionError("azure unreachable")
         try:
@@ -281,9 +301,39 @@ def test_aws_kek_version_is_key_arn() -> None:
 
 
 def test_vault_kek_version_shape_is_key_colon_vN() -> None:
-    """Vault kek_version = ``<key>:vN`` (ADR-0032 §2 rotation-model column)."""
+    """Vault kek_version = ``<key>:vN`` (ADR-0032 §2 rotation-model column).
+
+    The version is the REAL active version read off the live key
+    (``read_key()["data"]["latest_version"]`` in prod / ``read_key_version`` on
+    the adapter double) — never a hardcoded v1. A rotation that bumps the key's
+    latest_version moves kek_version so the T3 worklist predicate fires.
+    """
     provider = _vault(version=3)
     assert provider.kek_version == "netops-kek:v3"
+
+
+def test_azure_kek_version_reflects_key_vault_key_version() -> None:
+    """Azure kek_version = ``<key>:<key.properties.version>`` (not a hardcoded v1).
+
+    The wrapping-key version is the REAL Key Vault key version
+    (``key.properties.version`` in prod / ``key_version()`` on the adapter double),
+    so a Key Vault key rotation moves kek_version and the T3 rotation worklist
+    (``WHERE kek_version != active``) actually fires. A static label hid rotation.
+    """
+    provider = AzureKeyVaultKeyProvider(
+        vault_uri="https://kv.vault.azure.net/",
+        key_name="netops-kek",
+        client=_FakeAzureKeyClient("netops-kek", key_version="abc123def456"),
+    )
+    assert provider.kek_version == "netops-kek:abc123def456"
+    # A different Key Vault key version yields a different kek_version (rotation
+    # is visible — the predicate that drives T3 re-wrap can never miss it).
+    rotated = AzureKeyVaultKeyProvider(
+        vault_uri="https://kv.vault.azure.net/",
+        key_name="netops-kek",
+        client=_FakeAzureKeyClient("netops-kek", key_version="999rotated"),
+    )
+    assert rotated.kek_version == "netops-kek:999rotated"
 
 
 def test_vault_decrypt_accepts_old_versions() -> None:

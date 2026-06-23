@@ -5,7 +5,7 @@
 | **Gate** | G-SEC — KMS no-leak + fail-closed + non-prod-KEK-cannot-hide (PRODUCTION.md §11) |
 | **Wave / task** | P1 W6-T2 (builds on W6-T1 wrap/unwrap contract) |
 | **ADRs** | ADR-0032 §1 (per-backend AAD), §2 (config-only swap + prod gate), §4 (health→readiness), §6 (no-leak) |
-| **Status** | Offline unit + emulator validation **GREEN**; real-cloud-KMS validation **lab-deferred** |
+| **Status** | Offline unit + **contract tests** + **CI emulator gate** GREEN; real-cloud-KMS validation **lab-deferred** |
 
 ## What was proven (P1)
 
@@ -18,16 +18,24 @@ local Env/File providers barred from production:
    the pod's ambient credentials (no static keys); the key is referenced by ARN
    only. `kek_version` is the key ARN.
 2. **`HashiCorpVaultTransitKeyProvider`** — `transit/encrypt|decrypt`; row-id
-   bound natively via `context={row_id}`. The short-lived token comes from a
-   k8s-auth/AppRole login keyed by an **indirect `credential_ref`** (never a
-   token value); `kek_version = <key>:vN` and **decrypt accepts old versions**.
+   bound natively via `context={row_id}`. The hvac calls go through the
+   `_VaultTransitClient` adapter, which base64-encodes plaintext/context, passes
+   `mount_point`, and reads the active version via
+   `secrets.transit.read_key(...)["data"]["latest_version"]` — so `kek_version =
+   <key>:vN` reflects a **real** rotation (the T3 worklist predicate fires), not a
+   hardcoded v1. The short-lived token comes from a k8s-auth/AppRole login keyed
+   by an **indirect `credential_ref`** (never a token value), auto-renewed; and
+   **decrypt accepts old versions**.
 3. **`AzureKeyVaultKeyProvider`** — `wrapKey`/`unwrapKey` has **no native AAD**,
    so the row-id is bound by a **local AESGCM inner layer**: a fresh inner key
    seals the DEK with `aad=row_id` (fresh 96-bit nonce), then the inner key is
-   `wrapKey`-wrapped. `WrappedDek.ciphertext = inner-nonce ‖ wrapped-inner-key ‖
+   wrapped via `CryptographyClient.wrap_key(KeyWrapAlgorithm.rsa_oaep_256,
+   key).encrypted_key` (the `_AzureKeyClient` adapter); `unwrap_key(...).key`
+   reverses it. `WrappedDek.ciphertext = inner-nonce ‖ wrapped-inner-key ‖
    inner-ciphertext`; the single-blob schema is unchanged (ADR-0032 §1). The
    AESGCM open **fails on a row-id mismatch**, giving the identical cross-row
-   replay guard the native backends get.
+   replay guard the native backends get. `kek_version = <key>:<key.properties.
+   version>` so a Key Vault key rotation is visible to T3.
 
 ### Cross-row replay guard holds identically on ALL THREE
 
@@ -68,12 +76,25 @@ independent surfaces so it can never silently regress:
 
 ### health() drives the K8s readiness probe (ADR-0032 §4)
 
-`/api/v1/health/ready` adds a `kek_provider` dependency (only when a provider is
-configured) driven by `provider.health()`. An unreachable KMS makes readiness
-**degraded** — the replica is pulled from rotation — while **liveness stays
-green**, so the replica stays *live* and alerts fire instead of the pod being
-killed. The 0/1 `vault_key_provider_healthy` gauge is refreshed from each probe.
-Asserted by `tests/test_health.py::test_ready_degrades_when_kek_provider_unreachable`.
+The provider is built **once** in the lifespan, gated, and stashed on
+`app.state.key_provider`; the startup `health()` read and the readiness probe both
+offload the blocking SDK round-trip via `asyncio.to_thread` (the event loop is
+never stalled at boot or per poll). `/api/v1/health/ready` adds a `kek_provider`
+dependency (only when a provider is cached) that calls `health()` on the **cached**
+instance — never rebuilding the SDK client per poll (which on Azure/Vault would
+re-run `DefaultAzureCredential` / re-login each `/ready` and risk `PROBE_TIMEOUT`
+flapping). An unreachable KMS makes readiness **degraded** — the replica is pulled
+from rotation — while **liveness stays green**. The 0/1 `vault_key_provider_healthy`
+gauge is refreshed from each probe. Asserted by
+`test_ready_degrades_when_kek_provider_unreachable` +
+`test_ready_kek_probe_reuses_cached_provider_not_rebuilt`.
+
+The startup gate is **fail-loud**: when a production KMS backend
+(`VAULT_KEY_PROVIDER=aws|azure|vault`) is selected but its build fails (missing
+ARN, absent SDK extra, unreachable backend at boot), the lifespan **re-raises**
+rather than degrading to `provider=None` — so a non-functional prod KEK can never
+start behind a green deploy (`test_startup_crashes_when_kms_backend_unbuildable_in_prod`).
+Only an unset/local selector in a non-prod run degrades to no provider.
 
 ### No-leak (ADR-0032 §6) — extended to the KMS backends
 
@@ -100,23 +121,38 @@ KMS.
 
 | Layer | Status | Notes |
 |---|---|---|
-| **Deterministic in-memory fake** (`FakeKmsKeyProvider`) + per-backend fake clients | ✅ GREEN | The offline unit suite drives the real wrap/unwrap logic (incl. the Azure inner-AESGCM layer) at full coverage with NO cloud SDK installed. |
-| **LocalStack KMS / Azurite-fake / dev Vault Transit** | 🧪 emulator-ready | `deploy/docker/docker-compose.kms-emulators.yml` brings up backend-shaped emulators for optional integration validation. boto3/azure/hvac are OPTIONAL extras (`pyproject.toml [project.optional-dependencies] kms-aws/kms-azure/kms-vault`); not installed on the offline build host. |
-| **Real cloud KMS** (AWS KMS / Azure Key Vault / HashiCorp Vault) | ⏳ **lab-deferred** | Per ADR-0032 Negative / P1-PLAN.md §6, real-cloud-KMS validation is the customer environment — the unit fakes + emulators prove the mechanism, not a specific cloud account. |
+| **Deterministic in-memory fake** (`FakeKmsKeyProvider`) + per-backend adapter doubles | ✅ GREEN | The offline unit suite (`test_kms_providers.py`) drives the real wrap/unwrap logic (incl. the Azure inner-AESGCM layer) at full coverage with NO cloud SDK installed — the doubles mirror the **adapter** contract, not a raw SDK. |
+| **Real-SDK contract tests** (`test_kms_contract.py`) | ✅ GREEN | Pin the EXACT real call shape against mock SDK clients so the prod path is no longer vacuous-`# pragma: no cover`: Vault `secrets.transit.encrypt_data(name=, plaintext=<b64>, context=<b64>, mount_point=)` / `read_key(...)["data"]["latest_version"]` + k8s-auth/AppRole login; Azure `wrap_key(KeyWrapAlgorithm.rsa_oaep_256, key).encrypted_key` / `unwrap_key(...).key`; AWS `encrypt/decrypt` with `EncryptionContext`. |
+| **CI emulator job** `kms-emulators` (LocalStack KMS + dev Vault Transit) | ✅ GREEN — **required gate** | `deploy/docker/docker-compose.kms-emulators.yml` is brought up by the `kms-emulators` CI job, which installs the `kms-aws`/`kms-vault` extras, creates the keys, and runs `tests/integration/test_kms_emulators.py` against the REAL boto3/hvac adapters end-to-end. The job is a `needs:` of `all-gates`, so it blocks merge — NOT optional. |
+| **Azure local emulator** | ⚠️ documented exception | No first-party local `wrapKey`/`unwrapKey` emulator exists for Azure Key Vault. Its real call shape is covered by the contract test; the live integration is the lab Key Vault. The inner-AESGCM row-id binding is backend-independent and fully covered offline. |
+| **Real cloud KMS** (AWS KMS / Azure Key Vault / HashiCorp Vault) | ⏳ **lab-deferred** | Per ADR-0032 Negative / P1-PLAN.md §6, real-cloud-KMS validation is the customer environment — the unit fakes + contract tests + emulator job prove the mechanism, not a specific cloud account. |
 
 > **Host-tooling honesty (carry-forward W4 L1).** boto3 / the azure SDK / hvac
-> are NOT on the offline build host, so the AWS/Azure/Vault `_build_*_client`
-> paths (lazy SDK imports) are `# pragma: no cover` and exercised only where the
-> extra is installed. The providers' crypto/AAD/no-leak logic is fully covered by
-> the in-memory fakes. The CI emulator job validates the network shape; the real
-> clouds are lab.
+> are NOT on the offline build host, so only the `_build_*_client` **lazy SDK
+> import** lines keep a `# pragma: no cover` (they cannot run without the extra
+> installed — an honest, narrow pragma, not a wrapper hiding a broken path). The
+> adapter call shapes (`_VaultTransitClient` / `_AzureKeyClient` / the AWS
+> provider) and `_vault_login` are now covered by the contract tests, and the CI
+> emulator job exercises boto3/hvac end-to-end against backend-shaped emulators.
+> The real clouds are lab.
 
 ## Reproduce locally (offline, no cloud)
 
 ```
 cd backend
 .venv/Scripts/python.exe -m pytest tests/core/test_kms_providers.py \
-  tests/core/test_crypto.py tests/test_health.py tests/test_main.py -q
+  tests/core/test_kms_contract.py tests/core/test_crypto.py \
+  tests/test_health.py tests/test_main.py -q
+```
+
+The CI `kms-emulators` job runs the live integration layer (not reproducible on a
+host without Docker + the SDK extras):
+
+```
+docker compose -f deploy/docker/docker-compose.kms-emulators.yml up -d
+pip install -e "./backend[dev,kms-aws,kms-vault]"
+# (create a LocalStack KMS key + the dev Vault transit key — see ci.yml)
+KMS_EMULATOR_TEST=1 pytest backend/tests/integration/test_kms_emulators.py -v
 ```
 
 ## Gate status & carry-forward

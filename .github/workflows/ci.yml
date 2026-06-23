@@ -650,6 +650,91 @@ jobs:
           exit-code: "1"
           format: table
 
+  # KMS-emulator integration gate (P1 W6-T2, ADR-0032 §2/§148). The offline
+  # backend job drives the providers via in-memory doubles + contract tests; THIS
+  # job is the real integration gate — it brings up the backend-shaped emulators
+  # (LocalStack KMS + dev Vault Transit), installs the cloud SDK extras, creates
+  # the keys, and exercises the REAL boto3/hvac adapters end-to-end. Azure has no
+  # first-party local wrapKey/unwrapKey emulator (documented exception): its real
+  # call shape is pinned by the contract test and a real Key Vault is lab-deferred.
+  kms-emulators:
+    name: kms-emulators (LocalStack KMS + dev Vault — provider integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install backend + KMS extras (aws + vault)
+        run: pip install -e "./backend[dev,kms-aws,kms-vault]"
+
+      - name: Bring up KMS emulators
+        run: docker compose -f deploy/docker/docker-compose.kms-emulators.yml up -d
+
+      - name: Wait for LocalStack KMS + dev Vault
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4566/_localstack/health >/dev/null \
+               && curl -sf http://localhost:8200/v1/sys/health >/dev/null; then
+              echo "emulators ready"; break
+            fi
+            echo "waiting for emulators ($i)..."; sleep 2
+          done
+          curl -sf http://localhost:4566/_localstack/health >/dev/null
+          curl -sf http://localhost:8200/v1/sys/health >/dev/null
+
+      - name: Provision a LocalStack KMS key
+        id: kms
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          ARN=$(aws --endpoint-url=http://localhost:4566 kms create-key \
+            --query 'KeyMetadata.Arn' --output text)
+          echo "key_arn=${ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Provision the dev Vault Transit key
+        shell: bash
+        env:
+          VAULT_ADDR: http://localhost:8200
+          VAULT_TOKEN: dev-only-root-token
+        run: |
+          set -euo pipefail
+          curl -sf -H "X-Vault-Token: ${VAULT_TOKEN}" -X POST \
+            "${VAULT_ADDR}/v1/sys/mounts/transit" \
+            -d '{"type":"transit"}' || true   # already mounted is fine
+          curl -sf -H "X-Vault-Token: ${VAULT_TOKEN}" -X POST \
+            "${VAULT_ADDR}/v1/transit/keys/netops-kek" \
+            -d '{"type":"aes256-gcm96"}'
+
+      - name: Exercise AWS + Vault providers against the emulators (RED gate)
+        working-directory: backend
+        env:
+          KMS_EMULATOR_TEST: "1"
+          LOCALSTACK_KMS_ENDPOINT: http://localhost:4566
+          KMS_KEY_ARN: ${{ steps.kms.outputs.key_arn }}
+          VAULT_ADDR: http://localhost:8200
+          VAULT_TOKEN: dev-only-root-token
+          VAULT_TRANSIT_KEY: netops-kek
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
+        run: pytest tests/integration/test_kms_emulators.py -v
+
+      - name: Tear down emulators
+        if: always()
+        run: docker compose -f deploy/docker/docker-compose.kms-emulators.yml down -v
+
   # Single required-check aggregator (P1 W6-T4). Branch protection should require
   # ONLY this job; it transitively depends on every gate, so a failure or skip of
   # ANY upstream job (dependency audits, secret scan, image/Trivy, chart/policy)
@@ -662,7 +747,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators]
     steps:
       - name: Assert every gate succeeded
         env:
