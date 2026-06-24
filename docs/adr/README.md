@@ -29,14 +29,14 @@
 | [0022](0022-infoblox-wapi-plugin-and-ddi-capability-interfaces.md) | Infoblox WAPI Plugin and DDI Capability Interfaces | Accepted | M5 |
 | [0023](0023-packet-analysis-sandbox-and-pcap-retention.md) | Packet Analysis Sandbox and pcap Retention | Accepted | M5 |
 | [0024](0024-spatiumddi-client-and-endpoint-capability-mapping.md) | SpatiumDDI Client and Endpoint↔Capability Mapping | Accepted | M-DDI |
-| [0025](0025-cisco-nxos-plugin.md) | Cisco NX-OS Vendor Plugin | Proposed | P1 W0 |
-| [0026](0026-juniper-junos-plugin.md) | Juniper JunOS Vendor Plugin | Proposed | P1 W0 |
-| [0027](0027-bluecat-address-manager-plugin.md) | BlueCat Address Manager DDI Plugin | Proposed | P1 W0 |
-| [0028](0028-oidc-sso-identity-federation.md) | OIDC / SSO Identity Federation | Proposed | P1 W0 |
-| [0029](0029-kubernetes-helm-ga-chart-and-hardening.md) | Kubernetes/Helm GA Chart and Hardening Round 1 | Proposed | P1 W0 |
-| [0030](0030-backup-and-disaster-recovery-baseline.md) | Backup and Disaster Recovery Baseline | Proposed | P1 W0 |
-| [0031](0031-packet-sandbox-os-isolation.md) | Packet Capture Sandbox OS-Level Isolation | Proposed | P1 W0 |
-| [0032](0032-kms-backed-master-key-and-rotation.md) | KMS-Backed Master Key and Rotation | Proposed | P1 W0 |
+| [0025](0025-cisco-nxos-plugin.md) | Cisco NX-OS Vendor Plugin | Accepted | P1 W0 |
+| [0026](0026-juniper-junos-plugin.md) | Juniper JunOS Vendor Plugin | Accepted | P1 W0 |
+| [0027](0027-bluecat-address-manager-plugin.md) | BlueCat Address Manager DDI Plugin | Accepted | P1 W0 |
+| [0028](0028-oidc-sso-identity-federation.md) | OIDC / SSO Identity Federation | Accepted | P1 W0 |
+| [0029](0029-kubernetes-helm-ga-chart-and-hardening.md) | Kubernetes/Helm GA Chart and Hardening Round 1 | Accepted | P1 W0 |
+| [0030](0030-backup-and-disaster-recovery-baseline.md) | Backup and Disaster Recovery Baseline | Accepted | P1 W0 |
+| [0031](0031-packet-sandbox-os-isolation.md) | Packet Capture Sandbox OS-Level Isolation | Accepted | P1 W0 |
+| [0032](0032-kms-backed-master-key-and-rotation.md) | KMS-Backed Master Key and Rotation | Accepted | P1 W0 |
 | [0033](0033-prompt-injection-eval-suite.md) | Prompt-Injection Eval Suite | Proposed | P1 W7 |
 
 **Conventions:** every binding decision D1–D16 has a current ADR; any deviation requires a superseding ADR (no silent drift — see `PRODUCTION.md` gate G-MNT). New capabilities, normalized models, agents, or vendors beyond the CLAUDE.md lists require an ADR *before* implementation (`REPO-STRUCTURE.md` §6–§7).

@@ -1,6 +1,6 @@
 # ADR-0031: Packet Capture Sandbox OS-Level Isolation
 
-**Status:** Proposed | **Date:** 2026-06-20 | **Milestone:** P1 W0
+**Status:** Accepted | **Date:** 2026-06-20 | **Milestone:** P1 W0
 
 ## Context
 
