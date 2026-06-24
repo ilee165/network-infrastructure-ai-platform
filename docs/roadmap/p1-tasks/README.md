@@ -1,7 +1,8 @@
-# P1 W5 / W6 — Task Specs
+# P1 W5 / W6 / W7 — Task Specs
 
-Per-task decomposition of **P1-PLAN.md §3** waves **W5 (Backup/DR baseline)** and
-**W6 (Security hardening: KMS, CI supply-chain, rate-limit)**. Each task below is a
+Per-task decomposition of **P1-PLAN.md §3** waves **W5 (Backup/DR baseline)**,
+**W6 (Security hardening: KMS, CI supply-chain, rate-limit)**, and **W7 (Evals +
+phase-exit gate)**. Each task below is a
 single atomic-commit unit that runs the **P1-PLAN.md §3 per-task pattern**:
 
 > **1 implementer → 2 parallel reviewers (spec + quality) → conditional fixer → verifier → 1 atomic commit.**
@@ -59,6 +60,22 @@ reviewers to strong (P1-PLAN.md §3: "All secret-surface → escalated").
 | [W6-T5](W6-T5-sbom-image-signing-admission.md) | SBOM (syft) + cosign signing + admission verify + Trivy gate raise | `wf-infra` | **strong** quality | W6-T4, W4 (admission) |
 | [W6-T6](W6-T6-redis-rate-limit-login-lockout.md) | Redis-backed API rate-limit + login throttle/lockout | `wf-implementer` (strong) | **strong** spec + quality | — |
 
+## W7 — Evals + phase-exit gate (ADR-0033, PRODUCTION.md §5/§11, gate G-SEC)
+
+Owner: **`wf-eval-designer`** (suites) + **`wf-release-auditor`** (gate evidence — NEW
+agent, `.claude/agents/wf-release-auditor.md`). The **LAST** P1 wave and the phase-exit
+gate. Full plan: [`../P1-W7-PLAN.md`](../P1-W7-PLAN.md). Builds the *proof* (eval suites),
+not new controls. **Decisions (2026-06-24):** new `wf-release-auditor` for T4; **T1/T2
+reviewers escalated to strong** (ED4 secret-non-exfil + leak/exit-criteria = secret-surface,
+overrides the P1-PLAN W7 "sonnet").
+
+| Task | Title | Owner | Review tier | Depends on |
+|---|---|---|---|---|
+| [W7-T1](W7-T1-prompt-injection-deterministic-suite.md) | Deterministic injection suite (ED1–ED5) + held-out corpus + matrix meta-test | `wf-eval-designer` | **strong** spec + **strong** quality | — |
+| [W7-T2](W7-T2-prompt-injection-real-llm-layer.md) | Real-LLM layer (ED6), flag/marker-gated, non-gating | `wf-eval-designer` | **strong** quality | W7-T1 |
+| [W7-T3](W7-T3-cross-vendor-routing-rerun.md) | Cross-vendor routing re-run for 3 new Wave-1 plugins | `wf-eval-designer` | sonnet spec + quality | W1 plugins |
+| [W7-T4](W7-T4-gate-evidence-p1-readiness.md) | G-* gate evidence doc + P1 readiness; flip ADR-0033 → Accepted | `wf-release-auditor` (strong) | **strong** quality | W7-T1..T3 |
+
 ## Sequencing (within P1-PLAN.md §4)
 
 - W5 and W6 both follow **W4** (need chart deploy targets + namespaces).
@@ -72,6 +89,10 @@ reviewers to strong (P1-PLAN.md §3: "All secret-surface → escalated").
 - **W6 rate-limit (T6)** is independent of every other W6 task (auth/middleware files).
 - KMS, CI, and rate-limit streams run **concurrently** across owners; the per-task pattern
   serializes only the two reviews inside each task.
+- **W7** is last (needs all plugins + auth + infra in place to evaluate). T1 first (defines the
+  corpus + loader); T2 after T1 (shared loader, different module); T3 parallel (disjoint file,
+  `test_routing_eval.py`); T4 last (cites T1/T2/T3, flips ADR-0033 + roadmap on green).
+  **Rebase the W7 branch onto `origin/main` first** (W6 squash-merged `01e46c9`).
 
 ## Spec template
 

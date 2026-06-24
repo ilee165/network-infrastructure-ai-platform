@@ -16,6 +16,7 @@ Established 2026-06-11 during the M1 build (see the vault Decisions note,
 | `wf-implementer-light` | sonnet           | all        | Template-following work: a plugin mirroring a certified one, standard CRUD/UI |
 | `wf-infra`             | inherit (strong) | all        | Infra/CI deliverables: K8s/Helm manifests, NetworkPolicy/PSS/admission, backup/DR jobs, CI supply-chain (SBOM, signing, dep/secret scan). Infra gates (helm lint, kubeconform, kube-linter/kubescape, conftest/OPA, trivy, cosign), not Python-TDD |
 | `wf-eval-designer`     | inherit (strong) | all        | Evaluation for an AI-output deliverable: rubrics, reference datasets, deterministic CI evals + opt-in real-LLM manual gates (routing, RAG, grounded generation) |
+| `wf-release-auditor`   | inherit (strong) | read+docs  | Phase-exit gate audit: re-evaluate each named G-* gate against live repo/CI/sign-off evidence, write the release-readiness evidence doc, flip ADR/roadmap statuses on green. Evidence synthesis, not implementation — never edits product code |
 | `wf-spec-reviewer`     | sonnet           | read-only* | Spec-compliance review of one committed task |
 | `wf-quality-reviewer`  | sonnet           | read-only* | Correctness/security/convention review of one committed task |
 | `wf-fixer`             | sonnet           | all        | Applying enumerated must-fix review findings |
