@@ -85,14 +85,27 @@ How the value reaches the containers:
 The password is persisted in the `neo4jdata` volume on first start; to change
 it later, change it in Neo4j (or recreate the volume) **and** update `.env`.
 
-### 3. Database migrations (M1 placeholder)
+### 3. Database migrations + admin seed
 
-Alembic owns the schema (ADR-0004), and the backend image ships the migration
-environment, but **M0 contains no revisions yet** — there is nothing to
-migrate. From M1 onward, apply migrations after starting the stack:
+Alembic owns the schema (ADR-0004) and the backend image ships the migration
+environment. Apply migrations after starting the stack (revisions `0001`→`0010`
+ship today — identity/inventory/evidence/audit, topology, agent sessions, auth,
+config+docs, change-requests, OIDC):
 
 ```bash
-docker compose -f deploy/docker/docker-compose.yml exec api alembic upgrade head
+docker compose --env-file .env -f deploy/docker/docker-compose.yml exec api alembic upgrade head
+```
+
+The `0001` baseline also **seeds the bootstrap `admin` user** from
+`NETOPS_ADMIN_PASSWORD`. If that variable is unset the migration seeds the
+insecure default `admin`/`admin` and logs a loud warning — set a strong
+`NETOPS_ADMIN_PASSWORD` in `.env` **before** the first `upgrade head`, and rotate
+the account after first login. Verify the stack end-to-end once migrated:
+
+```bash
+# obtain a token, then call an authenticated endpoint
+curl -s -X POST http://localhost:8000/api/v1/auth/login \
+  -H 'Content-Type: application/json' -d '{"username":"admin","password":"<your-admin-pw>"}'
 ```
 
 ### 4. LLM availability

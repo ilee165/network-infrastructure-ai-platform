@@ -25,13 +25,16 @@ Agents are orchestrated with LangGraph (Master Architect supervisor + 9 speciali
 ## Quickstart (Docker Compose)
 
 ```bash
-cp .env.example .env          # then set NETOPS_SECRET_KEY and NETOPS_NEO4J_PASSWORD
-docker compose -f deploy/docker/docker-compose.yml up -d
+cp .env.example .env          # then set NETOPS_SECRET_KEY, NETOPS_NEO4J_PASSWORD, NETOPS_ADMIN_PASSWORD
+# --env-file .env is REQUIRED: with `-f deploy/docker/...` compose interpolates the
+# neo4j credential from the compose dir/shell, not the root .env (deploy/docker/README.md §2).
+docker compose --env-file .env -f deploy/docker/docker-compose.yml up -d
 # with a local LLM:
-docker compose -f deploy/docker/docker-compose.yml --profile local-llm up -d
+docker compose --env-file .env -f deploy/docker/docker-compose.yml --profile local-llm up -d
 ```
 
 - Frontend: http://localhost:8080 · API docs: http://localhost:8000/docs · Health: `GET /api/v1/health/ready`
+- First-run schema: `docker compose --env-file .env -f deploy/docker/docker-compose.yml exec api alembic upgrade head` (applies migrations `0001`→`0010`; the `0001` baseline seeds the bootstrap `admin` user from `NETOPS_ADMIN_PASSWORD`, defaulting to `admin`/`admin` with a loud warning when unset — set it and rotate after first login).
 
 Details: [deploy/docker/README.md](deploy/docker/README.md). Kubernetes/Helm arrives per the [production roadmap](docs/roadmap/PRODUCTION.md).
 
@@ -41,12 +44,21 @@ Details: [deploy/docker/README.md](deploy/docker/README.md). Kubernetes/Helm arr
 
 ```bash
 cd backend
-python -m venv .venv && .venv/Scripts/activate   # Windows; use bin/activate on Unix
+python -m venv .venv                 # ALWAYS use a venv — see note below
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 pytest                      # unit tests run without Postgres/Neo4j/Redis
 ruff check . && ruff format --check . && mypy
+lint-imports                # module-boundary contracts (import-linter)
 uvicorn app.main:create_app --factory --reload
 ```
+
+> Install into the **venv**, never the system/global interpreter. On a
+> distro-managed Python (e.g. Debian/Ubuntu base images) a global
+> `pip install -e ".[dev]"` aborts the whole transaction trying to replace the
+> OS-owned PyYAML — `Cannot uninstall PyYAML 6.0.1, RECORD file not found ...
+> installed by debian` — leaving the environment half-installed. The venv has no
+> such conflict.
 
 **Frontend** (Node 20):
 
