@@ -103,9 +103,13 @@ insecure default `admin`/`admin` and logs a loud warning — set a strong
 the account after first login. Verify the stack end-to-end once migrated:
 
 ```bash
-# obtain a token, then call an authenticated endpoint
-curl -s -X POST http://localhost:8000/api/v1/auth/login \
-  -H 'Content-Type: application/json' -d '{"username":"admin","password":"<your-admin-pw>"}'
+# 1. obtain a token
+TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<your-admin-pw>"}' | python -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+
+# 2. call a protected endpoint with the token (expects the admin user JSON)
+curl -s http://localhost:8000/api/v1/auth/me -H "Authorization: Bearer $TOKEN"
 ```
 
 ### 4. LLM availability
