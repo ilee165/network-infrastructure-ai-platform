@@ -191,6 +191,7 @@ markers = [
     "parity: real-provider (Ollama/Anthropic) parity run — manual pre-release gate, skipped in CI",
     "routing: real-LLM supervisor routing eval; opt-in, skipped in CI (manual gate).",
     "rag: real-embedder RAG retrieval relevance eval; opt-in, skipped in CI (manual gate).",
+    "injection: prompt-injection eval corpus (ADR-0033). Deterministic ED1-ED5 run in CI; the real-LLM ED6 layer is opt-in (NETOPS_RUN_INJECTION_EVAL=1).",
 ]
 
 # ---------------------------------------------------------------------------
