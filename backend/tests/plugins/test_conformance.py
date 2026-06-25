@@ -23,6 +23,7 @@ from app.plugins.base import (
     ConfigBackupCapability,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
+    FirewallPolicyCapability,
     InterfacesCapability,
     NeighborsCapability,
     OspfCapability,
@@ -34,12 +35,16 @@ from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     AclAction,
     BgpPeerState,
+    FirewallAction,
     InterfaceAdminStatus,
     InterfaceOperStatus,
+    NatType,
     NeighborProtocol,
     NormalizedAclEntry,
     NormalizedBgpPeer,
+    NormalizedFirewallRule,
     NormalizedInterface,
+    NormalizedNatRule,
     NormalizedNeighbor,
     NormalizedOspfNeighbor,
     NormalizedRoute,
@@ -153,19 +158,19 @@ class TestCaseGeneration:
             case.run()
 
     def test_capability_without_typed_interface_gets_no_fixture_case(self) -> None:
-        # FIREWALL_POLICY has no typed interface in plugins/base.py yet (it lands
+        # PACKET_CAPTURE has no typed interface in plugins/base.py yet (it lands
         # with its milestone); the suite checks the implementation class only.
-        class _FirewallPolicy(PluginCapability):
-            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.FIREWALL_POLICY})
+        class _PacketCapture(PluginCapability):
+            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.PACKET_CAPTURE})
 
         plugin = _plugin(
-            frozenset({Capability.FIREWALL_POLICY}),
-            {Capability.FIREWALL_POLICY: _FirewallPolicy},
+            frozenset({Capability.PACKET_CAPTURE}),
+            {Capability.PACKET_CAPTURE: _PacketCapture},
         )
         cases = _cases(plugin)
         ids = [case.id for case in cases]
-        assert "implementation:firewall_policy" in ids
-        assert "fixtures:firewall_policy" not in ids
+        assert "implementation:packet_capture" in ids
+        assert "fixtures:packet_capture" not in ids
         for case in cases:
             case.run()
 
@@ -582,4 +587,178 @@ class TestAclConformance:
         plugin = _plugin(frozenset({Capability.ACL}), {Capability.ACL: _ForeignAcl})
         case = _case(_cases(plugin), "fixtures:acl")
         with pytest.raises(AssertionError, match="source_vendor"):
+            case.run()
+
+
+# ---------------------------------------------------------------------------
+# Helpers for FIREWALL_POLICY conformance tests (P2 W1-T1, ADR-0034)
+# ---------------------------------------------------------------------------
+
+
+def _firewall_rule(**overrides: Any) -> NormalizedFirewallRule:
+    data: dict[str, Any] = {
+        "device_id": uuid4(),
+        "collected_at": datetime.now(UTC),
+        "source_vendor": VENDOR_ID,
+        "name": "allow-web",
+        "enabled": True,
+        "action": FirewallAction.ALLOW,
+    }
+    data.update(overrides)
+    return NormalizedFirewallRule(**data)
+
+
+def _nat_rule(**overrides: Any) -> NormalizedNatRule:
+    data: dict[str, Any] = {
+        "device_id": uuid4(),
+        "collected_at": datetime.now(UTC),
+        "source_vendor": VENDOR_ID,
+        "name": "outbound",
+        "nat_type": NatType.SOURCE,
+        "enabled": True,
+    }
+    data.update(overrides)
+    return NormalizedNatRule(**data)
+
+
+class _GoodFirewall(FirewallPolicyCapability):
+    def get_firewall_rules(self) -> list[NormalizedFirewallRule]:
+        return [_firewall_rule()]
+
+    def get_nat_rules(self) -> list[NormalizedNatRule]:
+        return [_nat_rule()]
+
+
+class TestFirewallPolicyConformance:
+    """Conformance suite recognizes and exercises FirewallPolicyCapability (W1-T1)."""
+
+    def test_generates_implementation_and_fixture_cases(self) -> None:
+        plugin = _plugin(
+            frozenset({Capability.FIREWALL_POLICY}),
+            {Capability.FIREWALL_POLICY: _GoodFirewall},
+        )
+        ids = [case.id for case in _cases(plugin)]
+        assert "implementation:firewall_policy" in ids
+        assert "fixtures:firewall_policy" in ids
+
+    def test_well_formed_firewall_plugin_passes_all_cases(self) -> None:
+        plugin = _plugin(
+            frozenset({Capability.FIREWALL_POLICY}),
+            {Capability.FIREWALL_POLICY: _GoodFirewall},
+        )
+        for case in _cases(plugin):
+            case.run()
+
+    def test_implementation_outside_typed_interface_is_reported(self) -> None:
+        class _Untyped(PluginCapability):
+            capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.FIREWALL_POLICY})
+
+            def get_firewall_rules(self) -> list[NormalizedFirewallRule]:
+                return [_firewall_rule()]
+
+            def get_nat_rules(self) -> list[NormalizedNatRule]:
+                return [_nat_rule()]
+
+        plugin = _plugin(
+            frozenset({Capability.FIREWALL_POLICY}), {Capability.FIREWALL_POLICY: _Untyped}
+        )
+        case = _case(_cases(plugin), "implementation:firewall_policy")
+        with pytest.raises(AssertionError, match="FirewallPolicyCapability"):
+            case.run()
+
+    def test_inherited_abstract_nat_method_is_reported(self) -> None:
+        class _NoNat(FirewallPolicyCapability):
+            def get_firewall_rules(self) -> list[NormalizedFirewallRule]:
+                return [_firewall_rule()]
+
+            # get_nat_rules left abstract — a non-implementation
+
+        plugin = _plugin(
+            frozenset({Capability.FIREWALL_POLICY}), {Capability.FIREWALL_POLICY: _NoNat}
+        )
+        case = _case(_cases(plugin), "implementation:firewall_policy")
+        with pytest.raises(AssertionError, match="get_nat_rules"):
+            case.run()
+
+    def test_empty_firewall_rules_list_is_reported(self) -> None:
+        class _EmptyFirewall(FirewallPolicyCapability):
+            def get_firewall_rules(self) -> list[NormalizedFirewallRule]:
+                return []
+
+            def get_nat_rules(self) -> list[NormalizedNatRule]:
+                return [_nat_rule()]
+
+        plugin = _plugin(
+            frozenset({Capability.FIREWALL_POLICY}),
+            {Capability.FIREWALL_POLICY: _EmptyFirewall},
+        )
+        case = _case(_cases(plugin), "fixtures:firewall_policy")
+        with pytest.raises(AssertionError, match="no records"):
+            case.run()
+
+    def test_empty_nat_rules_list_is_allowed(self) -> None:
+        # A firewall may legitimately have no NAT rules — the extra method may be
+        # empty while the primary firewall-rules list must not (ADR-0034).
+        class _NoNatRules(FirewallPolicyCapability):
+            def get_firewall_rules(self) -> list[NormalizedFirewallRule]:
+                return [_firewall_rule()]
+
+            def get_nat_rules(self) -> list[NormalizedNatRule]:
+                return []
+
+        plugin = _plugin(
+            frozenset({Capability.FIREWALL_POLICY}),
+            {Capability.FIREWALL_POLICY: _NoNatRules},
+        )
+        _case(_cases(plugin), "fixtures:firewall_policy").run()
+
+    def test_firewall_rule_source_vendor_mismatch_is_reported(self) -> None:
+        class _ForeignFirewall(FirewallPolicyCapability):
+            def get_firewall_rules(self) -> list[NormalizedFirewallRule]:
+                return [_firewall_rule(source_vendor="other_vendor")]
+
+            def get_nat_rules(self) -> list[NormalizedNatRule]:
+                return [_nat_rule()]
+
+        plugin = _plugin(
+            frozenset({Capability.FIREWALL_POLICY}),
+            {Capability.FIREWALL_POLICY: _ForeignFirewall},
+        )
+        case = _case(_cases(plugin), "fixtures:firewall_policy")
+        with pytest.raises(AssertionError, match="source_vendor"):
+            case.run()
+
+    def test_nat_rule_source_vendor_mismatch_is_reported(self) -> None:
+        # The extra (NAT) method is held to the same source_vendor contract.
+        class _ForeignNat(FirewallPolicyCapability):
+            def get_firewall_rules(self) -> list[NormalizedFirewallRule]:
+                return [_firewall_rule()]
+
+            def get_nat_rules(self) -> list[NormalizedNatRule]:
+                return [_nat_rule(source_vendor="other_vendor")]
+
+        plugin = _plugin(
+            frozenset({Capability.FIREWALL_POLICY}),
+            {Capability.FIREWALL_POLICY: _ForeignNat},
+        )
+        case = _case(_cases(plugin), "fixtures:firewall_policy")
+        with pytest.raises(AssertionError, match="source_vendor"):
+            case.run()
+
+    def test_wrong_nat_record_type_is_reported(self) -> None:
+        # Returning a firewall rule from get_nat_rules must be caught by the
+        # extra-method type check (the round-trip guard that makes the family bite).
+        class _SwappedNat(FirewallPolicyCapability):
+            def get_firewall_rules(self) -> list[NormalizedFirewallRule]:
+                return [_firewall_rule()]
+
+            def get_nat_rules(self) -> list[NormalizedNatRule]:
+                return [_firewall_rule()]  # type: ignore[list-item]
+
+        plugin = _plugin(
+            frozenset({Capability.FIREWALL_POLICY}),
+            {Capability.FIREWALL_POLICY: _SwappedNat},
+        )
+        case = _case(_cases(plugin), "fixtures:firewall_policy")
+        with pytest.raises(AssertionError, match="NormalizedNatRule"):
             case.run()

@@ -68,6 +68,7 @@ from app.plugins.base import (
     DiscoveryApiCapability,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
+    FirewallPolicyCapability,
     HaStatusCapability,
     InterfacesCapability,
     NeighborsCapability,
@@ -84,8 +85,10 @@ from app.schemas.normalized import (
     NormalizedDhcpLease,
     NormalizedDiscoveredObject,
     NormalizedDnsRecord,
+    NormalizedFirewallRule,
     NormalizedHaStatus,
     NormalizedInterface,
+    NormalizedNatRule,
     NormalizedNeighbor,
     NormalizedNetwork,
     NormalizedOspfNeighbor,
@@ -131,6 +134,13 @@ class _InterfaceSpec:
     :class:`~app.plugins.base.ChangeResult`, so the fixture case validates the
     structured result rather than a normalized-record list. The vendor-specific
     invocation is supplied per-plugin (see :func:`make_conformance_cases`).
+    ``extra_records`` lists additional ``(method, model)`` pairs for a capability
+    whose interface returns more than one normalized-record list (FIREWALL_POLICY:
+    ``get_firewall_rules`` + ``get_nat_rules``, ADR-0034). Each extra method is
+    invoked over the bundled fixtures and every returned record is re-validated
+    against its model and checked for the plugin's ``source_vendor``; an empty
+    list is permitted for an extra method (a firewall may legitimately have no NAT
+    rules), while the primary ``method`` must be non-empty.
     """
 
     interface: type[PluginCapability]
@@ -139,6 +149,7 @@ class _InterfaceSpec:
     neighbor_protocol: NeighborProtocol | None = None
     facts_model: type[DeviceFacts] | None = None
     change_write: bool = False
+    extra_records: tuple[tuple[str, type[NormalizedRecord]], ...] = ()
 
 
 #: Capability -> typed-interface contract from app.plugins.base. Extend this
@@ -164,6 +175,16 @@ _INTERFACE_SPECS: dict[Capability, _InterfaceSpec] = {
     Capability.BGP: _InterfaceSpec(BgpCapability, "get_bgp_peers", NormalizedBgpPeer),
     Capability.OSPF: _InterfaceSpec(OspfCapability, "get_ospf_neighbors", NormalizedOspfNeighbor),
     Capability.ACL: _InterfaceSpec(AclCapability, "get_acls", NormalizedAclEntry),
+    # Firewall policy (ADR-0034). Two normalized-record methods: firewall rules
+    # (primary, must be non-empty) + NAT rules (extra, may be empty). First
+    # implemented by panos/fortios (P2 W2), which the two-vendor rule validates
+    # against this family before FIREWALL_POLICY is declared stable.
+    Capability.FIREWALL_POLICY: _InterfaceSpec(
+        FirewallPolicyCapability,
+        "get_firewall_rules",
+        NormalizedFirewallRule,
+        extra_records=(("get_nat_rules", NormalizedNatRule),),
+    ),
     Capability.CONFIG_BACKUP: _InterfaceSpec(ConfigBackupCapability, "fetch_running_config", None),
     Capability.CONFIG_RESTORE: _InterfaceSpec(
         ConfigRestoreCapability, "restore", None, change_write=True
@@ -445,10 +466,36 @@ def _check_fixture_outputs(
         assert result.strip(), f"{ctx}: returned empty output for the bundled fixture"
         return
 
+    _check_record_list(
+        ctx, result, spec.item_model, plugin.vendor_id, spec.neighbor_protocol, allow_empty=False
+    )
+
+    # Capabilities whose interface returns more than one normalized-record list
+    # (FIREWALL_POLICY: firewall + NAT rules, ADR-0034). Each extra method is
+    # exercised over the same fixtures and re-validated against its own model;
+    # an extra list may be empty (e.g. a firewall with no NAT rules).
+    for method_name, model in spec.extra_records:
+        extra_ctx = (
+            f"{plugin.vendor_id}: capability {capability.value!r} ({impl.__name__}.{method_name})"
+        )
+        extra_result = getattr(instance, method_name)()
+        _check_record_list(extra_ctx, extra_result, model, plugin.vendor_id, None, allow_empty=True)
+
+
+def _check_record_list(
+    ctx: str,
+    result: object,
+    item_model: type[NormalizedRecord],
+    vendor_id: str,
+    neighbor_protocol: NeighborProtocol | None,
+    *,
+    allow_empty: bool,
+) -> None:
     assert isinstance(result, list), f"{ctx}: must return a list, got {type(result).__name__}"
-    assert result, f"{ctx}: returned no records for the bundled fixture — expected at least one"
+    if not allow_empty:
+        assert result, f"{ctx}: returned no records for the bundled fixture — expected at least one"
     for index, item in enumerate(result):
-        _check_record(ctx, index, item, spec, plugin.vendor_id)
+        _check_record(ctx, index, item, item_model, vendor_id, neighbor_protocol)
 
 
 def _check_facts(
@@ -478,31 +525,31 @@ def _check_record(
     ctx: str,
     index: int,
     item: object,
-    spec: _InterfaceSpec,
+    item_model: type[NormalizedRecord],
     vendor_id: str,
+    neighbor_protocol: NeighborProtocol | None,
 ) -> None:
-    assert spec.item_model is not None  # callers guarantee a record-list spec
     item_ctx = f"{ctx}: item[{index}]"
-    assert isinstance(item, spec.item_model), (
-        f"{item_ctx} is {type(item).__name__}, expected {spec.item_model.__name__}"
+    assert isinstance(item, item_model), (
+        f"{item_ctx} is {type(item).__name__}, expected {item_model.__name__}"
     )
     try:
-        spec.item_model.model_validate(item.model_dump(mode="python"))
+        item_model.model_validate(item.model_dump(mode="python"))
     except ValidationError as exc:
         details = "; ".join(
             f"field {'.'.join(str(loc) for loc in error['loc'])!r}: {error['msg']}"
             for error in exc.errors()
         )
         raise AssertionError(
-            f"{item_ctx} fails {spec.item_model.__name__} validation: {details}"
+            f"{item_ctx} fails {item_model.__name__} validation: {details}"
         ) from exc
     assert item.source_vendor == vendor_id, (
         f"{item_ctx} field 'source_vendor' is {item.source_vendor!r}, "
         f"expected the plugin vendor_id {vendor_id!r}"
     )
-    if spec.neighbor_protocol is not None:
+    if neighbor_protocol is not None:
         assert isinstance(item, NormalizedNeighbor)  # implied by item_model
-        assert item.protocol == spec.neighbor_protocol, (
+        assert item.protocol == neighbor_protocol, (
             f"{item_ctx} field 'protocol' is {item.protocol.value!r}, "
-            f"expected {spec.neighbor_protocol.value!r}"
+            f"expected {neighbor_protocol.value!r}"
         )
