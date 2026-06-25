@@ -9,7 +9,7 @@
 
 ## 1. Phase overview
 
-Four production phases, each ending with all five readiness gates (§11) re-evaluated. Calendar quarters are **PROPOSED** (the brief fixes no dates; assumes MVP exit ≈ 2026-Q4):
+Five production phases (P2 split into P2-Security + P3-Platform per the 2026-06-25 amendment below), each ending with all five readiness gates (§11) re-evaluated. Calendar quarters are **PROPOSED** (the brief fixes no dates; assumes MVP exit ≈ 2026-Q4):
 
 ```mermaid
 gantt
@@ -22,17 +22,35 @@ gantt
     Wave 4 - AWS (incl. Route53), Azure   :w4, after w3, 90d
     section Platform
     P1 - K8s GA, OIDC, backups/DR        :p1, 2026-11-01, 90d
-    P2 - HA, autoscaling, SIEM export    :p2, after p1, 90d
-    P3 - Compliance reporting, app topology :p3, after p2, 90d
-    P4 - Hybrid cloud topology, scale certification :p4, after p3, 90d
+    P2-Security - hardening subset (hash-chain, rotation, mTLS, segmentation) :p2s, after p1, 90d
+    P3-Platform - HA, autoscaling, SIEM export, SLO enforcement :p3p, after p2s, 90d
+    P4 - Compliance reporting, app topology :p4, after p3p, 90d
+    P5 - Hybrid cloud topology, scale certification :p5, after p4, 90d
 ```
 
 | Phase | Vendor wave | Platform track |
 |---|---|---|
 | **P1** | Wave 1: Cisco NX-OS, Juniper JunOS, BlueCat | Kubernetes/Helm GA, OIDC/SSO, backup/DR baseline, K8s hardening round 1 |
-| **P2** | Wave 2: Palo Alto PAN-OS, Fortinet FortiOS; **Security Agent** ships here | HA + scale-out (API replicas, worker autoscaling, Postgres HA), audit export to SIEM |
-| **P3** | Wave 3: F5 BIG-IP, VMware; **application-dependency topology** ships here | Compliance & audit reporting suite, observability SLO enforcement |
-| **P4** | Wave 4: AWS (incl. **Route53**), Azure | Hybrid on-prem/cloud topology stitching, scale certification, upgrade-path rehearsal N-2 |
+| **P2-Security** | Wave 2: Palo Alto PAN-OS, Fortinet FortiOS; **Security Agent** ships here | Security-hardening subset (all code or kind-validatable, K8s hardening round 2): audit-log hash-chaining, device-credential rotation + per-credential scoping, mTLS (api/worker↔postgres), collector network segmentation |
+| **P3-Platform** | — (platform-only; no vendor wave) | HA + scale-out (api HPA, KEDA workers, CloudNativePG, Redis Sentinel, PgBouncer); audit→SIEM export; observability-SLO enforcement (recording rules, burn-rate alerts, dashboards, fault-injection MTTD); live failover/soak/scale DR drills; N-2 upgrade rehearsal |
+| **P4** | Wave 3: F5 BIG-IP, VMware; **application-dependency topology** ships here | Compliance & audit reporting suite |
+| **P5** | Wave 4: AWS (incl. **Route53**), Azure | Hybrid on-prem/cloud topology stitching, scale certification |
+
+> **Amendment 2026-06-25 (P2 re-scope; sequencing change, not a decision
+> reversal — no superseding ADR).** The original "P2" row bundled Vendor Wave 2 +
+> Security Agent with HA/scale-out + audit→SIEM export. Those platform tracks are
+> split into a new **P3-Platform** phase and the downstream phases renumbered
+> (former P3 → **P4**, former P4 → **P5**). **Rationale:** HA + scale-out,
+> audit→SIEM export, observability-SLO enforcement, and the live failover/soak/scale
+> drills all require a live, certified-scale cluster to *validate*; on the current
+> no-hardware host they would be ~entirely deferred-accepted. Quarantining them into
+> P3-Platform keeps **P2-Security**'s exit gates honest and biting (code +
+> kind-validatable controls only). This amendment records the move per G-MNT §308
+> (no silent drift) and is the roadmap mirror of `P2-SECURITY-PLAN.md` §0/§1/§5;
+> the two must agree. **Deferred to P3-Platform (named, not dropped):** gate
+> **G-SCA** in full, and the **G-REL** live failover/soak/scale drills (the P1 G-REL
+> baseline holds for P2-Security). No binding decision D1–D16 is overturned, so no
+> superseding ADR is created.
 
 ---
 
@@ -59,32 +77,32 @@ Every plugin ships against the **plugin conformance suite** from M1 (capability 
 | Juniper JunOS (`junos`) | Second-largest route/switch install base; netmiko-supported with mature ntc-templates; exercises the normalized models against a non-Cisco syntax family, hardening vendor-agnosticism before firewalls | SSH/SNMP discovery, interfaces, routes, LLDP, BGP, OSPF, ACL (firewall filters → `NormalizedAclEntry`), config backup/restore/deploy |
 | BlueCat (`bluecat`) | Completes on-prem DDI required by CLAUDE.md; reuses the `DDI_*` capability interfaces and httpx client patterns proven on Infoblox in M5 — validates that the DDI abstraction is genuinely vendor-neutral | `DISCOVERY_API`, `DDI_DNS`, `DDI_DHCP`, `DDI_IPAM` via BlueCat Address Manager REST API |
 
-### 2.3 Wave 2 (P2) — Palo Alto PAN-OS, Fortinet FortiOS (+ Security Agent)
+### 2.3 Wave 2 (P2-Security) — Palo Alto PAN-OS, Fortinet FortiOS (+ Security Agent)
 
 | Vendor | Why this wave | Capabilities delivered |
 |---|---|---|
 | Palo Alto PAN-OS (`panos`) | First firewall family; introduces the `FIREWALL_POLICY` capability and `NormalizedFirewallRule` (**PROPOSED** model name, following the brief's normalized-model pattern); API-driven via XML API over httpx per D7 | `DISCOVERY_API`, interfaces, routes, `FIREWALL_POLICY`, ACL/NAT visibility, config backup, `HA_STATUS` |
 | Fortinet FortiOS (`fortios`) | Ships in the same wave deliberately: two independent firewall vendors must validate `FIREWALL_POLICY` normalization before the interface is declared stable (same pattern as Wave 0 proving interfaces across three OSes) | `DISCOVERY_API` (REST) + SSH fallback, interfaces, routes, `FIREWALL_POLICY`, config backup, `HA_STATUS` |
 
-**Security Agent ships in P2** (per MVP traceability): firewall policy analysis (shadowed/redundant/overly-permissive rules), security posture checks across configs and ACLs, findings feed compliance reports. It is read-only; remediations it proposes become ChangeRequests. CLAUDE.md "Troubleshooting → Firewall analysis" is delivered here (Troubleshooting Agent gains firewall tools backed by `FIREWALL_POLICY`).
+**Security Agent ships in P2-Security** (per MVP traceability): firewall policy analysis (shadowed/redundant/overly-permissive rules), security posture checks across configs and ACLs, findings feed compliance reports. It is read-only; remediations it proposes become ChangeRequests. CLAUDE.md "Troubleshooting → Firewall analysis" is delivered here (Troubleshooting Agent gains firewall tools backed by `FIREWALL_POLICY`).
 
-### 2.4 Wave 3 (P3) — F5 BIG-IP, VMware (+ application dependencies)
+### 2.4 Wave 3 (P4) — F5 BIG-IP, VMware (+ application dependencies)
 
 | Vendor | Why this wave | Capabilities delivered |
 |---|---|---|
 | F5 BIG-IP (`f5_bigip`) | ADC layer: VIPs, pools, members, monitors via iControl REST per D7 — the primary source of service-to-server mappings, a direct input to application-dependency topology | `DISCOVERY_API`, interfaces, routes (self-IPs), virtual-server/pool inventory, `HA_STATUS`, config backup (UCS) |
 | VMware (`vmware`) | pyVmomi per D7: vSwitch/dvSwitch, port groups, VM-to-port and VM-to-host mappings — bridges physical L2 topology to workloads; prerequisite for `Application`/`DEPENDS_ON` graph data | `DISCOVERY_API`, virtual interfaces/port groups, VM inventory, host/cluster topology |
 
-**Application-dependency topology ships in P3** (per MVP traceability): `Application` nodes + `DEPENDS_ON` edges in Neo4j, derived from F5 VIP→pool→member chains, VMware VM placement, DNS dependencies (M5), and manual application tagging in the UI. **PROPOSED:** flow-telemetry enrichment (NetFlow/gNMI) stays out of scope until the Consultant Agent's telemetry open item (brief §9) is answered — it is absent from CLAUDE.md.
+**Application-dependency topology ships in P4** (per MVP traceability): `Application` nodes + `DEPENDS_ON` edges in Neo4j, derived from F5 VIP→pool→member chains, VMware VM placement, DNS dependencies (M5), and manual application tagging in the UI. **PROPOSED:** flow-telemetry enrichment (NetFlow/gNMI) stays out of scope until the Consultant Agent's telemetry open item (brief §9) is answered — it is absent from CLAUDE.md.
 
-### 2.5 Wave 4 (P4) — AWS (incl. Route53), Azure
+### 2.5 Wave 4 (P5) — AWS (incl. Route53), Azure
 
 | Vendor | Why this wave | Capabilities delivered |
 |---|---|---|
 | AWS (`aws`) | boto3 per D7. Last because it requires a new read-only cloud credential model (IAM roles/STS) and hybrid topology stitching, both designed once and shared with Azure. **Route53 rides here** (boto3 + same credentials), completing the CLAUDE.md DDI triad | `DISCOVERY_API`: VPCs, subnets, route tables, TGW/peering, security groups (→ `FIREWALL_POLICY`-style normalization), ENIs; `DDI_DNS` via Route53 |
 | Azure (`azure`) | azure SDK per D7; service-principal credential model mirrors the AWS design; paired in one wave so cloud normalization (VNet↔VPC, NSG↔SG) is validated across two providers before declared stable | `DISCOVERY_API`: VNets, subnets, route tables, peerings, NSGs, NICs |
 
-Hybrid topology stitching (cloud VPC/VNet subnets joined to on-prem L3 graph via VPN/Direct Connect/ExpressRoute edges) is the P4 platform deliverable.
+Hybrid topology stitching (cloud VPC/VNet subnets joined to on-prem L3 graph via VPN/Direct Connect/ExpressRoute edges) is the P5 platform deliverable.
 
 ### 2.6 Per-wave exit criteria (apply to every wave)
 
@@ -96,7 +114,7 @@ Hybrid topology stitching (cloud VPC/VNet subnets joined to on-prem L3 graph via
 
 ---
 
-## 3. HA and scale-out (P2 platform track)
+## 3. HA and scale-out (P3-Platform track)
 
 Targets below marked **PROPOSED** are defaults pending the Consultant Agent's scale/HA answers (brief §9: device count, sites, HA/DR expectations); the build proceeds on these defaults.
 
@@ -163,14 +181,14 @@ Implements the "pluggable OIDC" half of D10.
 
 ---
 
-## 5. Security hardening checklist (P1–P2, then continuous)
+## 5. Security hardening checklist (P1–P2-Security, then continuous)
 
 Builds on the D11/brief §7 baseline already live at MVP exit (envelope-encrypted vault, append-only audit, ChangeRequest gate, RBAC inheritance, non-root containers, TLS).
 
 - [ ] Master key moved from env/file to a real KMS via the D11 KMS-compatible interface (Vault, cloud KMS, or HSM — customer choice); key rotation procedure with re-wrap of data keys, rehearsed.
 - [ ] Device credential rotation jobs (scheduled re-issue where vendor supports it); per-credential scoping (site/role) so a leaked credential bounds blast radius.
 - [ ] mTLS between containers — **PROPOSED:** via service mesh or cert-manager-issued SPIFFE-style certs; mandatory for `api`↔`postgres` and `worker`↔`postgres` at minimum.
-- [ ] Audit log streaming export to customer SIEM (syslog/CEF + HTTPS push) in near-real-time; export lag is an SLO (§6).
+- [ ] Audit log streaming export to customer SIEM (syslog/CEF + HTTPS push) in near-real-time; export lag is an SLO (§6). **(deferred to P3-Platform per the §1 2026-06-25 amendment — needs the live platform stack; the in-DB audit hash-chain (ADR-0038) is the P2-Security audit-integrity control.)**
 - [ ] **PROPOSED:** audit-log hash chaining (each entry carries hash of predecessor) so tampering below the DB-grant layer is detectable; verification job runs daily.
 - [ ] Image supply chain: SBOM generation (syft), image signing + admission verification (**PROPOSED:** cosign + policy controller), Trivy gate raised to zero critical *and* high CVEs at release.
 - [ ] Dependency and secret scanning in CI (pip-audit, npm audit, gitleaks) added to the D16 pipeline.
@@ -181,7 +199,7 @@ Builds on the D11/brief §7 baseline already live at MVP exit (envelope-encrypte
 
 ---
 
-## 6. Observability SLOs (P2 measurement, P3 enforcement)
+## 6. Observability SLOs (P2-Security measurement, P3-Platform enforcement)
 
 D15 gives structlog JSON, Prometheus `/metrics`, OTel tracing, health endpoints. Production adds Grafana dashboards, alert rules with runbooks, and these SLOs (targets **PROPOSED** pending Consultant scale answers):
 
@@ -201,7 +219,7 @@ Supporting requirements: 100% of containers expose `/metrics` + health endpoints
 
 ---
 
-## 7. Compliance and audit reporting (P3)
+## 7. Compliance and audit reporting (P4)
 
 - **Change report:** scheduled (weekly/monthly) report of all ChangeRequests — requester, approver, executor agent, before/after state, reasoning-trace links — generated by the Documentation Agent, exportable CSV/PDF, suitable as change-management evidence.
 - **Compliance posture report:** roll-up of the M4 compliance engine across all vendors/waves — pass/fail by policy, device, severity, trend over time; scheduled and on-demand.
@@ -212,7 +230,7 @@ Supporting requirements: 100% of containers expose `/metrics` + health endpoints
 
 ---
 
-## 8. DR / backup (P1 baseline, drills from P2)
+## 8. DR / backup (P1 baseline, live drills from P3-Platform)
 
 RPO/RTO targets are **PROPOSED** defaults pending the Consultant HA/DR answer.
 
@@ -230,7 +248,7 @@ RPO/RTO targets are **PROPOSED** defaults pending the Consultant HA/DR answer.
 
 ---
 
-## 9. Kubernetes hardening (P1 round 1, P2 round 2)
+## 9. Kubernetes hardening (P1 round 1, P2-Security round 2)
 
 Builds on D13 (Helm chart, one image per container) and brief §7 (non-root, NetworkPolicies, TLS).
 
@@ -261,7 +279,7 @@ Builds on D13 (Helm chart, one image per container) and brief §7 (non-root, Net
 
 ## 11. Production-readiness gates
 
-CLAUDE.md requires every iteration to improve **security, reliability, scalability, observability, maintainability**. Each dimension has a gate with measurable criteria. A phase (P1–P4) is not complete until every gate passes; GA requires all gates green simultaneously.
+CLAUDE.md requires every iteration to improve **security, reliability, scalability, observability, maintainability**. Each dimension has a gate with measurable criteria. A phase (P1–P5) is not complete until every **in-scope** gate passes; GA requires all gates green simultaneously. **Per the §1 2026-06-25 amendment, gate G-SCA in full and the G-REL live failover/soak/scale drills are out of scope for P2-Security and deferred to P3-Platform** (they need a certified-scale cluster to validate); P2-Security holds the P1 G-REL baseline and is not gated on them.
 
 ### G-SEC — Security
 
@@ -327,4 +345,4 @@ These open items materially shape this roadmap; defaults above are conservative 
 | GPU availability | §3.2 Ollama pool, §6 first-token SLO |
 | Telemetry (gNMI/NetFlow) | §2.4 app-dependency enrichment (out until answered) |
 | Data retention | §6 log retention, §7 audit retention, §8 pcap retention |
-| Multi-tenancy, NetBox integration, commercial API licensing | Backlog — none scheduled in P1–P4 without an answer |
+| Multi-tenancy, NetBox integration, commercial API licensing | Backlog — none scheduled in P1–P5 without an answer |
