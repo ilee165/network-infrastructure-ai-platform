@@ -1,6 +1,13 @@
 # ADR-0033: Prompt-Injection Eval Suite
 
-**Status:** Proposed | **Date:** 2026-06-21 | **Milestone:** P1 W7
+**Status:** Accepted | **Date:** 2026-06-21 | **Milestone:** P1 W7
+
+> **Accepted 2026-06-24 (W7-T4).** The deterministic ED1–ED5 suite landed in W7
+> (`backend/tests/agents/eval/test_p1_prompt_injection.py`) and is **100% green on
+> the release HEAD** (25/25, re-run 2026-06-24); the prompt-injection G-SEC control
+> (§275) is opened and signed PASS in the successor evidence doc
+> `docs/roadmap/P1-RELEASE-READINESS.md`. The real-LLM ED6 layer is run/deferred-
+> accepted (no-hardware) and non-gating, per §3. Flip mirrors PR #63 (ADR 0025–0032).
 
 ## Context
 

@@ -1,7 +1,7 @@
 # P1 Build Plan — Production Hardening (Post-MVP)
 
 **Project:** AI Network Operations Platform
-**Status:** IN PROGRESS — W0–W6 merged to main (PRs #50/#58/#59/#60/#61/#62; W6 = `01e46c9`). Only **W7** (prompt-injection evals, ADR-0033) remains — the phase-exit gate.
+**Status:** COMPLETE — W0–W7 done (W0–W6 merged: PRs #50/#58/#59/#60/#61/#62, W6 = `01e46c9`; **W7 DONE** — prompt-injection evals ED1–ED5 100% green on HEAD + cross-vendor routing re-run, ADR-0033 **Accepted**). The phase-exit gate is signed off in `docs/roadmap/P1-RELEASE-READINESS.md` (W7-T4): all five §11 gates PASS on the P1-scoped slice simultaneously on the release HEAD; later-phase (P2+) criteria named deferred-accepted, none silent. **P1 complete.**
 **Authority:** Bound by `CLAUDE.md`, `docs/architecture/DECISIONS-BRIEF.md` (D1–D16), and `docs/roadmap/PRODUCTION.md` §1–§11. Entry condition satisfied: MVP exit = M5 merged (PR #25).
 **Scope source:** `PRODUCTION.md` Phase **P1** = Vendor Wave 1 + Platform track (K8s/Helm GA, OIDC/SSO, backup/DR baseline, K8s hardening round 1) + the M5-deferred packet-sandbox OS-isolation half.
 
@@ -76,6 +76,15 @@ Per-task pattern: **1 implementer → 2 parallel reviewers (spec + quality) → 
 Vendor waves (W1): PRODUCTION.md §2.6 — conformance suite green, raw artifacts stored verbatim, normalized models round-trip, write paths via ChangeRequest, docs + API docs published, ≥80% cov, no cross-vendor eval regression.
 
 Platform waves: relevant §11 gate criteria green (G-SEC for W2/W3/W6, G-REL for W5, G-OBS/G-MNT continuous). Phase P1 complete only when all five gates pass simultaneously on the release HEAD.
+
+**P1 phase-exit (W7-T4, 2026-06-24): SATISFIED.** All five §11 gates PASS on the
+P1-scoped slice simultaneously on the release HEAD — G-SEC PASS (prompt-injection
+ED1–ED5 100% green; four-eyes/redaction/RBAC/secret-handling/K8s-posture/KMS PASS),
+G-REL PASS (backup/DR baseline + from-backups-alone drill green at seeded scale),
+G-OBS PASS (`/metrics` + probes + trace correlation continuous), G-MNT PASS (D16
+green, ADR currency incl. 0033), G-SCA deferred-accepted (HA/scale-out is P2 by
+design). Later-phase (P2+) criteria are named deferred-accepted, none silent. Full
+per-gate evidence: `docs/roadmap/P1-RELEASE-READINESS.md`.
 
 ---
 

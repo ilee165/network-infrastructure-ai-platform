@@ -35,6 +35,23 @@ roster (real specialist ``description`` properties under test) built from
 ``build_default_registry`` minus the supervisor, identical to what the graph
 routes over.
 
+W7-T3 cross-vendor re-run (P1 Wave-1 plugins)
+---------------------------------------------
+This is also the cross-vendor routing re-run for the three P1 Wave-1 vendor
+plugins (``cisco_nxos``, ``junos``, ``bluecat``) — ADR-0033 §5's "sibling W7
+deliverable, not part of [the injection] corpus". Three held-out cases at the end
+of ``_CASES`` route each new vendor's intents to its owning *existing* specialist
+(NX-OS config drift -> configuration, JunOS routing fault -> troubleshooting,
+BlueCat DNS lookup -> ddi). Roster source is **registry-derived**: the routing
+roster comes from ``build_default_registry()`` minus the supervisor, so it needs
+no hardcoded edit for a new vendor — and the three Wave-1 names are correctly
+*absent* from it because they are vendor drivers, not routing targets (the
+specialist roster is unchanged at eight). The deterministic, CI-collected
+guardrail that those plugins are present in the *vendor* registry lives in the
+sibling ``test_p1_cross_vendor_routing.py`` (runs without a local model); the
+live re-run here is **deferred-accepted** when no local model is available (no
+hardware, same posture as W1/W2).
+
 Non-deterministic + needs a running Ollama, so — like provider parity and the
 M1/M2 live-lab gates — it is opt-in and skipped in CI:
 
@@ -189,6 +206,35 @@ _CASES = [
         "Something is wrong — devices are unreachable, configs look off,"
         " and I think we need new DNS records too. Where do we start?",
         "consultant",
+    ),
+    # ------------------------------------------------------------------ #
+    # W7-T3 cross-vendor re-run — the three P1 Wave-1 plugins (cisco_nxos,
+    # junos, bluecat). These plugins are vendor DRIVERS, not routing targets:
+    # the supervisor routes their intents to the EXISTING specialist that owns
+    # the vendor's capability. The re-run confirms no routing regression when a
+    # query is phrased around a new vendor's device/feature. Each case names the
+    # new vendor's hardware/feature explicitly and is HELD OUT — fresh device
+    # names, subnets, and wording distinct from the v5 few-shot examples — so a
+    # pass reflects the diagnose-vs-narrate-vs-DDI boundary holding under
+    # vendor-specific phrasing, not echoing a demonstration.
+    #
+    # cisco_nxos (NX-OS): config drift / compliance narration -> configuration.
+    (
+        "Compare nxos-agg-04's running config against the VXLAN baseline we signed "
+        "off — which NX-OS features drifted?",
+        "configuration",
+    ),
+    # junos (JunOS): live routing-fault diagnosis -> troubleshooting.
+    (
+        "Our Juniper mx-edge-02 stopped exporting 172.20.8.0/22 into BGP overnight — "
+        "read its route table and tell me why.",
+        "troubleshooting",
+    ),
+    # bluecat (BlueCat DDI): DNS record analysis / drafting -> ddi.
+    (
+        "In BlueCat, what address does the host record for vpn-gw.corp.example "
+        "currently resolve to?",
+        "ddi",
     ),
 ]
 
