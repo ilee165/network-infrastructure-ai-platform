@@ -91,11 +91,11 @@ NetworkPolicy deny only; expensive HA/scale/soak drills are P3-Platform.
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
-| W4-T1 | Audit-log hash chaining (predecessor-hash per entry) + daily verification job + tamper-detection test | `wf-implementer` (strong) | **strong** spec + quality | W0-T5 |
-| W4-T2 | Device-credential rotation job + per-credential (site/role) scoping for blast-radius bounding | `wf-implementer` (strong) | **strong** spec + quality | W0-T7 |
-| W4-T3 | Ephemeral in-CI kind/k3d cluster harness (apply manifests, run enforcement assertions) | `wf-infra` (strong) | **strong** quality | W0-T6/T8 |
-| W4-T4 | mTLS api↔postgres / worker↔postgres (cert-manager/SPIFFE); handshake asserted on kind, plaintext refused | `wf-infra` (strong) | **strong** spec + quality | W4-T3 |
-| W4-T5 | Collector network segmentation — default-deny egress NetworkPolicy, mgmt-subnet allow only; deny asserted on kind | `wf-infra` (strong) | **strong** spec + quality | W4-T3 |
+| [W4-T1](W4-T1-audit-hash-chaining.md) | Audit-log hash chaining (predecessor-hash per entry) + daily verification job + tamper-detection test | `wf-implementer` (strong) | **strong** spec + quality | W0-T5 |
+| [W4-T2](W4-T2-device-credential-rotation.md) | Device-credential rotation job + per-credential (site/role) scoping for blast-radius bounding | `wf-implementer` (strong) | **strong** spec + quality | W0-T7 |
+| [W4-T3](W4-T3-kind-cluster-harness.md) | Ephemeral in-CI kind/k3d cluster harness (apply manifests, run enforcement assertions) | `wf-infra` (strong) | **strong** quality | W0-T6/T8 |
+| [W4-T4](W4-T4-mtls-postgres-links.md) | mTLS api↔postgres / worker↔postgres (cert-manager/SPIFFE); handshake asserted on kind, plaintext refused | `wf-infra` (strong) | **strong** spec + quality | W4-T3 |
+| [W4-T5](W4-T5-collector-network-segmentation.md) | Collector network segmentation — default-deny egress NetworkPolicy, mgmt-subnet allow only; deny asserted on kind | `wf-infra` (strong) | **strong** spec + quality | W4-T3 |
 
 ## W5 — Evals + phase-exit gate (PRODUCTION.md §2.6/§11, gates G-SEC/G-MNT/G-OBS)
 
@@ -104,9 +104,9 @@ The LAST P2 wave and the phase-exit gate. Builds the *proof*, not new controls.
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
-| W5-T1 | Firewall-policy-analysis eval corpus + deterministic suite (precision/recall thresholds; `NullPool` SQLite) | `wf-eval-designer` (strong) | **strong** spec + quality | W3 |
-| W5-T2 | Cross-vendor + Security-Agent routing re-run (panos/fortios + new agent; no regression vs prior matrix) | `wf-eval-designer` (strong) | sonnet spec + quality | W2, W3 |
-| W5-T3 | G-* gate evidence doc + P2-Security readiness; flip ADRs 0034–0041 → Accepted; record G-SCA/G-REL-live deferred → P3-Platform | `wf-release-auditor` (strong) | **strong** quality | W5-T1, W5-T2, W4 |
+| [W5-T1](W5-T1-firewall-analysis-eval-corpus.md) | Firewall-policy-analysis eval corpus + deterministic suite (precision/recall thresholds; `NullPool` SQLite) | `wf-eval-designer` (strong) | **strong** spec + quality | W3 |
+| [W5-T2](W5-T2-cross-vendor-routing-rerun.md) | Cross-vendor + Security-Agent routing re-run (panos/fortios + new agent; no regression vs prior matrix) | `wf-eval-designer` (strong) | sonnet spec + quality | W2, W3 |
+| [W5-T3](W5-T3-gate-evidence-readiness.md) | G-* gate evidence doc + P2-Security readiness; flip ADRs 0034–0041 → Accepted; record G-SCA/G-REL-live deferred → P3-Platform | `wf-release-auditor` (strong) | **strong** quality | W5-T1, W5-T2, W4 |
 
 ---
 
