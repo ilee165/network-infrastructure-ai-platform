@@ -41,15 +41,15 @@ amended into `PRODUCTION.md`.
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
-| W0-T1 | ADR-0034 `FIREWALL_POLICY` capability + `NormalizedFirewallRule`/`NormalizedNatRule` | `wf-implementer` | sonnet | — |
-| W0-T2 | ADR-0035 Palo Alto PAN-OS plugin (XML API) | `wf-implementer` | sonnet | W0-T1 |
-| W0-T3 | ADR-0036 Fortinet FortiOS plugin (REST + SSH fallback) | `wf-implementer` | sonnet | W0-T1 |
-| W0-T4 | ADR-0037 Security Agent (read-only analysis, findings, remediation→CR) | `wf-implementer` | **strong** (security-semantic) | W0-T1 |
-| W0-T5 | ADR-0038 Audit-log hash chaining + daily verification | `wf-implementer` | **strong** (audit spine) | — |
-| W0-T6 | ADR-0039 mTLS between containers (cert-manager/SPIFFE) | `wf-implementer` | **strong** | — |
-| W0-T7 | ADR-0040 Device credential rotation + per-credential scoping | `wf-implementer` | **strong** (credential vault) | — |
-| W0-T8 | ADR-0041 Collector network segmentation (NetworkPolicy egress) | `wf-implementer` | **strong** | — |
-| W0-T9 | `PRODUCTION.md` §1 re-scope amendment (HA/scale-out + SIEM + obs-SLO → P3-Platform; dated rationale) | `wf-implementer` | sonnet | W0-T1..T8 |
+| [W0-T1](W0-T1-adr-firewall-policy-capability.md) | ADR-0034 `FIREWALL_POLICY` capability + `NormalizedFirewallRule`/`NormalizedNatRule` | `wf-implementer` | sonnet | — |
+| [W0-T2](W0-T2-adr-panos-plugin.md) | ADR-0035 Palo Alto PAN-OS plugin (XML API) | `wf-implementer` | sonnet | W0-T1 |
+| [W0-T3](W0-T3-adr-fortios-plugin.md) | ADR-0036 Fortinet FortiOS plugin (REST + SSH fallback) | `wf-implementer` | sonnet | W0-T1 |
+| [W0-T4](W0-T4-adr-security-agent.md) | ADR-0037 Security Agent (read-only analysis, findings, remediation→CR) | `wf-implementer` | **strong** (security-semantic) | W0-T1 |
+| [W0-T5](W0-T5-adr-audit-hash-chaining.md) | ADR-0038 Audit-log hash chaining + daily verification | `wf-implementer` | **strong** (audit spine) | — |
+| [W0-T6](W0-T6-adr-mtls-between-containers.md) | ADR-0039 mTLS between containers (cert-manager/SPIFFE) | `wf-implementer` | **strong** | — |
+| [W0-T7](W0-T7-adr-device-credential-rotation.md) | ADR-0040 Device credential rotation + per-credential scoping | `wf-implementer` | **strong** (credential vault) | — |
+| [W0-T8](W0-T8-adr-collector-network-segmentation.md) | ADR-0041 Collector network segmentation (NetworkPolicy egress) | `wf-implementer` | **strong** | — |
+| [W0-T9](W0-T9-production-md-rescope-amendment.md) | `PRODUCTION.md` §1 re-scope amendment (HA/scale-out + SIEM + obs-SLO → P3-Platform; dated rationale) | `wf-implementer` | sonnet | W0-T1..T8 |
 
 ## W1 — `FIREWALL_POLICY` capability (ADR-0034, PRODUCTION.md §2.3, ADR-0006)
 
@@ -58,7 +58,7 @@ Owner: **`wf-implementer`** (strong — novel cross-vendor normalized model).
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
-| W1-T1 | `FIREWALL_POLICY` interface + `NormalizedFirewallRule`/`NormalizedNatRule` models + conformance-suite additions | `wf-implementer` (strong) | sonnet spec + quality | W0 |
+| [W1-T1](W1-T1-firewall-policy-capability.md) | `FIREWALL_POLICY` interface + `NormalizedFirewallRule`/`NormalizedNatRule` models + conformance-suite additions | `wf-implementer` (strong) | sonnet spec + quality | W0 |
 
 ## W2 — Vendor Wave 2 (ADR-0035/0036, PRODUCTION.md §2.3/§2.6)
 
