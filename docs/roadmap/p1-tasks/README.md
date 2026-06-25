@@ -60,7 +60,7 @@ reviewers to strong (P1-PLAN.md §3: "All secret-surface → escalated").
 | [W6-T5](W6-T5-sbom-image-signing-admission.md) | SBOM (syft) + cosign signing + admission verify + Trivy gate raise | `wf-infra` | **strong** quality | W6-T4, W4 (admission) |
 | [W6-T6](W6-T6-redis-rate-limit-login-lockout.md) | Redis-backed API rate-limit + login throttle/lockout | `wf-implementer` (strong) | **strong** spec + quality | — |
 
-## W7 — Evals + phase-exit gate (ADR-0033, PRODUCTION.md §5/§11, gate G-SEC)
+## W7 — Evals + phase-exit gate (ADR-0033, PRODUCTION.md §5/§11, gates G-SEC/G-REL/G-SCA/G-OBS/G-MNT)
 
 Owner: **`wf-eval-designer`** (suites) + **`wf-release-auditor`** (gate evidence — NEW
 agent, `.claude/agents/wf-release-auditor.md`). The **LAST** P1 wave and the phase-exit

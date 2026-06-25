@@ -57,8 +57,8 @@ HEAD from `backend/` with the project venv:
 | Prompt-injection real-LLM (ED6) | same file `_live.py`, no flag | **SKIP (by design)** — 1 skipped; module-skips without `NETOPS_RUN_INJECTION_EVAL=1`, like the routing / provider-parity gates |
 | Cross-vendor routing re-run (W7-T3) | `test_routing_eval.py` + `test_p1_cross_vendor_routing.py` | **PASS** — eval dir 85 passed / 6 skipped in CI posture (commit `6a7d777`); live 23/25, all 3 new cross-vendor cases pass, no regression |
 | Lint / Format / Typecheck / Imports | `ruff check . && ruff format --check . && mypy && lint-imports` | **PASS** (W7-T3 commit body; D16 gate) |
-| Dep audit | `pip-audit --strict` (backend) / `npm audit` gate (frontend) | **CI-gated, RED gate** (ci.yml:65, :166) |
-| Secret scan | `gitleaks detect` tree + full history | **CI-gated, RED gate** (ci.yml:239) |
+| Dep audit | `pip-audit --strict` (backend) / `npm audit` gate (frontend) | **CI-gated (blocking; confirmed green on merge HEAD)** (ci.yml:65, :166) |
+| Secret scan | `gitleaks detect` tree + full history | **CI-gated (blocking; confirmed green on merge HEAD)** (ci.yml:239) |
 | Image SBOM + Trivy + cosign | `docker` job (syft SBOM, Trivy CRIT/HIGH, keyless cosign sign+verify) | **CI-gated** (ci.yml:253) |
 | Chart policy-as-test | `infra` job (helm lint, kubeconform, kube-linter, conftest 2691/2691) | **CI-gated** (ci.yml:542; W4 sign-off) |
 | KMS emulator integration | `kms-emulators` job (LocalStack KMS + dev Vault) | **CI-gated, required** (ci.yml:678) |
