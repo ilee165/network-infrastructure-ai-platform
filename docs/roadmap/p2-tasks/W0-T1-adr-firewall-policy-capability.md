@@ -29,8 +29,10 @@ escape hatch; W1-T1 implements exactly what this settles. No code in this task.
   field sets across **PAN-OS + FortiOS** (the two W2 validators).
 - Decide how **vendor-unique richness** rides (the ADR-0006 known negative:
   "vendor-unique richness either extends the schema or rides an escape-hatch
-  field"): pick one — a frozen `vendor_attributes` map vs raw-first-only — and
-  state why the engine-visible surface stays normalized.
+  field"). **Settled by ADR-0034 §6: raw-first-only — no `vendor_attributes`
+  map** (a normalized escape-hatch field would bloat every vendor and leak
+  non-portable data into the agent's analysis surface); the engine-visible surface
+  stays strictly normalized, vendor extras live only in the verbatim raw artifact.
 - Decide the relationship to the existing `NormalizedAclEntry` / `AclCapability`:
   firewall policy is **zone/application-aware** and distinct from an interface
   ACL; both coexist, neither subsumes the other.

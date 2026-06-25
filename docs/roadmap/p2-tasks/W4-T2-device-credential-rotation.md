@@ -33,9 +33,11 @@ Helm-rendered Job + tests)
 - **Structural enforcement**: the credentials service **refuses** to open a session
   with a credential whose scope does not cover the target device — a code check, not
   documentation.
-- **Fail-closed posture** (per ADR-0040's decision): a failed rotation either leaves
-  the prior credential valid (no lock-out) **or** marks it degraded + alerts — never
-  silently leaves a device unreachable.
+- **Confirm-then-swap, fail-closed** (per ADR-0040 §1/§3): stage the new wrapped
+  credential, **verify it against the device**, then activate — never overwrite the
+  only working secret in place. A failed rotation discards the unconfirmed credential
+  (prior stays valid, no lock-out), retries, then marks degraded + alerts on repeated
+  failure; the device outcome is never ambiguous, never silently unreachable.
 - **On-device change**: if ADR-0040 scoped the device-side secret change **in**, it
   routes through the ADR-0020 CR spine (four-eyes); if deferred, only the stored copy
   rotates — implement whichever ADR-0040 fixed.

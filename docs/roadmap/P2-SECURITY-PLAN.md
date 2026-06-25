@@ -117,8 +117,10 @@ stored verbatim, normalized models (incl. `FIREWALL_POLICY`) round-trip, write
 paths via ChangeRequest, docs + API docs published, ≥80% cov, **no cross-vendor
 eval regression** (re-run in W5). Live-lab golden-path deferred-accepted (no hardware).
 
-**Security Agent (W3):** read-only (no STATE_CHANGING tool registered to it;
-remediations emit a four-eyes ChangeRequest only); findings deterministic on the
+**Security Agent (W3):** read-only — **no device-executing tool registered**; the
+only write path is a gate-routed four-eyes `ChangeRequest` draft (ADR-0020), itself a
+STATE_CHANGING tool the `ChangeRequestGate` intercepts (never a device write), per
+ADR-0037 §1; findings deterministic on the
 W5 labelled corpus (precision/recall thresholds met); routing eval re-run with the
 new agent passes; per-agent tool allow-list confines it (the ADR-0033 injection
 boundary extends to the new agent).
@@ -156,8 +158,9 @@ discipline, carried from P1).
 - **Live-lab deferred-accepted** (no hardware): Wave-2 device golden-paths (W2),
   Security Agent against live firewall policy (W3) — same posture as M4/M5/P1;
   code paths fixture/mock-verified in the green eval suites.
-- **`FIREWALL_POLICY` model names** (`NormalizedFirewallRule` / `NormalizedNatRule`)
-  are PROPOSED (PRODUCTION.md §2.3); ADR-0034 ratifies the final names — both
-  plugins and the Security Agent bind to whatever ADR-0034 settles.
+- **`FIREWALL_POLICY` model names** — **ratified by ADR-0034** (W0):
+  `NormalizedFirewallRule` / `NormalizedNatRule`, lowest-common-denominator fields,
+  **raw-first-only** vendor-richness escape hatch (ADR-0034 §6, no `vendor_attributes`
+  map). Both plugins (W2) and the Security Agent (W3) bind field-for-field to these.
 - **P3-Platform** inherits the resequenced HA/scale-out + SIEM export + obs SLO
   enforcement; its own plan is authored when P2-Security exits.

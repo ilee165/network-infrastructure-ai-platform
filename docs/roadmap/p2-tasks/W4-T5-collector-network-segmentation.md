@@ -24,9 +24,10 @@ its enforcing CNI) — an allowed egress succeeds, an arbitrary external egress 
 **In** (a Helm-rendered `NetworkPolicy` + a T5 assertion plugged into the W4-T3
 runner)
 - **Default-deny egress** on the collector/worker pods (selector per ADR-0041);
-  **allow only**: the device **management subnet(s)** (ipBlock CIDR or selectors as
-  ADR-0041 fixed) **plus** the required in-cluster endpoints (Postgres / Redis /
-  Neo4j as needed). Everything else denied.
+  **allow only**: the device **management subnet(s)** as **`ipBlock` CIDR(s)** (the
+  external allow-list is `ipBlock` only — never namespace/pod selectors, which cannot
+  express an external CIDR) **plus** the required in-cluster endpoints (Postgres /
+  Redis / Neo4j) **via namespace/pod selectors**. Everything else denied.
 - **Selector model** exactly as ADR-0041 decided (which pod labels the policy binds;
   how the mgmt-subnet allow is expressed) — no broadening here.
 - **kind assertion** (T5's plug into the W4-T3 runner): an allowed egress (mgmt

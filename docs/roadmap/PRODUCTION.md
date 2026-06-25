@@ -279,7 +279,7 @@ Builds on D13 (Helm chart, one image per container) and brief §7 (non-root, Net
 
 ## 11. Production-readiness gates
 
-CLAUDE.md requires every iteration to improve **security, reliability, scalability, observability, maintainability**. Each dimension has a gate with measurable criteria. A phase (P1–P5) is not complete until every gate passes; GA requires all gates green simultaneously. **Per the §1 2026-06-25 amendment, gate G-SCA in full and the G-REL live failover/soak/scale drills are deferred to P3-Platform** (they need a certified-scale cluster to validate); P2-Security holds the P1 G-REL baseline and is not gated on them.
+CLAUDE.md requires every iteration to improve **security, reliability, scalability, observability, maintainability**. Each dimension has a gate with measurable criteria. A phase (P1–P5) is not complete until every **in-scope** gate passes; GA requires all gates green simultaneously. **Per the §1 2026-06-25 amendment, gate G-SCA in full and the G-REL live failover/soak/scale drills are out of scope for P2-Security and deferred to P3-Platform** (they need a certified-scale cluster to validate); P2-Security holds the P1 G-REL baseline and is not gated on them.
 
 ### G-SEC — Security
 

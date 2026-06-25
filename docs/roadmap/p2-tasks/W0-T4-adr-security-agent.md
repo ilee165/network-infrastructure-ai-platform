@@ -21,8 +21,11 @@ RBAC scope, and injection boundary. Design gate; build is **W3-T1/T2**.
 
 **In**
 - **Read-only mandate** (PRODUCTION.md §2.3, CLAUDE.md "Human approval for
-  changes"): **no STATE_CHANGING tool registered** to this agent; the only write
-  path is emitting a `ChangeRequest` draft (ADR-0020) for human approval.
+  changes"): **no device-executing tool registered** to this agent; the only write
+  path is a gate-routed `ChangeRequest` draft (ADR-0020) for human approval — itself
+  a STATE_CHANGING tool the framework `ChangeRequestGate` intercepts into a draft,
+  never a device write (the DDI precedent; the remediation tool is **not** banned —
+  it is the sole, gated mutation surface). See ADR-0037 §1.
 - **Analysis tools** (the agent's allow-list): firewall-policy analysis —
   **shadowed / redundant / overly-permissive** rule detection — and posture
   checks across configs + ACLs, backed by `FIREWALL_POLICY` (ADR-0034) + existing

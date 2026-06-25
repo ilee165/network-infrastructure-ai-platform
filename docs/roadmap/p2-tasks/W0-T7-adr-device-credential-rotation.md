@@ -50,9 +50,12 @@ Design gate; build is **W4-T2**.
 2. **Scope is enforced, not advisory** (ADR-0011 least-privilege): the credentials
    service refuses to open a session with a credential outside the target's scope —
    a structural check, not documentation.
-3. **Fail-closed on rotation failure** (secure-by-default): a failed rotation
-   leaves the prior credential valid and usable (no lock-out) **or** marks it
-   degraded with an alert — decide which; never leave a device unreachable silently.
+3. **Fail-closed on rotation failure** (secure-by-default, **settled by ADR-0040
+   §1/§3**): rotation is **confirm-then-swap** — stage + verify the new credential
+   against the device, then activate; never overwrite the only working secret in
+   place. A failed rotation discards the unconfirmed credential, leaving the prior
+   one valid (no lock-out), retries, then marks it degraded + alerts on repeated
+   failure. A device is never left unreachable silently.
 4. **K8s exec-argv discipline** (P1-W4-LESSONS **L3**): the rotation Job wraps
    `$(VAR)` in `sh -c` (recorded for W4-T2).
 5. **CR spine for device writes** (ADR-0020): any on-device secret change is a
