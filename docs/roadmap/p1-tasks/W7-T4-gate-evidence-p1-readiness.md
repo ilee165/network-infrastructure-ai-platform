@@ -8,7 +8,7 @@
 | **Depends on** | W7-T1, W7-T2, W7-T3 (cites all as evidence) |
 | **ADRs** | ADR-0033 §5 (gate evidence); flips ADR-0033 Proposed→Accepted |
 | **PRODUCTION.md** | §11 (gates G-SEC/G-REL/G-SCA/G-OBS/G-MNT); §10 (release blocking) |
-| **Status** | Proposed |
+| **Status** | Done (2026-06-24) — `docs/roadmap/P1-RELEASE-READINESS.md`; ADR-0033 Accepted; P1 complete |
 
 ## Objective
 
