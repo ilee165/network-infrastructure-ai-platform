@@ -28,8 +28,11 @@ the existing append-only trigger.**
 `entry_hash = SHA-256(canonical(entry_fields) || prev_hash)`, where `prev_hash` is
 the previous entry's `entry_hash` and the first entry chains from a fixed
 **genesis** constant. Two columns are added to `audit_log` — `prev_hash` and
-`entry_hash` (both `bytea`/fixed-width hex) — via a **new Alembic revision** (current
-head `0010` → `0011`; forward + down).
+`entry_hash`, **both `bytea` holding the raw 32-byte SHA-256 digest** (one canonical
+on-disk format; no hex-string variant — the writer, migration, and verifier all read
+and write `bytea` so they cannot drift) — via a **new Alembic revision** (current
+head `0010` → `0011`; forward + down). Hex is a presentation concern only (logs /
+metrics), never the stored or hashed form.
 
 ### 2. Canonical serialization (byte-exact, deterministic)
 

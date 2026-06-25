@@ -34,7 +34,12 @@ The plugin uses an httpx client against the PAN-OS XML API
 (`https://<host>/api/`), mirroring the existing httpx-client plugins, **not**
 netmiko/SSH (D7 API-first: the XML API is the supported surface). Blocking httpx
 calls run in Celery workers, never on the event loop (ADR-0007 §3 posture). Raw XML
-is stored verbatim before parse (`_record_raw`, ADR-0006 §3).
+is stored verbatim before parse (`_record_raw`, ADR-0006 §3). **A PAN-OS config
+export can carry secret material** (phash/`type-7`-class secrets, API keys, SNMP
+communities in the candidate/running config), so the stored raw artifact inherits
+the same `raw_artifacts` storage, access-scoping, and retention controls as every
+other raw payload (ADR-0006 §3 / ADR-0011) — it is not a new, unprotected secret
+surface. The normalized `FIREWALL_POLICY` models stay secret-free (ADR-0034).
 
 ### 2. Auth — vault API key only
 

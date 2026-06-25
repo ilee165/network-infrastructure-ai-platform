@@ -30,12 +30,15 @@ on-device secret change routes through the four-eyes CR spine.**
 
 ### 1. Rotation path — re-wrap via the ADR-0032 envelope
 
-A rotation generates/accepts a new device secret, wraps it as a new DEK via the
-existing ADR-0032 provider, and updates the `device_credentials` vault row in place.
-The transient plaintext is **zeroized** after wrap; it never reaches a log, trace,
-audit row, queue, or cache (ADR-0032 §6). Trigger: a scheduled Helm-rendered
-**CronJob** (cadence policy) and/or on-demand. Rotation emits audit events carrying
-ids/versions only.
+A rotation generates/accepts a new device secret and wraps it as a new DEK via the
+existing ADR-0032 provider. The write is **confirm-then-swap, never overwrite the
+only working secret in place**: the new wrapped credential is staged, **verified
+against the target device** (a successful auth with the new secret), and only then
+activated as the credential of record; the prior credential stays valid until the
+swap is confirmed. The transient plaintext is **zeroized** after wrap; it never
+reaches a log, trace, audit row, queue, or cache (ADR-0032 §6). Trigger: a scheduled
+Helm-rendered **CronJob** (cadence policy) and/or on-demand. Rotation emits audit
+events carrying ids/versions only.
 
 ### 2. Per-credential scope — enforced at session open
 
@@ -47,11 +50,13 @@ thereby bounded to the credential's scope.
 
 ### 3. Fail-closed posture
 
-A failed rotation **leaves the prior credential valid and usable** (no lock-out);
-the rotation is retried and, on repeated failure, the credential is marked
-**degraded** with an alert (ADR-0015). A device is never left silently unreachable.
-(Chosen over "invalidate-then-replace," which risks locking out the only working
-credential.)
+Because the swap is confirm-then-swap (§1), a failed rotation **leaves the prior
+credential valid and usable** (no lock-out) — the staged-but-unconfirmed new
+credential is discarded, never activated, so the device outcome is unambiguous even
+if the wrap succeeded but verification failed. The rotation is retried and, on
+repeated failure, the credential is marked **degraded** with an alert (ADR-0015). A
+device is never left silently unreachable. (Chosen over "invalidate-then-replace,"
+which risks locking out the only working credential.)
 
 ### 4. On-device change — deferred; CR spine if scoped in later
 
