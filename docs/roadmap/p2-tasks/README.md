@@ -68,8 +68,8 @@ firewalls must validate `FIREWALL_POLICY` before the interface is declared stabl
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
-| W2-T1 | `panos` plugin — XML API; DISCOVERY_API, interfaces, routes, FIREWALL_POLICY, config backup, HA_STATUS | `wf-implementer-light` | sonnet spec + **strong** quality | W1-T1 |
-| W2-T2 | `fortios` plugin — REST + SSH fallback; same capability set | `wf-implementer-light` | sonnet spec + **strong** quality | W1-T1 |
+| [W2-T1](W2-T1-panos-plugin.md) | `panos` plugin — XML API; DISCOVERY_API, interfaces, routes, FIREWALL_POLICY, config backup, HA_STATUS | `wf-implementer-light` | sonnet spec + **strong** quality | W1-T1 |
+| [W2-T2](W2-T2-fortios-plugin.md) | `fortios` plugin — REST + SSH fallback; same capability set | `wf-implementer-light` | sonnet spec + **strong** quality | W1-T1 |
 
 ## W3 — Security Agent (ADR-0037, PRODUCTION.md §2.3, ADR-0003/0011/0020)
 
@@ -79,8 +79,8 @@ emit a four-eyes ChangeRequest only. Needs W1 + ≥1 W2 plugin.
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
-| W3-T1 | Security Agent core — shadowed/redundant/overly-permissive rule analysis + posture checks + findings model + remediation→CR | `wf-implementer` (strong) | **strong** spec + quality | W1-T1, ≥1 of W2 |
-| W3-T2 | Supervisor routing registration + read-only RBAC scoping + per-agent tool allow-list (extend ADR-0033 injection boundary) | `wf-implementer` (strong) | **strong** spec + quality | W3-T1 |
+| [W3-T1](W3-T1-security-agent-core.md) | Security Agent core — shadowed/redundant/overly-permissive rule analysis + posture checks + findings model + remediation→CR | `wf-implementer` (strong) | **strong** spec + quality | W1-T1, ≥1 of W2 |
+| [W3-T2](W3-T2-supervisor-routing-rbac-allowlist.md) | Supervisor routing registration + read-only RBAC scoping + per-agent tool allow-list (extend ADR-0033 injection boundary) | `wf-implementer` (strong) | **strong** spec + quality | W3-T1 |
 
 ## W4 — Security hardening + kind validation (ADR-0038/0039/0040/0041, PRODUCTION.md §5/§9, gate G-SEC)
 
