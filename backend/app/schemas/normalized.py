@@ -39,12 +39,14 @@ __all__ = [
     "DhcpLeaseState",
     "DiscoveredObjectKind",
     "DnsRecordType",
+    "FirewallAction",
     "HaPeerRole",
     "HaPeerLinkState",
     "InterfaceAdminStatus",
     "InterfaceDuplex",
     "InterfaceOperStatus",
     "MacAddress",
+    "NatType",
     "NeighborProtocol",
     "NormalizedAclEntry",
     "NormalizedArpEntry",
@@ -53,8 +55,10 @@ __all__ = [
     "NormalizedDhcpRange",
     "NormalizedDiscoveredObject",
     "NormalizedDnsRecord",
+    "NormalizedFirewallRule",
     "NormalizedHaStatus",
     "NormalizedInterface",
+    "NormalizedNatRule",
     "NormalizedNetwork",
     "NormalizedNeighbor",
     "NormalizedOspfNeighbor",
@@ -169,6 +173,28 @@ class AclAction(StrEnum):
 
     PERMIT = "permit"
     DENY = "deny"
+
+
+class FirewallAction(StrEnum):
+    """Action a firewall/security policy rule takes on matching traffic (ADR-0034 §4).
+
+    Lowest common denominator across PAN-OS (``allow``/``deny``/``drop``/``reset``)
+    and FortiOS (``accept``/``deny``); the plugin maps its vendor verbs onto this
+    set (``reset`` → ``reject``, ``accept`` → ``allow``).
+    """
+
+    ALLOW = "allow"
+    DENY = "deny"
+    DROP = "drop"
+    REJECT = "reject"
+
+
+class NatType(StrEnum):
+    """Kind of address translation a NAT policy rule performs (ADR-0034 §4)."""
+
+    SOURCE = "source"
+    DESTINATION = "destination"
+    STATIC = "static"
 
 
 class VlanStatus(StrEnum):
@@ -346,6 +372,54 @@ class NormalizedAclEntry(NormalizedRecord):
     destination: IPv4Network | IPv6Network | None = None
     destination_port: str | None = None
     hits: int | None = Field(default=None, ge=0)
+
+
+class NormalizedFirewallRule(NormalizedRecord):
+    """A zone/application-aware firewall (security) policy rule (ADR-0034 §2).
+
+    Distinct from :class:`NormalizedAclEntry` (an interface-bound L3/L4 ACL):
+    a firewall rule matches on source/destination **zones**, named **address
+    objects**, and **application/service** identity. Addresses are strings
+    (object names *or* CIDR/IP literals — ADR-0034 §5), and an empty tuple means
+    *any* (firewall convention). Vendor-unique richness (security profiles, rule
+    UUIDs, schedules) does not enter this model; it lives only in the verbatim
+    raw artifact (ADR-0034 §6). No field carries a secret — policy is config
+    metadata.
+    """
+
+    name: str = Field(min_length=1)
+    position: int | None = Field(default=None, ge=0)
+    enabled: bool
+    action: FirewallAction
+    source_zones: tuple[str, ...] = ()
+    destination_zones: tuple[str, ...] = ()
+    source_addresses: tuple[str, ...] = ()
+    destination_addresses: tuple[str, ...] = ()
+    applications: tuple[str, ...] = ()
+    services: tuple[str, ...] = ()
+    logging: bool | None = None
+    hit_count: int | None = Field(default=None, ge=0)
+    description: str | None = None
+
+
+class NormalizedNatRule(NormalizedRecord):
+    """A NAT policy rule (source/destination/static) (ADR-0034 §3).
+
+    Original/translated endpoints are strings (object names *or* literals,
+    ADR-0034 §5); an empty tuple means *any*. Secret-free config metadata.
+    """
+
+    name: str = Field(min_length=1)
+    nat_type: NatType
+    enabled: bool
+    source_zones: tuple[str, ...] = ()
+    destination_zones: tuple[str, ...] = ()
+    original_source: tuple[str, ...] = ()
+    original_destination: tuple[str, ...] = ()
+    original_service: str | None = None
+    translated_source: tuple[str, ...] = ()
+    translated_destination: tuple[str, ...] = ()
+    translated_service: str | None = None
 
 
 class NormalizedVlan(NormalizedRecord):

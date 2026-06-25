@@ -47,8 +47,10 @@ from app.schemas.normalized import (
     NormalizedDhcpRange,
     NormalizedDiscoveredObject,
     NormalizedDnsRecord,
+    NormalizedFirewallRule,
     NormalizedHaStatus,
     NormalizedInterface,
+    NormalizedNatRule,
     NormalizedNeighbor,
     NormalizedNetwork,
     NormalizedOspfNeighbor,
@@ -77,6 +79,7 @@ __all__ = [
     "DiscoveryApiCapability",
     "DiscoverySnmpCapability",
     "DiscoverySshCapability",
+    "FirewallPolicyCapability",
     "HaStatusCapability",
     "InterfacesCapability",
     "NeighborsCapability",
@@ -487,6 +490,31 @@ class AclCapability(PluginCapability):
     @abstractmethod
     def get_acls(self) -> list[NormalizedAclEntry]:
         """Return ACL entries as normalized records."""
+
+
+class FirewallPolicyCapability(PluginCapability):
+    """``Capability.FIREWALL_POLICY`` — zone/application-aware firewall + NAT policy.
+
+    Ratified by ADR-0034; first implemented by PAN-OS (``panos``, P2 W2) and
+    FortiOS (``fortios``, P2 W2), consumed by the Security Agent (ADR-0037).
+    Returns the lowest-common-denominator normalized models
+    :class:`~app.schemas.normalized.NormalizedFirewallRule` /
+    :class:`~app.schemas.normalized.NormalizedNatRule` — never raw/dicts
+    (ADR-0006 §3). Vendor-unique richness rides the verbatim raw artifact only
+    (ADR-0034 §6). Distinct from :class:`AclCapability` (interface-bound L3/L4
+    ACL); both coexist (ADR-0034 §7). Adding this typed capability is additive —
+    no change to existing plugins (ADR-0006 §6).
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.FIREWALL_POLICY})
+
+    @abstractmethod
+    def get_firewall_rules(self) -> list[NormalizedFirewallRule]:
+        """Return firewall/security policy rules as normalized records."""
+
+    @abstractmethod
+    def get_nat_rules(self) -> list[NormalizedNatRule]:
+        """Return NAT policy rules as normalized records."""
 
 
 class ConfigBackupCapability(PluginCapability):
