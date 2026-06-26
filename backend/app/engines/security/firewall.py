@@ -60,6 +60,26 @@ MANAGEMENT_SERVICES: frozenset[str] = frozenset(
     {"ssh", "telnet", "snmp", "netconf", "https-mgmt", "http-mgmt", "rdp", "winrm"}
 )
 
+#: Literal wildcard tokens a match dimension may carry instead of an empty tuple.
+#: ADR-0034 §5 says "empty tuple means *any*", but the real Wave-2 plugins emit the
+#: vendor token verbatim — PAN-OS ``<member>any</member>`` → ``("any",)``, FortiOS
+#: ``srcaddr: [{"name": "all"}]`` → ``("all",)``. A dimension is therefore *any*
+#: when it is empty OR contains one of these tokens (case-insensitive), so the
+#: overly-permissive / shadow / management-exposure checks do not silently
+#: under-report the most common real-world "any" rule.
+_WILDCARD_TOKENS: frozenset[str] = frozenset({"any", "all"})
+
+
+def _dim_is_any(dimension: tuple[str, ...]) -> bool:
+    """True iff a single match dimension is *any* (empty or a wildcard token).
+
+    A dimension matches everything when it is empty or contains a wildcard token
+    (``any``/``all``) — a rule whose source is ``[any, host-1]`` still matches any
+    source (firewall convention).
+    """
+    return not dimension or any(member.casefold() in _WILDCARD_TOKENS for member in dimension)
+
+
 #: Severity ranking (worst-first) for stable, deterministic ordering of findings.
 _SEVERITY_RANK: dict[FindingSeverity, int] = {
     FindingSeverity.CRITICAL: 0,
@@ -107,14 +127,14 @@ def _acl_evidence(entry: NormalizedAclEntry) -> dict[str, Any]:
 def _dim_covers(covering: tuple[str, ...], covered: tuple[str, ...]) -> bool:
     """True iff the *covering* match dimension is a superset of *covered*.
 
-    Firewall convention: an empty tuple means *any*. ``any`` covers everything;
-    a specific set never covers ``any`` (the ``any`` rule matches strictly more);
-    otherwise membership is a string-set superset test (ADR-0034 §5 — literal
-    comparison, no CIDR math).
+    Firewall convention: an empty tuple OR a wildcard token (``any``/``all``) means
+    *any*. ``any`` covers everything; a specific set never covers ``any`` (the
+    ``any`` rule matches strictly more); otherwise membership is a string-set
+    superset test (ADR-0034 §5 — literal comparison, no CIDR math).
     """
-    if not covering:  # covering = any -> matches everything
+    if _dim_is_any(covering):  # covering = any -> matches everything
         return True
-    if not covered:  # covered = any but covering is specific -> not covered
+    if _dim_is_any(covered):  # covered = any but covering is specific -> not covered
         return False
     return set(covering) >= set(covered)
 
@@ -132,8 +152,8 @@ def _covers(covering: NormalizedFirewallRule, covered: NormalizedFirewallRule) -
 
 
 def _is_any(*dimensions: tuple[str, ...]) -> bool:
-    """True iff every given match dimension is *any* (empty)."""
-    return all(not dim for dim in dimensions)
+    """True iff every given match dimension is *any* (empty or a wildcard token)."""
+    return all(_dim_is_any(dim) for dim in dimensions)
 
 
 def _shadow_or_redundant(

@@ -83,9 +83,12 @@ class SecurityFinding(BaseModel):
     #: Position of the offending rule in the policy, when known.
     rule_position: int | None = Field(default=None, ge=0)
     #: For shadowed/redundant findings, the earlier rule that covers this one.
-    related_rule_name: str | None = None
+    #: Optional, but non-empty when present (a blank reference is never useful).
+    related_rule_name: str | None = Field(default=None, min_length=1)
     #: The offending rule's normalized fields (secret-free evidence, ADR-0034 §2).
-    evidence: dict[str, Any] = Field(default_factory=dict)
+    #: Required and non-empty — every finding is evidence-cited (ADR-0037 §3 /
+    #: CLAUDE.md "explain all AI decisions"); a finding with no evidence is invalid.
+    evidence: dict[str, Any] = Field(min_length=1)
     #: Why this is a finding (grounds CLAUDE.md "explain all AI decisions").
     rationale: str = Field(min_length=1)
     #: The deterministic, human-reviewable fix (drafted as a CR, never applied).

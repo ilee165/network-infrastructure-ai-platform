@@ -40,6 +40,8 @@ from app.agents.security import SecurityAgent, registry, security_agent
 from app.agents.security.agent import SECURITY_NAME
 from app.agents.security.tools import (
     SECURITY_TOOLS,
+    _parse_acls,
+    _parse_firewall_rules,
     analyze_firewall_policy,
     assess_security_posture,
     propose_firewall_remediation,
@@ -270,6 +272,41 @@ class TestAnalysisTools:
 # ---------------------------------------------------------------------------
 # A9 redaction at the secret boundary
 # ---------------------------------------------------------------------------
+
+
+class TestValidationErrorSanitization:
+    """A malformed record cannot leak secret text via the validation exception."""
+
+    def test_firewall_validation_error_drops_secret_bearing_input(self) -> None:
+        # A malformed rule (invalid action) carrying a secret in its description.
+        bad = {
+            "device_id": DEVICE,
+            "collected_at": datetime.now(tz=UTC).isoformat(),
+            "source_vendor": "panos",
+            "name": "r1",
+            "enabled": True,
+            "action": "definitely-not-a-valid-action",
+            "description": f"temp {_SECRET}",
+        }
+        with pytest.raises(ValueError) as ei:  # noqa: PT011 - message asserted below
+            _parse_firewall_rules([bad])
+        message = str(ei.value)
+        # The exception names the field location/type but NEVER the secret input.
+        assert _SECRET not in message
+        assert "action" in message
+        assert "firewall rule at index 0" in message
+
+    def test_acl_validation_error_is_sanitized(self) -> None:
+        bad = {
+            "device_id": DEVICE,
+            "collected_at": datetime.now(tz=UTC).isoformat(),
+            "source_vendor": "cisco_ios",
+            "acl_name": "A1",
+            "action": "not-permit-or-deny",
+        }
+        with pytest.raises(ValueError) as ei:  # noqa: PT011 - message asserted below
+            _parse_acls([bad])
+        assert "ACL entry at index 0" in str(ei.value)
 
 
 class TestRedaction:

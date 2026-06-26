@@ -8,7 +8,7 @@
 | **Depends on** | **W3-T1** (the agent it registers); ADR-0037 (W0-T4) |
 | **ADRs** | ADR-0003 (supervisor routing / registry), ADR-0011 (RBAC `min_role`), ADR-0033 (per-agent tool allow-list / injection boundary), ADR-0037 (Troubleshooting-vs-Security split) |
 | **PRODUCTION.md** | §2.3, §11 G-SEC |
-| **Status** | Done — implemented on `feat/p2-w3-security-agent` (commit `cc4d59c`). Routing-quality re-run over the new roster is W5-T2. |
+| **Status** | Done — implemented on `feat/p2-w3-security-agent` (PR #70). Routing-quality re-run over the new roster is W5-T2. |
 
 ## Objective
 
@@ -93,7 +93,7 @@ time; `app/agents/security/`; the ADR-0033 allow-list config; tests)
 - [x] Supervisor builds; no existing-routing regression (composition / eight-way /
       P1 injection guardrail updated for the ninth specialist; full quality re-run
       is W5-T2). Full unit suite 2803 passed / 18 skipped.
-- [x] D16 gates green; one atomic commit (`cc4d59c`).
+- [x] D16 gates green; one atomic commit (PR #70).
 
 ## Workflow (P2-SECURITY-PLAN.md §3, secret-surface escalation)
 

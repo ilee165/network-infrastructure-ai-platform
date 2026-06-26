@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any
 
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from app.agents.framework.tools import ToolClassification, netops_tool
 from app.engines.security.firewall import (
@@ -72,14 +72,43 @@ def _redact_finding(finding: SecurityFinding) -> dict[str, Any]:
     return payload
 
 
+def _sanitized_validation_error(kind: str, index: int, exc: ValidationError) -> str:
+    """Build a secret-free message from a ValidationError (drop input values).
+
+    A Pydantic ``ValidationError`` embeds the offending input in its message — for
+    a firewall rule that includes the free-text ``description``, which can carry an
+    operator-pasted secret (A9, ADR-0017 §3). Surface only the field location and
+    error type, never the input value or the value-bearing default message, so a
+    malformed record cannot leak secret text into an exception detail or audit log.
+    """
+    problems = "; ".join(
+        f"{'.'.join(str(part) for part in err['loc'])}: {err['type']}" for err in exc.errors()
+    )
+    return f"{kind} at index {index} failed normalized-schema validation: {problems}"
+
+
 def _parse_firewall_rules(rules: list[dict[str, Any]]) -> list[NormalizedFirewallRule]:
     """Validate already-collected normalized firewall-rule dumps into models."""
-    return [NormalizedFirewallRule.model_validate(rule) for rule in rules]
+    parsed: list[NormalizedFirewallRule] = []
+    for index, rule in enumerate(rules):
+        try:
+            parsed.append(NormalizedFirewallRule.model_validate(rule))
+        except ValidationError as exc:
+            # ``from None`` drops the chained ValidationError (its repr carries the
+            # raw, possibly secret-bearing input) so only the sanitized message survives.
+            raise ValueError(_sanitized_validation_error("firewall rule", index, exc)) from None
+    return parsed
 
 
 def _parse_acls(acls: list[dict[str, Any]]) -> list[NormalizedAclEntry]:
     """Validate already-collected normalized ACL-entry dumps into models."""
-    return [NormalizedAclEntry.model_validate(entry) for entry in acls]
+    parsed: list[NormalizedAclEntry] = []
+    for index, entry in enumerate(acls):
+        try:
+            parsed.append(NormalizedAclEntry.model_validate(entry))
+        except ValidationError as exc:
+            raise ValueError(_sanitized_validation_error("ACL entry", index, exc)) from None
+    return parsed
 
 
 # ---------------------------------------------------------------------------

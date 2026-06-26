@@ -1,15 +1,16 @@
-"""8-way supervisor routing tests (M5 T14): the full specialist roster.
+"""Full-roster supervisor routing tests (M5 T14; extended P2 W3-T2).
 
-T14 registers the three Wave-4 specialists (automation, ddi, packet_analysis)
-with the Master Architect and takes the structured routing prompt to v5. After
-this task the supervisor routes over EIGHT specialists. These tests are offline
-and deterministic — a scripted fake chat model replays a fixed
-``RoutingDecision`` (it cannot test routing *quality*; the real-LLM eval guards
-that), so they prove the wiring: each of the eight specialists is a reachable
-router node, a representative routing decision reaches each new specialist, and
-— the critical M5 invariant — a "change X" request routes to the agent that
-DRAFTS a ChangeRequest (the DDI Agent for records), never to the Automation
-Agent that EXECUTES an already-approved change.
+T14 registered the three Wave-4 specialists (automation, ddi, packet_analysis)
+with the Master Architect and took the structured routing prompt to v5 — eight
+specialists. P2 W3-T2 added the security agent (prompt v6), so the supervisor now
+routes over NINE specialists. These tests are offline and deterministic — a
+scripted fake chat model replays a fixed ``RoutingDecision`` (it cannot test
+routing *quality*; the real-LLM eval guards that), so they prove the wiring: each
+of the nine specialists is a reachable router node, a representative routing
+decision reaches each new specialist, and — the critical M5 invariant — a
+"change X" request routes to the agent that DRAFTS a ChangeRequest (the DDI Agent
+for records), never to the Automation Agent that EXECUTES an already-approved
+change. (Security-agent routing lives in tests/agents/security/test_security_routing.py.)
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ class TestWave4Registration:
         names = set(build_default_registry().names())
         assert names >= WAVE4_SPECIALISTS
 
-    def test_registry_holds_the_full_eight_specialist_roster(self) -> None:
+    def test_registry_holds_the_full_specialist_roster(self) -> None:
         registry = build_default_registry()
         routable = {n for n in registry.names() if n != SUPERVISOR_NAME}
         assert routable == FULL_ROSTER

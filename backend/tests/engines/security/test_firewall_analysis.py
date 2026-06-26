@@ -358,6 +358,77 @@ class TestPosture:
 
 
 # ---------------------------------------------------------------------------
+# Literal wildcard tokens (the real Wave-2 plugin encoding — ADR-0034 §5)
+# ---------------------------------------------------------------------------
+
+
+class TestLiteralWildcardTokens:
+    """`any` (PAN-OS) / `all` (FortiOS) tokens are wildcards, not specific names.
+
+    The plugins emit the vendor token verbatim (`source=("any",)` /
+    `srcaddr=("all",)`), not an empty tuple, so the engine must treat them as
+    *any* or it silently under-reports the most common real-world exposure.
+    """
+
+    def test_literal_any_to_all_is_overly_permissive_high(self) -> None:
+        rules = [
+            _rule(
+                "permit-any",
+                action=FirewallAction.ALLOW,
+                position=1,
+                source_addresses=("any",),  # PAN-OS encoding
+                destination_addresses=("all",),  # FortiOS encoding
+                services=("any",),
+            )
+        ]
+        op = [
+            f
+            for f in analyze_firewall_rules(rules)
+            if f.category is FindingCategory.OVERLY_PERMISSIVE
+        ]
+        assert len(op) == 1
+        assert op[0].severity is FindingSeverity.HIGH
+
+    def test_literal_any_shadows_later_rule(self) -> None:
+        rules = [
+            _rule(
+                "deny-all",
+                action=FirewallAction.DENY,
+                position=1,
+                source_addresses=("any",),
+                destination_addresses=("any",),
+            ),
+            _rule(
+                "allow-web",
+                action=FirewallAction.ALLOW,
+                position=2,
+                source_addresses=("10.0.0.0/24",),
+                destination_addresses=("web",),
+            ),
+        ]
+        shadowed = [
+            f for f in analyze_firewall_rules(rules) if f.category is FindingCategory.SHADOWED
+        ]
+        assert len(shadowed) == 1
+        assert shadowed[0].rule_name == "allow-web"
+        assert shadowed[0].related_rule_name == "deny-all"
+
+    def test_literal_any_source_exposes_management_plane(self) -> None:
+        rules = [
+            _rule(
+                "mgmt-ssh",
+                action=FirewallAction.ALLOW,
+                source_addresses=("All",),  # case-insensitive wildcard
+                destination_addresses=("core-1",),
+                services=("ssh",),
+                logging=True,
+            )
+        ]
+        findings = analyze_security_posture(rules)
+        assert any("management-plane" in f.rationale for f in findings)
+
+
+# ---------------------------------------------------------------------------
 # Determinism / ordering
 # ---------------------------------------------------------------------------
 

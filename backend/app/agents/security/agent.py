@@ -78,7 +78,7 @@ class SecurityAgent(BaseSpecialistAgent):
             "REVIEW firewall-policy hygiene or security posture — 'is this rule shadowed?', "
             "'find overly-permissive rules', 'audit this firewall's policy', 'which rules are "
             "redundant?', 'check our security posture'. It analyzes already-collected "
-            "normalized firewall/NAT policy and ACLs as DATA; it does NOT diagnose a live, "
+            "normalized firewall policy and ACLs as DATA; it does NOT diagnose a live, "
             "single-flow reachability fault ('why is THIS flow blocked right now?' is "
             "troubleshooting), and it does NOT enumerate inventory (discovery). It is "
             "read-only: a remediation it proposes becomes a change request for human approval "
