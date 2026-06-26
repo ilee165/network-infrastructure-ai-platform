@@ -107,10 +107,10 @@ class TestRoutingPromptV4:
 
 
 class TestRoutingPromptV5:
-    def test_v5_is_the_latest_routing_prompt(self) -> None:
-        # The supervisor auto-selects the latest; v5 is the 8-way prompt (T14).
-        latest = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)
-        assert latest.version == 5
+    def test_v5_is_registered_as_the_eight_way_prompt(self) -> None:
+        # v5 is the 8-way prompt (T14); P2 W3-T2 supersedes it with v6 (9-way) but
+        # v5 stays registered and immutable for reproducibility.
+        assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 5).version == 5
 
     def test_v5_keeps_specialists_placeholder(self) -> None:
         assert "{specialists}" in get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 5).text
@@ -167,6 +167,64 @@ class TestRoutingPromptV5:
         assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 2).version == 2
         assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 3).version == 3
         assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 4).version == 4
+
+
+class TestRoutingPromptV6:
+    def test_v6_is_the_latest_routing_prompt(self) -> None:
+        # The supervisor auto-selects the latest; v6 is the 9-way prompt (P2 W3-T2).
+        latest = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)
+        assert latest.version == 6
+
+    def test_v6_keeps_specialists_placeholder(self) -> None:
+        assert "{specialists}" in get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 6).text
+
+    def test_v6_covers_all_nine_specialists(self) -> None:
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 6).text.lower()
+        for specialist in (
+            "discovery",
+            "troubleshooting",
+            "consultant",
+            "configuration",
+            "documentation",
+            "automation",
+            "ddi",
+            "packet",
+            "security",
+        ):
+            assert specialist in text
+
+    def test_v6_adds_the_troubleshooting_security_split(self) -> None:
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 6).text.lower()
+        # Security => audit firewall policy AS DATA (shadowed/overly-permissive).
+        assert "audit" in text
+        assert "shadow" in text
+        assert "overly-permissive" in text
+        # The split: a live single-flow fault is troubleshooting, not an audit.
+        assert "blocked right now" in text
+
+    def test_v6_preserves_v5_v4_v3_rules(self) -> None:
+        text = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, 6).text.lower()
+        # v3 diagnosis-vs-enumeration rules retained.
+        assert "why" in text
+        assert "enumerat" in text
+        assert "routing table" in text
+        # v4 config/documentation boundaries retained.
+        assert "drift" in text
+        assert "complian" in text
+        assert "inventory" in text
+        assert "diagram" in text
+        assert "runbook" in text
+        # v5 wave-4 boundaries + change-draft-not-execute invariant retained.
+        assert "dns" in text
+        assert "dhcp" in text
+        assert "capture" in text
+        assert "change request" in text
+        assert "approved" in text
+        assert "execut" in text
+
+    def test_v1_through_v5_still_registered_immutable(self) -> None:
+        for version in (1, 2, 3, 4, 5):
+            assert get_prompt(SUPERVISOR_ROUTING_PROMPT_ID, version).version == version
 
 
 class TestRegistryBehavior:

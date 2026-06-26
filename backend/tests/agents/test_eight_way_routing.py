@@ -26,6 +26,10 @@ from app.agents.packet_analysis.agent import PACKET_ANALYSIS_NAME
 from tests.agents.conftest import scripted_model
 
 WAVE4_SPECIALISTS = {AUTOMATION_NAME, DDI_NAME, PACKET_ANALYSIS_NAME}
+# P2 W3-T2 added the security agent, so the routable roster is now nine. The
+# Wave-4 registration assertions below stay as written; the exact-roster check
+# tracks the current full set (security-agent routing is covered in
+# tests/agents/security/test_security_routing.py).
 FULL_ROSTER = {
     "consultant",
     "discovery",
@@ -35,6 +39,7 @@ FULL_ROSTER = {
     AUTOMATION_NAME,
     DDI_NAME,
     PACKET_ANALYSIS_NAME,
+    "security",
 }
 
 

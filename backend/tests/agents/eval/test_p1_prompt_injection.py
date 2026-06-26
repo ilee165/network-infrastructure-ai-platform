@@ -457,9 +457,15 @@ class TestCoverageMatrix:
             "corpus target_agent(s) with no exercisable state-changing surface: "
             f"{sorted(targets - exercisable)}"
         )
-        # The DDI agent is the only one expected to register state-changing tools
-        # today; pin that so the gap is named, not assumed away.
-        assert with_registered_tool == {"ddi"}, (
+        # DDI and (P2 W3) security are the agents that register state-changing
+        # MODEL tools today (ddi: typed DDI mutators; security:
+        # propose_firewall_remediation, gate-routed to a security_remediation CR
+        # draft). Pin that set so a future change to the surface is named, not
+        # assumed away. The P1 injection corpus does not yet target the security
+        # agent (its firewall-analysis corpus is W5-T1); this guardrail only
+        # tracks the registered surface, so the existing per-(carrier x agent)
+        # claims stay honest.
+        assert with_registered_tool == {"ddi", "security"}, (
             "registered state-changing tool surface changed; revisit the honest "
             f"dispatch and this guardrail: {sorted(with_registered_tool)}"
         )

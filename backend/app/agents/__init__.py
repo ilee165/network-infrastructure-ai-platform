@@ -7,12 +7,13 @@ all ten core agents. Specialist packages (``master_architect/``,
 ``agents.framework`` plus ``core``/``schemas``/``llm`` (REPO-STRUCTURE
 section 3.2, row 11).
 
-Composition root (M3-14, extended in M4 T13 and M5 T14)
+Composition root (M3-14, extended in M4 T13, M5 T14, and P2 W3-T2)
     :func:`build_default_registry` assembles the process-wide
     :class:`~app.agents.framework.registry.AgentRegistry` for the core set — the
-    Master Architect supervisor plus the EIGHT routable specialists (consultant,
+    Master Architect supervisor plus the NINE routable specialists (consultant,
     discovery, troubleshooting, configuration, documentation added M3/M4;
-    automation, ddi, packet_analysis added in M5 T14). :func:`build_default_supervisor`
+    automation, ddi, packet_analysis added in M5 T14; security added in P2 W3-T2).
+    :func:`build_default_supervisor`
     compiles the runnable supervisor graph over the *routable* subset of that
     registry (everything except the Master Architect itself, which is the
     supervisor and must never route to itself). Both take their inputs explicitly
@@ -47,6 +48,7 @@ from app.agents.framework.supervisor import (
 from app.agents.framework.traces import TraceRecorder
 from app.agents.master_architect.agent import MasterArchitectAgent
 from app.agents.packet_analysis.agent import PacketAnalysisAgent
+from app.agents.security.agent import SecurityAgent
 from app.agents.troubleshooting.agent import TroubleshootingAgent
 
 __all__ = [
@@ -58,11 +60,12 @@ __all__ = [
 def build_default_registry() -> AgentRegistry:
     """Build the default :class:`AgentRegistry` (the composition root).
 
-    Registers the nine core agents — the Master Architect supervisor (CLAUDE.md
-    Core Agent #1) and the eight routable specialists: consultant, discovery,
+    Registers the ten core agents — the Master Architect supervisor (CLAUDE.md
+    Core Agent #1) and the nine routable specialists: consultant, discovery,
     troubleshooting, configuration, documentation (M3/M4) plus automation, ddi,
-    and packet_analysis (M5 T14) — each as a fresh instance so the registry owns
-    no shared mutable state across processes or tests. Registration validates
+    and packet_analysis (M5 T14) and security (P2 W3-T2, CLAUDE.md Core Agent #9) —
+    each as a fresh instance so the registry owns no shared mutable state across
+    processes or tests. Registration validates
     every agent's declaration
     (:meth:`~app.agents.framework.base.BaseSpecialistAgent.validate_definition`).
 
@@ -85,6 +88,7 @@ def build_default_registry() -> AgentRegistry:
     registry.register(AutomationAgent())
     registry.register(DdiAgent())
     registry.register(PacketAnalysisAgent())
+    registry.register(SecurityAgent())
     return registry
 
 
