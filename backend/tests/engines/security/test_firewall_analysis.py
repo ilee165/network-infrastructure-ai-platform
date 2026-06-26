@@ -229,6 +229,46 @@ class TestOverlyPermissive:
         assert len(op) == 1
         assert op[0].severity is FindingSeverity.MEDIUM
 
+    def test_allow_any_service_only_is_medium(self) -> None:
+        # Specific source AND destination but ANY service (`corp -> db on any`) is a
+        # real least-privilege gap the narrow detector used to miss.
+        rules = [
+            _rule(
+                "corp-to-db",
+                action=FirewallAction.ALLOW,
+                position=1,
+                source_addresses=("corp",),
+                destination_addresses=("db",),  # services empty -> any
+            )
+        ]
+        op = [
+            f
+            for f in analyze_firewall_rules(rules)
+            if f.category is FindingCategory.OVERLY_PERMISSIVE
+        ]
+        assert len(op) == 1
+        assert op[0].severity is FindingSeverity.MEDIUM
+        assert "service" in op[0].rationale
+
+    def test_allow_any_destination_only_is_medium(self) -> None:
+        rules = [
+            _rule(
+                "corp-egress",
+                action=FirewallAction.ALLOW,
+                position=1,
+                source_addresses=("corp",),  # dst any, service specific
+                services=("https",),
+            )
+        ]
+        op = [
+            f
+            for f in analyze_firewall_rules(rules)
+            if f.category is FindingCategory.OVERLY_PERMISSIVE
+        ]
+        assert len(op) == 1
+        assert op[0].severity is FindingSeverity.MEDIUM
+        assert "destination" in op[0].rationale
+
     def test_deny_any_to_any_is_not_overly_permissive(self) -> None:
         # A broad DENY is good hygiene (a default-deny), not an exposure.
         rules = [_rule("deny-any", action=FirewallAction.DENY, position=1)]

@@ -237,8 +237,19 @@ def _overly_permissive(
                     ),
                 )
             )
-        elif (src_any or dst_any) and svc_any:
-            side = "source" if src_any else "destination"
+        elif src_any or dst_any or svc_any:
+            # Any single unconstrained dimension on an allow is broader than a
+            # least-privilege rule (e.g. `corp -> db on ANY service`), matching the
+            # module/schema contract ("any source, destination, OR service").
+            unconstrained = [
+                name
+                for name, is_any in (
+                    ("source", src_any),
+                    ("destination", dst_any),
+                    ("service", svc_any),
+                )
+                if is_any
+            ]
             findings.append(
                 SecurityFinding(
                     category=FindingCategory.OVERLY_PERMISSIVE,
@@ -247,12 +258,12 @@ def _overly_permissive(
                     rule_position=rule.position,
                     evidence=_rule_evidence(rule),
                     rationale=(
-                        f"Rule '{rule.name}' allows any {side} on any service — broader than a "
-                        "least-privilege rule should be."
+                        f"Rule '{rule.name}' leaves {', '.join(unconstrained)} unconstrained "
+                        "(any) on an allow — broader than a least-privilege rule should be."
                     ),
                     suggested_remediation=(
-                        f"Constrain rule '{rule.name}' to the specific {side} and service it is "
-                        "meant to permit."
+                        f"Constrain rule '{rule.name}' to the specific source, destination, and "
+                        "service it is meant to permit."
                     ),
                 )
             )
