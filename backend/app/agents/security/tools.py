@@ -77,13 +77,13 @@ def _sanitized_validation_error(kind: str, index: int, exc: ValidationError) -> 
 
     A Pydantic ``ValidationError`` embeds the offending input in its message — for
     a firewall rule that includes the free-text ``description``, which can carry an
-    operator-pasted secret (A9, ADR-0017 §3). Surface only the field location and
-    error type, never the input value or the value-bearing default message, so a
-    malformed record cannot leak secret text into an exception detail or audit log.
+    operator-pasted secret (A9, ADR-0017 §3). Surface only the error TYPE and an
+    ordinal — never ``err['loc']`` (with ``extra="forbid"`` the loc is the offending
+    field NAME, which is attacker-controllable and could echo a secret), and never
+    ``err['msg']``/``err['input']`` (which embed the value) — so a malformed record
+    cannot leak secret text into an exception detail or audit log.
     """
-    problems = "; ".join(
-        f"{'.'.join(str(part) for part in err['loc'])}: {err['type']}" for err in exc.errors()
-    )
+    problems = "; ".join(f"error {i}: {err['type']}" for i, err in enumerate(exc.errors(), start=1))
     return f"{kind} at index {index} failed normalized-schema validation: {problems}"
 
 

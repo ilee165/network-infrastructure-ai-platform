@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -57,6 +58,7 @@ from app.models import (
 )
 from app.models import Role as RoleRow
 from app.schemas.normalized import FirewallAction, NormalizedFirewallRule
+from app.schemas.security import FindingCategory, FindingSeverity, SecurityFinding
 from tests.agents.conftest import scripted_model
 
 DEVICE = "11111111-1111-1111-1111-111111111111"
@@ -274,6 +276,55 @@ class TestAnalysisTools:
 # ---------------------------------------------------------------------------
 
 
+class TestFindingSchemaInvariants:
+    """The SecurityFinding contract: evidence-cited + correlation-cited."""
+
+    def test_shadowed_finding_requires_related_rule_name(self) -> None:
+        with pytest.raises(ValidationError):
+            SecurityFinding(
+                category=FindingCategory.SHADOWED,
+                severity=FindingSeverity.MEDIUM,
+                rule_name="allow-web",
+                evidence={"name": "allow-web"},
+                rationale="unreachable",
+                suggested_remediation="reorder",
+            )
+
+    def test_redundant_finding_requires_related_rule_name(self) -> None:
+        with pytest.raises(ValidationError):
+            SecurityFinding(
+                category=FindingCategory.REDUNDANT,
+                severity=FindingSeverity.LOW,
+                rule_name="allow-dup",
+                evidence={"name": "allow-dup"},
+                rationale="adds nothing",
+                suggested_remediation="remove",
+            )
+
+    def test_empty_evidence_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SecurityFinding(
+                category=FindingCategory.OVERLY_PERMISSIVE,
+                severity=FindingSeverity.HIGH,
+                rule_name="permit-any",
+                evidence={},  # evidence-cited contract: must be non-empty
+                rationale="any to any",
+                suggested_remediation="constrain",
+            )
+
+    def test_overly_permissive_finding_needs_no_related_rule(self) -> None:
+        # Non-correlated categories are valid without related_rule_name.
+        finding = SecurityFinding(
+            category=FindingCategory.OVERLY_PERMISSIVE,
+            severity=FindingSeverity.HIGH,
+            rule_name="permit-any",
+            evidence={"name": "permit-any"},
+            rationale="any to any",
+            suggested_remediation="constrain",
+        )
+        assert finding.related_rule_name is None
+
+
 class TestValidationErrorSanitization:
     """A malformed record cannot leak secret text via the validation exception."""
 
@@ -291,10 +342,11 @@ class TestValidationErrorSanitization:
         with pytest.raises(ValueError) as ei:  # noqa: PT011 - message asserted below
             _parse_firewall_rules([bad])
         message = str(ei.value)
-        # The exception names the field location/type but NEVER the secret input.
+        # The message names the error type/ordinal but NEVER the secret input — and
+        # never the field NAME either (an extra-field loc is attacker-controllable).
         assert _SECRET not in message
-        assert "action" in message
         assert "firewall rule at index 0" in message
+        assert "error 1" in message
 
     def test_acl_validation_error_is_sanitized(self) -> None:
         bad = {

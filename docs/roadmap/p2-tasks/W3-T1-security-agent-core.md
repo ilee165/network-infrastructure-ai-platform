@@ -109,8 +109,8 @@ in `app/schemas/`, the analysis service the tools call, a new ChangeRequest
       test green.
 - [x] A9 redaction at the secret boundary (rule `description`); analysis fixtures
       green (W5-T1 seed). 100% coverage on the new modules.
-- [x] D16 gates green (ruff, ruff format, mypy, import-linter, pytest); one atomic
-      commit (PR #70).
+- [x] D16 gates green (ruff, ruff format, mypy, import-linter, pytest); implemented
+      in PR #70 (the task landed as one atomic commit; review-response commits follow).
 
 ## Workflow (P2-SECURITY-PLAN.md §3, secret-surface escalation)
 

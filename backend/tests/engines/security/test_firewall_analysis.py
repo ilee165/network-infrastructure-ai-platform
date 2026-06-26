@@ -345,12 +345,18 @@ class TestPosture:
         findings = analyze_security_posture(rules)
         assert [f for f in findings if "management-plane" in f.rationale] == []
 
-    def test_permit_any_any_acl_is_high(self) -> None:
-        acls = [_acl("OUTSIDE_IN", action=AclAction.PERMIT, sequence=10)]  # any -> any
+    def test_permit_unscoped_acl_is_flagged_low_advisory(self) -> None:
+        # A permit ACE with both endpoints None is ambiguous (genuine any OR an
+        # unresolved address-group the normalized model can't represent — e.g.
+        # cisco_nxos addrgroup -> None), so it is flagged LOW/advisory, never a
+        # false-positive HIGH violation.
+        acls = [_acl("OUTSIDE_IN", action=AclAction.PERMIT, sequence=10)]  # source/dest None
         findings = analyze_security_posture((), acls)
         assert len(findings) == 1
-        assert findings[0].severity is FindingSeverity.HIGH
+        assert findings[0].category is FindingCategory.POSTURE
+        assert findings[0].severity is FindingSeverity.LOW
         assert findings[0].rule_name == "OUTSIDE_IN"
+        assert "unresolved address-group" in findings[0].rationale
 
     def test_scoped_acl_permit_is_clean(self) -> None:
         acls = [_acl("OK", action=AclAction.PERMIT, source="10.0.0.0/24")]
@@ -412,6 +418,8 @@ class TestLiteralWildcardTokens:
         assert len(shadowed) == 1
         assert shadowed[0].rule_name == "allow-web"
         assert shadowed[0].related_rule_name == "deny-all"
+        # allow shadowed by deny = functionality gap -> MEDIUM (sibling-test parity).
+        assert shadowed[0].severity is FindingSeverity.MEDIUM
 
     def test_literal_any_source_exposes_management_plane(self) -> None:
         rules = [
@@ -424,8 +432,10 @@ class TestLiteralWildcardTokens:
                 logging=True,
             )
         ]
-        findings = analyze_security_posture(rules)
-        assert any("management-plane" in f.rationale for f in findings)
+        mgmt = [f for f in analyze_security_posture(rules) if "management-plane" in f.rationale]
+        assert len(mgmt) == 1
+        assert mgmt[0].category is FindingCategory.POSTURE
+        assert mgmt[0].severity is FindingSeverity.HIGH
 
 
 # ---------------------------------------------------------------------------

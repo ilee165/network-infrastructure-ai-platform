@@ -344,24 +344,37 @@ def _posture_firewall(
 
 
 def _posture_acls(acls: Sequence[NormalizedAclEntry]) -> list[SecurityFinding]:
-    """Posture check over ACLs: a permit-any-to-any entry is over-broad."""
+    """Advisory posture check over ACLs: a permit entry with unscoped endpoints.
+
+    A ``None`` source/destination on a :class:`NormalizedAclEntry` is **ambiguous**:
+    the normalized model (``IPv4Network | IPv6Network | None``) cannot represent a
+    named address-group, so a vendor that uses object-groups collapses them to
+    ``None`` exactly like a genuine ``any`` (e.g. cisco_nxos ``addrgroup`` →
+    ``None``). The engine therefore cannot tell "permit any → any" from "permit
+    group-A → group-B" from ``None`` alone. To avoid false-positive HIGH findings on
+    scoped object-group rules, a permit ACE with both endpoints unscoped is flagged
+    **LOW / advisory** ("verify"), with the ambiguity named in the rationale — not
+    asserted as a definite over-broad violation. (A precise check needs a normalized
+    wildcard/group distinction; deferred — recorded, not silent.)
+    """
     findings: list[SecurityFinding] = []
     for entry in acls:
         if entry.action == AclAction.PERMIT and entry.source is None and entry.destination is None:
             findings.append(
                 SecurityFinding(
                     category=FindingCategory.POSTURE,
-                    severity=FindingSeverity.HIGH,
+                    severity=FindingSeverity.LOW,
                     rule_name=entry.acl_name,
                     rule_position=entry.sequence,
                     evidence=_acl_evidence(entry),
                     rationale=(
-                        f"ACL '{entry.acl_name}' permits any source to any destination — an "
-                        "over-broad permit with no least-privilege scoping."
+                        f"ACL '{entry.acl_name}' permits traffic with both source and destination "
+                        "unscoped — either 'any → any' (over-broad) OR an unresolved address-group "
+                        "the normalized model cannot represent. Verify the intended scope."
                     ),
                     suggested_remediation=(
-                        f"Scope ACL '{entry.acl_name}' to the specific source and destination it "
-                        "must permit."
+                        f"Confirm ACL '{entry.acl_name}' is not 'any → any'; if it is, scope it to "
+                        "the specific source and destination it must permit."
                     ),
                 )
             )

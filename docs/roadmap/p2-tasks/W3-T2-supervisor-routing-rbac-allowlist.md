@@ -93,7 +93,8 @@ time; `app/agents/security/`; the ADR-0033 allow-list config; tests)
 - [x] Supervisor builds; no existing-routing regression (composition / eight-way /
       P1 injection guardrail updated for the ninth specialist; full quality re-run
       is W5-T2). Full unit suite 2803 passed / 18 skipped.
-- [x] D16 gates green; one atomic commit (PR #70).
+- [x] D16 gates green; implemented in PR #70 (the task landed as one atomic commit;
+      review-response commits follow).
 
 ## Workflow (P2-SECURITY-PLAN.md §3, secret-surface escalation)
 

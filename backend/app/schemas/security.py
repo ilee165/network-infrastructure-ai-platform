@@ -22,7 +22,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
     "FindingCategory",
@@ -93,3 +93,21 @@ class SecurityFinding(BaseModel):
     rationale: str = Field(min_length=1)
     #: The deterministic, human-reviewable fix (drafted as a CR, never applied).
     suggested_remediation: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _require_correlation_for_shadow_redundant(self) -> SecurityFinding:
+        """A shadowed/redundant finding must cite the covering rule (ADR-0037 §3).
+
+        These categories are inherently relational — "rule X is covered by rule Y";
+        a finding that omits ``related_rule_name`` carries no correlation context and
+        is invalid, so the contract is enforced structurally, not by convention.
+        """
+        if (
+            self.category in (FindingCategory.SHADOWED, FindingCategory.REDUNDANT)
+            and not self.related_rule_name
+        ):
+            raise ValueError(
+                f"a '{self.category.value}' finding must name the covering rule via "
+                "related_rule_name"
+            )
+        return self
