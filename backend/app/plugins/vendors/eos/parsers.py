@@ -358,6 +358,17 @@ def _hms_to_seconds(value: str) -> int | None:
     return hours * 3600 + minutes * 60 + seconds
 
 
+def _eos_is_any(value: str) -> bool:
+    """``True`` only for the literal ``any`` token (an explicit *any*).
+
+    Both ``any`` and an unparseable token (e.g. a field-set name) collapse to a
+    ``None`` endpoint in :func:`_eos_acl_endpoint`; this flag carries the bit that
+    tells a genuine *any* apart from an unresolved group. Matched case-insensitively
+    in case EOS output preserves ``ANY``/``Any``.
+    """
+    return value.strip().lower() == "any"
+
+
 def _eos_acl_endpoint(source: str) -> IPv4Network | None:
     """Resolve an EOS ACE source/destination to a network.
 
@@ -369,7 +380,7 @@ def _eos_acl_endpoint(source: str) -> IPv4Network | None:
     EOS ACLs are IPv4-only at this capability tier, so we cast to IPv4Network.
     """
     src = source.strip()
-    if not src or src == "any":
+    if not src or src.lower() == "any":
         return None
     if src.startswith("host "):
         host_ip = src[5:].strip()
@@ -516,8 +527,10 @@ def parse_acls(
                     protocol=str(row.get("protocol", "")).strip() or "ip",
                     sequence=_int_or_none(row.get("sn")),
                     source=_eos_acl_endpoint(str(row.get("source", ""))),
+                    source_is_any=_eos_is_any(str(row.get("source", ""))),
                     source_port=None,  # EOS template does not expose source port separately
                     destination=_eos_acl_endpoint(str(row.get("destination", ""))),
+                    destination_is_any=_eos_is_any(str(row.get("destination", ""))),
                     destination_port=str(row.get("modifier", "")).strip() or None,
                     hits=None,  # EOS template does not capture match counts
                 )

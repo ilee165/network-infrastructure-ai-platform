@@ -216,11 +216,14 @@ class TestAcl:
         permit = next(e for e in entries if e.acl_name == "10" and e.sequence == 10)
         assert permit.action is AclAction.PERMIT
         assert permit.source == IPv4Network("10.1.1.0/24")
+        assert permit.source_is_any is False  # scoped network, not the literal 'any'
         assert permit.destination is None  # standard ACL: no explicit destination
+        assert permit.destination_is_any is False  # implicit (no 'any' token emitted)
         assert permit.hits == 120
         deny_any = next(e for e in entries if e.acl_name == "10" and e.sequence == 20)
         assert deny_any.action is AclAction.DENY
         assert deny_any.source is None  # 'any'
+        assert deny_any.source_is_any is True  # explicit literal 'any' token
 
     def test_extended_acl_host_and_ports(self, transport: FakeTransport, device_id: UUID) -> None:
         entries = CiscoIosAcl(transport, device_id).get_acls()
@@ -228,12 +231,16 @@ class TestAcl:
         assert telnet.action is AclAction.DENY
         assert telnet.protocol == "tcp"
         assert telnet.source is None  # any
+        assert telnet.source_is_any is True  # explicit 'any' token
         assert telnet.destination == IPv4Network("10.0.0.5/32")  # host
+        assert telnet.destination_is_any is False  # scoped host, not 'any'
         assert telnet.destination_port == "eq telnet"
         assert telnet.hits == 5
         www = next(e for e in entries if e.acl_name == "BLOCK-TELNET" and e.sequence == 20)
         assert www.source == IPv4Network("192.0.2.0/24")
+        assert www.source_is_any is False
         assert www.destination is None  # any
+        assert www.destination_is_any is True  # explicit 'any' token
         assert www.destination_port == "eq www"
 
     def test_provenance_and_raw_capture(self, transport: FakeTransport, device_id: UUID) -> None:

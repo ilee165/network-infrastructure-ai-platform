@@ -8,7 +8,7 @@
 | **Depends on** | **W3-T1** (the agent it registers); ADR-0037 (W0-T4) |
 | **ADRs** | ADR-0003 (supervisor routing / registry), ADR-0011 (RBAC `min_role`), ADR-0033 (per-agent tool allow-list / injection boundary), ADR-0037 (Troubleshooting-vs-Security split) |
 | **PRODUCTION.md** | §2.3, §11 G-SEC |
-| **Status** | Proposed |
+| **Status** | Done — implemented on `feat/p2-w3-security-agent` (PR #70). Routing-quality re-run over the new roster is W5-T2. |
 
 ## Objective
 
@@ -81,12 +81,20 @@ time; `app/agents/security/`; the ADR-0033 allow-list config; tests)
 
 ## Exit criteria
 
-- [ ] Security Agent registered; appears in the supervisor roster + subgraph.
-- [ ] Troubleshooting-vs-Security split implemented; routing test green both ways.
-- [ ] Read-only RBAC `min_role` per tool; RBAC test green.
-- [ ] ADR-0033 allow-list extended to the agent; injection-boundary test fails closed.
-- [ ] Supervisor builds; no existing-routing regression (full re-run deferred to W5-T2).
-- [ ] D16 gates green; one atomic commit.
+- [x] Security Agent registered in `build_default_registry`; appears in the
+      supervisor roster + subgraph (ninth routable specialist).
+- [x] Troubleshooting-vs-Security split implemented (routing prompt v6 + disjoint
+      descriptions); routing test green both ways.
+- [x] Read-only RBAC `min_role` per tool (read tools = viewer, remediation =
+      engineer); RBAC test green (viewer reaches reads, not the drafter).
+- [x] ADR-0033 allow-list extended to the agent; injection-boundary test fails
+      closed (out-of-allow-list tools unreachable; only write surface is the
+      gate-routed remediation draft).
+- [x] Supervisor builds; no existing-routing regression (composition / eight-way /
+      P1 injection guardrail updated for the ninth specialist; full quality re-run
+      is W5-T2). Full unit suite 2803 passed / 18 skipped.
+- [x] D16 gates green; implemented in PR #70 (the task landed as one atomic commit;
+      review-response commits follow).
 
 ## Workflow (P2-SECURITY-PLAN.md §3, secret-surface escalation)
 

@@ -8,7 +8,7 @@
 | **Depends on** | **W1-T1** (`FIREWALL_POLICY` models) + **≥1 of W2** (`panos` or `fortios`, a real policy source); ADR-0037 (W0-T4) |
 | **ADRs** | ADR-0037 (the agent decision), ADR-0003 (specialist framework), ADR-0011 (RBAC / read-only), ADR-0020 (ChangeRequest spine), ADR-0033 (per-agent tool allow-list), ADR-0034 (analysis input) |
 | **PRODUCTION.md** | §2.3 (Security Agent), §11 G-SEC |
-| **Status** | Proposed |
+| **Status** | Done — implemented on `feat/p2-w3-security-agent` (PR #70). ADR-0037 stays Proposed → Accepted is the W5 release gate. |
 
 ## Objective
 
@@ -27,11 +27,14 @@ in `app/schemas/`, the analysis service the tools call, a new ChangeRequest
   tunes for routing), `system_prompt`, `tools`. Default ReAct graph
   (`BaseSpecialistAgent.build_graph`), exactly like `DdiAgent`.
 - **READ_ONLY analysis tools** over already-collected normalized data
-  (`FIREWALL_POLICY` from W2 + existing `ACL` / `CONFIG_BACKUP`), following the
+  (`FIREWALL_POLICY` from W2 + existing `ACL`), following the
   **Configuration-agent "narrate" pattern**: the *server/service* computes the
   analysis deterministically; the agent narrates. Analyses:
   **shadowed**, **redundant**, **overly-permissive** firewall rules; posture
-  checks across configs + ACLs.
+  checks across firewall policy + ACLs. (Raw `CONFIG_BACKUP` text-hardening is
+  **intentionally not** consumed here — that is the compliance engine's domain,
+  ADR-0018; the Security Agent analyzes firewall policy *as data*. The exit
+  criteria reflect this.)
 - **Findings model** (`app/schemas/`): severity, category, offending-rule
   reference, evidence (the normalized rule), rationale, suggested remediation;
   **frozen, `extra="forbid"`, secret-free**.
@@ -91,14 +94,23 @@ in `app/schemas/`, the analysis service the tools call, a new ChangeRequest
 
 ## Exit criteria
 
-- [ ] `SecurityAgent` (`name="security"`) on `BaseSpecialistAgent`, DDI-style graph.
-- [ ] READ_ONLY analyses (shadowed/redundant/overly-permissive + posture) over
-      `FIREWALL_POLICY`/`ACL`/`CONFIG_BACKUP`; deterministic in the service.
-- [ ] Findings model: evidence-cited, frozen, secret-free.
-- [ ] Remediation = gate-routed CR draft (new kind); **no device-executing tool**;
-      invariant test green.
-- [ ] Redaction at the secret boundary; analysis fixtures green (W5-T1 seed).
-- [ ] D16 gates green; one atomic commit.
+- [x] `SecurityAgent` (`name="security"`) on `BaseSpecialistAgent`, DDI-style graph
+      (default ReAct loop). `app/agents/security/agent.py`.
+- [x] READ_ONLY analyses (shadowed/redundant/overly-permissive + posture) over
+      `FIREWALL_POLICY` + `ACL`; deterministic in the engine
+      (`app/engines/security/firewall.py`). Posture runs over normalized firewall
+      rules + ACL entries (secret-free, reproducible); raw `CONFIG_BACKUP` hardening
+      stays the compliance engine's domain (ADR-0018) — the security engine analyzes
+      policy-as-data, not raw config text.
+- [x] Findings model (`app/schemas/security.py`): evidence-cited, frozen,
+      `extra="forbid"`, secret-free.
+- [x] Remediation = gate-routed CR draft (new `security_remediation` kind, code-only —
+      VARCHAR column, no migration); **no device-executing tool**; read-only-invariant
+      test green.
+- [x] A9 redaction at the secret boundary (rule `description`); analysis fixtures
+      green (W5-T1 seed). 100% coverage on the new modules.
+- [x] D16 gates green (ruff, ruff format, mypy, import-linter, pytest); implemented
+      in PR #70 (the task landed as one atomic commit; review-response commits follow).
 
 ## Workflow (P2-SECURITY-PLAN.md §3, secret-surface escalation)
 

@@ -531,10 +531,12 @@ def parse_acls(
                     source=_acl_endpoint(
                         row["src_host"], row["src_any"], row["src_network"], row["src_wildcard"]
                     ),
+                    source_is_any=bool(row["src_any"].strip()),
                     source_port=_acl_port(row["src_port_match"], row["src_port"]),
                     destination=_acl_endpoint(
                         row["dst_host"], row["dst_any"], row["dst_network"], row["dst_wildcard"]
                     ),
+                    destination_is_any=bool(row["dst_any"].strip()),
                     destination_port=_acl_port(row["dst_port_match"], row["dst_port"]),
                     hits=_int_or_none(row["matches"]),
                 )

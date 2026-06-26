@@ -1,12 +1,12 @@
 """Composition-root tests (M3-14): the default registry + supervisor wiring.
 
 Offline and deterministic: a scripted fake chat model stands in for the LLM, so
-no network is touched. After M5 T14 the default registry must hold exactly the
-nine core agents — the Master Architect supervisor plus the EIGHT routable
+no network is touched. After P2 W3-T2 the default registry must hold exactly the
+ten core agents — the Master Architect supervisor plus the NINE routable
 specialists (consultant, discovery, troubleshooting, configuration,
-documentation, automation, ddi, packet_analysis) — and the supervisor compiled
-from it must route over those eight specialists without routing to the Master
-Architect itself.
+documentation, automation, ddi, packet_analysis, security) — and the supervisor
+compiled from it must route over those nine specialists without routing to the
+Master Architect itself.
 """
 
 from __future__ import annotations
@@ -24,15 +24,16 @@ ROUTABLE_SPECIALISTS = {
     "automation",
     "ddi",
     "packet_analysis",
+    "security",
 }
 EXPECTED_AGENTS = {SUPERVISOR_NAME, *ROUTABLE_SPECIALISTS}
 
 
 class TestDefaultRegistry:
-    def test_registry_contains_exactly_the_nine_core_agents(self) -> None:
+    def test_registry_contains_exactly_the_ten_core_agents(self) -> None:
         registry = build_default_registry()
         assert set(registry.names()) == EXPECTED_AGENTS
-        assert len(registry) == 9
+        assert len(registry) == 10
 
     def test_master_architect_is_registered(self) -> None:
         registry = build_default_registry()
@@ -56,7 +57,7 @@ class TestDefaultSupervisor:
     def test_supervisor_routes_over_specialists_not_itself(self) -> None:
         graph = build_default_supervisor(scripted_model([]))
         nodes = set(graph.get_graph().nodes)
-        # The eight specialists are routable nodes; the supervisor is not a node
+        # The nine specialists are routable nodes; the supervisor is not a node
         # it can route to (it IS the router).
         assert nodes >= ROUTABLE_SPECIALISTS
         assert SUPERVISOR_NAME not in nodes
@@ -67,9 +68,9 @@ class TestDefaultSupervisor:
         graph = build_default_supervisor(scripted_model([]), registry)
         assert "troubleshooting" in set(graph.get_graph().nodes)
 
-    def test_all_eight_specialists_are_reachable_router_nodes(self) -> None:
-        # Each of the eight Wave-1..4 specialists must be a node the supervisor
-        # can route to after T14 registers the three Wave-4 agents.
+    def test_all_specialists_are_reachable_router_nodes(self) -> None:
+        # Each of the nine routable specialists must be a node the supervisor can
+        # route to (P2 W3-T2 adds the security agent to the M5 eight).
         graph = build_default_supervisor(scripted_model([]))
         nodes = set(graph.get_graph().nodes)
         for specialist in ROUTABLE_SPECIALISTS:

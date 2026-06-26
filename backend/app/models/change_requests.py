@@ -83,10 +83,18 @@ class ChangeRequestState(StrEnum):
 
 
 class ChangeRequestKind(StrEnum):
-    """What class of state-changing action a CR proposes (ADR-0020 §2)."""
+    """What class of state-changing action a CR proposes (ADR-0020 §2).
+
+    Persisted as VARCHAR(32) via :func:`_wire_enum` (``native_enum=False``, no
+    CHECK constraint — migration 0007), so adding a new member is a code-only
+    change: no Alembic migration is required as long as the value fits in 32
+    chars. ``security_remediation`` (P2 W3-T1, ADR-0037 §4) is such an addition —
+    a Security-Agent remediation draft, gate-routed exactly like ``ddi_record``.
+    """
 
     CONFIG = "config"
     DDI_RECORD = "ddi_record"
+    SECURITY_REMEDIATION = "security_remediation"
 
 
 class ApprovalDecision(StrEnum):

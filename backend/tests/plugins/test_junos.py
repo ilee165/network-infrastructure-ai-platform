@@ -609,6 +609,21 @@ class TestAcl:
         # First source address in the list: 10.0.0.0/8
         assert bogon_term.source == IPv4Network("10.0.0.0/8")
 
+    def test_is_any_flags(self, transport: FakeTransport, device_id: UUID) -> None:
+        from app.plugins.vendors.junos.plugin import JunosAcl
+
+        acls = JunosAcl(transport, device_id).get_acls()
+        # permit-ssh has no source/destination-address term -> matches any -> any.
+        permit_ssh = next(a for a in acls if a.acl_name == "ALLOW-MGMT" and a.sequence == 1)
+        assert permit_ssh.source is None
+        assert permit_ssh.source_is_any is True
+        assert permit_ssh.destination is None
+        assert permit_ssh.destination_is_any is True
+        # bogon term has a scoped source-address list but no destination-address.
+        bogon_term = next(a for a in acls if a.acl_name == "BLOCK-BOGONS" and a.sequence == 1)
+        assert bogon_term.source_is_any is False  # explicit source-address prefixes
+        assert bogon_term.destination_is_any is True  # no destination-address term
+
     def test_stamps_provenance(self, transport: FakeTransport, device_id: UUID) -> None:
         from app.plugins.vendors.junos.plugin import JunosAcl
 

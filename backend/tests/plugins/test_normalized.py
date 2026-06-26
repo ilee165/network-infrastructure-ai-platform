@@ -190,6 +190,39 @@ class TestRemainingModels:
         assert entry.source is None  # any
         assert entry.destination == IPv4Network("10.10.0.0/24")
 
+    def test_acl_entry_is_any_with_concrete_endpoint_is_rejected(
+        self, provenance: dict[str, Any]
+    ) -> None:
+        # source_is_any asserts a literal *any*; pairing it with a concrete network
+        # is contradictory and must not validate (the flag's documented meaning).
+        with pytest.raises(ValidationError, match="source_is_any"):
+            NormalizedAclEntry(
+                acl_name="EDGE-IN",
+                action=AclAction.PERMIT,
+                source="10.0.0.0/24",
+                source_is_any=True,
+                **provenance,
+            )
+        with pytest.raises(ValidationError, match="destination_is_any"):
+            NormalizedAclEntry(
+                acl_name="EDGE-IN",
+                action=AclAction.PERMIT,
+                destination="10.0.0.0/24",
+                destination_is_any=True,
+                **provenance,
+            )
+
+    def test_acl_entry_is_any_with_none_endpoint_is_valid(self, provenance: dict[str, Any]) -> None:
+        entry = NormalizedAclEntry(
+            acl_name="ANY-ANY",
+            action=AclAction.PERMIT,
+            source_is_any=True,
+            destination_is_any=True,
+            **provenance,
+        )
+        assert entry.source is None and entry.source_is_any is True
+        assert entry.destination is None and entry.destination_is_any is True
+
     def test_arp_entry_normalizes_mac(self, provenance: dict[str, Any]) -> None:
         entry = NormalizedArpEntry(
             ip_address="10.10.0.2",

@@ -31,7 +31,7 @@ from ipaddress import (
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
     "AclAction",
@@ -361,17 +361,44 @@ class NormalizedOspfNeighbor(NormalizedRecord):
 
 
 class NormalizedAclEntry(NormalizedRecord):
-    """A single ACL rule. ``source``/``destination`` of ``None`` mean *any*."""
+    """A single ACL rule.
+
+    A ``None`` ``source``/``destination`` is **ambiguous** on its own: it means
+    either a literal *any* or a named address-group the normalized model cannot
+    represent (a vendor object-group/address-set/field-set that collapses to
+    ``None`` at parse time — e.g. cisco_nxos ``addrgroup``). The ``*_is_any``
+    flags disambiguate: a parser sets them ``True`` **only** for an explicit
+    literal-any token, never for a collapsed group. Consumers therefore read
+    ``source is None and source_is_any`` as a definite *any*, and ``source is
+    None and not source_is_any`` as an unresolved group (advisory only).
+    """
 
     acl_name: str = Field(min_length=1)
     action: AclAction
     protocol: str = "ip"
     sequence: int | None = Field(default=None, ge=0)
     source: IPv4Network | IPv6Network | None = None
+    source_is_any: bool = False
     source_port: str | None = None
     destination: IPv4Network | IPv6Network | None = None
+    destination_is_any: bool = False
     destination_port: str | None = None
     hits: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _is_any_requires_unscoped_endpoint(self) -> NormalizedAclEntry:
+        """An endpoint flagged *any* must be unscoped (``None``).
+
+        ``source_is_any`` / ``destination_is_any`` mean "this endpoint is a literal
+        *any*"; that is contradictory with a concrete network. Enforcing it
+        structurally keeps the flag's documented meaning trustworthy for every
+        consumer (e.g. the security posture engine), not just by parser convention.
+        """
+        if self.source_is_any and self.source is not None:
+            raise ValueError("source_is_any=True requires source=None (a literal 'any')")
+        if self.destination_is_any and self.destination is not None:
+            raise ValueError("destination_is_any=True requires destination=None (a literal 'any')")
+        return self
 
 
 class NormalizedFirewallRule(NormalizedRecord):

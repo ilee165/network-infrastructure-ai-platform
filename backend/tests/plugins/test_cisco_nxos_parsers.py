@@ -395,6 +395,31 @@ class TestParseAcls:
         assert AclAction.PERMIT in actions
         assert AclAction.DENY in actions
 
+    def test_is_any_flags_distinguish_literal_any_from_cidr(self) -> None:
+        entries = parsers.parse_acls(
+            _fix("show_ip_access_lists.txt"), device_id=_DEVICE_ID, collected_at=_NOW
+        )
+        by_seq = {e.sequence: e for e in entries}
+        # seq 10: permit tcp 192.0.2.0/24 any eq 22
+        assert by_seq[10].source is not None
+        assert by_seq[10].source_is_any is False  # scoped CIDR
+        assert by_seq[10].destination is None
+        assert by_seq[10].destination_is_any is True  # literal 'any'
+        # seq 20: permit icmp any any
+        assert by_seq[20].source_is_any is True
+        assert by_seq[20].destination_is_any is True
+
+    def test_addrgroup_endpoint_is_not_flagged_any(self) -> None:
+        # An addrgroup reference collapses to source=None but must NOT be flagged
+        # explicit-any — it is an unresolved group, not a literal 'any'.
+        raw = "IP access list GRP-IN\n        10 permit ip addrgroup TRUSTED addrgroup WEB\n"
+        entries = parsers.parse_acls(raw, device_id=_DEVICE_ID, collected_at=_NOW)
+        assert len(entries) == 1
+        assert entries[0].source is None
+        assert entries[0].source_is_any is False
+        assert entries[0].destination is None
+        assert entries[0].destination_is_any is False
+
 
 # ---------------------------------------------------------------------------
 # parse_ha_status — vPC state (ADR-0025 §8)
