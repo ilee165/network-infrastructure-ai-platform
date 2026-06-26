@@ -70,6 +70,8 @@ def _acl(
     sequence: int | None = None,
     source: str | None = None,
     destination: str | None = None,
+    source_is_any: bool = False,
+    destination_is_any: bool = False,
 ) -> NormalizedAclEntry:
     return NormalizedAclEntry(
         device_id=_DEVICE,
@@ -80,6 +82,8 @@ def _acl(
         sequence=sequence,
         source=source,
         destination=destination,
+        source_is_any=source_is_any,
+        destination_is_any=destination_is_any,
     )
 
 
@@ -346,16 +350,53 @@ class TestPosture:
         assert [f for f in findings if "management-plane" in f.rationale] == []
 
     def test_permit_unscoped_acl_is_flagged_low_advisory(self) -> None:
-        # A permit ACE with both endpoints None is ambiguous (genuine any OR an
-        # unresolved address-group the normalized model can't represent — e.g.
-        # cisco_nxos addrgroup -> None), so it is flagged LOW/advisory, never a
-        # false-positive HIGH violation.
+        # A permit ACE with both endpoints None but NOT both flagged explicit-any
+        # is ambiguous (an unresolved address-group the normalized model can't
+        # represent — e.g. cisco_nxos addrgroup -> None), so it is flagged
+        # LOW/advisory, never a false-positive HIGH violation.
         acls = [_acl("OUTSIDE_IN", action=AclAction.PERMIT, sequence=10)]  # source/dest None
         findings = analyze_security_posture((), acls)
         assert len(findings) == 1
         assert findings[0].category is FindingCategory.POSTURE
         assert findings[0].severity is FindingSeverity.LOW
         assert findings[0].rule_name == "OUTSIDE_IN"
+        assert "unresolved address-group" in findings[0].rationale
+
+    def test_explicit_any_to_any_acl_is_high(self) -> None:
+        # Both endpoints carry the explicit-any signal (literal "any" token, not a
+        # collapsed group): an unambiguous permit any -> any over-broad exposure.
+        acls = [
+            _acl(
+                "OUTSIDE_IN",
+                action=AclAction.PERMIT,
+                sequence=10,
+                source_is_any=True,
+                destination_is_any=True,
+            )
+        ]
+        findings = analyze_security_posture((), acls)
+        assert len(findings) == 1
+        assert findings[0].category is FindingCategory.POSTURE
+        assert findings[0].severity is FindingSeverity.HIGH
+        assert findings[0].rule_name == "OUTSIDE_IN"
+        assert "any" in findings[0].rationale.lower()
+        assert "unresolved address-group" not in findings[0].rationale
+
+    def test_partial_any_acl_is_low_advisory(self) -> None:
+        # One side explicit-any, the other a collapsed group (None, not any) -> the
+        # rule is NOT provably any -> any, so it stays LOW/advisory.
+        acls = [
+            _acl(
+                "OUTSIDE_IN",
+                action=AclAction.PERMIT,
+                sequence=10,
+                source_is_any=True,
+                destination_is_any=False,
+            )
+        ]
+        findings = analyze_security_posture((), acls)
+        assert len(findings) == 1
+        assert findings[0].severity is FindingSeverity.LOW
         assert "unresolved address-group" in findings[0].rationale
 
     def test_scoped_acl_permit_is_clean(self) -> None:

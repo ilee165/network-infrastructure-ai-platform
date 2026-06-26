@@ -676,6 +676,8 @@ def parse_acls(
                     dst_addrs = from_obj.get("destination-address", [])
                     source = _parse_acl_network(src_addrs)
                     destination = _parse_acl_network(dst_addrs)
+                    source_is_any = _acl_addrs_is_any(src_addrs)
+                    destination_is_any = _acl_addrs_is_any(dst_addrs)
 
                     # Parse ``then``.
                     then_list = term.get("then", [{}])
@@ -696,8 +698,10 @@ def parse_acls(
                             protocol=protocol,
                             sequence=seq,
                             source=source,
+                            source_is_any=source_is_any,
                             source_port=None,
                             destination=destination,
+                            destination_is_any=destination_is_any,
                             destination_port=None,
                             hits=None,
                         )
@@ -707,6 +711,18 @@ def parse_acls(
                         f"junos: invalid firewall filter term in {filter_name!r}: {exc}"
                     ) from exc
     return results
+
+
+def _acl_addrs_is_any(addr_list: list[Any]) -> bool:
+    """``True`` only when a term has no address term at all (matches *any*).
+
+    A JunOS filter term that omits ``source-address`` / ``destination-address``
+    matches any address — an explicit *any*. A non-empty list that parses to no
+    network (an ``address-set``/``prefix-list`` reference) also collapses to a
+    ``None`` endpoint in :func:`_parse_acl_network`, but is an unresolved group,
+    **not** *any* — so it is excluded here.
+    """
+    return not addr_list
 
 
 def _parse_acl_network(addr_list: list[Any]) -> IPv4Network | None:

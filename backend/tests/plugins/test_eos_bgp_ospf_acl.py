@@ -234,7 +234,9 @@ class TestAcl:
         first = next(e for e in entries if e.acl_name == "PERMIT-MGMT" and e.sequence == 10)
         assert first.action is AclAction.PERMIT
         assert first.source == IPv4Network("10.1.1.0/24")
+        assert first.source_is_any is False
         assert first.destination is None  # 'any'
+        assert first.destination_is_any is True
 
     def test_any_source_destination_is_none(
         self, transport: FakeTransport, device_id: UUID
@@ -243,7 +245,9 @@ class TestAcl:
         deny_any = next(e for e in entries if e.acl_name == "PERMIT-MGMT" and e.sequence == 20)
         assert deny_any.action is AclAction.DENY
         assert deny_any.source is None
+        assert deny_any.source_is_any is True  # literal 'any', not a collapsed group
         assert deny_any.destination is None
+        assert deny_any.destination_is_any is True
 
     def test_host_destination_and_port_modifier(
         self, transport: FakeTransport, device_id: UUID
@@ -253,7 +257,9 @@ class TestAcl:
         assert telnet.action is AclAction.DENY
         assert telnet.protocol == "tcp"
         assert telnet.source is None  # any
+        assert telnet.source_is_any is True
         assert telnet.destination == IPv4Network("10.0.0.5/32")  # host 10.0.0.5
+        assert telnet.destination_is_any is False
         assert telnet.destination_port == "eq telnet"
 
     def test_cidr_source_with_destination_port(
@@ -263,7 +269,9 @@ class TestAcl:
         www = next(e for e in entries if e.acl_name == "BLOCK-TELNET" and e.sequence == 20)
         assert www.action is AclAction.PERMIT
         assert www.source == IPv4Network("192.0.2.0/24")
+        assert www.source_is_any is False
         assert www.destination is None  # any
+        assert www.destination_is_any is True
         assert www.destination_port == "eq www"
 
     def test_provenance_and_raw_capture(self, transport: FakeTransport, device_id: UUID) -> None:

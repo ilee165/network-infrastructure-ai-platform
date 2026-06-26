@@ -358,6 +358,16 @@ def _hms_to_seconds(value: str) -> int | None:
     return hours * 3600 + minutes * 60 + seconds
 
 
+def _eos_is_any(value: str) -> bool:
+    """``True`` only for the literal ``any`` token (an explicit *any*).
+
+    Both ``any`` and an unparseable token (e.g. a field-set name) collapse to a
+    ``None`` endpoint in :func:`_eos_acl_endpoint`; this flag carries the bit that
+    tells a genuine *any* apart from an unresolved group.
+    """
+    return value.strip() == "any"
+
+
 def _eos_acl_endpoint(source: str) -> IPv4Network | None:
     """Resolve an EOS ACE source/destination to a network.
 
@@ -516,8 +526,10 @@ def parse_acls(
                     protocol=str(row.get("protocol", "")).strip() or "ip",
                     sequence=_int_or_none(row.get("sn")),
                     source=_eos_acl_endpoint(str(row.get("source", ""))),
+                    source_is_any=_eos_is_any(str(row.get("source", ""))),
                     source_port=None,  # EOS template does not expose source port separately
                     destination=_eos_acl_endpoint(str(row.get("destination", ""))),
+                    destination_is_any=_eos_is_any(str(row.get("destination", ""))),
                     destination_port=str(row.get("modifier", "")).strip() or None,
                     hits=None,  # EOS template does not capture match counts
                 )

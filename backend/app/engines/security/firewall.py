@@ -344,22 +344,51 @@ def _posture_firewall(
 
 
 def _posture_acls(acls: Sequence[NormalizedAclEntry]) -> list[SecurityFinding]:
-    """Advisory posture check over ACLs: a permit entry with unscoped endpoints.
+    """Posture check over ACLs: a permit entry with both endpoints unscoped.
 
-    A ``None`` source/destination on a :class:`NormalizedAclEntry` is **ambiguous**:
-    the normalized model (``IPv4Network | IPv6Network | None``) cannot represent a
-    named address-group, so a vendor that uses object-groups collapses them to
-    ``None`` exactly like a genuine ``any`` (e.g. cisco_nxos ``addrgroup`` →
-    ``None``). The engine therefore cannot tell "permit any → any" from "permit
-    group-A → group-B" from ``None`` alone. To avoid false-positive HIGH findings on
-    scoped object-group rules, a permit ACE with both endpoints unscoped is flagged
-    **LOW / advisory** ("verify"), with the ambiguity named in the rationale — not
-    asserted as a definite over-broad violation. (A precise check needs a normalized
-    wildcard/group distinction; deferred — recorded, not silent.)
+    A ``None`` source/destination on a :class:`NormalizedAclEntry` is **ambiguous**
+    by itself: the normalized model (``IPv4Network | IPv6Network | None``) cannot
+    represent a named address-group, so a vendor that uses object-groups collapses
+    them to ``None`` exactly like a genuine ``any`` (e.g. cisco_nxos ``addrgroup``
+    → ``None``). The ``source_is_any`` / ``destination_is_any`` flags carry the bit
+    the parser knows but the address field discards — a parser sets them ``True``
+    only for an explicit literal-any token, never for a collapsed group. Severity
+    is gated on that signal:
+
+    - **Both** endpoints flagged explicit-any → a definite permit any → any
+      over-broad exposure → **HIGH**.
+    - Otherwise (at least one endpoint is an unresolved group) → cannot prove
+      any → any, so **LOW / advisory** ("verify"), with the ambiguity named in the
+      rationale rather than asserted as a violation. This avoids false-positive
+      HIGH findings on scoped object-group rules across every vendor (each one
+      collapses groups to ``None`` via a parse-failure path, so a vendor allowlist
+      would not be safe).
     """
     findings: list[SecurityFinding] = []
     for entry in acls:
-        if entry.action == AclAction.PERMIT and entry.source is None and entry.destination is None:
+        if not (
+            entry.action == AclAction.PERMIT and entry.source is None and entry.destination is None
+        ):
+            continue
+        if entry.source_is_any and entry.destination_is_any:
+            findings.append(
+                SecurityFinding(
+                    category=FindingCategory.POSTURE,
+                    severity=FindingSeverity.HIGH,
+                    rule_name=entry.acl_name,
+                    rule_position=entry.sequence,
+                    evidence=_acl_evidence(entry),
+                    rationale=(
+                        f"ACL '{entry.acl_name}' permits any → any — an over-broad rule that "
+                        "allows all traffic from any source to any destination."
+                    ),
+                    suggested_remediation=(
+                        f"Scope ACL '{entry.acl_name}' to the specific source and destination it "
+                        "must permit instead of any → any."
+                    ),
+                )
+            )
+        else:
             findings.append(
                 SecurityFinding(
                     category=FindingCategory.POSTURE,

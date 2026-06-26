@@ -569,14 +569,26 @@ def parse_acls(
                     protocol=row["protocol"].strip() or "ip",
                     sequence=_int_or_none(row["sn"]),
                     source=_nxos_acl_endpoint(row["source"]),
+                    source_is_any=_nxos_is_any(row["source"]),
                     source_port=row.get("port", "").strip() or None,
                     destination=_nxos_acl_endpoint(row["destination"]),
+                    destination_is_any=_nxos_is_any(row["destination"]),
                     destination_port=_nxos_acl_dest_port(row),
                 )
             )
     except (KeyError, ValueError, ValidationError) as exc:
         raise PluginError(f"cisco_nxos: invalid 'show access-lists' row: {exc}") from exc
     return entries
+
+
+def _nxos_is_any(value: str) -> bool:
+    """``True`` only for the literal ``any`` token, never for a collapsed group.
+
+    Both ``any`` and an ``addrgroup`` reference resolve to ``source``/``destination``
+    of ``None`` (see :func:`_nxos_acl_endpoint`); this flag carries the bit that
+    disambiguates a genuine *any* from an unresolved object-group.
+    """
+    return value.strip().lower() == "any"
 
 
 def _nxos_acl_endpoint(value: str) -> IPv4Network | None:
