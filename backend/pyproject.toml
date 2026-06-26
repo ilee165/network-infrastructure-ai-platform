@@ -105,6 +105,7 @@ cisco_nxos = "app.plugins.vendors.cisco_nxos.plugin:CiscoNxosPlugin"
 eos = "app.plugins.vendors.eos.plugin:EosPlugin"
 infoblox = "app.plugins.vendors.infoblox.plugin:InfobloxPlugin"
 junos = "app.plugins.vendors.junos.plugin:JunosPlugin"
+panos = "app.plugins.vendors.panos.plugin:PanosPlugin"
 spatiumddi = "app.plugins.vendors.spatiumddi.plugin:SpatiumddiPlugin"
 
 [tool.hatch.build.targets.wheel]
