@@ -330,8 +330,14 @@ jobs:
           file: deploy/docker/backend.Dockerfile
           push: ${{ steps.meta.outputs.publish == 'true' }}
           load: ${{ steps.meta.outputs.publish != 'true' }}
+          # :ci is a PR-path-only LOCAL tag (load:true) consumed by the syft/trivy
+          # daemon scans. It MUST NOT appear on the publish gate: with push:true a
+          # bare name resolves to docker.io/library/netops-backend and buildx
+          # would try to push it to Docker Hub (401 insufficient scopes). On
+          # publish only the GHCR digest-pinned tag is pushed; every publish
+          # consumer (SBOM/Trivy/cosign) reads that image by digest/sha.
           tags: |
-            netops-backend:ci
+            ${{ steps.meta.outputs.publish != 'true' && 'netops-backend:ci' || '' }}
             ${{ steps.meta.outputs.publish == 'true' && format('{0}:{1}', steps.meta.outputs.backend_image, github.sha) || '' }}
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
@@ -344,8 +350,10 @@ jobs:
           file: deploy/docker/frontend.Dockerfile
           push: ${{ steps.meta.outputs.publish == 'true' }}
           load: ${{ steps.meta.outputs.publish != 'true' }}
+          # :ci is PR-path-only (see backend build note) — kept off the publish
+          # gate so push:true never tries to push a bare name to Docker Hub.
           tags: |
-            netops-frontend:ci
+            ${{ steps.meta.outputs.publish != 'true' && 'netops-frontend:ci' || '' }}
             ${{ steps.meta.outputs.publish == 'true' && format('{0}:{1}', steps.meta.outputs.frontend_image, github.sha) || '' }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
