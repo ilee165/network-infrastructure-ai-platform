@@ -300,6 +300,17 @@ class TestDefinition:
         assert "approved" in desc
         assert "change request" in desc or "changerequest" in desc
 
+    def test_execute_preflight_matches_dispatch(self) -> None:
+        """The kinds execute() accepts must be EXACTLY the kinds _apply_and_finalize
+        can dispatch — a single source of truth, so kind support cannot drift
+        (cubic PR #70: a kind wired in dispatch but missing from the preflight set,
+        or vice-versa, would be wrongly refused / fall through to fail-closed)."""
+        agent = AutomationAgent(change_request_service=None)  # type: ignore[arg-type]
+        executable = {k for k in ChangeRequestKind if agent._executor_for(k) is not None}
+        assert executable == {ChangeRequestKind.CONFIG, ChangeRequestKind.DDI_RECORD}
+        # The drafted-but-not-yet-executable kind has no executor.
+        assert agent._executor_for(ChangeRequestKind.SECURITY_REMEDIATION) is None
+
 
 # ---------------------------------------------------------------------------
 # 2. Refusal of every non-approved state

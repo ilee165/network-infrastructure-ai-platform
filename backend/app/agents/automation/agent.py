@@ -47,7 +47,7 @@ the rest of the platform keeps (REPO-STRUCTURE §3.2).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from app.agents.automation.executors import (
@@ -90,14 +90,8 @@ AUTOMATION_NAME = "automation"
 #: Terminal outcomes that complete the CR successfully (ADR-0021 §3).
 _SUCCESS_OUTCOMES = frozenset({ChangeOutcome.APPLIED, ChangeOutcome.NO_OP})
 
-#: CR kinds the executor can actually apply (a real executor branch exists). A
-#: kind outside this set (e.g. ``security_remediation`` — drafted by the Security
-#: Agent in P2 W3, executor in a later wave) is refused BEFORE ``approved ->
-#: executing`` so an approved-but-unsupported CR never churns through
-#: ``executing -> failed``. New kinds inherit the safe refuse until added here.
-_EXECUTABLE_KINDS: frozenset[ChangeRequestKind] = frozenset(
-    {ChangeRequestKind.CONFIG, ChangeRequestKind.DDI_RECORD}
-)
+#: Signature every CR-kind executor shares: ``(cr, trace) -> terminal state``.
+_KindExecutor = Callable[["ChangeRequest", "ReasoningTrace"], Awaitable["ChangeRequestState"]]
 
 
 class ChangeExecutionRefused(NetOpsError):
@@ -269,8 +263,10 @@ class AutomationAgent(BaseSpecialistAgent):
 
         # Refuse a kind with no executor BEFORE claiming it (approved -> executing),
         # so an approved-but-unsupported CR never churns through executing -> failed.
-        # It stays 'approved' and runs unchanged once its executor ships.
-        if cr.kind not in _EXECUTABLE_KINDS:
+        # It stays 'approved' and runs unchanged once its executor ships. The same
+        # _executor_for map drives both this gate and _apply_and_finalize, so the
+        # set of executable kinds has a single source of truth.
+        if self._executor_for(cr.kind) is None:
             await self._refuse_unsupported_kind(cr, trace)
             await self._trace_recorder.complete(trace.trace_id)
             raise ChangeExecutionRefused(
@@ -373,22 +369,35 @@ class AutomationAgent(BaseSpecialistAgent):
             ),
         )
 
+    def _executor_for(self, kind: ChangeRequestKind) -> _KindExecutor | None:
+        """The executor for *kind*, or ``None`` if the kind has no executor wired.
+
+        Single source of truth for "which CR kinds are executable": both the
+        :meth:`execute` pre-flight gate and :meth:`_apply_and_finalize` dispatch
+        consult this map, so kind support cannot drift between the two (cubic
+        PR #70). A kind absent here (e.g. ``security_remediation`` — drafted by the
+        Security Agent in P2 W3, executor in a later wave) is refused before
+        ``approved -> executing`` and never reaches a half-run.
+        """
+        return {
+            ChangeRequestKind.CONFIG: self._execute_config,
+            ChangeRequestKind.DDI_RECORD: self._execute_ddi,
+        }.get(kind)
+
     async def _apply_and_finalize(
         self, cr: ChangeRequest, trace: ReasoningTrace
     ) -> ChangeRequestState:
         """Run the matching executor port and map its outcome onto the lifecycle."""
-        if cr.kind is ChangeRequestKind.CONFIG:
-            return await self._execute_config(cr, trace)
-        if cr.kind is ChangeRequestKind.DDI_RECORD:
-            return await self._execute_ddi(cr, trace)
-        # Defense-in-depth backstop: execute() already refuses any kind outside
-        # _EXECUTABLE_KINDS BEFORE mark_executing (e.g. SECURITY_REMEDIATION), so a
-        # non-executable kind never reaches here via execute(). This fail-closed
-        # branch remains the exhaustive-enum guard for any other entry path / a
-        # future kind added before its executor — never a half-run.
-        return await self._fail_no_executor(
-            cr, trace, reason=f"no executor wired for CR kind '{cr.kind.value}'"
-        )
+        executor = self._executor_for(cr.kind)
+        if executor is None:
+            # Defense-in-depth backstop: execute() already refuses a kind with no
+            # executor BEFORE mark_executing, so this is unreachable via execute();
+            # it stays the fail-closed guard for any other entry path — never a
+            # half-run.
+            return await self._fail_no_executor(
+                cr, trace, reason=f"no executor wired for CR kind '{cr.kind.value}'"
+            )
+        return await executor(cr, trace)
 
     # -- config (CONFIG_RESTORE / CONFIG_DEPLOY) -----------------------------
 
