@@ -8,7 +8,7 @@
 | **Depends on** | **W1-T1** (`FirewallPolicyCapability` + models); ADR-0036 (W0-T3) |
 | **ADRs** | ADR-0036 (the plugin decision), ADR-0006 (contract, raw-first), ADR-0007 §D7 (httpx REST + netmiko SSH), ADR-0011 (`credential_ref`), ADR-0034 (`FIREWALL_POLICY` models) |
 | **PRODUCTION.md** | §2.3 (capability set), §2.6 (conformance + ≥80% cov + normalized round-trip) |
-| **Status** | Proposed |
+| **Status** | Done — `b85c067` (impl) + `3216ab1` (fix); 89% cov, conformance + cross-vendor proof green, credential-hygiene green |
 
 ## Objective
 
