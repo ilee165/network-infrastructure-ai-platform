@@ -210,6 +210,17 @@ _FIREWALL_SNAT_JSON = """\
       "nat-ippool": [{"name": "WAN-Pool"}],
       "srcintf": [{"name": "port2"}],
       "comments": "Outbound SNAT pool"
+    },
+    {
+      "id": 2,
+      "name": "static-snat-one-to-one",
+      "status": "enable",
+      "orig-addr": [{"name": "host-10-0-1-50"}],
+      "outintf": [{"name": "port1"}],
+      "nat-ippool": [],
+      "nat-source-address": [{"name": "ext-203-0-113-50"}],
+      "srcintf": [{"name": "port2"}],
+      "comments": "Static one-to-one source NAT"
     }
   ],
   "vdom": "root",
@@ -741,6 +752,24 @@ class TestFortiosNormalizedRoundTrip:
         snat_rules = [r for r in nat_rules if r.name == "outbound-snat"]
         assert snat_rules, "Expected central-SNAT source NAT rule"
         assert snat_rules[0].nat_type == NatType.SOURCE
+
+    def test_static_central_snat_rule_type_is_static(self) -> None:
+        """FortiOS static one-to-one central-SNAT (no pool) → NatType.STATIC (ADR-0036 §3).
+
+        A central-SNAT-map entry with no ``nat-ippool`` but a fixed
+        ``nat-source-address`` is a static one-to-one source translation; it must
+        be normalized to ``NatType.STATIC`` (driven by ``_detect_nat_type``), not
+        mislabeled ``SOURCE``.
+        """
+        from app.schemas.normalized import NatType
+
+        rest_client = _make_rest_client()
+        ssh_transport = _make_ssh_transport()
+        cap = FortiosFirewallPolicy(rest_client, ssh_transport, uuid4())
+        nat_rules = cap.get_nat_rules()
+        static_rules = [r for r in nat_rules if r.name == "static-snat-one-to-one"]
+        assert static_rules, "Expected static central-SNAT rule"
+        assert static_rules[0].nat_type == NatType.STATIC
 
 
 # ---------------------------------------------------------------------------

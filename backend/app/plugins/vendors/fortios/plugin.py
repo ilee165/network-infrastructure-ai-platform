@@ -1,20 +1,29 @@
-"""Fortinet FortiOS plugin: REST-primary + netmiko SSH-fallback (ADR-0036).
+"""Fortinet FortiOS plugin: REST + netmiko SSH (single-transport per capability, ADR-0036).
 
-The platform's **second firewall vendor plugin** (P2 W2-T2): ``fortios``, a
-REST/httpx-primary + netmiko-SSH-fallback plugin declaring ``DISCOVERY_API``,
-``INTERFACES``, ``ROUTES``, ``FIREWALL_POLICY``, ``CONFIG_BACKUP``, and
-``HA_STATUS``. Binds ``FIREWALL_POLICY`` to the W1-T1 normalized models
+The platform's **second firewall vendor plugin** (P2 W2-T2): ``fortios``,
+declaring ``DISCOVERY_API``, ``INTERFACES``, ``ROUTES``, ``FIREWALL_POLICY``,
+``CONFIG_BACKUP``, and ``HA_STATUS``. Binds ``FIREWALL_POLICY`` to the W1-T1
+normalized models
 :class:`~app.schemas.normalized.NormalizedFirewallRule` /
 :class:`~app.schemas.normalized.NormalizedNatRule` (ADR-0034). No config-write
 capability in P2 (ADR-0036 §5). Root VDOM only; multi-VDOM deferred (ADR-0036 §4).
 
-Per-capability transport split (ADR-0036 §1):
-- ``DISCOVERY_API``: REST /monitor/system/status | SSH fallback (get system status)
-- ``INTERFACES``:    REST /monitor/system/interface | SSH fallback
-- ``ROUTES``:        REST /monitor/router/ipv4 | SSH fallback (get router info routing-table)
-- ``FIREWALL_POLICY``: REST only (/cmdb/firewall/policy + /cmdb/firewall/*nat*); no fallback
-- ``CONFIG_BACKUP``: SSH primary (show full-configuration) | REST fallback
-- ``HA_STATUS``:     REST /monitor/system/ha-* | SSH fallback
+Per-capability transport (each capability uses exactly one transport in P2 —
+a cross-transport fallback that is never reached would be dead surface,
+ADR-0036 §1):
+- ``DISCOVERY_API``: REST /monitor/system/status (SSH fallback named-deferred)
+- ``INTERFACES``:    REST /monitor/system/interface (SSH fallback named-deferred)
+- ``ROUTES``:        REST /monitor/router/ipv4 (SSH fallback named-deferred)
+- ``FIREWALL_POLICY``: REST /cmdb/firewall/policy + /cmdb/firewall/*nat*
+- ``CONFIG_BACKUP``: SSH show full-configuration (REST fallback named-deferred)
+- ``HA_STATUS``:     REST /monitor/system/ha-* (SSH fallback named-deferred)
+
+The SSH transport (netmiko ``fortinet``, ADR-0007) backs only ``CONFIG_BACKUP``
+in P2 — the one capability whose full-config text is cleaner over the CLI
+(ADR-0036 Consequences). The cross-transport fallbacks listed in the ADR-0036 §1
+table are named-deferred until a follow-up ADR wires try-primary/except-fallback
+logic; shipping them as inert docstring claims would be the dead surface §1 warns
+against.
 
 Every REST response and every SSH output is recorded verbatim via
 ``PluginCapability._record_raw`` before parsing (ADR-0006 §3 raw-first).
@@ -228,7 +237,7 @@ class _FortiosCapability(PluginCapability):
 
 
 # ---------------------------------------------------------------------------
-# DISCOVERY_API — REST primary | SSH fallback
+# DISCOVERY_API — REST only (SSH fallback named-deferred, ADR-0036 §1)
 # ---------------------------------------------------------------------------
 
 
@@ -236,8 +245,9 @@ class FortiosDiscoveryApi(_FortiosCapability, DiscoveryApiCapability):
     """``DISCOVERY_API``: REST /monitor/system/status → device identity.
 
     Returns one :class:`NormalizedDiscoveredObject` representing the firewall
-    itself (hostname, model, OS version). REST is primary; SSH ``get system
-    status`` is the fallback (ADR-0036 §1). Raw-first on both transports.
+    itself (hostname, model, OS version). REST-only in P2; the ADR-0036 §1 SSH
+    ``get system status`` fallback is named-deferred (no try-REST/except-SSH
+    path is wired yet). Raw-first on the REST response (ADR-0006 §3).
     """
 
     def discover(self) -> list[NormalizedDiscoveredObject]:
@@ -287,15 +297,16 @@ class FortiosDiscoveryApi(_FortiosCapability, DiscoveryApiCapability):
 
 
 # ---------------------------------------------------------------------------
-# INTERFACES — REST primary | SSH fallback
+# INTERFACES — REST only (SSH fallback named-deferred, ADR-0036 §1)
 # ---------------------------------------------------------------------------
 
 
 class FortiosInterfaces(_FortiosCapability, InterfacesCapability):
     """``INTERFACES``: REST /monitor/system/interface → interface list.
 
-    Returns :class:`NormalizedInterface` records. REST is primary; SSH is the
-    fallback (ADR-0036 §1). Raw-first on REST response (ADR-0006 §3).
+    Returns :class:`NormalizedInterface` records. REST-only in P2; the ADR-0036
+    §1 SSH fallback is named-deferred (no fallback path is wired yet). Raw-first
+    on the REST response (ADR-0006 §3).
     """
 
     def get_interfaces(self) -> list[NormalizedInterface]:
@@ -365,12 +376,17 @@ def _dotted_mask_to_prefix(mask: str) -> int | None:
 
 
 # ---------------------------------------------------------------------------
-# ROUTES — REST primary | SSH fallback
+# ROUTES — REST only (SSH fallback named-deferred, ADR-0036 §1)
 # ---------------------------------------------------------------------------
 
 
 class FortiosRoutes(_FortiosCapability, RoutesCapability):
-    """``ROUTES``: REST /monitor/router/ipv4 → IPv4 routing table (ADR-0036 §1)."""
+    """``ROUTES``: REST /monitor/router/ipv4 → IPv4 routing table.
+
+    REST-only in P2; the ADR-0036 §1 SSH ``get router info routing-table``
+    fallback is named-deferred (no fallback path is wired yet). Raw-first on the
+    REST response (ADR-0006 §3).
+    """
 
     def get_routes(self) -> list[NormalizedRoute]:
         # REST primary (ADR-0036 §1).
@@ -541,8 +557,8 @@ class FortiosFirewallPolicy(_FortiosCapability, FirewallPolicyCapability):
             status_str = entry.get("status", "enable").lower()
             enabled = status_str == "enable"
 
-            # static-nat → destination NAT; portforward → also destination
-            nat_type = NatType.DESTINATION
+            # VIP entries are destination NAT (static-nat / portforward both DNAT).
+            nat_type = _detect_nat_type("vip")
 
             # Original (external) IP → original destination
             extip = entry.get("extip", "")
@@ -590,10 +606,14 @@ class FortiosFirewallPolicy(_FortiosCapability, FirewallPolicyCapability):
             status_str = entry.get("status", "enable").lower()
             enabled = status_str == "enable"
 
-            # Determine NAT type from pool reference
-            # nat-ippool → source; static-ip → static; otherwise source
+            # Determine NAT type from the actual central-SNAT entry shape
+            # (ADR-0036 §3): a pooled/masquerade SNAT (nat-ippool present, or no
+            # explicit static source) is source NAT; an entry with no pool but a
+            # fixed nat-source-address is a static one-to-one source translation.
             nat_pool = entry.get("nat-ippool", [])
-            nat_type = NatType.SOURCE  # central-SNAT default is source
+            nat_source = entry.get("nat-source-address", [])
+            nat_kind = "static" if not nat_pool and nat_source else "snat"
+            nat_type = _detect_nat_type(nat_kind)
 
             # Source zones from srcintf
             source_zones = tuple(
@@ -651,7 +671,7 @@ class FortiosFirewallPolicy(_FortiosCapability, FirewallPolicyCapability):
 
 
 # ---------------------------------------------------------------------------
-# CONFIG_BACKUP — SSH primary | REST fallback (ADR-0036 §1)
+# CONFIG_BACKUP — SSH only (REST fallback named-deferred, ADR-0036 §1)
 # ---------------------------------------------------------------------------
 
 #: SSH command to retrieve the full FortiOS running configuration.
@@ -662,8 +682,9 @@ class FortiosConfigBackup(_FortiosCapability, ConfigBackupCapability):
     """``CONFIG_BACKUP``: SSH ``show full-configuration`` (ADR-0036 §1).
 
     The full FortiOS running config is the established, lossless CLI surface
-    (ADR-0036 §1: "full config text is cleaner over CLI"). SSH is the primary
-    transport for this capability; the REST backup endpoint is the fallback.
+    (ADR-0036 §1: "full config text is cleaner over CLI"). SSH is the sole
+    transport for this capability in P2; the ADR-0036 §1 REST backup-endpoint
+    fallback is named-deferred (no except-SSH/then-REST path is wired yet).
     The raw CLI output is stored verbatim via ``_record_raw`` before being
     returned (ADR-0006 §3).
 
@@ -681,16 +702,18 @@ class FortiosConfigBackup(_FortiosCapability, ConfigBackupCapability):
 
 
 # ---------------------------------------------------------------------------
-# HA_STATUS — REST primary | SSH fallback (ADR-0036 §1)
+# HA_STATUS — REST only (SSH fallback named-deferred, ADR-0036 §1)
 # ---------------------------------------------------------------------------
 
 
 class FortiosHaStatus(_FortiosCapability, HaStatusCapability):
-    """``HA_STATUS``: REST /monitor/system/ha-* → HA cluster state (ADR-0036 §1).
+    """``HA_STATUS``: REST /monitor/system/ha-* → HA cluster state.
 
     Returns one :class:`NormalizedHaStatus` per device reflecting the local HA
     role and the peer connection state. FortiOS a-p (active-passive) HA:
-    primary → ACTIVE, secondary → STANDBY (ADR-0025 §8).
+    primary → ACTIVE, secondary → STANDBY (ADR-0025 §8). REST-only in P2; the
+    ADR-0036 §1 SSH ``get system ha status`` fallback is named-deferred (no
+    fallback path is wired yet).
     """
 
     def get_ha_status(self) -> list[NormalizedHaStatus]:
@@ -765,8 +788,9 @@ class FortiosPlugin(VendorPlugin):
 
     Declares six capabilities: ``DISCOVERY_API``, ``INTERFACES``, ``ROUTES``,
     ``FIREWALL_POLICY`` (security + NAT rules, ADR-0034), ``CONFIG_BACKUP``,
-    and ``HA_STATUS``. REST primary for all but CONFIG_BACKUP (which is SSH
-    primary); no config-write, root VDOM only in P2 (ADR-0036 §4/§5).
+    and ``HA_STATUS``. REST-only for all but CONFIG_BACKUP (which is SSH-only);
+    the ADR-0036 §1 cross-transport fallbacks are named-deferred in P2. No
+    config-write, root VDOM only in P2 (ADR-0036 §4/§5).
     The second of two firewall plugins (with ``panos``) validating the
     ``FIREWALL_POLICY`` contract before it is declared stable
     (PRODUCTION.md §2.3 / ADR-0034 two-vendor rule).
