@@ -412,10 +412,7 @@ class TestParseAcls:
     def test_addrgroup_endpoint_is_not_flagged_any(self) -> None:
         # An addrgroup reference collapses to source=None but must NOT be flagged
         # explicit-any — it is an unresolved group, not a literal 'any'.
-        raw = (
-            "IP access list GRP-IN\n"
-            "        10 permit ip addrgroup TRUSTED addrgroup WEB\n"
-        )
+        raw = "IP access list GRP-IN\n        10 permit ip addrgroup TRUSTED addrgroup WEB\n"
         entries = parsers.parse_acls(raw, device_id=_DEVICE_ID, collected_at=_NOW)
         assert len(entries) == 1
         assert entries[0].source is None
