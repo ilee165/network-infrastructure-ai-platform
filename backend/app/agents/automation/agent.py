@@ -326,11 +326,13 @@ class AutomationAgent(BaseSpecialistAgent):
             return await self._execute_config(cr, trace)
         if cr.kind is ChangeRequestKind.DDI_RECORD:
             return await self._execute_ddi(cr, trace)
-        # Unknown kind: fail closed rather than guess (no half-run).
-        # The ignore below suppresses the unreachable-code warning — this is an
-        # exhaustive-enum safety guard for new ChangeRequestKind members added
-        # before this switch is updated.
-        return await self._fail_no_executor(cr, trace, reason=f"unknown CR kind '{cr.kind.value}'")  # type: ignore[unreachable]
+        # A CR kind with no executor wired (e.g. SECURITY_REMEDIATION, P2 W3 —
+        # the Security Agent DRAFTS the CR but its execution path is a later
+        # wave): fail closed rather than guess (no half-run). This is the
+        # exhaustive-enum safety guard for kinds added before an executor exists.
+        return await self._fail_no_executor(
+            cr, trace, reason=f"no executor wired for CR kind '{cr.kind.value}'"
+        )
 
     # -- config (CONFIG_RESTORE / CONFIG_DEPLOY) -----------------------------
 

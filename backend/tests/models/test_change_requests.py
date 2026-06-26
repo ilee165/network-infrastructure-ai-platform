@@ -111,8 +111,17 @@ async def test_change_request_state_machine_terminal_and_failed_states() -> None
 
 
 async def test_change_request_kind_enum_values() -> None:
-    """kind distinguishes config writes from DDI record writes (ADR-0020 §2)."""
-    assert {k.value for k in ChangeRequestKind} == {"config", "ddi_record"}
+    """kind distinguishes config / DDI-record / security-remediation writes (ADR-0020 §2).
+
+    ``security_remediation`` (P2 W3-T1, ADR-0037 §4) is a Security-Agent remediation
+    draft, gate-routed exactly like the others; it is a code-only addition (the kind
+    column is VARCHAR, no CHECK — migration 0007), so no migration is required.
+    """
+    assert {k.value for k in ChangeRequestKind} == {
+        "config",
+        "ddi_record",
+        "security_remediation",
+    }
 
 
 async def test_change_request_requires_requester_fk(session: AsyncSession) -> None:
