@@ -382,6 +382,52 @@ class TestRefusesNonApproved:
             await agent.execute(cr.id)
         assert config_exec.calls == []
 
+    async def test_approved_unsupported_kind_refused_before_executing(
+        self,
+        service: ChangeRequestService,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """An approved CR of a kind with no executor (SECURITY_REMEDIATION — the
+        Security Agent DRAFTS it in P2 W3 but its executor ships in a later wave)
+        is refused BEFORE ``approved -> executing``: no executing/failed churn, the
+        refusal is audited and names the kind, ``execute()`` raises, and the CR is
+        left ``approved`` (so the same CR runs once an executor exists)."""
+        requester = await _seed_user(sessionmaker, role_name="engineer")
+        approver = await _seed_user(sessionmaker, role_name="engineer")
+        cr = await service.create_draft(
+            requester_id=requester,
+            actor_role=Role.ENGINEER,
+            kind=ChangeRequestKind.SECURITY_REMEDIATION,
+            payload={"summary": "scope ACL OUTSIDE_IN (any -> any)"},
+            target_refs={"device_id": DEVICE_ID},
+        )
+        await service.submit(cr.id, actor_id=requester, actor_role=Role.ENGINEER)
+        await service.approve(cr.id, actor_id=approver, actor_role=Role.ENGINEER)
+        assert (await service.get(cr.id)).state is ChangeRequestState.APPROVED
+
+        # A config executor IS wired: the refusal is therefore driven by the
+        # unsupported KIND, not by a missing executor port.
+        config_exec = _ScriptedConfigExecutor(_applied_result)
+        agent = _config_agent(service, config_executor=config_exec)
+
+        with pytest.raises(ChangeExecutionRefused):
+            await agent.execute(cr.id)
+
+        # No executor was consulted and the CR never left ``approved``.
+        assert config_exec.calls == []
+        assert (await service.get(cr.id)).state is ChangeRequestState.APPROVED
+
+        rows = await _audit_rows(sessionmaker, cr.id)
+        actions = {row.action for row in rows}
+        assert audit_service.AUTOMATION_EXECUTION_REFUSED in actions
+        # Regression signature: the kind must never have entered the executing path.
+        assert audit_service.CHANGE_REQUEST_APPROVED_TO_EXECUTING not in actions
+        assert audit_service.CHANGE_REQUEST_EXECUTING_TO_FAILED not in actions
+        # The refusal names the kind so an operator can find why an approved CR
+        # is not running.
+        refusals = [r for r in rows if r.action == audit_service.AUTOMATION_EXECUTION_REFUSED]
+        assert any("security_remediation" in str(r.detail) for r in refusals)
+
 
 # ---------------------------------------------------------------------------
 # 3. Happy path: approved -> executing -> completed

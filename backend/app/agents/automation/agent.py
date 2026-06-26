@@ -90,14 +90,27 @@ AUTOMATION_NAME = "automation"
 #: Terminal outcomes that complete the CR successfully (ADR-0021 §3).
 _SUCCESS_OUTCOMES = frozenset({ChangeOutcome.APPLIED, ChangeOutcome.NO_OP})
 
+#: CR kinds the executor can actually apply (a real executor branch exists). A
+#: kind outside this set (e.g. ``security_remediation`` — drafted by the Security
+#: Agent in P2 W3, executor in a later wave) is refused BEFORE ``approved ->
+#: executing`` so an approved-but-unsupported CR never churns through
+#: ``executing -> failed``. New kinds inherit the safe refuse until added here.
+_EXECUTABLE_KINDS: frozenset[ChangeRequestKind] = frozenset(
+    {ChangeRequestKind.CONFIG, ChangeRequestKind.DDI_RECORD}
+)
+
 
 class ChangeExecutionRefused(NetOpsError):
-    """The Automation Agent refused to execute a CR that was not ``approved``.
+    """The Automation Agent refused to execute a CR it may not run.
+
+    Two refusal reasons: the CR is not ``approved``, or its ``kind`` has no
+    executor wired (e.g. ``security_remediation`` before its executor ships).
 
     Raised before any device/DDI write and before any lifecycle transition, so a
-    refused CR's state is never touched. The refusal is audited
+    refused CR's state is never touched (an unsupported-kind CR stays ``approved``
+    and runs unchanged once an executor exists). The refusal is audited
     (:data:`~app.services.audit.service.AUTOMATION_EXECUTION_REFUSED`) before this
-    is raised. ``409`` — the CR is in a state from which execution is not legal.
+    is raised. ``409`` — the CR is in a state/kind from which execution is not legal.
     """
 
     status_code = 409
@@ -254,6 +267,17 @@ class AutomationAgent(BaseSpecialistAgent):
                 "executes only 'approved' change requests"
             )
 
+        # Refuse a kind with no executor BEFORE claiming it (approved -> executing),
+        # so an approved-but-unsupported CR never churns through executing -> failed.
+        # It stays 'approved' and runs unchanged once its executor ships.
+        if cr.kind not in _EXECUTABLE_KINDS:
+            await self._refuse_unsupported_kind(cr, trace)
+            await self._trace_recorder.complete(trace.trace_id)
+            raise ChangeExecutionRefused(
+                f"change request '{cr_id}' has kind '{cr.kind.value}', which has no "
+                "executor wired; the Automation Agent cannot execute it"
+            )
+
         # Claim the CR: approved -> executing. The service re-validates the state
         # AND the principal, so this is the second, server-side guard — a foreign
         # principal or a non-approved CR is rejected here too (ADR-0020 §2).
@@ -318,6 +342,37 @@ class AutomationAgent(BaseSpecialistAgent):
             ),
         )
 
+    async def _refuse_unsupported_kind(self, cr: ChangeRequest, trace: ReasoningTrace) -> None:
+        """Audit the refusal of an approved CR whose kind has no executor wired.
+
+        Mirrors :meth:`_refuse` (same ``AUTOMATION_EXECUTION_REFUSED`` action) but
+        for the kind-level gap rather than a non-approved state. Performs no write
+        and no lifecycle transition — the CR is left ``approved``. The audit detail
+        names the kind so an operator can see why an approved CR is not running.
+        """
+        reason = f"no executor wired for CR kind '{cr.kind.value}'"
+        async with self._svc.sessionmaker() as session:
+            await audit.record(
+                session,
+                actor=self._principal.actor,
+                action=audit.AUTOMATION_EXECUTION_REFUSED,
+                target_type="change_request",
+                target_id=str(cr.id),
+                detail={"reason": reason, "kind": cr.kind.value, "target_refs": cr.target_refs},
+                reasoning_trace_id=cr.reasoning_trace_id,
+            )
+            await session.commit()
+        await self._trace_recorder.record_step(
+            trace.trace_id,
+            TraceStep(
+                kind=TraceStepKind.CONCLUSION,
+                summary=(
+                    f"refused change request {cr.id}: kind '{cr.kind.value}' has no executor "
+                    "wired; no change was applied and the request stays 'approved'"
+                ),
+            ),
+        )
+
     async def _apply_and_finalize(
         self, cr: ChangeRequest, trace: ReasoningTrace
     ) -> ChangeRequestState:
@@ -326,10 +381,11 @@ class AutomationAgent(BaseSpecialistAgent):
             return await self._execute_config(cr, trace)
         if cr.kind is ChangeRequestKind.DDI_RECORD:
             return await self._execute_ddi(cr, trace)
-        # A CR kind with no executor wired (e.g. SECURITY_REMEDIATION, P2 W3 —
-        # the Security Agent DRAFTS the CR but its execution path is a later
-        # wave): fail closed rather than guess (no half-run). This is the
-        # exhaustive-enum safety guard for kinds added before an executor exists.
+        # Defense-in-depth backstop: execute() already refuses any kind outside
+        # _EXECUTABLE_KINDS BEFORE mark_executing (e.g. SECURITY_REMEDIATION), so a
+        # non-executable kind never reaches here via execute(). This fail-closed
+        # branch remains the exhaustive-enum guard for any other entry path / a
+        # future kind added before its executor — never a half-run.
         return await self._fail_no_executor(
             cr, trace, reason=f"no executor wired for CR kind '{cr.kind.value}'"
         )
