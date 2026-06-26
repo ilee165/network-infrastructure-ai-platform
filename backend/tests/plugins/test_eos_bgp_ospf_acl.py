@@ -274,6 +274,16 @@ class TestAcl:
         assert www.destination_is_any is True
         assert www.destination_port == "eq www"
 
+    def test_any_detection_is_case_insensitive(self) -> None:
+        # If EOS output preserves ``ANY``/``Any``, both the endpoint resolution and
+        # the explicit-any flag must treat it as *any* — otherwise a definite
+        # exposure is silently downgraded to advisory.
+        for token in ("any", "ANY", "Any", " any "):
+            assert parsers._eos_is_any(token) is True
+            assert parsers._eos_acl_endpoint(token) is None
+        assert parsers._eos_is_any("host 10.0.0.1") is False
+        assert parsers._eos_is_any("") is False
+
     def test_provenance_and_raw_capture(self, transport: FakeTransport, device_id: UUID) -> None:
         capability = EosAcl(transport, device_id)
         entries = capability.get_acls()
