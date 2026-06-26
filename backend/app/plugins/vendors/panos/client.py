@@ -1,7 +1,8 @@
 """Palo Alto PAN-OS XML API client over httpx (ADR-0035 §1, D7).
 
 A thin, synchronous client wrapping :mod:`httpx` against the PAN-OS XML API
-(``https://<host>/api/?type=...&key=...``). Used only inside the ``panos``
+(``https://<host>/api/?type=...``; the API key travels in the ``X-PAN-KEY``
+header, not the URL query). Used only inside the ``panos``
 plugin (ADR-0006 §6: vendor-private connectivity); engines and agents never
 see it. Synchronous by design — capability methods run inside Celery worker
 tasks, never on the FastAPI event loop (ADR-0007 §3).
@@ -10,8 +11,11 @@ Security posture (A9 / D11):
 
 - The PAN-OS **API key** is materialized in-process from the vault
   (a ``credential_ref``, never a stored secret). The :class:`PanosClient`
-  holds the key in a name-mangled slot so it never appears in repr(),
-  a log line, a traceback frame dump, or a debugger display (ADR-0011 §1).
+  holds the key in a name-mangled attribute (``__key``) and defines no custom
+  ``repr()``/``str()`` that would emit it, so it does not surface in log lines
+  or tracebacks (ADR-0011 §1). It still lives in process memory and in
+  ``vars(self)`` as ``_PanosClient__key`` — a debugger or ``vars()`` can read
+  it, so those remain sensitive surfaces.
 - The API key is sent in the ``X-PAN-KEY`` **request header**, never in the
   ``key=`` URL query parameter (ADR-0035 §2: "never placed in the URL query
   in any logged form"). httpx logs the full request URL at INFO level via the
@@ -109,12 +113,14 @@ class PanosClient:
         client: Optional pre-built httpx.Client (for testing via MockTransport).
         timeout: Request timeout in seconds.
 
-    The API key is held in a name-mangled slot (``__key``) so it never
-    appears in ``repr()``, ``__dict__``, or a debugger display (ADR-0011 §1).
-    It is sent in the ``X-PAN-KEY`` request header (never the URL query), so it
-    cannot leak through httpx's INFO-level request-URL log. A
-    :class:`_ApiKeyRedactFilter` is additionally registered on the ``httpx``
-    logger as a defence-in-depth backstop.
+    The API key is held in a name-mangled attribute (``__key``); the class
+    defines no custom ``repr()``/``str()``, so the key does not appear in log
+    lines or tracebacks (ADR-0011 §1). It still resides in process memory and
+    in ``vars(self)`` as ``_PanosClient__key`` — a debugger or ``vars()`` can
+    read it, so those remain sensitive. It is sent in the ``X-PAN-KEY`` request
+    header (never the URL query), so it cannot leak through httpx's INFO-level
+    request-URL log. A :class:`_ApiKeyRedactFilter` is additionally registered
+    on the ``httpx`` logger as a defence-in-depth backstop.
     """
 
     def __init__(
@@ -127,7 +133,8 @@ class PanosClient:
         timeout: float = 30.0,
     ) -> None:
         self._base_url = f"https://{host}{_API_PATH}"
-        # Name-mangled to prevent repr() / dir() / traceback exposure (ADR-0011 §1).
+        # Name-mangled attr; no custom repr()/str() emits it, so it stays out of
+        # logs/tracebacks (ADR-0011 §1). vars()/debugger still expose it.
         self.__key: str = api_key
         self._client = client or httpx.Client(verify=verify, timeout=timeout)
         # Defence-in-depth: register a redaction filter on the httpx logger so any

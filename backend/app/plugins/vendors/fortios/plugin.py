@@ -625,8 +625,18 @@ class FortiosFirewallPolicy(_FortiosCapability, FirewallPolicyCapability):
                 addr.get("name", "") for addr in entry.get("orig-addr", []) if addr.get("name")
             )
 
-            # Translated source (NAT pool names)
-            translated_source = tuple(pool.get("name", "") for pool in nat_pool if pool.get("name"))
+            # Translated source: NAT pool names for a pooled SNAT, or the fixed
+            # nat-source-address object(s) for a static one-to-one translation
+            # (where nat-ippool is empty). Without the fallback a STATIC rule
+            # would report no translated address at all (ADR-0036 §3).
+            if nat_pool:
+                translated_source = tuple(
+                    pool.get("name", "") for pool in nat_pool if pool.get("name")
+                )
+            else:
+                translated_source = tuple(
+                    addr.get("name", "") for addr in nat_source if addr.get("name")
+                )
 
             # Outbound interface as destination zone
             outintf = entry.get("outintf", [])

@@ -770,3 +770,31 @@ class TestPanosClientErrorHandling:
             cap.discover()
         assert _FAKE_API_KEY not in str(exc_info.value)
         assert _FAKE_API_KEY not in str(exc_info.value.args)
+
+
+# ---------------------------------------------------------------------------
+# Interface speed parsing (ADR-0035 §3)
+# ---------------------------------------------------------------------------
+
+
+class TestPanosSpeedParsing:
+    """`_parse_speed_mbps` parses negotiated speeds, not advertised ranges."""
+
+    def test_single_negotiated_speed(self) -> None:
+        from app.plugins.vendors.panos.plugin import _parse_speed_mbps
+
+        assert _parse_speed_mbps("1000full") == 1000
+        assert _parse_speed_mbps("100half") == 100
+        assert _parse_speed_mbps("10000") == 10000
+
+    def test_advertised_range_is_none(self) -> None:
+        """A down/auto interface advertising '10/100/1000' is not a 10 Mbps link."""
+        from app.plugins.vendors.panos.plugin import _parse_speed_mbps
+
+        assert _parse_speed_mbps("10/100/1000") is None
+
+    def test_non_numeric_is_none(self) -> None:
+        from app.plugins.vendors.panos.plugin import _parse_speed_mbps
+
+        assert _parse_speed_mbps("auto") is None
+        assert _parse_speed_mbps("") is None

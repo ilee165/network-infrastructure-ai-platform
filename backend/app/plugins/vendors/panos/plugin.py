@@ -318,10 +318,16 @@ class PanosInterfaces(_PanosCapability, InterfacesCapability):
 
 
 def _parse_speed_mbps(raw: str) -> int | None:
-    """Parse PAN-OS speed string (e.g. '1000full', '100full') → Mbps."""
+    """Parse a PAN-OS negotiated speed string → Mbps.
+
+    Accepts a single negotiated value such as ``'1000'`` or ``'1000full'``.
+    Returns ``None`` for an advertised capability *range* (e.g. ``'10/100/1000'``
+    on a down/auto interface) or any non-numeric value — emitting the first
+    number of a range (``10``) would misreport the interface speed.
+    """
     import re
 
-    m = re.match(r"(\d+)", raw)
+    m = re.fullmatch(r"(\d+)(?:\s*(?:full|half))?", raw.strip().lower())
     if m:
         return int(m.group(1))
     return None

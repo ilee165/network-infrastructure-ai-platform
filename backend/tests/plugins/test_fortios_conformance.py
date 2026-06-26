@@ -770,6 +770,9 @@ class TestFortiosNormalizedRoundTrip:
         static_rules = [r for r in nat_rules if r.name == "static-snat-one-to-one"]
         assert static_rules, "Expected static central-SNAT rule"
         assert static_rules[0].nat_type == NatType.STATIC
+        # A static one-to-one translation has no NAT pool; the translated source
+        # must still carry the fixed nat-source-address object, not be dropped.
+        assert static_rules[0].translated_source == ("ext-203-0-113-50",)
 
 
 # ---------------------------------------------------------------------------
