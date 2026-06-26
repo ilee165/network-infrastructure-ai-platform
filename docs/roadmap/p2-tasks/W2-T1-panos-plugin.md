@@ -8,7 +8,7 @@
 | **Depends on** | **W1-T1** (`FirewallPolicyCapability` + models); ADR-0035 (W0-T2) |
 | **ADRs** | ADR-0035 (the plugin decision), ADR-0006 (contract, raw-first), ADR-0007 §D7 (httpx API transport), ADR-0011 (`credential_ref`), ADR-0034 (`FIREWALL_POLICY` models) |
 | **PRODUCTION.md** | §2.3 (capability set), §2.6 (conformance + ≥80% cov + normalized round-trip) |
-| **Status** | Proposed |
+| **Status** | Done — `b6190df` (impl) + `7472803` (fix); 89% cov, conformance green, credential-hygiene green |
 
 ## Objective
 

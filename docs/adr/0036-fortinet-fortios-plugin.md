@@ -30,9 +30,9 @@ capability set, and binding `FIREWALL_POLICY` to the ADR-0034 models. Each
 capability names exactly one primary transport; SSH is fallback only where REST does
 not cleanly serve.**
 
-### 1. Transport — REST primary, SSH fallback (per-capability split)
+### 1. Transport — one transport per capability in P2 (fallbacks named-deferred)
 
-| Capability | Primary | Fallback | Notes |
+| Capability | P2 transport | Fallback (named-deferred) | Notes |
 |---|---|---|---|
 | `DISCOVERY_API` | REST `/monitor/system/status` | SSH `get system status` | facts |
 | `INTERFACES` | REST `/monitor/system/interface` | SSH | `NormalizedInterface` |
@@ -41,10 +41,16 @@ not cleanly serve.**
 | `CONFIG_BACKUP` | SSH `show full-configuration` | REST backup endpoint | full config text is cleaner over CLI |
 | `HA_STATUS` | REST `/monitor/system/ha-*` | SSH `get system ha status` | `NormalizedHaStatus` |
 
-The SSH path reuses the netmiko `fortinet` transport (ADR-0007) — **no new transport
-stack**. `CONFIG_BACKUP` is the one capability whose primary is SSH (the full-config
-text export is the established, lossless CLI surface). Raw payloads from **both**
-transports are stored verbatim before parse (ADR-0006 §3).
+A fallback that is never reached is dead surface (Context, above). Accordingly,
+**each capability ships exactly one transport in P2**: REST for everything except
+`CONFIG_BACKUP`, which is SSH-only. The "fallback" column lists the transport a
+follow-up ADR will wire as a try-primary/except-fallback path; until that ADR ships
+the fallbacks are **named-deferred**, not implemented — the plugin and its docstrings
+advertise only the single transport each capability actually uses. The SSH path
+reuses the netmiko `fortinet` transport (ADR-0007) — **no new transport stack** —
+and backs only `CONFIG_BACKUP` in P2 (the full-config text export is the established,
+lossless CLI surface). Raw payloads from **both** transports are stored verbatim
+before parse (ADR-0006 §3).
 
 ### 2. Auth — vault credential_ref for both transports
 
@@ -93,8 +99,9 @@ holds.
 - Independent second vendor with a different transport and a different action
   vocabulary proves `FIREWALL_POLICY` is genuinely vendor-neutral (the ADR-0034
   stability gate), not PAN-OS-shaped.
-- REST-primary keeps the common path structured; the SSH fallback is confined to the
-  one capability (full-config) where the CLI is cleaner — no dead surface.
+- REST-primary keeps the common path structured; SSH is used by exactly one
+  capability (full-config) where the CLI is cleaner. The §1 cross-transport fallbacks
+  are named-deferred (not shipped as inert code) — no dead surface.
 - Read-only with a fixed root-VDOM boundary — no scope ambiguity for W2-T2.
 
 **Negative**
