@@ -8,7 +8,10 @@ over :func:`make_conformance_cases`. Each capability returns non-empty
 normalized records carrying ``source_vendor == "panos"``.
 
 The only credential anywhere in this module is the obviously-fake sentinel
-``FAKE-panos-api-key-zzz`` — it is never a real secret.
+``_FAKE_API_KEY`` — it is never a real secret. The sentinel is deliberately
+shaped like a real PAN-OS key (base64-derived: it contains ``+``, ``/`` and
+``=``) so the credential-hygiene tests exercise the URL-percent-encoding leak
+path that a URL-safe sentinel would silently miss (ADR-0011 / ADR-0035 §2).
 
 Live golden-path deferred-accepted (no PAN-OS hardware) — documented for W5-T3.
 """
@@ -16,6 +19,7 @@ Live golden-path deferred-accepted (no PAN-OS hardware) — documented for W5-T3
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from uuid import uuid4
 
 import httpx
@@ -37,8 +41,11 @@ from tests.plugins.conformance import ConformanceCase, make_conformance_cases
 # Fake credential sentinel — never a real secret
 # ---------------------------------------------------------------------------
 
-#: A clearly-fake API key — never a real secret.
-_FAKE_API_KEY = "FAKE-panos-api-key-zzz"  # noqa: S105 — obviously-fake test sentinel
+#: A clearly-fake API key — never a real secret. Shaped like a real PAN-OS key
+#: (base64-derived: contains ``+``, ``/`` and ``=``) so the hygiene tests cover
+#: the URL-percent-encoding leak surface a URL-safe sentinel would miss
+#: (ADR-0011 / ADR-0035 §2). httpx would log this as ``LUFRPT1FAKE%2B%2F...%3D``.
+_FAKE_API_KEY = "LUFRPT1FAKEpanos+key/zzz=="  # noqa: S105 — obviously-fake test sentinel
 
 # ---------------------------------------------------------------------------
 # Fixture XML payloads (realistic PAN-OS XML API responses)
@@ -421,15 +428,40 @@ class TestPanosCredentialHygiene:
         assert _FAKE_API_KEY not in str(exc_info.value)
 
     def test_api_key_not_logged(self, caplog: pytest.LogCaptureFixture) -> None:
-        """The API key must never appear in any log record (ADR-0011)."""
+        """The API key must never appear in any log record (ADR-0011 / ADR-0035 §2).
+
+        Asserts the key is absent in BOTH its literal form AND its
+        URL-percent-encoded form (``%2B``/``%2F``/``%3D``). httpx logs the
+        request URL at INFO; if the key were carried in the query string httpx
+        would log it percent-encoded, which a literal-substring redaction filter
+        would NOT catch — so this test fails unless the key never enters the
+        logged URL. The httpx INFO request log is explicitly captured.
+        """
+        encoded_key = urllib.parse.quote(_FAKE_API_KEY, safe="")
+        # Sanity-check the sentinel actually exercises the encoding path.
+        assert encoded_key != _FAKE_API_KEY, "sentinel must contain URL-special chars"
+
         http = httpx.Client(transport=httpx.MockTransport(_handle))
         client = PanosClient(host="fw.example.com", api_key=_FAKE_API_KEY, client=http)
         cap = PanosDiscoveryApi(client, uuid4())
-        with caplog.at_level(logging.DEBUG):
+        # Capture the httpx logger (it emits the request URL at INFO) as well as
+        # the plugin/app loggers.
+        with caplog.at_level(logging.DEBUG, logger="httpx"), caplog.at_level(logging.DEBUG):
             cap.discover()
+
+        # The httpx request log line must actually be present so this test is
+        # not vacuously green.
+        assert any(
+            record.name == "httpx" and "HTTP Request" in record.getMessage()
+            for record in caplog.records
+        ), "expected httpx INFO request log to be captured"
+
         for record in caplog.records:
-            assert _FAKE_API_KEY not in record.getMessage()
+            message = record.getMessage()
+            assert _FAKE_API_KEY not in message
+            assert encoded_key not in message
             assert _FAKE_API_KEY not in str(record.args)
+            assert encoded_key not in str(record.args)
 
     def test_api_key_not_in_raw_outputs(self) -> None:
         """Raw outputs stored via _record_raw must not contain the API key."""

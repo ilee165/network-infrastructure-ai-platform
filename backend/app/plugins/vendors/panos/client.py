@@ -12,12 +12,20 @@ Security posture (A9 / D11):
   (a ``credential_ref``, never a stored secret). The :class:`PanosClient`
   holds the key in a name-mangled slot so it never appears in repr(),
   a log line, a traceback frame dump, or a debugger display (ADR-0011 §1).
-- The API key is placed in the ``key=`` query parameter of every request.
-  Since httpx logs the full URL (including query params) at INFO level via
-  the ``httpx`` logger, a per-instance :class:`_ApiKeyRedactFilter` is
+- The API key is sent in the ``X-PAN-KEY`` **request header**, never in the
+  ``key=`` URL query parameter (ADR-0035 §2: "never placed in the URL query
+  in any logged form"). httpx logs the full request URL at INFO level via the
+  ``httpx`` logger; a key in the query string would be logged *percent-encoded*
+  (``+``/``/``/``=`` → ``%2B``/``%2F``/``%3D``) and thus leak in a trivially
+  reversible form. Carrying the key in a header keeps it out of the logged URL
+  entirely — the same posture as every other httpx-client plugin (bluecat,
+  infoblox, spatiumddi), which all pass credentials via headers/body.
+- As defence-in-depth, a per-instance :class:`_ApiKeyRedactFilter` is also
   registered on the ``httpx`` logger to suppress any record whose formatted
-  message contains the key. This is the narrowest possible scope — only
-  records that would leak this instance's key are dropped (ADR-0035 §2).
+  message contains the key in either literal or URL-percent-encoded form. This
+  is the narrowest possible scope — only records that would leak this instance's
+  key are dropped (ADR-0035 §2). httpx does not log request headers, so this
+  filter is a backstop, not the primary defence.
 - The key is never placed in a normalized record, a raw artifact's ``command``
   field, or any exception message (ADR-0011 / ADR-0035 §2).
 - TLS verification is **on by default**; ``verify`` is part of device
@@ -37,6 +45,7 @@ models stay secret-free (ADR-0034).
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -45,8 +54,11 @@ from app.core.errors import PluginError
 
 __all__ = ["PanosClient"]
 
-#: PAN-OS XML API path (fixed; parameters go in the query string).
+#: PAN-OS XML API path (fixed; non-secret parameters go in the query string).
 _API_PATH = "/api/"
+
+#: PAN-OS request header carrying the API key (keeps the key out of the URL).
+_API_KEY_HEADER = "X-PAN-KEY"
 
 _log = logging.getLogger(__name__)
 
@@ -54,20 +66,29 @@ _log = logging.getLogger(__name__)
 class _ApiKeyRedactFilter(logging.Filter):
     """Logging filter that blocks any record whose message contains the API key.
 
-    Registered on the ``httpx`` logger so that httpx's INFO-level request
-    URL log (which includes all query params including ``key=``) is suppressed
-    for records that would expose the credential (ADR-0011 §1 / ADR-0035 §2).
+    Defence-in-depth backstop registered on the ``httpx`` logger. The primary
+    defence is that the key is sent in the ``X-PAN-KEY`` header and never in the
+    URL, so httpx never logs it; this filter additionally drops any record whose
+    formatted message contains the key in either its **literal** form or its
+    **URL-percent-encoded** form (``+``/``/``/``=`` → ``%2B``/``%2F``/``%3D``).
+    Matching only the literal form would miss a percent-encoded key (ADR-0035 §2).
 
-    Only log records whose formatted message contains the literal key string
-    are blocked — all other records pass through unchanged. This is the
-    narrowest possible scope and avoids global logger mutation.
+    Only records that would expose this instance's key are blocked — all other
+    records pass through unchanged. This is the narrowest possible scope and
+    avoids global logger mutation.
+
+    The key is stored in a **name-mangled** slot (``__key`` → ``_ApiKeyRedactFilter__key``)
+    so ``vars(filter)`` / a debugger display does not expose it under a guessable
+    attribute name (ADR-0011 §1), matching :class:`PanosClient.__key`.
     """
 
     def __init__(self, api_key: str) -> None:
         super().__init__()
-        # Store a reference to identify which records to drop; the key itself
-        # is never stored in a loggable repr or serialised repr of this object.
-        self._key = api_key
+        # Name-mangled so vars()/repr()/a traceback frame dump does not surface
+        # the key under a discoverable attribute name (ADR-0011 §1). Store both
+        # the literal and the URL-percent-encoded form to match either in logs.
+        self.__key = api_key
+        self.__encoded_key = urllib.parse.quote(api_key, safe="")
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Return False (block) if the record message would expose the key."""
@@ -75,7 +96,7 @@ class _ApiKeyRedactFilter(logging.Filter):
             msg = record.getMessage()
         except Exception:  # noqa: BLE001
             return True
-        return self._key not in msg
+        return self.__key not in msg and self.__encoded_key not in msg
 
 
 class PanosClient:
@@ -90,8 +111,10 @@ class PanosClient:
 
     The API key is held in a name-mangled slot (``__key``) so it never
     appears in ``repr()``, ``__dict__``, or a debugger display (ADR-0011 §1).
-    A :class:`_ApiKeyRedactFilter` is registered on the ``httpx`` logger to
-    prevent the key from appearing in httpx's request/response URL log lines.
+    It is sent in the ``X-PAN-KEY`` request header (never the URL query), so it
+    cannot leak through httpx's INFO-level request-URL log. A
+    :class:`_ApiKeyRedactFilter` is additionally registered on the ``httpx``
+    logger as a defence-in-depth backstop.
     """
 
     def __init__(
@@ -107,8 +130,10 @@ class PanosClient:
         # Name-mangled to prevent repr() / dir() / traceback exposure (ADR-0011 §1).
         self.__key: str = api_key
         self._client = client or httpx.Client(verify=verify, timeout=timeout)
-        # Register the redaction filter on the httpx logger so URL log lines
-        # containing the API key are never emitted (ADR-0011 §1 / ADR-0035 §2).
+        # Defence-in-depth: register a redaction filter on the httpx logger so any
+        # record that would expose the key (literal or percent-encoded) is dropped
+        # (ADR-0011 §1 / ADR-0035 §2). The key normally never reaches a log line
+        # because it travels in the X-PAN-KEY header, not the URL.
         self.__log_filter: _ApiKeyRedactFilter = _ApiKeyRedactFilter(api_key)
         logging.getLogger("httpx").addFilter(self.__log_filter)
 
@@ -131,8 +156,9 @@ class PanosClient:
     ) -> str:
         """Issue one XML API request and return the raw XML text verbatim.
 
-        The API key is passed as the ``key`` query parameter. It is NEVER
-        logged, NEVER referenced in an error message, and NEVER returned
+        The API key is passed in the ``X-PAN-KEY`` request header (never the
+        URL query), so it cannot appear in httpx's logged request URL. It is
+        NEVER logged, NEVER referenced in an error message, and NEVER returned
         as part of the output (ADR-0035 §2 / ADR-0011 §1).
 
         On a non-2xx HTTP status or a PAN-OS ``status="error"`` response,
@@ -141,7 +167,6 @@ class PanosClient:
         """
         params: dict[str, str] = {
             "type": req_type,
-            "key": self.__key,  # credential in query param — filtered from logs
         }
         if cmd is not None:
             params["cmd"] = cmd
@@ -154,8 +179,11 @@ class PanosClient:
 
         # op label for error messages: omits the key (ADR-0035 §2).
         op = f"type={req_type}" + (f" action={action}" if action else "")
+        # Credential travels in a request header, not the URL — httpx never logs
+        # request headers, so the key cannot leak through the request-URL log.
+        headers = {_API_KEY_HEADER: self.__key}
         try:
-            response = self._client.get(self._base_url, params=params)
+            response = self._client.get(self._base_url, params=params, headers=headers)
         except httpx.HTTPError:
             # Transport error message omits the key and URL params (ADR-0035 §2).
             raise PluginError(f"panos: {op} failed (transport error)") from None
