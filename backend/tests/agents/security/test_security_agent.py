@@ -338,23 +338,6 @@ class TestFindingSchemaInvariants:
                 suggested_remediation="reorder",
             )
 
-    def test_evidence_is_immutable_after_construction(self) -> None:
-        # evidence is "evidence, not scratch space" — frozen must mean the mapping
-        # itself cannot be tampered with post-validation (cubic PR #70).
-        finding = SecurityFinding(
-            category=FindingCategory.OVERLY_PERMISSIVE,
-            severity=FindingSeverity.HIGH,
-            rule_name="permit-any",
-            evidence={"name": "permit-any", "source_addresses": ["any"]},
-            rationale="any to any",
-            suggested_remediation="constrain",
-        )
-        with pytest.raises(TypeError):
-            finding.evidence["name"] = "tampered"  # type: ignore[index]
-        # And it still serializes to a plain JSON dict for the tool boundary.
-        dumped = finding.model_dump(mode="json")
-        assert dumped["evidence"] == {"name": "permit-any", "source_addresses": ["any"]}
-
 
 class TestValidationErrorSanitization:
     """A malformed record cannot leak secret text via the validation exception."""

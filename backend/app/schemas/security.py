@@ -19,19 +19,10 @@ finding is evidence, not scratch space, mirroring
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from enum import StrEnum
-from types import MappingProxyType
 from typing import Any
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_serializer,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
     "FindingCategory",
@@ -97,34 +88,15 @@ class SecurityFinding(BaseModel):
     #: The offending rule's normalized fields (secret-free evidence, ADR-0034 §2).
     #: Required and non-empty — every finding is evidence-cited (ADR-0037 §3 /
     #: CLAUDE.md "explain all AI decisions"); a finding with no evidence is invalid.
-    #: Stored as a read-only mapping so a frozen finding's evidence cannot be
-    #: tampered with after validation ("evidence, not scratch space").
-    evidence: Mapping[str, Any] = Field(min_length=1)
+    #: A plain dict: evidence is deterministic, write-once engine output that is
+    #: never mutated after construction and is redacted on a *copy* of ``model_dump``
+    #: at the tool boundary — so an immutability wrapper earns no real protection
+    #: and only adds a dict-vs-proxy API footgun (PR #70 review).
+    evidence: dict[str, Any] = Field(min_length=1)
     #: Why this is a finding (grounds CLAUDE.md "explain all AI decisions").
     rationale: str = Field(min_length=1)
     #: The deterministic, human-reviewable fix (drafted as a CR, never applied).
     suggested_remediation: str = Field(min_length=1)
-
-    @field_validator("evidence", mode="after")
-    @classmethod
-    def _freeze_evidence(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
-        """Return a read-only view so the evidence cannot be mutated post-validation.
-
-        ``frozen=True`` only blocks reassigning the field; the underlying ``dict``
-        would still accept ``finding.evidence[k] = ...``. Wrapping it in a
-        :class:`~types.MappingProxyType` makes the contract real.
-        """
-        return MappingProxyType(dict(value))
-
-    @field_serializer("evidence")
-    def _serialize_evidence(self, value: Mapping[str, Any]) -> dict[str, Any]:
-        """Dump the read-only evidence view back to a plain JSON-able dict.
-
-        pydantic cannot serialize a :class:`~types.MappingProxyType` natively, and
-        the tool boundary (:mod:`app.agents.security.tools`) redacts a *copy* of
-        this dump — never the frozen finding.
-        """
-        return dict(value)
 
     @model_validator(mode="after")
     def _require_correlation_for_shadow_redundant(self) -> SecurityFinding:
