@@ -22,9 +22,6 @@ the conditional guard ``services.worker.enabled`` is present on the correct line
 from __future__ import annotations
 
 import pathlib
-import re
-
-import pytest
 
 # ---------------------------------------------------------------------------
 # Repo root — resolved relative to this file (backend/tests/ → repo root)
@@ -87,7 +84,9 @@ def test_runbook_table_pipe_is_escaped() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     # Find the log-line table row.
     log_line_rows = [ln for ln in text.splitlines() if "AUDIT_CHAIN_VERIFY OUTCOME=" in ln]
-    assert log_line_rows, f"{RUNBOOK.name}: could not find the AUDIT_CHAIN_VERIFY log-line table row"
+    assert log_line_rows, (
+        f"{RUNBOOK.name}: could not find the AUDIT_CHAIN_VERIFY log-line table row"
+    )
     for row in log_line_rows:
         assert r"PASS\|FAIL" in row, (
             f"{RUNBOOK.name}: table row contains unescaped pipe — found: {row!r}\n"
@@ -127,13 +126,14 @@ def test_notes_collector_egress_warning_gated_by_worker_in_source() -> None:
     """D2: the collector-egress opt-out warning in NOTES.txt must include
     the .Values.services.worker.enabled guard on the same conditional line.
 
-    Before the fix the condition was:
-        {{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.collectorEgress.enabled) }}
-    which would emit the warning even when the worker deployment was disabled,
-    falsely implying device operations would fail when there is no worker.
+    Before the fix the ``{{- if and ... }}`` guard checked only
+    ``networkPolicy.enabled`` and ``(not collectorEgress.enabled)``, so it would
+    emit the warning even when the worker deployment was disabled, falsely
+    implying device operations would fail when there is no worker.
 
-    After the fix the condition is:
-        {{- if and .Values.networkPolicy.enabled .Values.services.worker.enabled (not .Values.networkPolicy.collectorEgress.enabled) }}
+    After the fix the condition adds ``.Values.services.worker.enabled`` to the
+    same ``{{- if and ... }}`` guard so the warning only fires when the worker is
+    enabled.
     """
     text = NOTES_TXT.read_text(encoding="utf-8")
     warning_lines = _find_collector_egress_warning_lines(text)
@@ -141,10 +141,6 @@ def test_notes_collector_egress_warning_gated_by_worker_in_source() -> None:
         f"{NOTES_TXT.name}: could not find the collector-egress warning line "
         f"(fragment: {_COLLECTOR_WARNING_FRAGMENT!r})"
     )
-    for line in warning_lines:
-        # The triggering line is the `{{- if ...}}` guard line; find the
-        # corresponding if-block opening line(s) in the source.
-        pass  # assertions below cover all lines that reference the warning
 
 
 def test_notes_collector_egress_line_references_worker_enabled() -> None:
