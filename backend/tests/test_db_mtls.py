@@ -123,6 +123,66 @@ def test_verify_full_requires_root_cert(tmp_path: Path) -> None:
         db.build_ssl_connect_args(settings)
 
 
+def test_mode_set_without_client_cert_key_fails_closed(tmp_path: Path) -> None:
+    """A mode + root CA but NO client cert/key must fail closed (no one-way downgrade).
+
+    ADR-0039 §4 mandates mutual TLS: the client must PRESENT a cert. Building a
+    server-auth-only context here would silently downgrade mTLS to one-way TLS at
+    the client's own layer (the fail-open class the root-cert guard already blocks).
+    """
+    ca, _, _ = _write_cert_material(tmp_path)
+    settings = Settings(
+        database_url="postgresql+asyncpg://netops:netops@netops-postgres:5432/netops",
+        db_ssl_mode="verify-full",
+        db_ssl_root_cert=ca,
+    )
+    with pytest.raises(ValueError, match="client cert"):
+        db.build_ssl_connect_args(settings)
+
+
+def test_half_set_client_cert_key_fails_closed(tmp_path: Path) -> None:
+    """Only one of NETOPS_DB_SSL_CERT / NETOPS_DB_SSL_KEY set must fail closed."""
+    ca, cert, _ = _write_cert_material(tmp_path)
+    settings = Settings(
+        database_url="postgresql+asyncpg://netops:netops@netops-postgres:5432/netops",
+        db_ssl_mode="verify-full",
+        db_ssl_root_cert=ca,
+        db_ssl_cert=cert,  # key omitted
+    )
+    with pytest.raises(ValueError, match="must be set together"):
+        db.build_ssl_connect_args(settings)
+
+
+def test_mutual_tls_actually_loads_client_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mutual leg is covered: load_cert_chain is called with the client cert/key.
+
+    Spies on ``SSLContext.load_cert_chain`` so the test proves the client chain is
+    actually loaded (the mTLS-presenting leg), not merely that a context is built.
+    """
+    ca, cert, key = _write_cert_material(tmp_path)
+    settings = Settings(
+        database_url="postgresql+asyncpg://netops:netops@netops-postgres:5432/netops",
+        db_ssl_mode="verify-full",
+        db_ssl_root_cert=ca,
+        db_ssl_cert=cert,
+        db_ssl_key=key,
+    )
+    loaded: dict[str, object] = {}
+    real_load = ssl.SSLContext.load_cert_chain
+
+    def _spy(self: ssl.SSLContext, certfile: object, keyfile: object = None, **kw: object) -> None:
+        loaded["certfile"] = certfile
+        loaded["keyfile"] = keyfile
+        real_load(self, certfile, keyfile)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ssl.SSLContext, "load_cert_chain", _spy)
+    db.build_ssl_connect_args(settings)
+    assert loaded["certfile"] == str(cert)
+    assert loaded["keyfile"] == str(key)
+
+
 def test_create_engine_threads_ssl_connect_args(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

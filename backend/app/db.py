@@ -45,7 +45,10 @@ def build_ssl_connect_args(settings: Settings) -> dict[str, Any]:
     ------
     ValueError
         When an SSL mode is requested without a root CA (a verify mode with no
-        trust anchor must fail closed, never silently downgrade to no-verify).
+        trust anchor must fail closed, never silently downgrade to no-verify), or
+        when the client cert/key pair is missing/half-set while a mode is set
+        (mutual TLS must present a client cert — fail closed at the client layer,
+        never silently downgrade to one-way server-auth-only TLS).
     """
     mode = settings.db_ssl_mode
     if mode is None:
@@ -55,17 +58,31 @@ def build_ssl_connect_args(settings: Settings) -> dict[str, Any]:
             "NETOPS_DB_SSL_MODE is set but no root cert (NETOPS_DB_SSL_ROOT_CERT) "
             "was provided — a verify mode with no trust anchor must fail closed"
         )
+    # Mutual TLS (ADR-0039 §4): the client MUST present a cert/key. Fail closed if
+    # the pair is half-set or absent — silently building a server-auth-only context
+    # would downgrade mTLS to one-way TLS at the client's own layer (relying on the
+    # server's clientcert=verify-full to refuse a certless client is fail-open here).
+    if (settings.db_ssl_cert is None) != (settings.db_ssl_key is None):
+        raise ValueError(
+            "NETOPS_DB_SSL_CERT and NETOPS_DB_SSL_KEY must be set together "
+            "(mutual TLS requires both the client cert and its key)"
+        )
+    if settings.db_ssl_cert is None:
+        raise ValueError(
+            "NETOPS_DB_SSL_MODE is set but no client cert/key "
+            "(NETOPS_DB_SSL_CERT / NETOPS_DB_SSL_KEY) was provided — mutual TLS "
+            "requires a client cert/key; verify-full must present a client certificate"
+        )
     context = ssl.create_default_context(cafile=str(settings.db_ssl_root_cert))
     # verify-full == verify the chain AND match the server hostname; verify-ca
     # verifies the chain only (the libpq distinction). Both REQUIRE the peer cert.
     context.check_hostname = mode == "verify-full"
     context.verify_mode = ssl.CERT_REQUIRED
     # Present the client certificate (mutual TLS): the server authenticates it.
-    if settings.db_ssl_cert is not None and settings.db_ssl_key is not None:
-        context.load_cert_chain(
-            certfile=str(settings.db_ssl_cert),
-            keyfile=str(settings.db_ssl_key),
-        )
+    context.load_cert_chain(
+        certfile=str(settings.db_ssl_cert),
+        keyfile=str(settings.db_ssl_key),
+    )
     return {"ssl": context}
 
 

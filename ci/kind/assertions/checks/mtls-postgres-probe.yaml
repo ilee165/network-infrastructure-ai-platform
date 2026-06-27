@@ -74,11 +74,15 @@ spec:
   volumes:
     # The api/worker CLIENT cert material (cert-manager-issued or dev-fallback).
     # The same Secret the api/worker mount — the probe authenticates as that
-    # client identity. defaultMode 0600; the check re-copies the key it needs.
+    # client identity. defaultMode 0640: with fsGroup 65532 K8s writes the files
+    # root:65532, so the non-root probe uid 65532 reads tls.key via its gid (0600
+    # owner-only would deny the non-root user read and EACCES the `cp` in case 1).
+    # Mirrors the postgres server mount's 0640 group-read pattern; the check then
+    # re-copies the key to a 0600 path it OWNS (libpq rejects a group-readable key).
     - name: client-tls
       secret:
         secretName: netops-db-client-tls
-        defaultMode: 0600
+        defaultMode: 0640
     - name: tmp
       emptyDir:
         sizeLimit: 32Mi

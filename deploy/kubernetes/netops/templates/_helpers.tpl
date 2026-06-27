@@ -355,9 +355,13 @@ mounted at mtls.postgres.mountPath. Usage:
 
 {{/*
 netops.dbClientTlsVolume — the CLIENT cert Secret volume for api/worker
-(W4-T4, ADR-0039 §5). defaultMode 0400: the client KEY is readable ONLY by the
-pod's runAsUser, never group/world (the pods run as a single non-root uid; no
-fsGroup-shared reader needs it). Usage:
+(W4-T4, ADR-0039 §5). defaultMode 0440: with fsGroup set (podSecurityContext
+fsGroup == runAsGroup == 10001) K8s writes the Secret files owned root:10001, so
+the key is OWNED BY ROOT and GROUP-READABLE by the pod's fsGroup — the non-root
+app uid 10001 reads it via its gid, never world. 0400 (owner-only) would deny the
+app group read and break the asyncpg verify-full client-chain load; this mirrors
+the postgres server mount's 0640 group-read pattern (key non-world-readable).
+Usage:
   {{- include "netops.dbClientTlsVolume" . | nindent 8 }}
 */}}
 {{- define "netops.dbClientTlsVolume" -}}
@@ -365,6 +369,6 @@ fsGroup-shared reader needs it). Usage:
 - name: db-tls-client
   secret:
     secretName: {{ .Values.mtls.postgres.clientSecretName }}
-    defaultMode: 0400
+    defaultMode: 0440
 {{- end -}}
 {{- end -}}
