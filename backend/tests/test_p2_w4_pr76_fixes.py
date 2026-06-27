@@ -168,3 +168,32 @@ def test_notes_collector_egress_line_references_worker_enabled() -> None:
             f"This means the warning fires even when the worker is disabled — the bug D2 fixed.\n"
             f"Offending line: {line!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# #22 (round 2) — NOTES.txt must warn when the WEEKLY full-scan tier is disabled
+# while the DAILY incremental verify is still on (A3 historical-tamper blind spot)
+# ---------------------------------------------------------------------------
+
+
+def test_notes_warns_when_fullscan_disabled_with_chainverify_on() -> None:
+    """#22: NOTES.txt must carry a warning guarded by chainVerify.enabled AND
+    (not fullScan.enabled), so disabling only the weekly A3 full-scan sub-tier is
+    not a silent historical-tamper blind spot. Source-inspected (helm does not
+    render NOTES.txt via --show-only), mirroring the D2 tests above.
+    """
+    lines = NOTES_TXT.read_text(encoding="utf-8").splitlines()
+    guard_lines = [
+        ln
+        for ln in lines
+        if "{{-" in ln
+        and ".Values.audit.chainVerify.enabled" in ln
+        and "(not .Values.audit.chainVerify.fullScan.enabled)" in ln
+    ]
+    assert guard_lines, (
+        f"{NOTES_TXT.name}: missing the full-scan opt-out warning — expected a "
+        "'{{- if and .Values.audit.chainVerify.enabled "
+        "(not .Values.audit.chainVerify.fullScan.enabled) }}' guard. Without it an "
+        "operator can disable the weekly full scan (A3) and get no warning about the "
+        "historical-tamper blind spot (ADR-0038 §4)."
+    )
