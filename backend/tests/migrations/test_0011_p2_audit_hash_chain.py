@@ -101,6 +101,38 @@ def test_offline_sql_adds_bytea_chain_columns() -> None:
 
 
 @pytest.mark.usefixtures("_postgres_dialect_env")
+def test_offline_sql_keeps_genesis_default_for_rolling_deploy() -> None:
+    """The genesis server_default stays on through this expand migration (W4-T1 A7).
+
+    Dropping the default in the SAME migration that adds the NOT NULL chain columns
+    would break N→N+1 rolling deploys: an old (pre-W4) pod still inserting audit
+    rows does not set prev_hash/entry_hash, so without a default its INSERT hits
+    NOT NULL and crashes. The expand migration therefore KEEPS the default (a
+    contract migration may drop it later) — assert the upgrade SQL carries the
+    genesis DEFAULT and issues NO ``ALTER COLUMN ... DROP DEFAULT`` on these columns.
+    """
+    sql = _offline_upgrade_sql()
+    genesis_hex = ("\\x" + "00" * 32).lower()
+    assert genesis_hex in sql.lower(), "genesis default literal must appear in the column add"
+    lowered = sql.lower()
+    assert "drop default" not in lowered, "expand migration must NOT drop the chain defaults (A7)"
+
+
+@pytest.mark.usefixtures("_postgres_dialect_env")
+def test_offline_sql_adds_monotonic_seq_column_and_sequence() -> None:
+    """A monotonic BIGINT ``seq`` column + shared sequence are added (W4-T1 A4)."""
+    sql = _offline_upgrade_sql()
+    lowered = sql.lower()
+    # A dedicated sequence backs the column, drawn from on every INSERT (any
+    # partition) so seq is globally monotonic; the column defaults to nextval.
+    assert "create sequence" in lowered and "audit_log_seq" in lowered
+    assert "add column seq bigint" in lowered
+    assert "nextval('audit_log_seq'" in lowered
+    # The column is indexed for the head read (MAX seq) and the verifier ORDER BY.
+    assert "ix_audit_log_seq" in lowered
+
+
+@pytest.mark.usefixtures("_postgres_dialect_env")
 def test_offline_sql_creates_checkpoint_table() -> None:
     sql = _offline_upgrade_sql()
     assert "CREATE TABLE audit_chain_checkpoint (" in sql
@@ -113,7 +145,24 @@ def test_offline_downgrade_reverses_upgrade() -> None:
     sql = _offline_sql("downgrade")
     assert "ALTER TABLE audit_log DROP COLUMN entry_hash" in sql
     assert "ALTER TABLE audit_log DROP COLUMN prev_hash" in sql
+    assert "ALTER TABLE audit_log DROP COLUMN seq" in sql
     assert "DROP TABLE audit_chain_checkpoint" in sql
+    # The shared sequence is dropped too (clean down, no orphaned object).
+    assert "drop sequence" in sql.lower() and "audit_log_seq" in sql.lower()
+
+
+def test_migration_seq_sequence_name_pinned_to_model() -> None:
+    """Migration's inlined sequence name equals the model constant (D4 — pinned)."""
+    from app.models import audit as audit_model
+
+    # The revision file name starts with a digit (``0011_...``), so it is not a
+    # plain importable module — load it via the alembic ScriptDirectory the same way
+    # the migration runner does, then read the inlined constant off the module.
+    script = ScriptDirectory.from_config(_alembic_config())
+    revision = script.get_revision("0011")
+    migration_module = revision.module
+
+    assert migration_module._SEQ_SEQUENCE_NAME == audit_model._SEQ_SEQUENCE_NAME == "audit_log_seq"
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,9 @@
 
 Recomputes the ``audit_log`` hash chain FROM the last verified-clean checkpoint
 (the :class:`~app.models.audit.AuditChainCheckpoint` watermark) to the current
-head, walking entries in append order ``(created_at, id)``. Each entry's stored
+head, walking entries in append order ``seq`` (the monotonic append-order column,
+W4-T1 A4 — never ``(created_at, id)``, whose random-UUID tiebreak could invert
+two equal-``created_at`` rows and false-alarm the chain). Each entry's stored
 ``entry_hash`` must equal ``SHA-256(canonical(entry) || prev_hash)`` and each
 entry's stored ``prev_hash`` must equal the predecessor's ``entry_hash`` — a
 mismatch on EITHER is a chain break (a mutated, deleted, reordered, or inserted
@@ -23,7 +25,6 @@ construction, ADR-0032 §5).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,33 +83,20 @@ async def _load_checkpoint(session: AsyncSession) -> AuditChainCheckpoint | None
     ).scalar_one_or_none()
 
 
-async def _entries_after(
-    session: AsyncSession, after: tuple[datetime, str] | None
-) -> list[AuditLog]:
-    """Load audit entries in append order, starting strictly AFTER *after*.
+async def _entries_after(session: AsyncSession, after_seq: int | None) -> list[AuditLog]:
+    """Load audit entries in append order, starting strictly AFTER *after_seq*.
 
-    *after* is the ``(created_at, id)`` of the checkpoint entry (``None`` to start
-    from the genesis). The keyset filter ``(created_at, id) > (cp_ts, cp_id)`` is
-    expressed as the standard row-comparison so the recompute resumes exactly where
-    the last verified-clean pass stopped (ADR-0038 §4) without re-walking history.
+    *after_seq* is the ``seq`` of the checkpoint entry (``None`` to start from the
+    genesis). Ordering and the keyset filter ``seq > after_seq`` both use the
+    monotonic append-order column (W4-T1 A4) so the recompute walks the chain in the
+    SAME total order the writer appended it — never the ambiguous ``(created_at, id)``
+    order — and resumes exactly where the last verified-clean pass stopped
+    (ADR-0038 §4) without re-walking history.
     """
-    stmt = select(AuditLog).order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
-    if after is not None:
-        cp_ts, cp_id = after
-        # (created_at, id) strictly greater than the checkpoint key — a portable
-        # keyset predicate (no tuple-comparison reliance) valid on SQLite + PG.
-        stmt = stmt.where(
-            (AuditLog.created_at > cp_ts)
-            | ((AuditLog.created_at == cp_ts) & (AuditLog.id > _as_uuid(cp_id)))
-        )
+    stmt = select(AuditLog).order_by(AuditLog.seq.asc())
+    if after_seq is not None:
+        stmt = stmt.where(AuditLog.seq > after_seq)
     return list((await session.execute(stmt)).scalars().all())
-
-
-def _as_uuid(value: str) -> object:
-    """Parse a string id back to UUID for the keyset comparison (PG/SQLite safe)."""
-    import uuid
-
-    return uuid.UUID(value)
 
 
 async def verify_chain(session: AsyncSession, *, advance_checkpoint: bool = False) -> VerifyResult:
@@ -177,15 +165,15 @@ async def verify_chain(session: AsyncSession, *, advance_checkpoint: bool = Fals
                 ),
             )
         prev_hash = checkpoint.entry_hash
-        after: tuple[datetime, str] | None = (
-            checkpoint.entry_created_at,
-            str(checkpoint.entry_id),
-        )
+        # Resume strictly after the anchor's monotonic ``seq`` (W4-T1 A4). The
+        # anchor row was just re-fetched and re-proven above, so reading its ``seq``
+        # gives the exact keyset boundary for the incremental walk.
+        after_seq: int | None = anchor.seq
     else:
         prev_hash = GENESIS_HASH
-        after = None
+        after_seq = None
 
-    entries = await _entries_after(session, after)
+    entries = await _entries_after(session, after_seq)
 
     head_entry: AuditLog | None = None
     for offset, entry in enumerate(entries):

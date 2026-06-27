@@ -332,6 +332,90 @@ async def test_writer_remains_single_append_path_no_update(session: AsyncSession
     assert after - before == 3
 
 
+async def test_record_emits_no_update_on_audit_log(session: AsyncSession) -> None:
+    """record() issues exactly ONE INSERT and NO UPDATE on audit_log (W4-T1 A2).
+
+    The previous write shape inserted a placeholder entry_hash then UPDATEd it in a
+    second flush — which contradicts the append-only ``REVOKE UPDATE ... FROM
+    PUBLIC`` posture and fails under a least-privilege (non-owner) DB role. This
+    test captures the real emitted SQL via a ``before_cursor_execute`` listener and
+    asserts the writer never UPDATEs ``audit_log`` (and that it does INSERT it),
+    closing the gap that let A2 through (the prior test only counted rows).
+    """
+    statements: list[str] = []
+
+    bind = session.bind
+    assert bind is not None
+    sync_engine = bind.sync_engine
+
+    @event.listens_for(sync_engine, "before_cursor_execute")
+    def _capture(
+        _conn: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: Any,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    try:
+        await _seed_chain(session, 2)
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _capture)
+
+    lowered = [s.lower() for s in statements]
+    inserts = [s for s in lowered if "insert into audit_log" in s]
+    updates = [s for s in lowered if "update audit_log" in s]
+    # Two appends → exactly two INSERTs, zero UPDATEs (single-insert write shape).
+    assert len(inserts) == 2, f"expected one INSERT per append, saw: {inserts}"
+    assert updates == [], f"record() must not UPDATE audit_log, saw: {updates}"
+
+
+async def test_seq_is_monotonic_in_append_order(session: AsyncSession) -> None:
+    """Each append gets a strictly-increasing ``seq`` — the chain's true order (A4)."""
+    entries = await _seed_chain(session, 4)
+    seqs = [e.seq for e in entries]
+    assert seqs == sorted(seqs)
+    assert len(set(seqs)) == len(seqs)
+    # Strictly increasing (no plateau): the head read + assignment never repeats.
+    assert all(b > a for a, b in zip(seqs, seqs[1:], strict=False))
+
+
+async def test_equal_created_at_rows_verify_clean_by_seq(session: AsyncSession) -> None:
+    """Rows that share created_at still verify clean — ordering is by seq, not id (A4).
+
+    Two appends are forced to the SAME ``created_at`` (clock granularity / same
+    instant). Under the old ``ORDER BY (created_at, id)`` read the random-UUID
+    tiebreak could invert their order and make the verifier report a FALSE
+    ``prev_hash_mismatch`` (ADR-0038 §2 forbids false alarms). Ordering by the
+    monotonic ``seq`` makes the chain unambiguous, so the verifier passes.
+    """
+    from datetime import UTC, datetime
+
+    fixed = datetime(2026, 6, 26, 12, 0, 0, tzinfo=UTC)
+
+    # Pin every appended row to the SAME created_at so (created_at, id) cannot order
+    # them — only seq can. Patch the writer's clock for the duration of the appends.
+    import app.services.audit.service as svc
+
+    original = svc.utcnow
+    svc.utcnow = lambda: fixed  # type: ignore[assignment]
+    try:
+        entries = await _seed_chain(session, 5)
+    finally:
+        svc.utcnow = original  # type: ignore[assignment]
+
+    assert {e.created_at for e in entries} == {fixed}, "all rows must share created_at"
+    # seq remains strictly increasing despite the identical timestamps.
+    assert [e.seq for e in entries] == sorted(e.seq for e in entries)
+    # The verifier walks by seq and finds a clean linear chain (no false alarm).
+    result = await verify_chain(session)
+    assert result.ok is True
+    assert result.break_ is None
+    assert result.checked == 5
+
+
 async def test_existing_writer_callers_need_no_chain_args(session: AsyncSession) -> None:
     """A caller that omits chain args still gets a fully-chained row (back-compat)."""
     entry = await audit_service.record(

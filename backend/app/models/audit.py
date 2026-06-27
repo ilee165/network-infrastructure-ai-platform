@@ -12,8 +12,11 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import LargeBinary, String
+from sqlalchemy import BigInteger, LargeBinary, String, func, select
+from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql.functions import next_value
+from sqlalchemy.sql.schema import Sequence
 
 from app.models.base import Base
 from app.models.mixins import JSON_VARIANT, UtcDateTime, utcnow
@@ -23,6 +26,38 @@ from app.models.mixins import JSON_VARIANT, UtcDateTime, utcnow
 #: ``app.services.audit.chain.GENESIS_HASH`` (the canonical definition the writer /
 #: verifier use) and to migration 0011's inlined value by test.
 _GENESIS_HASH = b"\x00" * 32
+
+#: Name of the DB sequence that backs the monotonic append-order column ``seq``
+#: (ADR-0038 §3, W4-T1 A4). A single shared sequence is drawn from on every INSERT
+#: into any range partition of ``audit_log``, so ``seq`` is globally monotonic in
+#: append order across all partitions. Mirrored (inlined) by migration 0011 (D4 —
+#: migrations never import models); the two are pinned equal by test.
+_SEQ_SEQUENCE_NAME = "audit_log_seq"
+
+#: The shared sequence object (PostgreSQL only). The migration owns the real
+#: CREATE/DROP SEQUENCE DDL (D4); this object is referenced ONLY to draw
+#: ``nextval`` in the column default below, so SQLAlchemy never emits its DDL here.
+_SEQ_SEQUENCE = Sequence(_SEQ_SEQUENCE_NAME)
+
+
+def _next_seq(context: Any) -> int:
+    """Context-sensitive default for the monotonic ``seq`` column (W4-T1 A4).
+
+    PostgreSQL draws the next value from the shared ``audit_log_seq`` sequence
+    (globally monotonic across the range partitions); SQLite (the unit-test backend,
+    no sequences) returns ``MAX(seq)+1`` over the existing rows. Either way the value
+    is computed on the SAME connection/transaction as the INSERT, so the audit writer
+    and any direct-construct caller get a valid monotonic ``seq`` without a second
+    statement after the insert. The audit writer may also pre-assign ``seq``
+    explicitly (it holds the serialised head read), in which case this default never
+    fires.
+    """
+    connection = context.connection
+    dialect: Dialect = connection.dialect
+    if dialect.name == "postgresql":
+        return int(connection.scalar(select(next_value(_SEQ_SEQUENCE))))
+    current = connection.scalar(select(func.coalesce(func.max(AuditLog.seq), 0)))
+    return int(current) + 1
 
 
 class AuditLog(Base):
@@ -62,6 +97,21 @@ class AuditLog(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), primary_key=True, default=utcnow)
+    # Monotonic append-order key (ADR-0038 §3, W4-T1 A4). The chain's ORDER is this
+    # column — NOT ``(created_at, id)`` — so equal-``created_at`` rows can never be
+    # ordered ambiguously by the random-UUID tiebreak (which could invert read order
+    # and false-alarm the verifier). On PostgreSQL the value comes from a single
+    # shared ``Sequence`` (``server_default = nextval``) drawn from on every INSERT
+    # into any range partition, so ``seq`` is globally monotonic across partitions;
+    # on SQLite (the unit-test backend, no sequences) the audit writer assigns
+    # ``MAX(seq)+1`` under its serialised head read. Indexed for the head read
+    # (``MAX(seq)``) and the verifier's ``ORDER BY seq``.
+    seq: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        index=True,
+        default=_next_seq,
+    )
     actor: Mapped[str] = mapped_column(String(255), nullable=False)
     action: Mapped[str] = mapped_column(String(128), nullable=False)
     target_type: Mapped[str] = mapped_column(String(128), nullable=False)
