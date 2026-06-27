@@ -306,3 +306,65 @@ spec:
           emptyDir:
             sizeLimit: 128Mi
 {{- end -}}
+
+{{/*
+netops.dbClientTlsEnv — the api/worker -> Postgres mTLS CLIENT env (W4-T4,
+ADR-0039 §4). Authored ONCE so the api + worker cannot drift. Renders the
+NETOPS_DB_SSL_* settings (sslmode + the mounted cert/key/CA FILE paths) the
+backend reads in app.db.build_ssl_connect_args. NO key material — only file
+paths into the read-only Secret mount (ADR-0039 §5). Also sets NETOPS_DATABASE_URL
+to the in-cluster DSN so the client dials the postgres Service over the verified
+link (the app default DSN points at the compose host, not the chart Service).
+Usage: {{- include "netops.dbClientTlsEnv" . | nindent 12 }}
+Renders nothing when mtls.postgres.enabled is false.
+*/}}
+{{- define "netops.dbClientTlsEnv" -}}
+{{- $m := .Values.mtls.postgres -}}
+{{- if $m.enabled }}
+# api/worker -> Postgres mTLS (ADR-0039 §4). The DSN targets the in-cluster
+# postgres Service; the SSL mode + mounted client cert/key/CA drive the asyncpg
+# verify-full SSLContext (app.db). The password stays a separate secretKeyRef env.
+- name: NETOPS_DATABASE_URL
+  value: postgresql+asyncpg://{{ .Values.config.postgres.user }}:$(NETOPS_POSTGRES_PASSWORD)@{{ .Values.config.postgres.host }}:{{ .Values.config.postgres.port }}/{{ .Values.config.postgres.database }}
+- name: NETOPS_DB_SSL_MODE
+  value: {{ $m.sslMode | quote }}
+- name: NETOPS_DB_SSL_ROOT_CERT
+  value: {{ printf "%s/%s" $m.mountPath ($m.caFile | default "ca.crt") | quote }}
+- name: NETOPS_DB_SSL_CERT
+  value: {{ printf "%s/%s" $m.mountPath ($m.serverCertFile | default "tls.crt") | quote }}
+- name: NETOPS_DB_SSL_KEY
+  value: {{ printf "%s/%s" $m.mountPath ($m.serverKeyFile | default "tls.key") | quote }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+netops.dbClientTlsVolumeMount — the read-only CLIENT cert mount for api/worker
+(W4-T4, ADR-0039 §5). The client Secret (cert-manager-issued or dev-fallback)
+mounted at mtls.postgres.mountPath. Usage:
+  {{- include "netops.dbClientTlsVolumeMount" . | nindent 12 }}
+*/}}
+{{- define "netops.dbClientTlsVolumeMount" -}}
+{{- if .Values.mtls.postgres.enabled }}
+# api/worker -> Postgres mTLS client cert/key + CA, mounted read-only from the
+# Secret (cert-manager-issued or dev-fallback). Never image-baked (ADR-0039 §5).
+- name: db-tls-client
+  mountPath: {{ .Values.mtls.postgres.mountPath }}
+  readOnly: true
+{{- end -}}
+{{- end -}}
+
+{{/*
+netops.dbClientTlsVolume — the CLIENT cert Secret volume for api/worker
+(W4-T4, ADR-0039 §5). defaultMode 0400: the client KEY is readable ONLY by the
+pod's runAsUser, never group/world (the pods run as a single non-root uid; no
+fsGroup-shared reader needs it). Usage:
+  {{- include "netops.dbClientTlsVolume" . | nindent 8 }}
+*/}}
+{{- define "netops.dbClientTlsVolume" -}}
+{{- if .Values.mtls.postgres.enabled }}
+- name: db-tls-client
+  secret:
+    secretName: {{ .Values.mtls.postgres.clientSecretName }}
+    defaultMode: 0400
+{{- end -}}
+{{- end -}}

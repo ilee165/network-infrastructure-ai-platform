@@ -9,7 +9,9 @@ cache one engine/sessionmaker per process for the api/worker runtime.
 
 from __future__ import annotations
 
+import ssl
 from collections.abc import AsyncIterator
+from typing import Any
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -24,9 +26,57 @@ _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 
+def build_ssl_connect_args(settings: Settings) -> dict[str, Any]:
+    """Build the asyncpg ``ssl`` connect-arg for the api/worker -> Postgres link.
+
+    Implements ADR-0039 §4 (mutual TLS, ``verify-full`` class) on the client
+    side: when :attr:`Settings.db_ssl_mode` is set the returned mapping carries an
+    :class:`ssl.SSLContext` that (a) verifies the Postgres SERVER cert against the
+    mounted CA and (b) PRESENTS the mounted client cert/key so the server can
+    authenticate it (``clientcert=verify-full`` on the server). With no SSL mode
+    the mapping is empty and the connection stays plaintext — unchanged behaviour
+    so the default deployment is unaffected; mTLS is opt-in via the chart.
+
+    The cert material is read from the mounted FILES referenced in *settings*;
+    the key bytes never pass through config, logs, or this function's return value
+    (ADR-0039 §5 — cert keys are mounted files, never inlined).
+
+    Raises
+    ------
+    ValueError
+        When an SSL mode is requested without a root CA (a verify mode with no
+        trust anchor must fail closed, never silently downgrade to no-verify).
+    """
+    mode = settings.db_ssl_mode
+    if mode is None:
+        return {}
+    if settings.db_ssl_root_cert is None:
+        raise ValueError(
+            "NETOPS_DB_SSL_MODE is set but no root cert (NETOPS_DB_SSL_ROOT_CERT) "
+            "was provided — a verify mode with no trust anchor must fail closed"
+        )
+    context = ssl.create_default_context(cafile=str(settings.db_ssl_root_cert))
+    # verify-full == verify the chain AND match the server hostname; verify-ca
+    # verifies the chain only (the libpq distinction). Both REQUIRE the peer cert.
+    context.check_hostname = mode == "verify-full"
+    context.verify_mode = ssl.CERT_REQUIRED
+    # Present the client certificate (mutual TLS): the server authenticates it.
+    if settings.db_ssl_cert is not None and settings.db_ssl_key is not None:
+        context.load_cert_chain(
+            certfile=str(settings.db_ssl_cert),
+            keyfile=str(settings.db_ssl_key),
+        )
+    return {"ssl": context}
+
+
 def create_engine(settings: Settings) -> AsyncEngine:
-    """Build a new async engine from *settings* (does not connect)."""
-    return create_async_engine(settings.database_url, pool_pre_ping=True)
+    """Build a new async engine from *settings* (does not connect).
+
+    Threads the api/worker -> Postgres mTLS connect-args (ADR-0039 §4) into the
+    asyncpg driver when SSL is configured; a plaintext deployment is unchanged.
+    """
+    connect_args = build_ssl_connect_args(settings)
+    return create_async_engine(settings.database_url, pool_pre_ping=True, connect_args=connect_args)
 
 
 def create_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

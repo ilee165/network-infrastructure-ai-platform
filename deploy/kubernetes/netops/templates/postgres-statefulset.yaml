@@ -83,19 +83,40 @@ spec:
         - name: postgres
           image: {{ include "netops.image" (dict "img" .Values.images.postgres) }}
           imagePullPolicy: {{ .Values.images.postgres.pullPolicy }}
-          {{- if .Values.backup.postgres.enabled }}
-          # archive_mode=on + archive_command=pgbackrest archive-push (ADR-0030 §1).
-          # The pgvector entrypoint passes trailing args to `postgres`, so these
-          # `-c` overrides enable continuous WAL archiving. archive_command is a
-          # postgres-internal shell, NOT a k8s exec argv — postgres expands %p
-          # itself; the pgbackrest binary is the init-copied one on PATH.
+          {{- $mtls := .Values.mtls.postgres -}}
+          {{- if or .Values.backup.postgres.enabled $mtls.enabled }}
+          # `-c` config overrides appended to the pgvector entrypoint's `postgres`
+          # invocation. archive_* (ADR-0030 §1) enable continuous WAL archiving;
+          # ssl_*/hba_file (ADR-0039 §3) turn on the server cert + the
+          # `hostssl … clientcert=verify-full` pg_hba that REQUIRES + verifies the
+          # client cert and REFUSES plaintext. archive_command is a postgres shell
+          # (postgres expands %p), NOT a k8s exec argv.
           args:
+            {{- if .Values.backup.postgres.enabled }}
             - -c
             - archive_mode={{ .Values.backup.postgres.wal.archiveMode }}
             - -c
             - wal_level=replica
             - -c
             - archive_command=/shared/pgbackrest/pgbackrest --stanza={{ .Values.backup.postgres.stanza }} --config=/etc/pgbackrest/pgbackrest.conf archive-push %p
+            {{- end }}
+            {{- if $mtls.enabled }}
+            # mTLS server side (ADR-0039 §3). ssl=on + the server cert/key + the CA
+            # the server verifies CLIENT certs against; hba_file points at the
+            # mounted pg_hba.conf whose only TCP line is `hostssl …
+            # clientcert=verify-full` — so a non-TLS / untrusted-CA connection is
+            # REFUSED at the server (there is NO plaintext `host` listener line).
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file={{ $mtls.mountPath }}/server/{{ $mtls.serverCertFile | default "tls.crt" }}
+            - -c
+            - ssl_key_file={{ $mtls.mountPath }}/server/{{ $mtls.serverKeyFile | default "tls.key" }}
+            - -c
+            - ssl_ca_file={{ $mtls.mountPath }}/server/{{ $mtls.caFile | default "ca.crt" }}
+            - -c
+            - hba_file={{ $mtls.mountPath }}/hba/pg_hba.conf
+            {{- end }}
           {{- end }}
           ports:
             - name: postgres
@@ -209,6 +230,19 @@ spec:
             - name: pgbackrest-runtime
               mountPath: /var/lib/pgbackrest
             {{- end }}
+            {{- if .Values.mtls.postgres.enabled }}
+            # api/worker↔postgres mTLS (ADR-0039 §3). The SERVER cert/key + the CA
+            # the server verifies CLIENT certs against, mounted READ-ONLY from the
+            # cert-manager-issued (or dev-fallback) Secret — never image-baked or
+            # logged (ADR-0039 §5). The pg_hba.conf (hostssl + clientcert=verify-
+            # full, no plaintext line) is a separate read-only ConfigMap mount.
+            - name: db-tls-server
+              mountPath: {{ .Values.mtls.postgres.mountPath }}/server
+              readOnly: true
+            - name: db-tls-hba
+              mountPath: {{ .Values.mtls.postgres.mountPath }}/hba
+              readOnly: true
+            {{- end }}
         {{- if and .Values.backup.postgres.enabled .Values.backup.postgres.tls.enabled }}
         # pgBackRest TLS SERVER sidecar (W5-T1, ADR-0030 §4). It shares the PGDATA
         # PVC (local pg1-path) and serves it to the remote backup CronJob over
@@ -276,6 +310,23 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 128Mi
+        {{- if .Values.mtls.postgres.enabled }}
+        # api/worker↔postgres mTLS material (ADR-0039 §3/§5). The SERVER keypair +
+        # CA from the cert-manager-issued (or dev-fallback) Secret. defaultMode
+        # 0640 so the root-owned key is group-readable by the postgres uid (via
+        # fsGroup) while staying non-world-readable — postgres REFUSES an over-
+        # permissive (0644/world-readable) ssl_key_file. By-reference; never inlined.
+        - name: db-tls-server
+          secret:
+            secretName: {{ .Values.mtls.postgres.serverSecretName }}
+            defaultMode: 0640
+        # pg_hba.conf: a ConfigMap whose only TCP line is `hostssl … cert
+        # clientcert=verify-full` (no plaintext `host` line) — the server REFUSES
+        # non-TLS / untrusted-CA connections (ADR-0039 §3). Non-secret (config only).
+        - name: db-tls-hba
+          configMap:
+            name: {{ include "netops.fullname" . }}-postgres-tls-config
+        {{- end }}
         {{- if .Values.backup.postgres.enabled }}
         - name: pgbackrest-bin
           emptyDir:

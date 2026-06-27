@@ -1,0 +1,84 @@
+# api/worker↔postgres mTLS handshake PROBE pod (W4-T4, ADR-0039 §6).
+#
+# The kind assertion (mtls-postgres.sh) execs psql in this pod to prove, against
+# the chart's Postgres over the in-cluster link:
+#   * a VALID-cert client (the mounted cert-manager/dev client cert, sslmode=
+#     verify-full) HANDSHAKES successfully;
+#   * a PLAINTEXT client (sslmode=disable) is REFUSED — the pg_hba has no host
+#     line, so plaintext matches no rule;
+#   * a WRONG-CA client (a throwaway cert the check mints) is REFUSED — the server
+#     verifies clientcert against its trusted CA only.
+# This is the deterministic enforcement bite (refusal proven, not just a working
+# TLS path), per ADR-0039 §6.
+#
+# The image is the SAME pgvector/pgvector:pg16 the chart's Postgres uses (psql +
+# openssl present; NO new image ref, admission-friendly explicit tag). The pod
+# idles; the check drives psql via `kubectl exec`. Hardened to satisfy the
+# cluster's restricted Pod Security baseline (ADR-0029 §3): non-root, no caps,
+# RO-rootfs, seccomp RuntimeDefault, no privilege escalation. The client cert
+# Secret is mounted read-only; the check copies the key to a 0600 tmpfs path it
+# owns before psql (libpq refuses a group/world-readable or non-owned key file).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mtls-postgres-probe
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: mtls-probe
+spec:
+  # The probe never needs the K8s API; drop its token (least privilege, ADR-0029 §5).
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: pgvector/pgvector:pg16
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65532
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      env:
+        # libpq home for any per-user files; points at the writable scratch so a
+        # RO rootfs does not break psql.
+        - name: HOME
+          value: /tmp
+      volumeMounts:
+        # Valid client cert/key + the CA the client verifies the server with.
+        - name: client-tls
+          mountPath: /certs
+          readOnly: true
+        # Writable scratch: the check copies the client key here at 0600 (libpq
+        # rejects a non-owned / group-readable key file) + psql temp.
+        - name: tmp
+          mountPath: /tmp
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+  volumes:
+    # The api/worker CLIENT cert material (cert-manager-issued or dev-fallback).
+    # The same Secret the api/worker mount — the probe authenticates as that
+    # client identity. defaultMode 0600; the check re-copies the key it needs.
+    - name: client-tls
+      secret:
+        secretName: netops-db-client-tls
+        defaultMode: 0600
+    - name: tmp
+      emptyDir:
+        sizeLimit: 32Mi

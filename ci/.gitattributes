@@ -8,3 +8,5 @@
 *.sh   text eol=lf
 *.yaml text eol=lf
 *.yml  text eol=lf
+# Python helpers invoked by the harness/render-twice scripts on Linux CI.
+*.py   text eol=lf

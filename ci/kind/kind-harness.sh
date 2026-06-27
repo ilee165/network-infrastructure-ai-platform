@@ -157,12 +157,23 @@ kubectl delete namespace "${SELFTEST_NS}" --wait=true
 # --- 4. render + apply the chart manifests ------------------------------------
 log "rendering netops chart"
 RENDERED="$(mktemp)"
+# W4-T4: render with api/worker↔postgres mTLS ON, via the DEV-FALLBACK cert path
+# (certManager.enabled=false) — the bare harness installs no cert-manager, so the
+# chart's `lookup` reuse-or-generate Secret material is what postgres/api/worker
+# mount, and the mtls-postgres.sh assertion can prove the handshake + plaintext/
+# wrong-CA refusal (ADR-0039 §6). Override MTLS_VALUES to test the cert-manager
+# path on a harness that pre-installs cert-manager.
+MTLS_VALUES=(
+  --set mtls.postgres.enabled="${MTLS_ENABLED:-true}"
+  --set mtls.postgres.certManager.enabled="${MTLS_CERT_MANAGER:-false}"
+)
 # L5: pipefail so a helm-template failure is not masked by the `tr` pipe; CRLF is
 # stripped (matches the `infra` job) and `test -s` guards an empty render.
 set -o pipefail
 helm template netops "${CHART_DIR}" \
   --namespace "${CHART_NS}" \
   --kube-version 1.29.0 \
+  "${MTLS_VALUES[@]}" \
   | tr -d '\r' > "${RENDERED}"
 test -s "${RENDERED}"
 log "applying chart manifests into namespace ${CHART_NS}"

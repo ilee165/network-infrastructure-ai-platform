@@ -908,6 +908,81 @@ ingress:
       kind: ClusterIssuer
       group: cert-manager.io
 
+# -- In-cluster mTLS on the DB links (W4-T4, ADR-0039). MUTUAL TLS on
+#    api↔postgres + worker↔postgres ONLY: Postgres presents a SERVER cert and
+#    REQUIRES + verifies the api/worker CLIENT certs (`hostssl` +
+#    `clientcert=verify-full`), refusing plaintext / untrusted-CA; the clients
+#    verify the server (verify-full) and present their cert. SCOPE: these two DB
+#    links only — neo4j/redis/ingress mTLS are NAMED-DEFERRED (ADR-0039 §2), do
+#    NOT add them here.
+#
+#    Issuance + auto-rotation is cert-manager (ADR-0039 §1, NOT SPIFFE): an
+#    in-cluster CA Issuer signs the server + client certs and renews them before
+#    expiry. The chart renders only cert-manager CR specs (Issuer/Certificate) —
+#    cert-manager OWNS the keypairs, writing them into the named Secrets at
+#    runtime; NO private key is ever templated or in Helm history (ADR-0039 §5,
+#    same posture as ingress TLS).
+#
+#    DEV/CI FALLBACK (certManager.enabled=false): a self-signed CA + server/client
+#    pair is generated in secret.yaml via the `lookup` REUSE-OR-GENERATE pattern
+#    (P1-W4-LESSONS L4) — empty in CI render, REUSED on `helm upgrade` so a regen
+#    never severs every DB connection. The render-twice idempotency test
+#    (ci/mtls/render-twice.sh) is the guard.
+mtls:
+  postgres:
+    # OFF by default: enabling mutual TLS on the DB link requires cert material
+    # mounted into postgres + api + worker and a cert-manager install (or the dev
+    # fallback). It is the ADR-0039 target posture; operators turn it on once
+    # cert-manager is present (the secure-by-default ingress TLS is already on).
+    # When false the chart renders NO mTLS CR / Secret / mount and the DB link is
+    # the existing in-namespace plaintext (NetworkPolicy-isolated) connection.
+    enabled: false
+    # cert-manager issuance + auto-rotation (ADR-0039 §1/§5). When true the chart
+    # renders the bootstrap self-signed Issuer → CA Certificate → CA Issuer →
+    # server + client Certificates; cert-manager provisions + ROTATES the keypairs
+    # into the Secrets below. Disable ONLY for the dev/CI fallback (secret.yaml
+    # generates a self-signed CA + pair via lookup reuse-or-generate, L4).
+    certManager:
+      enabled: true
+      # Certificate validity + renation window cert-manager honours (auto-rotation,
+      # ADR-0039 §5). cert-manager renews at (duration - renewBefore) with NO
+      # operator hand-rotation. The `lookup` dev fallback uses a long-lived
+      # self-signed pair instead (rotation is a cert-manager-only property).
+      duration: 2160h # 90d
+      renewBefore: 360h # 15d — renew well before expiry
+    # The in-cluster CA Issuer the server/client certs chain to. The bootstrap
+    # self-signed Issuer signs the CA cert; the CA Issuer then signs the leaves.
+    caCommonName: netops-db-ca
+    # Secret NAMES cert-manager writes the issued keypairs into (the chart
+    # references names, never key material — ADR-0039 §5). postgres mounts the
+    # server Secret; api + worker mount their client Secret + the CA.
+    serverSecretName: netops-postgres-server-tls
+    clientSecretName: netops-db-client-tls
+    caSecretName: netops-db-ca-tls
+    # libpq SSL mode the api/worker connect with (ADR-0039 §4). verify-full =
+    # verify the server identity AND present the client cert (mutual). The backend
+    # reads this as NETOPS_DB_SSL_MODE and builds the asyncpg SSLContext (db.py).
+    sslMode: verify-full
+    # Where the cert material is mounted READ-ONLY in every pod (ADR-0039 §5 —
+    # mounted files, never image-baked or logged). The api/worker read these as
+    # NETOPS_DB_SSL_{ROOT_CERT,CERT,KEY}; postgres reads server.crt/key + ca.crt.
+    mountPath: /etc/netops/db-tls
+    # CN embedded in the api/worker CLIENT certs. `clientcert=verify-full`
+    # additionally requires the cert CN to EQUAL the connecting DB username
+    # (ADR-0039 §3), so this MUST match config.postgres.user — keep them in sync.
+    # The client authenticates with scram-sha-256 (the password) AND presents this
+    # cert; verify-full checks the chain, the hostname class, and CN==username.
+    clientCommonName: netops
+    # pg_hba auth method paired with clientcert=verify-full (ADR-0039 §3). The
+    # client presents BOTH a password (scram-sha-256) AND a verified client cert.
+    hbaAuthMethod: scram-sha-256
+    # File names inside the cert-manager-issued (kubernetes.io/tls) server Secret.
+    # cert-manager writes the standard tls keys; overridable for an out-of-band
+    # Secret that uses different key names.
+    serverCertFile: tls.crt
+    serverKeyFile: tls.key
+    caFile: ca.crt
+
 # -- Non-secret application config (rendered into configmap.yaml as NETOPS_*
 #    env). NO credential material here — secrets are by-reference only (see the
 #    `secrets` map). These are the connection coordinates + behavioural flags the

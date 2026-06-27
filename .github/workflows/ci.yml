@@ -632,6 +632,15 @@ jobs:
             --policy deploy/kubernetes/policy/rego \
             --all-namespaces
 
+      # W4-T4 L4 idempotency guard for the api/worker↔postgres mTLS cert material
+      # (ADR-0039 §5 / P1-W4-LESSONS L4): a `helm upgrade` that REGENERATES the DB
+      # certs would sever every connection. This proves the dev-fallback uses the
+      # `lookup` reuse-or-generate branch (so upgrades reuse) and that a fresh
+      # render produces internally-consistent, usable cert material. helm + python3
+      # + openssl are all present on the runner. RED gate (no continue-on-error).
+      - name: mTLS render-twice L4 idempotency guard
+        run: bash ci/mtls/render-twice.sh
+
       # IaC misconfiguration scan (Trivy `config` target). GATING on its OWN
       # findings: exit-code 1 on fixable HIGH/CRITICAL misconfig, mirroring the
       # image-scan posture (ignore-unfixed). Scoped to IaC misconfig

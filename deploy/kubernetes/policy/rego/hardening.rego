@@ -2318,3 +2318,179 @@ deny contains msg if {
 	endswith(c.image, ":latest")
 	msg := sprintf("full-platform DR drill %q image %q must not use the `latest` tag (ADR-0029 §5)", [input.metadata.name, c.image])
 }
+
+# ===========================================================================
+# W4-T4 — api/worker↔postgres mTLS (ADR-0039 §3/§4/§5)
+#
+# Mutual TLS on the two DB links: Postgres presents a SERVER cert and REQUIRES +
+# verifies the api/worker CLIENT certs (`hostssl … clientcert=verify-full`),
+# REFUSING plaintext / untrusted-CA; the clients verify the server (verify-full)
+# and present their cert. These rules assert, on the RENDERED manifests, that the
+# control is wired AND not silently weakened. They only fire when the mTLS
+# objects are present (mtls.postgres.enabled), so a default (mTLS-off) render is
+# unaffected — the chart's existing posture is unchanged. NEVER weaken a rule to
+# make it green; fix the manifest.
+# ===========================================================================
+
+# --- The Postgres pg_hba ConfigMap (postgres-tls-config) is the REFUSAL bite ---
+
+is_postgres_tls_configmap(obj) if {
+	obj.kind == "ConfigMap"
+	endswith(obj.metadata.name, "-postgres-tls-config")
+}
+
+# The hba MUST carry a `hostssl … clientcert=verify-full` rule — TLS + a verified
+# client cert REQUIRED. Its absence means the server does not require mutual TLS.
+deny contains msg if {
+	is_postgres_tls_configmap(input)
+	hba := object.get(input.data, "pg_hba.conf", "")
+	not regex.match(`(?m)^hostssl\s+.*clientcert=verify-full`, hba)
+	msg := "postgres pg_hba.conf must carry a `hostssl … clientcert=verify-full` rule — the server must REQUIRE + verify the client cert (ADR-0039 §3)"
+}
+
+# The hba MUST NOT carry a plaintext TCP line (`host …` / `hostnossl …`). Such a
+# line would admit a non-TLS connection — exactly the plaintext path ADR-0039 §3
+# refuses. Only `local` (unix socket) and `hostssl` lines are permitted.
+deny contains msg if {
+	is_postgres_tls_configmap(input)
+	hba := object.get(input.data, "pg_hba.conf", "")
+	regex.match(`(?m)^host\s`, hba)
+	msg := "postgres pg_hba.conf must NOT carry a plaintext `host` line — a non-TLS listener path defeats the mTLS refusal (ADR-0039 §3)"
+}
+
+deny contains msg if {
+	is_postgres_tls_configmap(input)
+	hba := object.get(input.data, "pg_hba.conf", "")
+	regex.match(`(?m)^hostnossl\s`, hba)
+	msg := "postgres pg_hba.conf must NOT carry a `hostnossl` line — it would explicitly admit plaintext (ADR-0039 §3)"
+}
+
+# --- The Postgres StatefulSet must turn ssl on + point hba_file at the mounted
+# pg_hba (so the refusal rule above is the file actually used) when mTLS material
+# is mounted (the `db-tls-server` volume is the marker). ---
+
+postgres_statefulset_has_db_tls(obj) if {
+	obj.kind == "StatefulSet"
+	obj.metadata.labels["app.kubernetes.io/component"] == "postgres"
+	some v in obj.spec.template.spec.volumes
+	v.name == "db-tls-server"
+}
+
+postgres_container_args(obj) := obj.spec.template.spec.containers[0].args
+
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	not "ssl=on" in postgres_container_args(input)
+	msg := "postgres with mTLS material mounted must set `-c ssl=on` (ADR-0039 §3)"
+}
+
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	not postgres_args_set_hba_file(input)
+	msg := "postgres with mTLS material mounted must set `-c hba_file=` to the mounted pg_hba.conf so the clientcert=verify-full rule is the file in effect (ADR-0039 §3)"
+}
+
+postgres_args_set_hba_file(obj) if {
+	some a in postgres_container_args(obj)
+	startswith(a, "hba_file=")
+}
+
+# The server cert/key + the CA the server verifies CLIENT certs against must all
+# be configured — a missing ssl_ca_file would mean the server cannot verify
+# client certs (clientcert would have no trust anchor).
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	not postgres_args_have_prefix(input, "ssl_cert_file=")
+	msg := "postgres mTLS must set `-c ssl_cert_file=` (the server cert; ADR-0039 §3)"
+}
+
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	not postgres_args_have_prefix(input, "ssl_key_file=")
+	msg := "postgres mTLS must set `-c ssl_key_file=` (the server key; ADR-0039 §3)"
+}
+
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	not postgres_args_have_prefix(input, "ssl_ca_file=")
+	msg := "postgres mTLS must set `-c ssl_ca_file=` (the CA it verifies client certs against; ADR-0039 §3)"
+}
+
+postgres_args_have_prefix(obj, prefix) if {
+	some a in postgres_container_args(obj)
+	startswith(a, prefix)
+}
+
+# The server cert/key volume must be mounted READ-ONLY (cert keys are mounted
+# files, never writable in-pod; ADR-0039 §5).
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	some c in input.spec.template.spec.containers
+	some m in c.volumeMounts
+	m.name == "db-tls-server"
+	m.readOnly != true
+	msg := "postgres db-tls-server cert mount must be readOnly:true (ADR-0039 §5)"
+}
+
+# --- The api/worker CLIENT side must connect verify-full (mutual). When the mTLS
+# client env is present (NETOPS_DB_SSL_MODE), it MUST be verify-full — a downgrade
+# to a weaker mode (e.g. require, which skips server verification) is denied. ---
+
+mtls_client_components := {"api", "worker"}
+
+client_db_ssl_mode_env(obj) := mode if {
+	some c in obj.spec.template.spec.containers
+	some e in object.get(c, "env", [])
+	e.name == "NETOPS_DB_SSL_MODE"
+	mode := e.value
+}
+
+deny contains msg if {
+	input.kind == "Deployment"
+	mtls_client_components[input.metadata.labels["app.kubernetes.io/component"]]
+	mode := client_db_ssl_mode_env(input)
+	mode != "verify-full"
+	msg := sprintf("%s NETOPS_DB_SSL_MODE must be verify-full (server identity verified + client cert presented), got %q (ADR-0039 §4)", [input.metadata.labels["app.kubernetes.io/component"], mode])
+}
+
+# When an api/worker carries the mTLS client env it MUST also mount the client
+# cert material read-only — env without the mounted cert files cannot handshake.
+deny contains msg if {
+	input.kind == "Deployment"
+	mtls_client_components[input.metadata.labels["app.kubernetes.io/component"]]
+	client_db_ssl_mode_env(input)
+	not deployment_mounts_client_tls(input)
+	msg := sprintf("%s sets NETOPS_DB_SSL_MODE but does not mount the db-tls-client cert material read-only (ADR-0039 §4/§5)", [input.metadata.labels["app.kubernetes.io/component"]])
+}
+
+deployment_mounts_client_tls(obj) if {
+	some c in obj.spec.template.spec.containers
+	some m in c.volumeMounts
+	m.name == "db-tls-client"
+	m.readOnly == true
+}
+
+# --- The dev/CI fallback TLS Secrets must be marked dev-convenience (so the
+# existing "chart ships no unmarked credential Secret" rule does not fire) AND
+# carry cert material under `data:` only (PEM bytes), NEVER an inlined literal in
+# stringData. They are exempt from the platform-secret literal check by the
+# dev-secret annotation; this rule asserts they actually carry that marker. ---
+is_db_tls_secret(obj) if {
+	obj.kind == "Secret"
+	obj.metadata.labels["app.kubernetes.io/component"] == "mtls"
+}
+
+deny contains msg if {
+	is_db_tls_secret(input)
+	not is_dev_convenience_secret(input)
+	msg := sprintf("db mTLS dev-fallback Secret %q must be annotated netops.io/dev-secret=true (cert-manager owns the production material; ADR-0039 §5)", [input.metadata.name])
+}
+
+# Cert material must never be inlined under stringData (it belongs under `data:`
+# as base64 PEM, like the pgBackRest TLS precedent) — a stringData cert key is a
+# plaintext-in-history regression.
+deny contains msg if {
+	is_db_tls_secret(input)
+	some k, _ in object.get(input, "stringData", {})
+	msg := sprintf("db mTLS Secret %q must carry cert material under `data:` (base64 PEM), not stringData key %q (ADR-0039 §5)", [input.metadata.name, k])
+}

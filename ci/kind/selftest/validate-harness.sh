@@ -140,6 +140,34 @@ grep_must "${LIB}" "assert_egress_blocked" \
 grep_must "${LIB}" "assert_handshake_refused" \
   "lib provides assert_handshake_refused (W4-T4 plaintext-refusal bite)"
 
+# --- W4-T4 mTLS check is present + carries the refusal bite -------------------
+# The T4 handshake/refusal assertion plugs into this runner. Assert the check +
+# its probe pod exist and that the check proves the REFUSAL (plaintext + wrong-CA),
+# not merely a working TLS path — so deleting the bite fails this static validator.
+MTLS_CHECK="${CHECKS_DIR}/mtls-postgres.sh"
+MTLS_PROBE="${CHECKS_DIR}/mtls-postgres-probe.yaml"
+require_file "${MTLS_CHECK}" "W4-T4 mTLS handshake assertion check"
+require_file "${MTLS_PROBE}" "W4-T4 mTLS probe pod manifest"
+grep_must "${MTLS_CHECK}" "assert_handshake_ok" \
+  "mTLS check asserts the valid-cert client HANDSHAKES (ADR-0039 §6)"
+grep_must "${MTLS_CHECK}" "assert_handshake_refused .*plaintext" \
+  "mTLS check asserts a PLAINTEXT client is REFUSED (ADR-0039 §3/§6 bite)"
+grep_must "${MTLS_CHECK}" "assert_handshake_refused .*wrong-CA" \
+  "mTLS check asserts a WRONG-CA client is REFUSED (ADR-0039 §3/§6 bite)"
+grep_must "${MTLS_CHECK}" "sslmode=disable" \
+  "mTLS plaintext case actually disables TLS (sslmode=disable) so the refusal is real"
+# L3: the in-pod psql params are positional `sh -c` args, never \$(VAR) in argv.
+grep_must "${MTLS_CHECK}" "sh -c" \
+  "mTLS check drives in-pod psql via sh -c positional args, not \$(VAR) in argv (L3)"
+# The probe pod must be restricted-PSA admissible (non-root) and mount the client
+# cert read-only (ADR-0039 §5) — never a :latest image (admission rejects it).
+grep_must "${MTLS_PROBE}" "runAsNonRoot: true" \
+  "mTLS probe pod is non-root (restricted PSA admissible, ADR-0029 §3)"
+grep_must "${MTLS_PROBE}" "readOnly: true" \
+  "mTLS probe pod mounts the client cert read-only (ADR-0039 §5)"
+grep_must_not "${MTLS_PROBE}" "image:.*:latest" \
+  "no :latest image tag in the mTLS probe pod (admission would reject)"
+
 # --- no `latest` image anywhere (admission would reject; chart parity) -------
 for f in "${PROBE}"; do
   grep_must_not "${f}" "image:.*:latest" "no :latest image tag in ${f##*/} (admission would reject)"
