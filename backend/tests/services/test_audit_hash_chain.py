@@ -17,12 +17,24 @@ lesson). No Postgres/Docker/network.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
 
-from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+import pytest
+from sqlalchemy import event, func, select, update
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.pool import NullPool
 
-from app.models import AuditChainCheckpoint, AuditLog
+from app.models import AuditChainCheckpoint, AuditLog, Base
 from app.services.audit import chain
 from app.services.audit import service as audit_service
 from app.services.audit.verify import verify_chain
@@ -181,8 +193,10 @@ async def test_mid_chain_update_is_flagged_at_right_index(session: AsyncSession)
     """Mutating a mid-chain row's hashed field is caught at that row's position."""
     entries = await _seed_chain(session, 5)
     # Tamper with the 3rd entry's `action` (a hashed field) WITHOUT recomputing its
-    # entry_hash — emulating a privileged DB UPDATE that bypasses the writer. (The
-    # 0009 trigger blocks this on PostgreSQL; here on SQLite we force the row edit
+    # entry_hash — emulating a privileged DB UPDATE that bypasses the writer. (On
+    # PostgreSQL the migration 0001 `REVOKE UPDATE, DELETE ON audit_log FROM PUBLIC`
+    # blocks a non-owner, but it does NOT bind the owner/superuser — the exact
+    # privileged-actor case this chain catches; here on SQLite we force the row edit
     # to exercise the verifier exactly as it would behave against a tampered PG row.)
     target = entries[2]
     await session.execute(
@@ -377,3 +391,171 @@ async def test_stored_bytes_round_trip_byte_identical(session: AsyncSession) -> 
     # And the digest column is queryable as raw bytes via a direct SELECT.
     row = (await session.execute(select(AuditLog.entry_hash))).one()
     assert bytes(row[0]) == expected
+
+
+# ---------------------------------------------------------------------------
+# Concurrent appends do not fork the chain (W4-T1 #1/#2)
+# ---------------------------------------------------------------------------
+#
+# Under PostgreSQL READ COMMITTED two concurrent record() transactions reading
+# the head with a plain SELECT would both see head H and both insert prev_hash=H
+# — a chain FORK the linear verifier then false-alarms on (ADR-0038 §2). The
+# writer serialises the head read+insert with a transaction-scoped advisory lock
+# so concurrent appends QUEUE into a single linear chain instead. The two tests
+# below assert that property on both backends: a deterministic SQLite-NullPool
+# proof (CI) and an integration-marked real-Postgres proof (true concurrency).
+
+
+async def _verify_linear(session: AsyncSession, expected_len: int) -> None:
+    """Assert the persisted chain is a single linear, verifier-clean run of *n* rows."""
+    rows = (
+        (
+            await session.execute(
+                select(AuditLog).order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == expected_len
+    # No two rows share a prev_hash (a fork would re-use the same head twice), and
+    # each prev_hash equals the predecessor's entry_hash (a single linear chain).
+    prev_hashes = [bytes(r.prev_hash) for r in rows]
+    assert len(set(prev_hashes)) == len(prev_hashes)
+    running = chain.GENESIS_HASH
+    for row in rows:
+        assert bytes(row.prev_hash) == running
+        running = bytes(row.entry_hash)
+    result = await verify_chain(session)
+    assert result.ok is True
+    assert result.break_ is None
+    assert result.checked == expected_len
+
+
+@pytest.fixture()
+async def file_engine(tmp_path: Path) -> AsyncIterator[AsyncEngine]:
+    """File-backed async SQLite engine with ``NullPool`` (one real conn per session).
+
+    The default in-memory ``StaticPool`` shares a single connection, so two sessions
+    would interleave inside one transaction and could never exercise the cross-
+    connection race the advisory lock guards. A file URL with ``NullPool`` gives each
+    session its own connection + SQLite file write-locking — the same fixture shape
+    the reasoning-trace recorder concurrency test uses (W6 flaky-concurrency lesson).
+    """
+    db_path = tmp_path / "audit_chain_concurrency_test.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{db_path.as_posix()}",
+        poolclass=NullPool,
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_sqlite_fks(dbapi_connection: Any, _record: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    await engine.dispose()
+
+
+async def test_interleaved_appends_under_one_engine_are_linear(file_engine: AsyncEngine) -> None:
+    """Two record() calls on distinct sessions/connections form ONE linear chain.
+
+    Each append commits in its own transaction on its own connection (NullPool), so
+    the second reads the now-current head the first committed — the read+insert is
+    serialised, never forked. (SQLite has no advisory lock; its per-connection write
+    lock provides the same serialisation the PostgreSQL advisory lock provides — the
+    integration test below proves the lock itself on real concurrency.)
+    """
+    maker = async_sessionmaker(file_engine, expire_on_commit=False)
+
+    async def append(i: int) -> None:
+        async with maker() as s:
+            await audit_service.record(
+                s,
+                actor=f"user:{i}",
+                action=audit_service.DEVICE_UPDATED,
+                target_type="device",
+                target_id=str(i),
+                detail={"step": i},
+            )
+            await s.commit()
+
+    await append(0)
+    await append(1)
+
+    async with maker() as verify_session:
+        await _verify_linear(verify_session, expected_len=2)
+
+
+@pytest.mark.integration
+async def test_concurrent_appends_on_postgres_do_not_fork() -> None:
+    """Two PARALLEL record() transactions on real Postgres yield one linear chain.
+
+    This is the bite that the SQLite suite cannot surface (single connection): with
+    a plain head SELECT the two transactions would both read head H and fork the
+    chain (false prev_hash_mismatch). The advisory lock serialises them, so the
+    persisted chain is linear and verifies clean. Skipped unless a Postgres URL is
+    reachable (compose-backed integration run).
+    """
+    url = os.environ.get(
+        "NETOPS_TEST_DATABASE_URL",
+        "postgresql+asyncpg://netops:netops@127.0.0.1:5432/netops_test",
+    )
+    engine = create_async_engine(url, poolclass=NullPool)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as exc:  # pragma: no cover - skip when no Postgres is reachable
+        await engine.dispose()
+        pytest.skip(f"no reachable Postgres for the integration concurrency test: {exc}")
+
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    tag = uuid.uuid4().hex  # isolate this run's rows from any other test data
+
+    async def append(i: int) -> None:
+        async with maker() as s:
+            await audit_service.record(
+                s,
+                actor=f"user:{tag}:{i}",
+                action=audit_service.DEVICE_UPDATED,
+                target_type="device",
+                target_id=f"{tag}:{i}",
+                detail={"step": i, "tag": tag},
+            )
+            await s.commit()
+
+    try:
+        # Fire both appends in parallel; the advisory lock must queue them.
+        await asyncio.gather(append(0), append(1))
+
+        async with maker() as verify_session:
+            rows = (
+                (
+                    await verify_session.execute(
+                        select(AuditLog)
+                        .where(AuditLog.target_id.like(f"{tag}:%"))
+                        .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(rows) == 2
+            # No fork: the two rows carry DISTINCT prev_hash values and the second
+            # chains off the first's entry_hash (a single linear segment).
+            prev_a, prev_b = bytes(rows[0].prev_hash), bytes(rows[1].prev_hash)
+            assert prev_a != prev_b
+            assert bytes(rows[1].prev_hash) == bytes(rows[0].entry_hash)
+            assert bytes(rows[0].entry_hash) == chain.compute_entry_hash(rows[0], prev_a)
+            assert bytes(rows[1].entry_hash) == chain.compute_entry_hash(rows[1], prev_b)
+    finally:
+        async with maker() as cleanup:
+            await cleanup.execute(
+                AuditLog.__table__.delete().where(AuditLog.target_id.like(f"{tag}:%"))
+            )
+            await cleanup.commit()
+        await engine.dispose()

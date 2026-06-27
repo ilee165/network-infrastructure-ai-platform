@@ -46,7 +46,7 @@ A break carries a 1-based `position`, the offending `entry_id`, and a coarse `re
 
 1. **Capture evidence.** Snapshot the offending row(s) and the `AUDIT_CHAIN_VERIFY` line. The metric `audit_chain_last_verified_position` bounds where the chain was last known-good.
 2. **Determine the cause.**
-   - *Tampering* (an UPDATE/DELETE on `audit_log` by a privileged actor): a security incident. The migration 0009 append-only trigger should have blocked it on PostgreSQL — a break here means the trigger was dropped or bypassed at the DB role level. Investigate per the incident process; preserve the chain, do not re-seal.
+   - *Tampering* (an UPDATE/DELETE on `audit_log` by a privileged actor): a security incident. `audit_log` append-only is enforced by the migration 0001 `REVOKE UPDATE, DELETE ON audit_log FROM PUBLIC` (line 222) — NOT by the migration 0009 trigger, which guards the `approvals` table only. Crucially, `REVOKE ... FROM PUBLIC` does **not** bind the table owner or a superuser (PostgreSQL owners always hold implicit privileges), so a privileged actor connecting as the owner can still mutate a row — which is exactly the threat this hash chain exists to catch. A break here therefore means either the REVOKE was loosened (a non-owner role gained UPDATE/DELETE) or, more likely, an owner/superuser-level write that no GRANT can stop. Investigate per the incident process; preserve the chain, do not re-seal.
    - *Legitimate* (e.g. a restored-from-backup database whose tail differs, or a one-time data migration that touched audit rows under maintenance): the chain is genuinely discontinuous but not malicious.
 3. **Only after a legitimate cause is confirmed and signed off**, re-seal.
 
@@ -55,7 +55,7 @@ A break carries a 1-based `position`, the offending `entry_id`, and a coarse `re
 Re-sealing re-establishes a verifiable chain forward from the current head WITHOUT pretending the historical break did not happen.
 
 1. **Freeze.** Pause the verify CronJob (`audit.chainVerify.enabled=false` on the next upgrade, or `kubectl patch cronjob ... -p '{"spec":{"suspend":true}}'`) so it does not re-alert during the re-seal.
-2. **Record the break.** Write an operational note (this runbook's incident log) with the break position, entry id, reason, and the signed-off legitimate cause. The historical pre-break segment stays in the DB as-is — it is NOT rewritten (the append-only trigger forbids it, and rewriting history would defeat the control).
+2. **Record the break.** Write an operational note (this runbook's incident log) with the break position, entry id, reason, and the signed-off legitimate cause. The historical pre-break segment stays in the DB as-is — it is NOT rewritten (the migration 0001 `REVOKE UPDATE, DELETE ON audit_log FROM PUBLIC` blocks any non-owner rewrite, and rewriting history would defeat the control).
 3. **Re-anchor the checkpoint to the current head.** Point the `audit_chain_checkpoint` watermark at the current chain head so future verification starts from a clean boundary going forward. Because re-anchoring is the ONLY supported "advance past a known break" action, it is a deliberate operator step, logged here — never automated.
 4. **Resume.** Re-enable the CronJob. The next run verifies cleanly from the re-anchored checkpoint forward; the recorded break remains documented.
 
@@ -66,7 +66,7 @@ Re-sealing re-establishes a verifiable chain forward from the current head WITHO
 - **Tamper-detected** — an UPDATE/DELETE of a mid-chain row is flagged at the right index; an untouched chain verifies clean (`tests/services/test_audit_hash_chain.py`).
 - **Deterministic** — the same rows recompute to identical `entry_hash` across runs (byte-exact canonical form; `created_at` always rendered at fixed µs precision).
 - **No secret hashed** — the canonical field set excludes every secret/mutable column; the hash carries no credential/key material (ADR-0032 §5).
-- **Append-only intact** — chaining adds no UPDATE/DELETE path; the 0009 trigger stays and still raises on any UPDATE/DELETE.
+- **Append-only intact** — chaining adds no UPDATE/DELETE path; `audit_log` append-only is enforced by the migration 0001 `REVOKE UPDATE, DELETE ON audit_log FROM PUBLIC` (it does not bind the owner/superuser — the hash chain is the backstop for that privileged-actor case). The 0009 trigger applies to `approvals`, not `audit_log`.
 - **Loud on break** — a break yields exit non-zero + `audit_chain_verified 0`; the verify never silently passes (`tests/services/test_audit_verify_job.py`).
 
 ## Failure modes & response

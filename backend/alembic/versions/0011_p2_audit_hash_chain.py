@@ -8,8 +8,11 @@ Makes the append-only ``audit_log`` TAMPER-EVIDENT (ADR-0038, PRODUCTION.md §5)
   application audit writer sets them on every append
   (``entry_hash = SHA-256(canonical(immutable fields) || prev_hash)``, the first
   entry chaining from a fixed genesis); the daily verification job recomputes them
-  (§3/§4). The migration 0009 append-only trigger STAYS, so a chain link can never
-  be silently rewritten.
+  (§3/§4). ``audit_log`` append-only is enforced by the migration 0001
+  ``REVOKE UPDATE, DELETE ON audit_log FROM PUBLIC`` (the 0009 trigger guards the
+  ``approvals`` table, not this one); a REVOKE cannot bind the table owner /
+  superuser, so the hash chain — not a trigger — is what detects a privileged-actor
+  rewrite of a chain link.
 
   Both columns are ``NOT NULL``. To stay expand/contract-safe (PRODUCTION.md §10)
   on a non-empty table, they are added with a TRANSIENT genesis server_default

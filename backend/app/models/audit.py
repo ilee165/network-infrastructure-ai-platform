@@ -49,8 +49,12 @@ class AuditLog(Base):
     :data:`app.services.audit.chain.GENESIS_HASH` for the first entry). Both hold
     the RAW 32-byte SHA-256 digest (``bytea`` / ``BLOB``) — one on-disk format, no
     hex variant. They are written by the single application audit writer at insert
-    time (ADR-0038 §3) and recomputed by the daily verification job (§4); the
-    append-only trigger (migration 0009) keeps them from being silently rewritten.
+    time (ADR-0038 §3) and recomputed by the daily verification job (§4).
+    ``audit_log`` append-only is enforced by the migration 0001
+    ``REVOKE UPDATE, DELETE ... FROM PUBLIC`` (the 0009 trigger guards
+    ``approvals``, not this table); because a REVOKE does not bind the table
+    owner / superuser, the hash chain is the real backstop that detects a
+    privileged-actor rewrite.
     """
 
     __tablename__ = "audit_log"

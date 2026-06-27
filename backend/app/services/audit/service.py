@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Final
 
-from sqlalchemy import select
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -23,6 +23,16 @@ from app.models.audit import AuditLog
 from app.services.audit.chain import GENESIS_HASH, compute_entry_hash, hex_short
 
 _logger = get_logger(__name__)
+
+# Fixed key for the audit-chain advisory lock (finding W4-T1 #1/#2). A single
+# transaction-scoped ``pg_advisory_xact_lock`` on this constant serialises every
+# concurrent ``record()`` append so two transactions can never read the same head
+# and fork the chain on legitimate traffic (PostgreSQL default READ COMMITTED).
+# The value is an arbitrary but stable 64-bit signed integer dedicated to this
+# one purpose; it is auto-released when the caller's transaction commits/rolls
+# back. SQLite (the single-connection unit-test backend) has no advisory locks,
+# so the guard is skipped there — its single connection serialises appends anyway.
+_CHAIN_LOCK_KEY: Final = 0x0A0D38  # mnemonic for "audit chain", matches checkpoint id tail.
 
 # M1 audit action vocabulary. Routes, services, and engines must reuse these
 # constants instead of re-typing the strings.
@@ -193,9 +203,15 @@ async def record(
     head's ``entry_hash`` (or :data:`~app.services.audit.chain.GENESIS_HASH` for
     the first entry) UNDER THE CALLER'S TRANSACTION, then writes ``prev_hash`` /
     ``entry_hash`` on the new row before it commits — so a row can never land with
-    a missing or back-fillable chain link and the append-only trigger (migration
-    0009) keeps it from being silently rewritten. The chain order is the audit
-    log's natural append order ``(created_at, id)``.
+    a missing or back-fillable chain link. The head read is serialised by a
+    transaction-scoped advisory lock (see :func:`_current_chain_head`) so two
+    concurrent appends queue rather than read the same head and FORK the chain
+    (W4-T1 #1/#2). ``audit_log`` append-only is enforced by the migration 0001
+    ``REVOKE UPDATE, DELETE ... FROM PUBLIC`` (the 0009 trigger guards
+    ``approvals``, not this table); a REVOKE does not bind the table owner /
+    superuser, which is exactly why this hash chain is the real backstop against a
+    privileged actor silently rewriting a row. The chain order is the audit log's
+    natural append order ``(created_at, id)``.
     """
     prev_hash = await _current_chain_head(session)
     entry = AuditLog(
@@ -244,7 +260,25 @@ async def _current_chain_head(session: AsyncSession) -> bytes:
     transaction so the new row chains off the entry it actually follows. Returns
     :data:`~app.services.audit.chain.GENESIS_HASH` when the log is empty (the first
     entry seeds the chain, §1).
+
+    Concurrency (W4-T1 #1/#2): under PostgreSQL's default READ COMMITTED two
+    concurrent ``record()`` transactions would both read the same head ``H`` with a
+    plain SELECT and both insert rows with ``prev_hash=H`` — a CHAIN FORK on
+    legitimate traffic that the linear ``(created_at, id)`` verifier then flags as a
+    false ``prev_hash_mismatch`` (ADR-0038 §2: "a recompute mismatch on untampered
+    data is a build bug, not an alert"). A transaction-scoped
+    ``pg_advisory_xact_lock(:key)`` taken BEFORE the head read serialises the
+    read+insert: a second appender blocks until the first commits, then reads the
+    now-current head — so concurrent appends queue rather than fork. The lock is
+    auto-released at commit/rollback. SQLite has no advisory locks, but its single
+    test connection already serialises appends, so the guard is PostgreSQL-only.
     """
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        # Serialise concurrent appenders: bound parameter (never string-formatted)
+        # so the fixed key can never be an injection vector.
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)").bindparams(bindparam("key", _CHAIN_LOCK_KEY))
+        )
     head = (
         await session.execute(
             select(AuditLog.entry_hash)
