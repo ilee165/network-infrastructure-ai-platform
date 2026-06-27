@@ -1,0 +1,57 @@
+# CNI self-test probe pod (P2 W4-T3, ADR-0041 §2).
+#
+# This pod is the egress source for the harness CNI self-test. The harness:
+#   1. waits for it Ready, then confirms a KNOWN egress SUCCEEDS (baseline — the
+#      CNI is up and admits traffic);
+#   2. applies cni-selftest-default-deny.yaml (a default-deny egress policy that
+#      selects this pod) and confirms the SAME egress is now BLOCKED.
+# If step 2's egress still succeeds, the CNI admits but does not ENFORCE
+# NetworkPolicy (kindnet behaviour) — the harness FAILS the run. Without this
+# bite every downstream W4-T5 deny test is false-green (ADR-0041 §2 / L1).
+#
+# Hardened to satisfy the cluster's restricted Pod Security baseline (ADR-0029
+# §3) so the probe is not rejected by PSA: non-root, no caps, RO-rootfs,
+# seccomp RuntimeDefault, no privilege escalation. The self-test runs in its own
+# throwaway namespace (the harness creates/labels it), isolated from the chart.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cni-selftest-probe
+  labels:
+    app.kubernetes.io/name: cni-selftest
+    app.kubernetes.io/component: cni-selftest-probe
+spec:
+  # The probe never needs the API; drop its token (least privilege, ADR-0029 §5).
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      # Pinned by digest-free explicit tag (admission forbids :latest). The image
+      # carries wget/nc for the egress probe; the harness drives the actual probe
+      # via `kubectl exec`, so the entrypoint just idles.
+      image: ghcr.io/nicolaka/netshoot:v0.13
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65532
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

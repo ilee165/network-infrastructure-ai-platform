@@ -1,0 +1,26 @@
+# Ephemeral in-CI kind cluster config (P2 W4-T3, ADR-0041 §2).
+#
+# disableDefaultCNI: true is the LOAD-BEARING line. kind ships kindnet, which
+# ADMITS NetworkPolicy objects but does NOT ENFORCE them (ADR-0041 §2 /
+# P1-W4-LESSONS L1) — a deny test on kindnet is false-green. We disable the
+# default CNI so the harness installs an ENFORCING CNI (Calico) and the W4-T5
+# collector-egress deny actually bites. The harness CNI self-test (a
+# harness-applied default-deny that MUST block a known egress) gates the rest of
+# the run; if kindnet were left in place that self-test would (correctly) fail,
+# which is exactly the guard ADR-0041 §2 mandates.
+#
+# Single control-plane node only — this harness asserts mTLS handshake (W4-T4) +
+# NetworkPolicy deny (W4-T5); HA / scale / soak are P3-Platform (ADR-0041 §4 /
+# W4-T3 spec §0). A multi-node cluster buys nothing for those two assertions and
+# costs CI minutes.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: netops-w4
+networking:
+  # Disable kindnet so Calico is the sole, ENFORCING CNI (ADR-0041 §2).
+  disableDefaultCNI: true
+  # Calico's default IPv4 pool; kept explicit so the CNI install and the cluster
+  # agree on the pod CIDR (a mismatch silently breaks pod networking).
+  podSubnet: "192.168.0.0/16"
+nodes:
+  - role: control-plane
