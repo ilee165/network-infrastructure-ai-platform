@@ -17,12 +17,12 @@ load-bearing requirement: a non-deterministic form would false-alarm the verifie
 (ADR-0038 §2, Negative).
 
 Secure by default (ADR-0038 §5 / ADR-0032 §5): the hashed canonical form covers
-ONLY the already-secret-free audit columns — ``id``, ``created_at``, ``actor``,
-``action``, ``target_type``, ``target_id``, ``request_id``, ``reasoning_trace_id``
-and the structured ``detail``. Mutable / server-defaulted / secret-bearing columns
-do not participate; callers never place secret material in ``detail`` (the audit
-writer contract). :data:`CANONICAL_FIELDS` names the exact participating set so a
-test can assert no secret column was added to the hash.
+ONLY the already-secret-free audit columns — ``id``, ``seq``, ``created_at``,
+``actor``, ``action``, ``target_type``, ``target_id``, ``request_id``,
+``reasoning_trace_id`` and the structured ``detail``. Mutable / server-defaulted /
+secret-bearing columns do not participate; callers never place secret material in
+``detail`` (the audit writer contract). :data:`CANONICAL_FIELDS` names the exact
+participating set so a test can assert no secret column was added to the hash.
 """
 
 from __future__ import annotations
