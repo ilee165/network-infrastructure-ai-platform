@@ -41,6 +41,10 @@ The daily run resumes **strictly after** the checkpoint, and it re-proves only t
 
 > A break reported by the weekly full scan but NOT the daily run means the tamper is in already-checkpointed history (below the watermark). Triage it exactly as any break (tampering vs. legitimate) below; the `position`/`entry_id` locate the offending row from genesis.
 
+## `seq` nullability during the W4 rolling deploy (expand/contract)
+
+`audit_log.seq` (the monotonic append-order key the verifier orders by) is added **NULLABLE** by the expand migration `0011` and **stays nullable** through this phase. `seq` is *app-assigned* (`MAX(seq)+1` under the append advisory lock), so — unlike `prev_hash`/`entry_hash`, which keep a genesis `server_default` — no DB default can supply a correct monotonic value for an **old (pre-W4) pod** still inserting audit rows during an N→N+1 rolling deploy; a NOT-NULL `seq` would crash those legitimate inserts. New rows are never NULL (the writer always assigns `seq`). A **NULL `seq` row is therefore exactly an old-writer / pre-chain row** — it also carries the genesis `entry_hash` default, so the verifier already treats it as untrusted pre-chain history (it orders `seq` ASC NULLS LAST and flags genesis-hash rows like any genesis row). **A later, separate CONTRACT migration will backfill residual NULL `seq` and `SET NOT NULL` once no pre-W4 pod can write** — it is intentionally NOT part of `0011`.
+
 ## Reading a break
 
 A break carries a 1-based `position`, the offending `entry_id`, and a coarse `reason`:

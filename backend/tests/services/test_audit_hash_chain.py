@@ -26,7 +26,6 @@ from typing import Any
 
 import pytest
 from sqlalchemy import event, func, select, update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -164,8 +163,8 @@ async def test_tampered_seq_breaks_entry_hash(session: AsyncSession) -> None:
     # Tamper the LAST entry's seq to a larger value: the walk order (ORDER BY seq) is
     # unchanged so its predecessor link still matches (no prev_hash_mismatch), which
     # ISOLATES the seq-in-hash check — the recompute now sees the new seq and must
-    # diverge from the stored entry_hash. Use a free value so the unique index (on
-    # SQLite) does not reject the write.
+    # diverge from the stored entry_hash. Use a free value so it stays distinct from
+    # the other rows' seq (the chain order key must stay unambiguous).
     target = entries[-1]
     await session.execute(
         update(AuditLog)
@@ -545,31 +544,103 @@ async def test_seq_is_app_assigned_starting_at_one(session: AsyncSession) -> Non
     assert second.seq == 2
 
 
-async def test_duplicate_seq_is_rejected(session: AsyncSession) -> None:
-    """A duplicate ``seq`` is rejected by the unique index (PR #76 round-2 #4).
+async def test_serial_and_batched_appends_never_duplicate_seq(session: AsyncSession) -> None:
+    """Serial + batched appends never produce a duplicate ``seq`` (round-3 #03/#04).
 
-    ``seq`` is the chain's order key and the verifier's keyset boundary; a duplicate
-    would make head/verify order ambiguous (a false tamper report). On the unit-test
-    (SQLite) backend the model's UNIQUE index makes a duplicate impossible — proving
-    the constraint exists and bites. (On the partitioned PostgreSQL parent a global
-    UNIQUE folds in the partition key, so uniqueness rests on the writer's
-    MAX(seq)+1 assignment under the append advisory lock — documented in 0011.)
+    Round-3 #03/#04 DROPPED the model/migration UNIQUE index on ``seq``: a UNIQUE
+    index on ``seq`` ALONE is INVALID on the ``RANGE (created_at)`` partitioned
+    PostgreSQL ``audit_log`` parent (the unique key must fold in the partition key), so
+    keeping it would break ``create_all`` / autogenerate on PostgreSQL. This is the
+    BEHAVIOURAL test that REPLACES the lost DB-level guarantee: the writer's
+    ``MAX(seq)+1`` assignment (under the append advisory lock on PG / the single
+    connection on SQLite) must itself never emit a duplicate. Append a long serial run
+    AND a batch flushed together, then assert every ``seq`` is distinct, strictly
+    increasing, and dense (1..N) — the chain's order key stays unambiguous.
     """
-    [existing] = await _seed_chain(session, 1)
-    dup = AuditLog(
-        seq=existing.seq,  # collide with an existing seq
-        actor="x",
-        action="y",
-        target_type="t",
-        target_id=None,
-        detail=None,
-        prev_hash=b"\x00" * 32,
-        entry_hash=b"\x11" * 32,
+    serial = await _seed_chain(session, 8)
+    # A "batch": several appends recorded back-to-back before a single flush — the
+    # writer still assigns each its own MAX(seq)+1, so no two collide.
+    batch: list[AuditLog] = []
+    for i in range(5):
+        batch.append(
+            await audit_service.record(
+                session,
+                actor=f"batch:{i}",
+                action=audit_service.DEVICE_UPDATED,
+                target_type="device",
+                target_id=f"b{i}",
+                detail={"batch": i},
+            )
+        )
+    await session.flush()
+
+    seqs = [e.seq for e in (*serial, *batch)]
+    assert None not in seqs, "the writer always app-assigns seq (never NULL)"
+    assert len(set(seqs)) == len(seqs), f"writer produced a duplicate seq: {seqs}"
+    assert seqs == sorted(seqs), "seq must be strictly increasing in append order"
+    assert seqs == list(range(1, len(seqs) + 1)), "seq must be dense 1..N (no gaps/dupes)"
+
+
+async def test_old_writer_null_seq_insert_succeeds_and_verifier_is_deterministic(
+    session: AsyncSession,
+) -> None:
+    """An old-writer insert WITHOUT ``seq`` succeeds, and the verifier handles NULL ``seq``.
+
+    Round-3 #01/#02: ``seq`` is NULLABLE through the W4 expand phase so an OLD (pre-W4)
+    pod still inserting audit rows during an N→N+1 rolling deploy — which does NOT
+    assign the app-side ``seq`` — does not hit a NOT NULL violation. Simulate that old
+    writer with a raw INSERT that omits ``seq`` (the column default is bypassed via an
+    explicit ``seq=None``), carrying the genesis ``entry_hash`` it would have (pre-W4
+    rows are pre-chain). The insert must SUCCEED against the 0011 schema, and
+    :func:`verify_chain` must walk DETERMINISTICALLY (``ORDER BY seq NULLS LAST,
+    created_at, id``) without crashing — the NULL-``seq`` genesis row is flagged like
+    any pre-chain/genesis-hash row, never an uncaught error.
+    """
+    from datetime import UTC, datetime
+
+    # A real, fully-chained appended row first (so there IS a live chain head).
+    [real] = await _seed_chain(session, 1)
+    assert real.seq == 1
+
+    # The "old writer": a Core INSERT with seq EXPLICITLY NULL — what a pre-W4 pod
+    # (which knows nothing of seq) effectively emits. Passing ``seq=None`` in
+    # ``.values()`` makes Core insert a literal NULL (an explicit value overrides the
+    # ORM ``_next_seq`` column default, which only fires when the column is omitted).
+    # Using the table's own insert keeps id/created_at type rendering correct. The row
+    # carries the genesis entry_hash an unchained pre-W4 row would have. It MUST NOT
+    # raise a NOT NULL violation against the round-3 #01/#02 nullable-seq schema.
+    old_id = uuid.uuid4()
+    old_created_at = datetime(2026, 6, 27, 12, 0, 0, tzinfo=UTC)
+    await session.execute(
+        AuditLog.__table__.insert().values(
+            id=old_id,
+            created_at=old_created_at,
+            seq=None,
+            actor="old-pod",
+            action="legacy.write",
+            target_type="device",
+            target_id="legacy",
+            detail=None,
+            reasoning_trace_id=None,
+            request_id=None,
+            prev_hash=chain.GENESIS_HASH,
+            entry_hash=chain.GENESIS_HASH,
+        )
     )
-    session.add(dup)
-    with pytest.raises(IntegrityError):
-        await session.flush()
-    await session.rollback()
+    await session.flush()  # MUST NOT raise a NOT NULL violation (round-3 #01/#02)
+
+    reloaded = (await session.execute(select(AuditLog).where(AuditLog.id == old_id))).scalar_one()
+    assert reloaded.seq is None, "old-writer row stays NULL-seq (pre-chain history)"
+
+    # The verifier orders NULLS LAST and must not crash; the genesis-hash NULL-seq row
+    # is untrusted pre-chain history → a break (entry_hash != recompute), deterministic
+    # across runs. The point is: no exception, and the same loud result every pass.
+    first = await verify_chain(session)
+    second = await verify_chain(session)
+    assert first == second, "verifier must be deterministic with a NULL-seq row present"
+    assert first.ok is False, "the genesis-hash NULL-seq old-writer row is flagged"
+    assert first.break_ is not None
+    assert first.break_.entry_id == str(old_id)
 
 
 async def test_equal_created_at_rows_verify_clean_by_seq(session: AsyncSession) -> None:

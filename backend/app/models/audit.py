@@ -24,12 +24,19 @@ from app.models.mixins import JSON_VARIANT, UtcDateTime, utcnow
 #: verifier use) and to migration 0011's inlined value by test.
 _GENESIS_HASH = b"\x00" * 32
 
-#: Name of the UNIQUE index on the monotonic append-order column ``seq`` (ADR-0038
-#: §3, W4-T1 A4; PR #76 round-2 #4). ``seq`` is the chain's ORDER key and the
-#: verifier's keyset boundary, so a DUPLICATE ``seq`` would make head/verify order
-#: ambiguous (a false tamper report). A UNIQUE index makes a duplicate impossible.
-#: Mirrored (inlined) by migration 0011 (D4 — migrations never import models); the
-#: two are pinned equal by test.
+#: Name of the read-path / ORDER-BY index on the monotonic append-order column
+#: ``seq`` (ADR-0038 §3, W4-T1 A4; PR #76 round-2 #4, round-3 #03/#04). ``seq`` is
+#: the chain's ORDER key and the verifier's keyset boundary, so the index serves the
+#: head read (``MAX(seq)``) and the verifier's ``ORDER BY seq``. It is NOT unique:
+#: ``audit_log`` is ``postgresql_partition_by: RANGE (created_at)``, and a UNIQUE
+#: index on ``seq`` ALONE is INVALID on a PostgreSQL partitioned table (the unique
+#: key must contain the partition key) — so ``create_all`` / alembic autogenerate on
+#: PostgreSQL would break (round-3 #03/#04). ``seq`` uniqueness is guaranteed instead
+#: by the app-under-lock ``MAX(seq)+1`` assignment in the writer (PR #76 round-2 #4),
+#: proven by a behavioural append test on BOTH backends. Mirrored (inlined) by
+#: migration 0011 (D4 — migrations never import models); the two are pinned equal by
+#: test. The name keeps its historical ``uq_`` prefix so the on-disk index name is
+#: stable across this change (no needless DROP/CREATE churn on existing schemas).
 _SEQ_UNIQUE_INDEX_NAME = "uq_audit_log_seq"
 
 
@@ -88,18 +95,20 @@ class AuditLog(Base):
     """
 
     __tablename__ = "audit_log"
-    # A UNIQUE index on ``seq`` (PR #76 round-2 #4) — ``seq`` is the chain's ORDER
-    # key and the verifier's keyset boundary, so a duplicate would make head/verify
-    # order ambiguous (a false tamper report); uniqueness makes that impossible. It
-    # also serves the head read (``MAX(seq)``) and the verifier's ``ORDER BY seq``.
-    # On the partitioned PostgreSQL parent a global UNIQUE constraint would have to
-    # include the partition key, so uniqueness of ``seq`` itself is guaranteed by the
-    # app-under-lock ``MAX(seq)+1`` assignment; this index is the read-path/ordering
-    # index and is a true UNIQUE index on SQLite (the unit-test backend) where it
-    # additionally proves no duplicate ``seq`` is ever produced. The composite
-    # ``postgresql_partition_by`` table option must be the LAST element.
+    # A NON-unique read-path / ORDER-BY index on ``seq`` (PR #76 round-2 #4, round-3
+    # #03/#04) — ``seq`` is the chain's ORDER key and the verifier's keyset boundary,
+    # so the index serves the head read (``MAX(seq)``) and the verifier's
+    # ``ORDER BY seq``. It is deliberately NOT unique: this table is
+    # ``postgresql_partition_by: RANGE (created_at)``, and a UNIQUE index on ``seq``
+    # ALONE is INVALID on a PG partitioned table (the unique key must contain the
+    # partition key), so making it unique would break ``create_all`` / alembic
+    # autogenerate on PostgreSQL. ``seq`` uniqueness is guaranteed instead by the
+    # writer's app-under-lock ``MAX(seq)+1`` assignment (PR #76 round-2 #4) — proven
+    # by a behavioural serial/batched-append test on BOTH backends (the test that
+    # replaces the lost DB-level guarantee). The composite ``postgresql_partition_by``
+    # table option must be the LAST element.
     __table_args__ = (
-        Index(_SEQ_UNIQUE_INDEX_NAME, "seq", unique=True),
+        Index(_SEQ_UNIQUE_INDEX_NAME, "seq"),
         {"postgresql_partition_by": "RANGE (created_at)"},
     )
 
@@ -114,11 +123,24 @@ class AuditLog(Base):
     # in the canonical hash (PR #76 round-2 #5), so the value is known before
     # ``entry_hash`` is computed (still a SINGLE INSERT, no nextval default → no
     # full table rewrite on add, PR #76 round-2 #1). The ``default`` below fires only
-    # on the rare direct-construct test path. Uniqueness + the read index live in
+    # on the rare direct-construct test path; the read index lives in
     # ``__table_args__`` above.
-    seq: Mapped[int] = mapped_column(
+    #
+    # ``seq`` is NULLABLE (round-3 #01/#02). The expand migration 0011 adds it
+    # NULLABLE and KEEPS it nullable through this expand phase: an OLD (pre-W4) pod
+    # still inserting audit rows during an N→N+1 rolling deploy does NOT set ``seq``
+    # (it is app-assigned, so unlike prev_hash/entry_hash a server_default cannot
+    # supply a correct monotonic value), so a NOT-NULL ``seq`` here would crash those
+    # legitimate old-writer inserts. New rows are never NULL — the writer always
+    # assigns ``MAX(seq)+1`` under the lock. A NULL-seq row is therefore exactly an
+    # old-writer / pre-chain row: it also carries the genesis ``entry_hash`` default,
+    # so the verifier already treats it as untrusted pre-chain history (it sorts
+    # NULLS LAST and flags genesis-hash rows like any genesis row). A later CONTRACT
+    # migration will backfill residual NULL ``seq`` and SET NOT NULL once no pre-W4
+    # pod can write (NOT written now — see docs/runbooks/audit-chain-verify-and-reseal.md).
+    seq: Mapped[int | None] = mapped_column(
         BigInteger,
-        nullable=False,
+        nullable=True,
         default=_next_seq,
     )
     actor: Mapped[str] = mapped_column(String(255), nullable=False)

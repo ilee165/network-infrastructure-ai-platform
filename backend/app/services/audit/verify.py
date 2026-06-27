@@ -4,7 +4,10 @@ Recomputes the ``audit_log`` hash chain FROM the last verified-clean checkpoint
 (the :class:`~app.models.audit.AuditChainCheckpoint` watermark) to the current
 head, walking entries in append order ``seq`` (the monotonic append-order column,
 W4-T1 A4 — never ``(created_at, id)``, whose random-UUID tiebreak could invert
-two equal-``created_at`` rows and false-alarm the chain). Each entry's stored
+two equal-``created_at`` rows and false-alarm the chain). ``seq`` is NULLABLE
+through the W4 expand phase (round-3 #01/#02): a NULL-``seq`` row is an old-writer
+/ pre-chain row (genesis ``entry_hash`` too), sorted NULLS LAST and flagged as
+untrusted pre-chain history like any genesis-hash row. Each entry's stored
 ``entry_hash`` must equal ``SHA-256(canonical(entry) || prev_hash)`` and each
 entry's stored ``prev_hash`` must equal the predecessor's ``entry_hash`` — a
 mismatch on EITHER is a chain break (a mutated, deleted, reordered, or inserted
@@ -92,8 +95,22 @@ async def _entries_after(session: AsyncSession, after_seq: int | None) -> list[A
     SAME total order the writer appended it — never the ambiguous ``(created_at, id)``
     order — and resumes exactly where the last verified-clean pass stopped
     (ADR-0038 §4) without re-walking history.
+
+    ``seq`` is NULLABLE through the W4 expand phase (migration 0011, round-3 #01/#02):
+    a NULL-``seq`` row is an OLD-writer / pre-chain row (an old pod that inserted
+    during an N→N+1 rolling deploy without assigning ``seq``). Such a row also carries
+    the genesis ``entry_hash`` default, so it is already untrusted pre-chain history —
+    the verifier flags it like any genesis-hash row. To keep ordering DETERMINISTIC in
+    the presence of NULLs, sort ``seq`` ASC NULLS LAST, then ``created_at, id`` (so
+    NULL-``seq`` old-writer rows sort to the END in a stable, reproducible order and
+    can never reorder the chained tail or crash the walk). The keyset filter
+    ``seq > after_seq`` is SQL three-valued: a NULL ``seq`` is never ``> after_seq``,
+    so an incremental resume past a real (non-NULL) checkpoint silently excludes
+    NULL-``seq`` rows — correct, as those are pre-chain history below the watermark.
     """
-    stmt = select(AuditLog).order_by(AuditLog.seq.asc())
+    stmt = select(AuditLog).order_by(
+        AuditLog.seq.asc().nulls_last(), AuditLog.created_at.asc(), AuditLog.id.asc()
+    )
     if after_seq is not None:
         stmt = stmt.where(AuditLog.seq > after_seq)
     return list((await session.execute(stmt)).scalars().all())

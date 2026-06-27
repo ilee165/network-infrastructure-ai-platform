@@ -18,11 +18,13 @@ from app.models import AuditLog
 # the application writer normally sets them; here a fixed genesis-shaped placeholder
 # keeps the focus on the PK/detail behaviour under test).
 #
-# ``seq`` is also supplied explicitly: it is UNIQUE (PR #76 round-2 #4) and the
-# model's ``_next_seq`` default reads MAX(seq)+1, which cannot disambiguate two rows
-# added in the SAME batch flush (both would read MAX=0 → 1 → unique-index clash).
-# The real writer reads MAX(seq)+1 under the append advisory lock with one flush per
-# append, so it never collides; direct-construct tests pass distinct ``seq`` values.
+# ``seq`` is also supplied explicitly: the model's ``_next_seq`` default reads
+# MAX(seq)+1, which cannot disambiguate two rows added in the SAME batch flush (both
+# would read MAX=0 → 1 → a duplicate seq). ``seq`` carries no UNIQUE constraint
+# (round-3 #03/#04: a UNIQUE index on seq alone is invalid on the PG partitioned
+# parent; uniqueness rests on the writer's MAX(seq)+1 under the append advisory lock,
+# one flush per append), so these direct-construct tests pass distinct ``seq`` values
+# to keep the chain order key unambiguous.
 _CHAIN = {"prev_hash": b"\x00" * 32, "entry_hash": b"\x11" * 32}
 
 

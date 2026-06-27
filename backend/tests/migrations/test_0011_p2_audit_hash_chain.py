@@ -126,18 +126,62 @@ def test_offline_sql_adds_app_assigned_seq_without_volatile_default() -> None:
     ``seq`` is app-assigned (``MAX(seq)+1`` under the append advisory lock), so the
     migration must NOT add a DB sequence or a ``nextval`` volatile default — that
     would force a full table REWRITE + long lock on a large audit_log. The expand
-    pattern is: ADD COLUMN NULLABLE → deterministic backfill → SET NOT NULL.
+    pattern is: ADD COLUMN NULLABLE → deterministic backfill, and ``seq`` STAYS
+    NULLABLE through this expand phase (round-3 #01/#02) — no SET NOT NULL here.
     """
     sql = _offline_upgrade_sql()
     lowered = sql.lower()
     # No DB sequence and no volatile nextval default (the round-2 #1 regression).
     assert "create sequence" not in lowered, "no DB sequence — seq is app-assigned"
     assert "nextval" not in lowered, "no volatile nextval default (would rewrite the table)"
-    # Expand-safe shape: add nullable, deterministic backfill in append order, then
-    # SET NOT NULL — never an ADD COLUMN ... NOT NULL with a volatile default.
+    # Expand-safe shape: add nullable + deterministic backfill in append order.
     assert "add column seq bigint" in lowered
     assert "row_number() over (order by created_at, id)" in lowered
-    assert "set not null" in lowered or "alter column seq set not null" in lowered
+
+
+@pytest.mark.usefixtures("_postgres_dialect_env")
+def test_offline_sql_keeps_seq_nullable_for_rolling_deploy() -> None:
+    """``seq`` stays NULLABLE through the expand migration (round-3 #01/#02).
+
+    ``seq`` is APP-assigned, so — unlike prev_hash/entry_hash which keep a genesis
+    server_default — no DB default can supply a correct monotonic value for an OLD
+    (pre-W4) pod inserting audit rows during an N→N+1 rolling deploy. A SET NOT NULL
+    in THIS migration would crash those legitimate old-writer inserts. The expand
+    migration therefore adds ``seq`` NULLABLE and KEEPS it nullable; a later separate
+    CONTRACT migration backfills residual NULLs and sets NOT NULL. Assert the upgrade
+    SQL never sets ``seq`` NOT NULL (no ``ALTER COLUMN seq ... SET NOT NULL``) and the
+    ``ADD COLUMN seq`` is not itself ``NOT NULL``.
+    """
+    sql = _offline_upgrade_sql()
+    lowered = sql.lower()
+    assert "alter column seq set not null" not in lowered, (
+        "seq must stay nullable (round-3 #01/#02)"
+    )
+    assert "set not null" not in lowered, "expand migration must not SET NOT NULL on seq"
+    assert "add column seq bigint not null" not in lowered, "ADD COLUMN seq must be nullable"
+
+
+@pytest.mark.usefixtures("_postgres_dialect_env")
+def test_offline_sql_seq_index_is_non_unique_on_pg_partitioned_parent() -> None:
+    """The ``seq`` index is NON-unique on the partitioned PG parent (round-3 #03/#04).
+
+    A UNIQUE index on ``seq`` ALONE is INVALID on a ``RANGE (created_at)`` partitioned
+    table (the unique key must fold in the partition key), so the migration must emit a
+    plain (non-unique) ``CREATE INDEX`` on the parent + per-partition, never a UNIQUE
+    one. ``seq`` uniqueness rests on the app-under-lock ``MAX(seq)+1`` assignment,
+    proven by a behavioural serial-append test, not a DB constraint.
+    """
+    # Render ONLY revision 0011's upgrade SQL (0010:0011) so other migrations' unique
+    # indexes (e.g. reasoning_trace_steps) don't pollute the assertion.
+    sql = _offline_sql("upgrade")
+    lowered = sql.lower()
+    # Plain index on the parent; NO UNIQUE index on the seq index name in 0011's SQL.
+    assert f"create index {_SEQ_INDEX_NAME} on only audit_log".lower() in lowered
+    assert f"create unique index {_SEQ_INDEX_NAME}".lower() not in lowered, (
+        "seq index must be non-unique on PG partitioned"
+    )
+    # No UNIQUE index is emitted on the audit_log seq column at all in this revision.
+    assert "create unique index" not in lowered, "0011 must emit no unique index on seq"
 
 
 @pytest.mark.usefixtures("_postgres_dialect_env")
