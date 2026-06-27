@@ -806,6 +806,21 @@ audit:
       limits:
         cpu: "1"
         memory: 512Mi
+    # WEEKLY FULL SCAN (W4 PR#76 A3). The daily run above resumes AFTER the verified
+    # checkpoint, so tampering of an already-checkpointed HISTORICAL row (below the
+    # watermark, and not the anchor — the anchor is re-proven each pass) is never
+    # re-detected by the incremental walk. A second CronJob runs the verifier with
+    # AUDIT_CHAIN_VERIFY_FULL=true on a slower cadence: it ignores the checkpoint and
+    # re-walks the whole chain from genesis, so a historical tamper still surfaces.
+    # Tradeoff: the full scan is O(all rows) vs the daily O(new rows) — heavier, so
+    # it runs weekly, not daily (see docs/runbooks/audit-chain-verify-and-reseal.md).
+    fullScan:
+      # On by default — the historical-tamper guard is a release criterion alongside
+      # the daily incremental (G-SEC/G-MNT). Disabling leaves the A3 gap open.
+      enabled: true
+      # Weekly, Sunday 03:30 (offset from the daily 02:30 verify so the two never
+      # contend; the full scan is heavier but infrequent).
+      schedule: "30 3 * * 0"
 
 # -- Device-credential ROTATION (W4-T2, ADR-0040 §1/§3; ADR-0015). A scheduled
 #    CronJob runs the confirm-then-swap, fail-closed device-secret rotation pass:

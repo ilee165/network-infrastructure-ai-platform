@@ -35,19 +35,29 @@ W4-LESSONS guards applied:
 Backups/verify are K8s CronJobs, NOT Celery beat — they keep running when the
 app/Redis is degraded. Disabling the tier (audit.chainVerify.enabled=false)
 renders NOTHING here (a warned opt-out, NOTES.txt).
+
+TWO CronJobs render from ONE template (W4 PR#76 A3): the DAILY incremental verify
+(resumes after the verified checkpoint — cheap) and a slower WEEKLY FULL scan
+(AUDIT_CHAIN_VERIFY_FULL=true — ignores the checkpoint and re-walks from genesis).
+The daily walk never re-visits an already-checkpointed HISTORICAL row, so a tamper
+below the watermark (and not the anchor, which is re-proven each pass) is invisible
+to it; the weekly full scan is that gap's guard. The shared `_audit-verify-cronjob`
+define keeps the two pod specs byte-identical except name/schedule/full-flag.
 */ -}}
-{{- if .Values.audit.chainVerify.enabled }}
-{{- $v := .Values.audit.chainVerify -}}
-{{- $fullname := include "netops.fullname" . -}}
+
+{{- define "netops.auditVerifyCronJob" -}}
+{{- $ctx := .ctx -}}
+{{- $v := $ctx.Values.audit.chainVerify -}}
+{{- $fullname := include "netops.fullname" $ctx -}}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ $fullname }}-audit-chain-verify
-  namespace: {{ .Release.Namespace }}
+  name: {{ $fullname }}-audit-chain-verify{{ .nameSuffix }}
+  namespace: {{ $ctx.Release.Namespace }}
   labels:
-    {{- include "netops.componentLabels" (dict "ctx" . "component" "audit") | nindent 4 }}
+    {{- include "netops.componentLabels" (dict "ctx" $ctx "component" "audit") | nindent 4 }}
 spec:
-  schedule: {{ $v.schedule | quote }}
+  schedule: {{ .schedule | quote }}
   concurrencyPolicy: {{ $v.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $v.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: {{ $v.successfulJobsHistoryLimit }}
@@ -58,18 +68,18 @@ spec:
       template:
         metadata:
           labels:
-            {{- include "netops.componentLabels" (dict "ctx" . "component" "audit") | nindent 12 }}
+            {{- include "netops.componentLabels" (dict "ctx" $ctx "component" "audit") | nindent 12 }}
         spec:
-          automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+          automountServiceAccountToken: {{ $ctx.Values.serviceAccounts.automountServiceAccountToken }}
           restartPolicy: Never
           securityContext:
-            {{- include "netops.podSecurityContext" . | nindent 12 }}
+            {{- include "netops.podSecurityContext" $ctx | nindent 12 }}
           containers:
             - name: audit-chain-verify
-              image: {{ include "netops.backendImage" . }}
-              imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+              image: {{ include "netops.backendImage" $ctx }}
+              imagePullPolicy: {{ $ctx.Values.images.backend.pullPolicy }}
               securityContext:
-                {{- include "netops.hardenedSecurityContext" . | nindent 16 }}
+                {{- include "netops.hardenedSecurityContext" $ctx | nindent 16 }}
               command:
                 - sh
                 - -c
@@ -82,7 +92,7 @@ spec:
                 # the metric file was actually written.
                 - |
                   set -euo pipefail
-                  echo "[audit-chain-verify] recomputing audit_log hash chain from checkpoint -> head (ADR-0038 §4)"
+                  echo "[audit-chain-verify] recomputing audit_log hash chain ({{ .mode }}) (ADR-0038 §4)"
                   export NETOPS_DATABASE_URL="postgresql+asyncpg://${NETOPS_POSTGRES_USER}:${NETOPS_POSTGRES_PASSWORD}@${NETOPS_POSTGRES_HOST}:${NETOPS_POSTGRES_PORT}/${NETOPS_POSTGRES_DB}"
                   mkdir -p "${AUDIT_CHAIN_METRICS_DIR}"
                   # Non-zero exit here (a chain break) FAILS the pod via set -e — the
@@ -90,13 +100,21 @@ spec:
                   python -m app.services.audit.verify_job
                   echo "[audit-chain-verify] asserting the textfile metric was written (L5 belt-and-braces)"
                   test -s "${AUDIT_CHAIN_METRICS_DIR}/audit_chain_verify.prom"
-                  echo "[audit-chain-verify] daily verification complete (chain clean, checkpoint advanced)"
+                  echo "[audit-chain-verify] {{ .mode }} verification complete"
               env:
                 # Where the job writes the node_exporter textfile metric (consumed
                 # by app.services.audit.verify_job; used by the sh -c script, never
                 # a raw exec argv).
                 - name: AUDIT_CHAIN_METRICS_DIR
                   value: {{ $v.metricsDir | quote }}
+                {{- if .full }}
+                # FULL scan (A3): ignore the checkpoint and re-walk from genesis so a
+                # tamper of an already-checkpointed HISTORICAL row is re-detected (the
+                # daily incremental walk resumes after the checkpoint and never re-
+                # visits it). Read by app.services.audit.verify_job (_env_full_scan).
+                - name: AUDIT_CHAIN_VERIFY_FULL
+                  value: "true"
+                {{- end }}
                 # Non-secret Postgres coordinates from the platform ConfigMap; the
                 # sh -c script assembles the DSN from these + the password below.
                 - name: NETOPS_POSTGRES_HOST
@@ -124,12 +142,12 @@ spec:
                 - name: NETOPS_POSTGRES_PASSWORD
                   valueFrom:
                     secretKeyRef:
-                      {{- if .Values.secrets.existingSecret }}
-                      name: {{ .Values.secrets.existingSecret }}
+                      {{- if $ctx.Values.secrets.existingSecret }}
+                      name: {{ $ctx.Values.secrets.existingSecret }}
                       {{- else }}
                       name: {{ $fullname }}-dev-secrets
                       {{- end }}
-                      key: {{ .Values.secrets.keys.postgresPassword }}
+                      key: {{ $ctx.Values.secrets.keys.postgresPassword }}
               resources:
                 {{- toYaml $v.resources | nindent 16 }}
               volumeMounts:
@@ -146,4 +164,15 @@ spec:
             - name: tmp
               emptyDir:
                 sizeLimit: 64Mi
+{{- end -}}
+
+{{- if .Values.audit.chainVerify.enabled }}
+{{- $v := .Values.audit.chainVerify -}}
+{{- /* DAILY incremental verify (resumes after the checkpoint — cheap). */ -}}
+{{- include "netops.auditVerifyCronJob" (dict "ctx" . "nameSuffix" "" "schedule" $v.schedule "full" false "mode" "incremental checkpoint -> head") }}
+{{- if $v.fullScan.enabled }}
+---
+{{- /* WEEKLY FULL scan (A3): re-walk from genesis to catch a historical tamper. */ -}}
+{{- include "netops.auditVerifyCronJob" (dict "ctx" . "nameSuffix" "-full" "schedule" $v.fullScan.schedule "full" true "mode" "FULL genesis -> head") }}
+{{- end }}
 {{- end }}

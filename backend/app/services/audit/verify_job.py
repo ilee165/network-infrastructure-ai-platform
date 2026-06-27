@@ -55,6 +55,17 @@ _TEXTFILE_DIR_ENV = "AUDIT_CHAIN_METRICS_DIR"
 #: Metric file name within the textfile dir (one file per job, atomically renamed).
 _METRIC_FILENAME = "audit_chain_verify.prom"
 
+#: When this env var is truthy the job runs a FULL scan (walk from genesis,
+#: ignoring the checkpoint) instead of the daily incremental walk (A3). The weekly
+#: full-scan CronJob sets it; the daily CronJob leaves it unset. Truthy = a case-
+#: insensitive ``1``/``true``/``yes``/``on``.
+_FULL_SCAN_ENV = "AUDIT_CHAIN_VERIFY_FULL"
+
+
+def _env_full_scan() -> bool:
+    """Return True when ``AUDIT_CHAIN_VERIFY_FULL`` requests a full (genesis) scan."""
+    return os.environ.get(_FULL_SCAN_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
 
 def render_metrics(result: VerifyResult) -> str:
     """Render *result* as node_exporter textfile-format Prometheus metrics.
@@ -139,6 +150,7 @@ async def run(
     *,
     sessionmaker: Callable[[], AsyncSession] | async_sessionmaker[AsyncSession],
     textfile_dir: Path,
+    full: bool = False,
 ) -> int:
     """Run one verification pass; emit the metric + log line; return an exit code.
 
@@ -148,15 +160,27 @@ async def run(
     break details, and returns ``1`` so the Job is marked Failed — the loud signal
     ADR-0015 requires. A clean pass never masks a break (fail toward false-positive,
     ADR-0038 §4 / W4-T1 spec req 3).
+
+    When *full* is true the verifier ignores the checkpoint and re-walks the whole
+    chain from genesis (A3) — the slower-cadence guard that catches tampering of a
+    historical row BELOW the watermark, which the daily incremental walk (resuming
+    after the checkpoint) never re-visits.
+
+    Alert ordering (A8): the structured ``AUDIT_CHAIN_VERIFY`` log line + the
+    structured-logger alert are emitted and the exit code is decided BEFORE the
+    metric write. The textfile-metric write is best-effort — a metric-write failure
+    must never suppress the alert log or flip the exit code (the alert signal is
+    needed exactly when the job is failing).
     """
     async with sessionmaker() as session:
-        result = await verify_chain(session, advance_checkpoint=True)
+        result = await verify_chain(session, advance_checkpoint=True, full=full)
         if result.ok:
             await session.commit()
         else:
             await session.rollback()
 
-    write_metrics(result, textfile_dir=textfile_dir)
+    # A8: emit the alert log line + decide the exit code FIRST, so a metric-write
+    # failure below can never swallow the alert signal or the non-zero exit.
     _emit_log(result)
     if result.ok:
         _logger.info(
@@ -164,26 +188,38 @@ async def run(
             checked=result.checked,
             head_position=result.head_position,
             head_entry_id=result.head_entry_id,
+            full=full,
         )
-        return 0
+        exit_code = 0
+    else:
+        assert result.break_ is not None  # ok is False ⇒ a break was recorded
+        _logger.error(
+            "audit.chain.break_detected",
+            break_position=result.break_.position,
+            break_entry_id=result.break_.entry_id,
+            break_reason=result.break_.reason,
+            full=full,
+        )
+        exit_code = 1
 
-    assert result.break_ is not None  # ok is False ⇒ a break was recorded
-    _logger.error(
-        "audit.chain.break_detected",
-        break_position=result.break_.position,
-        break_entry_id=result.break_.entry_id,
-        break_reason=result.break_.reason,
-    )
-    return 1
+    # The metric is a secondary signal (ADR-0015); writing it is best-effort so a
+    # textfile-dir failure does not mask the primary log alert / exit code (A8).
+    try:
+        write_metrics(result, textfile_dir=textfile_dir)
+    except OSError:
+        _logger.error("audit.chain.metric_write_failed", exc_info=True)
+
+    return exit_code
 
 
 async def _main() -> int:
     """Build the runtime engine from settings and run one pass (the Job path)."""
     textfile_dir = Path(os.environ.get(_TEXTFILE_DIR_ENV, tempfile.gettempdir()))
+    full = _env_full_scan()
     engine = create_engine(get_settings())
     try:
         maker = create_sessionmaker(engine)
-        return await run(sessionmaker=maker, textfile_dir=textfile_dir)
+        return await run(sessionmaker=maker, textfile_dir=textfile_dir, full=full)
     finally:
         await engine.dispose()
 

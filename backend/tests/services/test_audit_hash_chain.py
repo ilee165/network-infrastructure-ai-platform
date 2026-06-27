@@ -319,6 +319,114 @@ async def test_tamper_below_checkpoint_anchor_is_flagged(session: AsyncSession) 
     assert result.break_.reason == "checkpoint_mismatch"
 
 
+async def test_pre_anchor_tamper_caught_by_full_scan_not_incremental(
+    session: AsyncSession,
+) -> None:
+    """A mutated PRE-anchor historical row is caught ONLY by the full scan (A3/A11).
+
+    The incremental walk resumes strictly AFTER the checkpoint anchor (entries[-1]
+    here), and the anchor itself is re-proven each pass — so tampering of a row
+    BELOW the watermark that is NOT the anchor (entries[1]) is invisible to the
+    daily incremental run. The full scan walks from genesis and re-detects it. This
+    is the bite that proves the new full mode is the guard for the A3 gap (the old
+    "tamper below checkpoint" test mutated entries[-1], i.e. the anchor, which is
+    already caught by the anchor recompute — it did NOT cover this gap).
+    """
+    entries = await _seed_chain(session, 5)
+    clean = await verify_chain(session, advance_checkpoint=True)
+    assert clean.ok is True
+    # The watermark now sits on the last entry; entries[1] is well below it.
+
+    pre_anchor = entries[1]
+    await session.execute(
+        update(AuditLog)
+        .where(AuditLog.id == pre_anchor.id, AuditLog.created_at == pre_anchor.created_at)
+        .values(actor="user:evil")  # a hashed field, not recomputed → tampering
+    )
+    await session.flush()
+
+    # Incremental run: resumes after the anchor and never re-visits entries[1] —
+    # so it passes clean, demonstrating the A3 gap the full scan closes.
+    incremental = await verify_chain(session)
+    assert incremental.ok is True, "incremental run does not re-detect a pre-anchor tamper"
+
+    # Full scan: walks from genesis, ignoring the checkpoint, and catches it.
+    full = await verify_chain(session, full=True)
+    assert full.ok is False
+    assert full.break_ is not None
+    assert full.break_.entry_id == str(pre_anchor.id)
+    assert full.break_.reason == "entry_hash_mismatch"
+    # entries[1] is the 2nd row from genesis → 1-based position 2.
+    assert full.break_.position == 2
+
+
+async def test_full_scan_on_untampered_chain_verifies_clean(session: AsyncSession) -> None:
+    """A full (genesis) scan over a clean chain verifies every row and reports head."""
+    entries = await _seed_chain(session, 4)
+    await verify_chain(session, advance_checkpoint=True)
+
+    result = await verify_chain(session, full=True)
+    assert result.ok is True
+    assert result.break_ is None
+    assert result.checked == 4  # every row, not just the post-checkpoint tail
+    assert result.head_entry_id == str(entries[-1].id)
+
+
+async def test_recompute_or_break_turns_malformed_length_into_a_break(
+    session: AsyncSession,
+) -> None:
+    """The in-loop recompute guard converts a wrong-length hash to a break (A1).
+
+    ``compute_entry_hash`` raises ``ValueError`` on a prev_hash that is not exactly
+    HASH_LEN raw bytes (chain.py:133). The verifier's ``_recompute_or_break`` helper
+    (verify.py:210 path) must NOT let that crash the walk before the metric/alert
+    path — it returns an ``entry_hash_mismatch`` :class:`VerifyResult` break instead.
+    We drive the helper directly with a malformed stored prev_hash (the in-loop
+    Direction-1 guard otherwise pre-empts this row, so the helper's ValueError
+    branch is pinned here).
+    """
+    from app.services.audit.verify import VerifyResult, _recompute_or_break
+
+    [entry] = await _seed_chain(session, 1)
+    entry.prev_hash = b"\x00\x01\x02"  # 3 bytes, not 32 → compute_entry_hash raises
+
+    outcome = _recompute_or_break(entry, entry.prev_hash, position=1, head_entry=None, checked=0)
+    assert isinstance(outcome, VerifyResult)
+    assert outcome.ok is False
+    assert outcome.break_ is not None
+    assert outcome.break_.reason == "entry_hash_mismatch"
+    assert outcome.break_.entry_id == str(entry.id)
+    assert outcome.break_.found == "malformed_length"
+
+
+async def test_malformed_length_anchor_hash_is_checkpoint_break_not_a_crash(
+    session: AsyncSession,
+) -> None:
+    """A wrong-length stored prev_hash on the checkpoint ANCHOR is a break (A1).
+
+    The anchor recompute (verify.py:163) runs without a Direction-1 guard, so a
+    length-tampered anchor would raise ``ValueError`` and crash the job before the
+    metric/alert path. The verifier must instead report a ``checkpoint_mismatch``
+    break so the job fails cleanly with the alert + non-zero exit.
+    """
+    entries = await _seed_chain(session, 3)
+    clean = await verify_chain(session, advance_checkpoint=True)
+    assert clean.ok is True
+
+    anchor = entries[-1]
+    await session.execute(
+        update(AuditLog)
+        .where(AuditLog.id == anchor.id, AuditLog.created_at == anchor.created_at)
+        .values(prev_hash=b"\x00\x01\x02")  # 3 bytes, not 32
+    )
+    await session.flush()
+
+    result = await verify_chain(session)
+    assert result.ok is False
+    assert result.break_ is not None
+    assert result.break_.reason == "checkpoint_mismatch"
+
+
 # ---------------------------------------------------------------------------
 # Append-only intact: the writer is still the single append path
 # ---------------------------------------------------------------------------

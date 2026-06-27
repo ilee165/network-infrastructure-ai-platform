@@ -99,7 +99,41 @@ async def _entries_after(session: AsyncSession, after_seq: int | None) -> list[A
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def verify_chain(session: AsyncSession, *, advance_checkpoint: bool = False) -> VerifyResult:
+def _recompute_or_break(
+    entry: AuditLog, prev_hash: bytes, *, position: int, head_entry: AuditLog | None, checked: int
+) -> bytes | VerifyResult:
+    """Recompute *entry*'s hash, turning a malformed-length stored hash into a break.
+
+    :func:`compute_entry_hash` raises ``ValueError`` when the stored ``prev_hash``
+    is not exactly :data:`~app.services.audit.chain.HASH_LEN` raw bytes (A1) — a
+    length-tampered row. The verifier must NOT crash before the metric/alert path
+    on such a row, so a malformed length is treated as an ``entry_hash_mismatch``
+    :class:`ChainBreak` (the loud signal) rather than a propagating exception.
+    Returns the recomputed digest on success, or a :class:`VerifyResult` break.
+    """
+    try:
+        return compute_entry_hash(entry, entry.prev_hash)
+    except ValueError:
+        # A wrong-length stored prev_hash/entry_hash is a tampered row, not a crash.
+        return VerifyResult(
+            ok=False,
+            checked=checked,
+            head_position=checked,
+            head_entry_id=str(head_entry.id) if head_entry is not None else None,
+            head_entry_hash_hex=hex_short(head_entry.entry_hash) if head_entry else None,
+            break_=ChainBreak(
+                position=position,
+                entry_id=str(entry.id),
+                reason="entry_hash_mismatch",
+                expected="",
+                found="malformed_length",
+            ),
+        )
+
+
+async def verify_chain(
+    session: AsyncSession, *, advance_checkpoint: bool = False, full: bool = False
+) -> VerifyResult:
     """Recompute the audit hash chain from the checkpoint to head (ADR-0038 §4).
 
     Walks every entry after the verified-clean watermark in append order and checks
@@ -113,10 +147,20 @@ async def verify_chain(session: AsyncSession, *, advance_checkpoint: bool = Fals
     The checkpoint itself is validated first: if the watermarked entry no longer
     carries the recorded ``entry_hash`` (it was mutated/deleted), that is reported
     as a break at the checkpoint — the verifier never trusts a tampered anchor.
+
+    When *full* is true the checkpoint is IGNORED and the walk starts from the
+    genesis over EVERY entry (A3). The incremental walk resumes strictly after the
+    checkpoint, so tampering of an already-checkpointed *historical* row (below the
+    watermark, but NOT the anchor itself — the anchor is re-proven each pass) is
+    never re-detected by the daily incremental run. The full scan is the guard for
+    that gap: it re-walks history from genesis so a mutated pre-anchor row surfaces
+    as a break. The job runs the cheap incremental daily and a full scan on a slower
+    cadence (see ``AUDIT_CHAIN_VERIFY_FULL`` / the runbook). A clean full pass may
+    still advance the checkpoint over the verified-clean head.
     """
     checkpoint = await _load_checkpoint(session)
 
-    if checkpoint is not None:
+    if checkpoint is not None and not full:
         anchor = (
             await session.execute(
                 select(AuditLog).where(
@@ -148,7 +192,12 @@ async def verify_chain(session: AsyncSession, *, advance_checkpoint: bool = Fals
         # entry_hash column was left untouched — the incremental walk below would
         # otherwise never re-visit it (ADR-0038 §4: the verified anchor is trusted
         # as a boundary, so it is re-proven here before we resume past it).
-        anchor_recomputed = compute_entry_hash(anchor, anchor.prev_hash)
+        try:
+            anchor_recomputed = compute_entry_hash(anchor, anchor.prev_hash)
+        except ValueError:
+            # A wrong-length stored prev_hash on the anchor is tampering, not a crash
+            # (A1) — surface it as a checkpoint break rather than propagating.
+            anchor_recomputed = b""
         if anchor.entry_hash != checkpoint.entry_hash or anchor_recomputed != anchor.entry_hash:
             return VerifyResult(
                 ok=False,
@@ -195,7 +244,12 @@ async def verify_chain(session: AsyncSession, *, advance_checkpoint: bool = Fals
                 ),
             )
         # Direction 2: the stored entry_hash must equal the canonical recompute.
-        recomputed = compute_entry_hash(entry, entry.prev_hash)
+        # A wrong-length stored prev_hash makes the recompute a break, not a crash (A1).
+        recomputed = _recompute_or_break(
+            entry, entry.prev_hash, position=position, head_entry=head_entry, checked=offset
+        )
+        if isinstance(recomputed, VerifyResult):
+            return recomputed
         if recomputed != entry.entry_hash:
             return VerifyResult(
                 ok=False,
@@ -224,7 +278,10 @@ async def verify_chain(session: AsyncSession, *, advance_checkpoint: bool = Fals
         head_id: str | None = str(head_entry.id)
         head_hex: str | None = hex_short(head_entry.entry_hash)
         head_position = checked
-    elif checkpoint is not None:
+    elif checkpoint is not None and not full:
+        # Incremental no-op pass (no new appends): echo the existing checkpoint as
+        # the verified head. A FULL pass walks from genesis, so a zero-entry full
+        # scan means an empty log — report a genesis-empty head, never a stale cp.
         head_id = str(checkpoint.entry_id)
         head_hex = hex_short(checkpoint.entry_hash)
         head_position = 0

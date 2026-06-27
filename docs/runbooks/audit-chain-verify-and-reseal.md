@@ -15,19 +15,31 @@ Continuously prove the append-only `audit_log` has not been mutated or deleted b
 | Canonical form | sorted-key, no-whitespace, UTF-8 JSON of `{id, created_at (RFC3339 UTC, µs), actor, action, target_type, target_id, request_id, reasoning_trace_id, detail}` |
 | Writer | `app.services.audit.record` (the single append path; sets the chain under the caller's transaction) |
 | Verifier | `app.services.audit.verify.verify_chain` (shared by the job + the test) |
-| Job entrypoint | `python -m app.services.audit.verify_job` |
-| CronJob | `<release>-audit-chain-verify` (Helm; daily 02:30; `audit.chainVerify.enabled`) |
+| Job entrypoint | `python -m app.services.audit.verify_job` (set `AUDIT_CHAIN_VERIFY_FULL=true` for a full genesis re-walk) |
+| CronJob (daily) | `<release>-audit-chain-verify` (Helm; daily 02:30; incremental from checkpoint; `audit.chainVerify.enabled`) |
+| CronJob (weekly full) | `<release>-audit-chain-verify-full` (Helm; weekly Sun 03:30; full scan from genesis; `audit.chainVerify.fullScan.enabled`) |
 | Checkpoint | `audit_chain_checkpoint` (single-row `(entry_id, entry_created_at, entry_hash)` watermark) |
 | Metrics | `audit_chain_verified` (1 clean / 0 break), `audit_chain_last_verified_position`, `audit_chain_checked_total` (node_exporter textfile) |
 | Log line | `AUDIT_CHAIN_VERIFY OUTCOME=PASS|FAIL ...` |
 
-## How the daily verify works
+## How the daily (incremental) verify works
 
 1. Loads the verified-clean checkpoint (the last entry a previous run confirmed). On the first ever run there is none, so it walks from the genesis.
-2. Re-proves the checkpoint anchor (recomputes its `entry_hash`) so a tamper *below* the watermark is still caught before resuming past it.
-3. Walks every entry after the checkpoint in append order `(created_at, id)`, checking BOTH directions of each link: the stored `entry_hash` must equal the recompute, and the stored `prev_hash` must equal the predecessor's `entry_hash`.
+2. Re-proves the checkpoint anchor (recomputes its `entry_hash`) so a tamper of the anchor row itself is still caught before resuming past it.
+3. Walks every entry after the checkpoint in append order (the monotonic `seq` column), checking BOTH directions of each link: the stored `entry_hash` must equal the recompute, and the stored `prev_hash` must equal the predecessor's `entry_hash`.
 4. **Clean** → advances the checkpoint over the verified-clean segment, writes `audit_chain_verified 1`, exits 0.
 5. **Break** → does NOT advance the checkpoint, writes `audit_chain_verified 0` + the break's position/entry-id/reason, exits **non-zero** (the Job is Failed — the alert). It never silently passes.
+
+## The weekly FULL scan — why the daily run is not enough
+
+The daily run resumes **strictly after** the checkpoint, and it re-proves only the *anchor* row (the watermark itself), not the rows below it. So a tamper of an **already-checkpointed historical row that is not the anchor** is invisible to the daily incremental walk — it never re-visits that row. The full scan closes this gap:
+
+- **What it does** — runs the same verifier with `AUDIT_CHAIN_VERIFY_FULL=true`, which **ignores the checkpoint and re-walks the whole chain from genesis**. A mutated pre-anchor row therefore surfaces as a normal `entry_hash_mismatch` / `prev_hash_mismatch` break, with the same loud signal (exit non-zero + `audit_chain_verified 0` + the structured log line). A clean full pass still advances the checkpoint to the head.
+- **Cadence** — weekly (Helm default Sun 03:30, `audit.chainVerify.fullScan.schedule`), in addition to the daily incremental. The daily fast check catches *new* tampering within ~24h; the weekly full scan bounds detection of *historical* tampering to ~7 days.
+- **Tradeoff** — the full scan is O(all audit rows) per run vs the daily O(new rows since the checkpoint), so it is heavier and runs infrequently. On a very large `audit_log` keep the weekly cadence (or lengthen it) rather than promoting the full scan to daily; the daily incremental remains the cheap continuous guard. Both write the SAME metric file, so the metric/alert wiring is unchanged.
+- **Disabling** — `audit.chainVerify.fullScan.enabled=false` renders no full-scan CronJob and leaves the historical-tamper gap open; keep it on for G-SEC/G-MNT.
+
+> A break reported by the weekly full scan but NOT the daily run means the tamper is in already-checkpointed history (below the watermark). Triage it exactly as any break (tampering vs. legitimate) below; the `position`/`entry_id` locate the offending row from genesis.
 
 ## Reading a break
 
@@ -67,7 +79,9 @@ Re-sealing re-establishes a verifiable chain forward from the current head WITHO
 - **Deterministic** — the same rows recompute to identical `entry_hash` across runs (byte-exact canonical form; `created_at` always rendered at fixed µs precision).
 - **No secret hashed** — the canonical field set excludes every secret/mutable column; the hash carries no credential/key material (ADR-0032 §5).
 - **Append-only intact** — chaining adds no UPDATE/DELETE path; `audit_log` append-only is enforced by the migration 0001 `REVOKE UPDATE, DELETE ON audit_log FROM PUBLIC` (it does not bind the owner/superuser — the hash chain is the backstop for that privileged-actor case). The 0009 trigger applies to `approvals`, not `audit_log`.
-- **Loud on break** — a break yields exit non-zero + `audit_chain_verified 0`; the verify never silently passes (`tests/services/test_audit_verify_job.py`).
+- **Loud on break** — a break yields exit non-zero + `audit_chain_verified 0`; the verify never silently passes (`tests/services/test_audit_verify_job.py`). The structured log line + exit code are emitted BEFORE the metric write, and the metric write is best-effort, so a metrics-write failure can never suppress the alert (`test_metric_write_failure_does_not_suppress_break_alert`).
+- **Historical-tamper guard** — the full scan (`AUDIT_CHAIN_VERIFY_FULL=true`) re-detects a pre-anchor tamper that the daily incremental run does not (`test_pre_anchor_tamper_caught_by_full_scan_not_incremental`, `test_full_scan_catches_pre_anchor_tamper_via_job`).
+- **No crash on a malformed-length hash** — a wrong-length stored `prev_hash`/`entry_hash` is reported as a chain break (so the metric/alert fires and the job exits cleanly), never an uncaught `ValueError` (`test_malformed_length_anchor_hash_is_checkpoint_break_not_a_crash`).
 
 ## Failure modes & response
 
