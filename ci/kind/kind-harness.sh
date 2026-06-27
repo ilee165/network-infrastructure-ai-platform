@@ -73,7 +73,13 @@ trap teardown EXIT INT TERM
 
 # --- 1. bring up the cluster (enforcing CNI disabled-default) -----------------
 log "creating ephemeral kind cluster ${CLUSTER_NAME}"
-kind create cluster --name "${CLUSTER_NAME}" --config "${KIND_CONFIG}" --wait 120s
+# NO `--wait` here: kind-config.yaml sets `disableDefaultCNI: true`, so the
+# cluster comes up with NO CNI and the node stays NotReady (CoreDNS Pending)
+# until Calico is applied in step 2. `--wait` would block on a readiness that
+# CANNOT be reached pre-CNI and, under `set -e`, abort the harness BEFORE the
+# CNI is ever installed (the canonical kind+Calico ordering trap). Readiness is
+# gated AFTER Calico via `kubectl wait --for=condition=Ready nodes` (line below).
+kind create cluster --name "${CLUSTER_NAME}" --config "${KIND_CONFIG}"
 
 # --- 2. install the ENFORCING CNI (Calico) — the load-bearing step (§2) -------
 log "installing enforcing CNI: Calico ${CALICO_VERSION}"

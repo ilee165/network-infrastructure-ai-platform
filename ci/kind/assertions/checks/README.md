@@ -18,9 +18,13 @@ assertions here:
 
 1. It is an executable `*.sh` file in this directory.
 2. It sources the shared helpers: `. "$(dirname "$0")/../lib.sh"`.
-3. It performs its assertions via the `assert_*` helpers and **exits non-zero**
-   (or leaves a non-zero `assert_failures`) on any failure — the runner treats a
-   non-zero exit OR an empty log as a failed check (no silent no-op).
+3. It performs its assertions via the `assert_*` helpers. On any failure it
+   either **exits non-zero** explicitly or simply **leaves a non-zero
+   `assert_failures`** — `lib.sh` installs an `EXIT` trap in the check's
+   subprocess that converts a recorded `assert_failures` into a non-zero exit, so
+   both paths reach the runner. The runner treats a non-zero exit OR an empty log
+   as a failed check (no silent no-op). A check may still end with
+   `exit "$(assert_failures)"` for explicitness, but it is no longer required.
 4. It assumes the chart is already applied and the **CNI self-test has passed**
    (the harness guarantees both before invoking the runner — ADR-0041 §2/§3).
 

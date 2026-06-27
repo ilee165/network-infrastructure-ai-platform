@@ -118,6 +118,22 @@ grep_must "${RUNNER}" 'run_failures.*-ne 0' \
 grep_must "${RUNNER}" "exit 1" \
   "assertion-runner has a non-zero exit path"
 
+# --- assert_failures path BITES: lib.sh trap + runner opt-out -----------------
+# A check runs in its own subprocess, so the runner can only see its EXIT status.
+# lib.sh must install an EXIT trap that turns a recorded ASSERT_FAIL into a
+# non-zero exit (otherwise the documented "leave a non-zero assert_failures" path
+# is a false contract and a conforming T5 deny check would ship false-green).
+grep_must "${LIB}" "trap _assert_exit_trap EXIT" \
+  "lib.sh installs an EXIT trap so a recorded assert_failures bites (no false-green)"
+grep_must "${LIB}" 'exit "\$\{ASSERT_FAIL\}"' \
+  "lib.sh's trap exits with the accumulated assert-failure count"
+# The runner sources lib.sh but owns its OWN exit code, so it must opt OUT of the
+# trap; assert the opt-out is wired so the runner's run_failures stays authoritative.
+grep_must "${RUNNER}" "ASSERT_LIB_NO_TRAP=1" \
+  "assertion-runner opts out of lib.sh's EXIT trap (runner owns its exit code)"
+grep_must "${LIB}" 'ASSERT_LIB_NO_TRAP' \
+  "lib.sh honours the ASSERT_LIB_NO_TRAP opt-out (so the runner can suppress the trap)"
+
 # --- lib provides the T4 + T5 primitives -------------------------------------
 grep_must "${LIB}" "assert_egress_blocked" \
   "lib provides assert_egress_blocked (W4-T5 deny bite)"

@@ -77,11 +77,36 @@ HA/scale/soak drills are **P3-Platform** (§0).
 
 ## Exit criteria
 
-- [ ] CI job creates + tears down an ephemeral kind/k3d cluster (teardown on failure too).
-- [ ] Enforcing CNI (Calico/Cilium) installed; **CNI self-test bites** (deny blocks).
-- [ ] Chart manifests render + apply into the cluster; assertion-runner scaffold present.
-- [ ] Harness validated **locally** before gating (L1); L5 pipefail on all pipes.
-- [ ] helm lint / kubeconform / conftest / kube-linter green; one atomic commit.
+Legend: `[x]` met as delivered · `[~]` **live-validation deferred** (artifact + CI
+job authored, but the live kind path was NOT observed on the W4-T3 authoring host —
+Windows, no Docker / no Linux kind — and is named-deferred to the W5 release auditor;
+see `docs/runbooks/kind-harness.md` "Gate status — NON-BLOCKING" and ADR-0041 L1
+"do not gate an unvalidated harness"). A `[~]` item is honestly NOT reported as
+satisfied.
+
+- [x] CI job authored that creates + tears down an ephemeral kind/k3d cluster
+      (teardown on failure too, via `trap teardown EXIT INT TERM`). `[~]` the
+      live create/teardown was not observed on this host.
+- [~] Enforcing CNI (Calico) install + **CNI self-test bite** authored, but the
+      live bite (default-deny actually blocking egress on Calico, and the self-test
+      FAILING when the CNI is removed) has **not been observed on a live cluster** —
+      live-validation deferred to W5 (see runbook). NOTE: the pre-fix harness could
+      never reach the bite because `kind create … --wait 120s` timed out on the
+      CNI-less node (fixed in this commit by dropping `--wait`); the live path is
+      now correctly ordered but still un-run here.
+- [x] Chart manifests render + apply step present; assertion-runner scaffold present
+      (the static validator exercises render-shape invariants).
+- [~] Harness validated **locally** before gating (L1): **deferred** — the static
+      `validate-harness.sh` is the only piece run on this host; the live harness was
+      not. Consistent with L1, the CI `kind-harness` job is left NON-blocking
+      (`continue-on-error` + absent from the required aggregator) until a Linux/Docker
+      host or green CI run satisfies the local-validation lesson. L5 pipefail on all
+      pipes: met (asserted by the validator).
+- [x] helm lint / kubeconform / kube-linter green (run on this host; conftest/OPA
+      policies are not present in the repo); one atomic commit.
+- [~] **Teardown on a forced mid-run failure**: the `trap` is authored and asserted
+      statically, but firing it on a live mid-run failure was not observed here —
+      live-validation deferred to W5.
 
 ## Workflow (P2-SECURITY-PLAN.md §3)
 

@@ -6,14 +6,18 @@
 # drops one or more executable `*.sh` files under
 #   ci/kind/assertions/checks/
 # Each check sources lib.sh, performs its assertions via the assert_* helpers,
-# and is expected to leave a non-zero ASSERT_FAIL count (and/or exit non-zero) on
-# any failed assertion.
+# and signals failure either by exiting non-zero OR by recording a non-zero
+# ASSERT_FAIL count (lib.sh installs an EXIT trap in the check's subprocess that
+# turns a recorded ASSERT_FAIL into a non-zero exit — so the recorded count
+# propagates to this runner even without an explicit `exit`).
 #
-# CONTRACT (the bite): the runner exits NON-ZERO if ANY check fails — either by
-# returning non-zero itself OR by recording an assert_* failure. A green run
-# means every check passed. The harness calls this only AFTER the CNI self-test
-# passes (ADR-0041 §2/§3) — assertions never run on an unproven (non-enforcing)
-# CNI.
+# CONTRACT (the bite): the runner exits NON-ZERO if ANY check fails. Because the
+# checks run in their own subprocesses, the runner can only see a check's EXIT
+# STATUS (and log emptiness), not its in-process ASSERT_FAIL — so lib.sh's trap
+# is what makes the "recorded assert_failures" path actually bite here. A green
+# run means every check passed. The harness calls this only AFTER the CNI
+# self-test passes (ADR-0041 §2/§3) — assertions never run on an unproven
+# (non-enforcing) CNI.
 #
 # L5 (P1-W4-LESSONS): `set -o pipefail` is on globally so a masked exit inside a
 # piped check cannot read green; each check's output is teed to a log and the
@@ -23,6 +27,11 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECKS_DIR="${HERE}/checks"
+# The runner manages its OWN exit code (run_failures aggregation below), so it
+# must NOT inherit lib.sh's assert-failure EXIT trap — that trap exists to make a
+# CHECK's accumulated ASSERT_FAIL bite in the check's own subprocess. Opt out
+# here so the runner's exit logic stays authoritative.
+ASSERT_LIB_NO_TRAP=1
 # shellcheck source=lib.sh
 . "${HERE}/lib.sh"
 

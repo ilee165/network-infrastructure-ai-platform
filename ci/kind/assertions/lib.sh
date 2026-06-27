@@ -33,8 +33,40 @@ _fail() {
   echo "FAIL: $*" >&2
 }
 
-# Total failures seen so far (the runner exits non-zero when > 0).
+# Total failures seen so far. The EXIT trap installed below turns a non-zero
+# ASSERT_FAIL into a non-zero check exit, which the runner then counts as a failed
+# check — so a recorded failure bites even without an explicit `exit`.
 assert_failures() { echo "${ASSERT_FAIL}"; }
+
+# --- make the assert_failures path actually BITE ----------------------------
+# Each check runs in its OWN `bash "${check}"` subprocess (see run-assertions.sh),
+# so ASSERT_FAIL lives and dies with that process — the runner cannot read it. A
+# check that records a failure via assert_egress_blocked / assert_handshake_*
+# but forgets to `exit "$(assert_failures)"` would therefore leave the subprocess
+# exiting 0 and read FALSE-GREEN. To honour the documented contract ("a check may
+# leave a non-zero assert_failures") we install an EXIT trap when lib.sh is
+# SOURCED BY A CHECK: on normal completion the check's exit status becomes its
+# accumulated ASSERT_FAIL count, so any recorded failure propagates to the runner
+# without the check author having to remember the explicit exit.
+#
+# The runner sources lib.sh too, but manages its OWN exit code; it sets
+# ASSERT_LIB_NO_TRAP=1 before sourcing so this trap is NOT armed in the runner
+# process (which would otherwise force its exit status to ASSERT_FAIL=0 — benign,
+# but we keep the runner's exit logic authoritative).
+_assert_exit_trap() {
+  local rc=$?
+  # A check that already failed/aborted with a non-zero status keeps that status
+  # (don't mask a `set -e` abort with a smaller ASSERT_FAIL). Only when the check
+  # body completed "successfully" (rc=0) do we surface any recorded assert fails.
+  if [ "${rc}" -eq 0 ] && [ "${ASSERT_FAIL}" -ne 0 ]; then
+    echo "::error::check recorded ${ASSERT_FAIL} assertion failure(s) — exiting non-zero (lib.sh assert-trap)" >&2
+    exit "${ASSERT_FAIL}"
+  fi
+  exit "${rc}"
+}
+if [ "${ASSERT_LIB_NO_TRAP:-0}" != "1" ]; then
+  trap _assert_exit_trap EXIT
+fi
 
 # --- in-pod exec (pipe-safe) ------------------------------------------------
 # run_in_pod <namespace> <pod> -- <cmd...>
