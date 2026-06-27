@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditChainCheckpoint, AuditLog
@@ -98,22 +98,63 @@ async def _entries_after(session: AsyncSession, after_seq: int | None) -> list[A
 
     ``seq`` is NULLABLE through the W4 expand phase (migration 0011, round-3 #01/#02):
     a NULL-``seq`` row is an OLD-writer / pre-chain row (an old pod that inserted
-    during an N→N+1 rolling deploy without assigning ``seq``). Such a row also carries
-    the genesis ``entry_hash`` default, so it is already untrusted pre-chain history —
-    the verifier flags it like any genesis-hash row. To keep ordering DETERMINISTIC in
-    the presence of NULLs, sort ``seq`` ASC NULLS LAST, then ``created_at, id`` (so
-    NULL-``seq`` old-writer rows sort to the END in a stable, reproducible order and
-    can never reorder the chained tail or crash the walk). The keyset filter
-    ``seq > after_seq`` is SQL three-valued: a NULL ``seq`` is never ``> after_seq``,
-    so an incremental resume past a real (non-NULL) checkpoint silently excludes
-    NULL-``seq`` rows — correct, as those are pre-chain history below the watermark.
+    during an N→N+1 rolling deploy without assigning ``seq``). Such rows are NOT part
+    of the verifiable chain (they have no chain position and carry the genesis
+    ``entry_hash`` default), so the walk EXCLUDES them with an explicit
+    ``seq IS NOT NULL`` filter (round-4 #01). This is load-bearing on the FULL-scan
+    path: without it, a legitimate NULL-``seq`` old-writer row would be walked (it
+    sorts after the real chain) and its genesis ``prev_hash`` would FALSE-break the
+    chain as a ``prev_hash_mismatch``. NULL-``seq`` rows are not silently dropped —
+    they are counted and surfaced separately by :func:`count_pre_chain_rows` (the job
+    logs the count and FAILS LOUD on any *suspicious* NULL-``seq`` row, i.e. one whose
+    ``entry_hash`` is not the genesis default), so real legacy corruption can never
+    hide behind the pre-chain classification. Ordering by ``seq`` ASC is now over
+    non-NULL values only; the ``created_at, id`` tiebreak is retained defensively
+    (``seq`` is unique, so it is not relied upon).
     """
-    stmt = select(AuditLog).order_by(
-        AuditLog.seq.asc().nulls_last(), AuditLog.created_at.asc(), AuditLog.id.asc()
+    stmt = (
+        select(AuditLog)
+        .where(AuditLog.seq.is_not(None))
+        .order_by(AuditLog.seq.asc(), AuditLog.created_at.asc(), AuditLog.id.asc())
     )
     if after_seq is not None:
         stmt = stmt.where(AuditLog.seq > after_seq)
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def count_pre_chain_rows(session: AsyncSession) -> tuple[int, int]:
+    """Count NULL-``seq`` (pre-chain) audit rows, and how many are SUSPICIOUS.
+
+    Returns ``(total, suspicious)``:
+
+    * ``total`` — rows with ``seq IS NULL``. Through the W4 expand phase these are
+      EXPECTED only transiently: old (pre-W4) pods that inserted audit rows during an
+      N→N+1 rolling deploy before ``seq`` became NOT NULL (a later contract
+      migration). They are pre-chain history (genesis ``entry_hash``), excluded from
+      the chain walk (:func:`_entries_after`).
+    * ``suspicious`` — pre-chain rows whose ``entry_hash`` is NOT the genesis default.
+      A genuine old-writer row carries the genesis seed; a NULL-``seq`` row with a
+      real-looking hash means ``seq`` was likely NULLED by tampering (legacy
+      corruption). This must NEVER be hidden by the pre-chain classification — the job
+      treats ``suspicious > 0`` as a loud failure (ADR-0038 §4, fail toward
+      false-positive).
+
+    Outside a known rolling-deploy window ANY ``total > 0`` warrants investigation;
+    the verify job logs the count explicitly so it is visible, never silent.
+    """
+    total = (
+        await session.execute(
+            select(func.count()).select_from(AuditLog).where(AuditLog.seq.is_(None))
+        )
+    ).scalar_one()
+    suspicious = (
+        await session.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.seq.is_(None), AuditLog.entry_hash != GENESIS_HASH)
+        )
+    ).scalar_one()
+    return int(total), int(suspicious)
 
 
 def _recompute_or_break(

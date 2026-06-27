@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db import create_engine, create_sessionmaker
-from app.services.audit.verify import VerifyResult, verify_chain
+from app.services.audit.verify import VerifyResult, count_pre_chain_rows, verify_chain
 
 _logger = get_logger(__name__)
 
@@ -67,15 +67,24 @@ def _env_full_scan() -> bool:
     return os.environ.get(_FULL_SCAN_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def render_metrics(result: VerifyResult) -> str:
+def render_metrics(
+    result: VerifyResult, *, pre_chain_rows: int = 0, pre_chain_suspicious: int = 0
+) -> str:
     """Render *result* as node_exporter textfile-format Prometheus metrics.
 
-    Three series, each with HELP/TYPE headers (ADR-0015): ``audit_chain_verified``
-    (1 clean / 0 break — the gate signal), ``audit_chain_last_verified_position``
-    (the verified head index), and ``audit_chain_checked_total`` (entries walked
-    this pass). Values only — no labels carry secret/digest material.
+    Series, each with HELP/TYPE headers (ADR-0015): ``audit_chain_verified``
+    (1 clean / 0 break-or-suspicious — the gate signal), ``audit_chain_last_verified_position``
+    (the verified head index), ``audit_chain_checked_total`` (entries walked this
+    pass), ``audit_chain_pre_chain_rows`` (NULL-``seq`` pre-chain rows — expected only
+    transiently during a rolling deploy) and ``audit_chain_pre_chain_suspicious``
+    (pre-chain rows with a non-genesis hash = likely tampering, round-4 #01). Values
+    only — no labels carry secret/digest material.
+
+    ``audit_chain_verified`` is 1 ONLY when the chain is clean AND there are no
+    suspicious pre-chain rows: a NULL-``seq`` row with a real hash must drag the gate
+    to 0 so legacy corruption cannot hide behind the pre-chain classification.
     """
-    verified = 1 if result.ok else 0
+    verified = 1 if (result.ok and pre_chain_suspicious == 0) else 0
     help_verified = (
         "# HELP audit_chain_verified 1 when the audit_log hash chain verified "
         "clean on the last run, 0 on a detected break (ADR-0038 4)."
@@ -87,6 +96,14 @@ def render_metrics(result: VerifyResult) -> str:
     help_checked = (
         "# HELP audit_chain_checked_total Audit entries recomputed in the last verification pass."
     )
+    help_pre_chain = (
+        "# HELP audit_chain_pre_chain_rows NULL-seq pre-chain audit rows (expected "
+        "only transiently during a rolling deploy; ADR-0038 4 / round-4 #01)."
+    )
+    help_pre_chain_suspicious = (
+        "# HELP audit_chain_pre_chain_suspicious Pre-chain rows with a non-genesis "
+        "entry_hash — likely tampering; drives audit_chain_verified to 0."
+    )
     lines = [
         help_verified,
         "# TYPE audit_chain_verified gauge",
@@ -97,11 +114,23 @@ def render_metrics(result: VerifyResult) -> str:
         help_checked,
         "# TYPE audit_chain_checked_total gauge",
         f"audit_chain_checked_total {result.checked}",
+        help_pre_chain,
+        "# TYPE audit_chain_pre_chain_rows gauge",
+        f"audit_chain_pre_chain_rows {pre_chain_rows}",
+        help_pre_chain_suspicious,
+        "# TYPE audit_chain_pre_chain_suspicious gauge",
+        f"audit_chain_pre_chain_suspicious {pre_chain_suspicious}",
     ]
     return "\n".join(lines) + "\n"
 
 
-def write_metrics(result: VerifyResult, *, textfile_dir: Path) -> Path:
+def write_metrics(
+    result: VerifyResult,
+    *,
+    textfile_dir: Path,
+    pre_chain_rows: int = 0,
+    pre_chain_suspicious: int = 0,
+) -> Path:
     """Atomically write the textfile metric to *textfile_dir* and return its path.
 
     Writes to a temp file in the same dir then ``os.replace`` to the final name so
@@ -110,7 +139,9 @@ def write_metrics(result: VerifyResult, *, textfile_dir: Path) -> Path:
     """
     textfile_dir.mkdir(parents=True, exist_ok=True)
     target = textfile_dir / _METRIC_FILENAME
-    body = render_metrics(result)
+    body = render_metrics(
+        result, pre_chain_rows=pre_chain_rows, pre_chain_suspicious=pre_chain_suspicious
+    )
     fd, tmp_name = tempfile.mkstemp(dir=textfile_dir, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -123,14 +154,23 @@ def write_metrics(result: VerifyResult, *, textfile_dir: Path) -> Path:
     return target
 
 
-def _emit_log(result: VerifyResult) -> None:
-    """Print one structured ``AUDIT_CHAIN_VERIFY ...`` line for log-based alerting."""
-    outcome = "PASS" if result.ok else "FAIL"
+def _emit_log(result: VerifyResult, *, pre_chain_rows: int, pre_chain_suspicious: int) -> None:
+    """Print one structured ``AUDIT_CHAIN_VERIFY ...`` line for log-based alerting.
+
+    OUTCOME is PASS only when the chain is clean AND no pre-chain row is suspicious
+    (round-4 #01): a NULL-``seq`` row with a non-genesis hash is surfaced here, never
+    hidden. ``pre_chain``/``pre_chain_suspicious`` are always emitted so an operator
+    sees the pre-chain count even on an otherwise-clean run.
+    """
+    healthy = result.ok and pre_chain_suspicious == 0
+    outcome = "PASS" if healthy else "FAIL"
     fields = [
         f"OUTCOME={outcome}",
         f"checked={result.checked}",
         f"head_position={result.head_position}",
         f"head_entry_id={result.head_entry_id or '-'}",
+        f"pre_chain={pre_chain_rows}",
+        f"pre_chain_suspicious={pre_chain_suspicious}",
     ]
     if result.break_ is not None:
         b = result.break_
@@ -174,23 +214,35 @@ async def run(
     """
     async with sessionmaker() as session:
         result = await verify_chain(session, advance_checkpoint=True, full=full)
+        # Pre-chain accounting (round-4 #01) — read in-session, BEFORE the commit/
+        # rollback decision, so NULL-seq rows are surfaced explicitly and a suspicious
+        # one (non-genesis hash = likely tampering) is never hidden by the pre-chain
+        # classification.
+        pre_chain_rows, pre_chain_suspicious = await count_pre_chain_rows(session)
         if result.ok:
             await session.commit()
         else:
             await session.rollback()
 
+    # Overall health: the chain must be clean AND no pre-chain row may be suspicious
+    # (a NULL-seq row with a real hash is anomalous — fail toward false-positive,
+    # ADR-0038 §4). A benign rolling-window old-writer row (genesis hash) is logged
+    # but does not fail the gate.
+    healthy = result.ok and pre_chain_suspicious == 0
+
     # A8: emit the alert log line + decide the exit code FIRST, so a metric-write
     # failure below can never swallow the alert signal or the non-zero exit.
-    _emit_log(result)
+    _emit_log(result, pre_chain_rows=pre_chain_rows, pre_chain_suspicious=pre_chain_suspicious)
     if result.ok:
         _logger.info(
             "audit.chain.verified",
             checked=result.checked,
             head_position=result.head_position,
             head_entry_id=result.head_entry_id,
+            pre_chain_rows=pre_chain_rows,
+            pre_chain_suspicious=pre_chain_suspicious,
             full=full,
         )
-        exit_code = 0
     else:
         assert result.break_ is not None  # ok is False ⇒ a break was recorded
         _logger.error(
@@ -198,14 +250,33 @@ async def run(
             break_position=result.break_.position,
             break_entry_id=result.break_.entry_id,
             break_reason=result.break_.reason,
+            pre_chain_rows=pre_chain_rows,
+            pre_chain_suspicious=pre_chain_suspicious,
             full=full,
         )
-        exit_code = 1
+    # Pre-chain rows are EXPLICIT, never silent: a suspicious one is a loud ERROR (it
+    # also drags the exit code + the audit_chain_verified metric to failing); a benign
+    # transient count is a WARNING so an operator still sees it outside a known window.
+    if pre_chain_suspicious > 0:
+        _logger.error(
+            "audit.chain.pre_chain_suspicious",
+            pre_chain_rows=pre_chain_rows,
+            pre_chain_suspicious=pre_chain_suspicious,
+        )
+    elif pre_chain_rows > 0:
+        _logger.warning("audit.chain.pre_chain_present", pre_chain_rows=pre_chain_rows)
+
+    exit_code = 0 if healthy else 1
 
     # The metric is a secondary signal (ADR-0015); writing it is best-effort so a
     # textfile-dir failure does not mask the primary log alert / exit code (A8).
     try:
-        write_metrics(result, textfile_dir=textfile_dir)
+        write_metrics(
+            result,
+            textfile_dir=textfile_dir,
+            pre_chain_rows=pre_chain_rows,
+            pre_chain_suspicious=pre_chain_suspicious,
+        )
     except OSError:
         _logger.error("audit.chain.metric_write_failed", exc_info=True)
 

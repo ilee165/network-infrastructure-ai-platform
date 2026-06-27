@@ -10,17 +10,46 @@ the injected dir (the no-pushgateway pattern, ADR-0015).
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from app.models import AuditChainCheckpoint, AuditLog
+from app.models.mixins import utcnow
 from app.services.audit import service as audit_service
 from app.services.audit import verify_job
-from app.services.audit.verify import VerifyResult
+from app.services.audit.chain import GENESIS_HASH, HASH_LEN
+from app.services.audit.verify import VerifyResult, count_pre_chain_rows
+
+
+async def _insert_pre_chain_row(maker: async_sessionmaker, *, entry_hash: bytes) -> None:
+    """Core-INSERT a NULL-``seq`` audit row (simulates an old pre-W4 writer).
+
+    Uses a core insert with an explicit ``seq=None`` so the ORM's app-side
+    ``_next_seq`` default is bypassed — exactly what an old (pre-``seq``) pod would
+    write during a rolling deploy. ``entry_hash`` is GENESIS for a benign old-writer
+    row, or a non-genesis digest for the SUSPICIOUS (likely-tampered) case.
+    """
+    async with maker() as session:
+        await session.execute(
+            insert(AuditLog).values(
+                id=uuid.uuid4(),
+                created_at=utcnow(),
+                seq=None,
+                actor="legacy:old-writer",
+                action=audit_service.DEVICE_UPDATED,
+                target_type="device",
+                target_id="legacy",
+                detail=None,
+                prev_hash=GENESIS_HASH,
+                entry_hash=entry_hash,
+            )
+        )
+        await session.commit()
 
 
 async def _seed(maker: async_sessionmaker, n: int) -> list[AuditLog]:
@@ -200,3 +229,107 @@ async def test_main_reads_full_scan_env_flag(monkeypatch: pytest.MonkeyPatch) ->
     for falsy in ("0", "false", "no", "", "off"):
         monkeypatch.setenv(verify_job._FULL_SCAN_ENV, falsy)
         assert verify_job._env_full_scan() is False
+
+
+# ---------------------------------------------------------------------------
+# round-4 #01 — NULL-`seq` (pre-chain) handling: no crash, no false break,
+# explicit + logged, fail-loud on a suspicious (non-genesis) pre-chain row.
+# ---------------------------------------------------------------------------
+
+_NON_GENESIS_HASH = bytes(range(1, HASH_LEN + 1))  # 32 non-zero bytes ≠ GENESIS
+
+
+async def test_current_chain_head_ignores_lone_null_seq_row(engine: AsyncEngine) -> None:
+    """A NULL-`seq` row is never selected as the chain head (round-4 #01 bite).
+
+    With only a NULL-`seq` old-writer row present, the OLD head read
+    (``ORDER BY seq DESC LIMIT 1`` with no filter) returns THAT row and then does
+    ``int(None) + 1`` — a crash that blocks every new append (and on PostgreSQL the
+    NULL sorts FIRST even when real rows exist). The ``seq IS NOT NULL`` filter makes
+    the head read seed the chain at ``(GENESIS, 1)`` instead.
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    await _insert_pre_chain_row(maker, entry_hash=GENESIS_HASH)
+
+    async with maker() as session:
+        prev_hash, next_seq = await audit_service._current_chain_head(session)
+
+    assert prev_hash == GENESIS_HASH
+    assert next_seq == 1
+
+
+async def test_current_chain_head_uses_greatest_real_seq(engine: AsyncEngine) -> None:
+    """The head is the greatest REAL-`seq` row, ignoring any NULL-`seq` pre-chain rows."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    entries = await _seed(maker, 3)  # seq 1,2,3
+    await _insert_pre_chain_row(maker, entry_hash=GENESIS_HASH)
+
+    async with maker() as session:
+        prev_hash, next_seq = await audit_service._current_chain_head(session)
+
+    assert prev_hash == entries[-1].entry_hash
+    assert next_seq == 4
+
+
+async def test_count_pre_chain_rows_classifies_genesis_vs_suspicious(engine: AsyncEngine) -> None:
+    """count_pre_chain_rows: total NULL-`seq` rows + how many are non-genesis (suspicious)."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    await _seed(maker, 2)  # real chain rows — not counted
+    await _insert_pre_chain_row(maker, entry_hash=GENESIS_HASH)  # benign old-writer
+    await _insert_pre_chain_row(maker, entry_hash=_NON_GENESIS_HASH)  # suspicious
+
+    async with maker() as session:
+        total, suspicious = await count_pre_chain_rows(session)
+
+    assert total == 2
+    assert suspicious == 1
+
+
+async def test_benign_pre_chain_row_is_logged_but_passes(
+    engine: AsyncEngine, tmp_path: Path, capsys: Any
+) -> None:
+    """A genesis NULL-`seq` old-writer row does NOT false-break and does NOT fail the gate.
+
+    The clean chain still verifies; the pre-chain row is surfaced explicitly (count in
+    the log line + metric) but, being a benign genesis-hash old-writer row, keeps
+    exit 0 and ``audit_chain_verified 1``.
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    await _seed(maker, 4)
+    await _insert_pre_chain_row(maker, entry_hash=GENESIS_HASH)
+
+    code = await verify_job.run(sessionmaker=maker, textfile_dir=tmp_path)
+
+    assert code == 0  # benign pre-chain row does not fail the gate
+    out = capsys.readouterr().out
+    assert "OUTCOME=PASS" in out
+    assert "pre_chain=1" in out
+    assert "pre_chain_suspicious=0" in out
+    metric = (tmp_path / "audit_chain_verify.prom").read_text(encoding="utf-8")
+    assert "audit_chain_verified 1" in metric
+    assert "audit_chain_pre_chain_rows 1" in metric
+    assert "audit_chain_pre_chain_suspicious 0" in metric
+
+
+async def test_suspicious_pre_chain_row_fails_loud(
+    engine: AsyncEngine, tmp_path: Path, capsys: Any
+) -> None:
+    """A NULL-`seq` row with a non-genesis hash (likely tampering) FAILS the job (round-4 #01).
+
+    Real legacy corruption must never hide behind the pre-chain classification: a
+    suspicious pre-chain row drags exit to 1 and ``audit_chain_verified`` to 0 even
+    though the real chain itself is clean.
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    await _seed(maker, 4)
+    await _insert_pre_chain_row(maker, entry_hash=_NON_GENESIS_HASH)
+
+    code = await verify_job.run(sessionmaker=maker, textfile_dir=tmp_path)
+
+    assert code == 1  # fail-loud: legacy corruption is not hidden
+    out = capsys.readouterr().out
+    assert "OUTCOME=FAIL" in out
+    assert "pre_chain_suspicious=1" in out
+    metric = (tmp_path / "audit_chain_verify.prom").read_text(encoding="utf-8")
+    assert "audit_chain_verified 0" in metric
+    assert "audit_chain_pre_chain_suspicious 1" in metric

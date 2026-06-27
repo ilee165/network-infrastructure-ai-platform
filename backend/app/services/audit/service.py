@@ -340,9 +340,21 @@ async def _current_chain_head(session: AsyncSession) -> tuple[bytes, int]:
         )
     # Read the head row UNDER the lock: its entry_hash is the new prev_hash and its
     # seq drives MAX(seq)+1. One ordered read serves both (the greatest-seq row).
+    #
+    # `seq IS NOT NULL` is LOAD-BEARING (round-4 #01): `seq` is NULLABLE through the
+    # W4 expand phase, and a NULL-seq old-writer row is pre-chain (never a chain
+    # link). Without the filter, PostgreSQL's `ORDER BY seq DESC` sorts NULLs FIRST,
+    # so a NULL-seq row would be picked as the head → `int(None) + 1` crashes EVERY
+    # new append during the rolling-deploy window (and would link prev_hash to a
+    # pre-chain row). The filter makes the head read deterministic on BOTH backends
+    # (SQLite sorts NULLs differently in DESC) — the chain head is always the
+    # greatest REAL seq; an empty / all-NULL log seeds the first real entry at 1.
     head_row = (
         await session.execute(
-            select(AuditLog.entry_hash, AuditLog.seq).order_by(AuditLog.seq.desc()).limit(1)
+            select(AuditLog.entry_hash, AuditLog.seq)
+            .where(AuditLog.seq.is_not(None))
+            .order_by(AuditLog.seq.desc())
+            .limit(1)
         )
     ).first()
     if head_row is None:

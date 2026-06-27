@@ -37,7 +37,7 @@ from sqlalchemy.pool import NullPool
 from app.models import AuditChainCheckpoint, AuditLog, Base
 from app.services.audit import chain
 from app.services.audit import service as audit_service
-from app.services.audit.verify import verify_chain
+from app.services.audit.verify import count_pre_chain_rows, verify_chain
 
 
 async def _seed_chain(session: AsyncSession, n: int) -> list[AuditLog]:
@@ -591,10 +591,12 @@ async def test_old_writer_null_seq_insert_succeeds_and_verifier_is_deterministic
     assign the app-side ``seq`` — does not hit a NOT NULL violation. Simulate that old
     writer with a raw INSERT that omits ``seq`` (the column default is bypassed via an
     explicit ``seq=None``), carrying the genesis ``entry_hash`` it would have (pre-W4
-    rows are pre-chain). The insert must SUCCEED against the 0011 schema, and
-    :func:`verify_chain` must walk DETERMINISTICALLY (``ORDER BY seq NULLS LAST,
-    created_at, id``) without crashing — the NULL-``seq`` genesis row is flagged like
-    any pre-chain/genesis-hash row, never an uncaught error.
+    rows are pre-chain). The insert must SUCCEED against the 0011 schema. Round-4 #01:
+    :func:`verify_chain` EXCLUDES NULL-``seq`` rows from the chain walk
+    (``seq IS NOT NULL``), so a legitimate genesis-hash old-writer row no longer
+    FALSE-breaks the real chain; it is surfaced separately as benign pre-chain by
+    :func:`count_pre_chain_rows` (genesis hash -> not suspicious). The real chain
+    verifies clean and deterministically.
     """
     from datetime import UTC, datetime
 
@@ -635,12 +637,19 @@ async def test_old_writer_null_seq_insert_succeeds_and_verifier_is_deterministic
     # The verifier orders NULLS LAST and must not crash; the genesis-hash NULL-seq row
     # is untrusted pre-chain history → a break (entry_hash != recompute), deterministic
     # across runs. The point is: no exception, and the same loud result every pass.
+    # round-4 #01: the verifier EXCLUDES NULL-seq pre-chain rows from the chain walk,
+    # so a legitimate genesis-hash old-writer row no longer FALSE-breaks the real
+    # chain. The one real appended row verifies clean and deterministically; the
+    # NULL-seq row is surfaced separately as benign pre-chain (genesis hash → total=1,
+    # suspicious=0), never an uncaught error and never a false break.
     first = await verify_chain(session)
     second = await verify_chain(session)
     assert first == second, "verifier must be deterministic with a NULL-seq row present"
-    assert first.ok is False, "the genesis-hash NULL-seq old-writer row is flagged"
-    assert first.break_ is not None
-    assert first.break_.entry_id == str(old_id)
+    assert first.ok is True, "a benign genesis NULL-seq old-writer row must NOT false-break"
+    assert first.break_ is None
+
+    total, suspicious = await count_pre_chain_rows(session)
+    assert (total, suspicious) == (1, 0), "NULL-seq genesis row counted as benign pre-chain"
 
 
 async def test_equal_created_at_rows_verify_clean_by_seq(session: AsyncSession) -> None:
