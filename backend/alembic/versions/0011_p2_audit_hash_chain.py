@@ -29,12 +29,19 @@ Makes the append-only ``audit_log`` TAMPER-EVIDENT (ADR-0038, PRODUCTION.md §5)
 - ``audit_log`` gains ``seq`` — a ``BIGINT NOT NULL`` monotonic append-order key
   (ADR-0038 §3, W4-T1 A4). The chain is ORDERED by ``seq`` (not ``(created_at,
   id)``, whose random-UUID tiebreak could invert two equal-``created_at`` rows and
-  false-alarm the verifier). On PostgreSQL the value is drawn from a single shared
-  ``audit_log_seq`` sequence (``server_default = nextval``) on every INSERT into
-  ANY range partition, so ``seq`` is globally monotonic across partitions; on
-  SQLite (the unit-test backend, no sequences) the application writer assigns
-  ``MAX(seq)+1`` under its serialised head read, and the column carries a constant
-  ``0`` backfill default for the rare migration-of-a-non-empty-table case.
+  false-alarm the verifier). ``seq`` is APP-ASSIGNED: the writer reads
+  ``MAX(seq)+1`` under the append advisory lock and sets it BEFORE the insert, so it
+  participates in the canonical hash (a tampered ``seq`` then breaks the chain, PR
+  #76 round-2 #5) and there is NO volatile DB ``nextval`` default (which would force
+  a full table REWRITE + long lock on add, PR #76 round-2 #1). The migration adds
+  the column NULLABLE, backfills existing rows deterministically in ``(created_at,
+  id)`` append order, then sets NOT NULL — expand/contract-safe, no rewrite. The
+  ``seq`` index is built WITHOUT a long blocking lock on the partitioned parent:
+  created on ONLY the parent, then each child-partition index is built CONCURRENTLY
+  and ATTACHed (PR #76 round-2 #2). A global UNIQUE constraint on the partitioned
+  parent would have to fold in the partition key, so ``seq`` uniqueness rests on the
+  app-under-lock assignment (PR #76 round-2 #4); on SQLite (the unit-test backend)
+  the index is a real UNIQUE index that additionally proves no duplicate is produced.
 
 - ``audit_chain_checkpoint`` — a single-row table holding the
   ``(entry_id, entry_created_at, entry_hash)`` of the last verified-clean entry so
@@ -74,10 +81,22 @@ _GENESIS = b"\x00" * 32
 #: ``app.models.audit.AuditChainCheckpoint.SINGLETON_ID`` (inlined per D4).
 _CHECKPOINT_SINGLETON_ID = "00000000-0000-0000-0000-0000000a0d38"
 
-#: Name of the shared sequence backing the monotonic ``seq`` append-order column
-#: (W4-T1 A4). INLINED here (D4 — migrations never import models); pinned equal to
-#: ``app.models.audit._SEQ_SEQUENCE_NAME`` by test.
-_SEQ_SEQUENCE_NAME = "audit_log_seq"
+#: Name of the index on the monotonic ``seq`` append-order column (W4-T1 A4; PR #76
+#: round-2 #4). INLINED here (D4 — migrations never import models); pinned equal to
+#: ``app.models.audit._SEQ_UNIQUE_INDEX_NAME`` by test. On SQLite (the unit-test
+#: backend) it is a real UNIQUE index (``Base.metadata`` builds it that way and the
+#: round-trip exercises it); on the partitioned PostgreSQL parent a global UNIQUE
+#: cannot be enforced without folding the partition key into the constraint, so this
+#: is the read-path / ORDER-BY index there and uniqueness of ``seq`` rests on the
+#: writer's ``MAX(seq)+1`` assignment under the append advisory lock (#3).
+_SEQ_INDEX_NAME = "uq_audit_log_seq"
+
+#: Partition suffixes of the ``audit_log`` range-partitioned parent (mirrors
+#: migration 0001 ``_PARTITION_WINDOWS`` + the DEFAULT partition; INLINED per D4).
+#: Used ONLY to build the ``seq`` index CONCURRENTLY per child partition so the
+#: upgrade never takes a long blocking index lock across the partitions (PR #76
+#: round-2 #2). Pinned equal to migration 0001's set by test.
+_AUDIT_LOG_PARTITION_SUFFIXES: tuple[str, ...] = ("2026_06", "2026_07", "default")
 
 
 def _is_postgresql() -> bool:
@@ -117,22 +136,57 @@ def upgrade() -> None:
         sa.Column("entry_hash", sa.LargeBinary(length=32), nullable=False, server_default=default),
     )
 
-    # The monotonic append-order column ``seq`` (W4-T1 A4). On PostgreSQL a single
-    # shared sequence is the server_default (``nextval``), drawn from on every
-    # INSERT into ANY range partition so ``seq`` is globally monotonic across
-    # partitions; on SQLite (no sequences) the application writer assigns
-    # ``MAX(seq)+1`` and the column carries a constant ``0`` backfill default for
-    # the rare non-empty-table migration. NOT NULL + expand-safe in both backends.
+    # The monotonic append-order column ``seq`` (W4-T1 A4). It is APP-ASSIGNED: the
+    # audit writer reads ``MAX(seq)+1`` under the append advisory lock and sets
+    # ``seq`` BEFORE the insert (so it participates in the canonical hash, PR #76
+    # round-2 #5). The migration adds NO volatile DB ``nextval`` default — that would
+    # force a full table REWRITE + long lock on a large PostgreSQL audit_log (PR #76
+    # round-2 #1).
     if _is_postgresql():
-        op.execute(sa.text(f"CREATE SEQUENCE IF NOT EXISTS {_SEQ_SEQUENCE_NAME}"))
-        seq_default: sa.TextClause = sa.text(f"nextval('{_SEQ_SEQUENCE_NAME}'::regclass)")
+        # Expand/contract-safe add (no rewrite, PR #76 round-2 #1): add the column
+        # NULLABLE (metadata-only), backfill existing rows DETERMINISTICALLY in
+        # append order (``created_at, id``) via ROW_NUMBER, THEN set NOT NULL. Old
+        # (pre-W4) pods writing during an N→N+1 rolling window do not set ``seq``;
+        # while NULLABLE their inserts succeed, and NOT NULL is set only after the
+        # backfill — a contract a later deploy relies on once no pre-W4 pod can write.
+        op.add_column("audit_log", sa.Column("seq", sa.BigInteger(), nullable=True))
+        op.execute(
+            sa.text(
+                "UPDATE audit_log AS a SET seq = s.rn FROM ("
+                "SELECT id, created_at, "
+                "ROW_NUMBER() OVER (ORDER BY created_at, id) AS rn FROM audit_log"
+                ") AS s WHERE a.id = s.id AND a.created_at = s.created_at"
+            )
+        )
+        op.alter_column("audit_log", "seq", existing_type=sa.BigInteger(), nullable=False)
+
+        # The ``seq`` index on the range-partitioned parent, built WITHOUT a long
+        # blocking lock (PR #76 round-2 #2): create it on ONLY the parent (brief
+        # catalog lock, no scan), then build each child-partition index CONCURRENTLY
+        # (no insert-blocking lock) and ATTACH it. CREATE INDEX CONCURRENTLY cannot
+        # run inside a transaction, so the per-partition builds run in an
+        # ``autocommit_block``. A global UNIQUE on the partitioned parent would have
+        # to fold in the partition key, so this is the read/ORDER-BY index and
+        # ``seq`` uniqueness rests on the app-under-lock assignment (PR #76 round-2 #4).
+        op.execute(sa.text(f"CREATE INDEX {_SEQ_INDEX_NAME} ON ONLY audit_log (seq)"))
+        with op.get_context().autocommit_block():
+            for suffix in _AUDIT_LOG_PARTITION_SUFFIXES:
+                child = f"audit_log_{suffix}"
+                child_index = f"{_SEQ_INDEX_NAME}_{suffix}"
+                op.execute(sa.text(f"CREATE INDEX CONCURRENTLY {child_index} ON {child} (seq)"))
+                op.execute(sa.text(f"ALTER INDEX {_SEQ_INDEX_NAME} ATTACH PARTITION {child_index}"))
     else:
-        seq_default = sa.text("0")
-    op.add_column(
-        "audit_log",
-        sa.Column("seq", sa.BigInteger(), nullable=False, server_default=seq_default),
-    )
-    op.create_index("ix_audit_log_seq", "audit_log", ["seq"])
+        # SQLite (unit-test backend): no rewrite-lock concern and no partitions, so
+        # add the column NOT NULL directly with a constant ``0`` backfill default
+        # (SQLite cannot ALTER COLUMN ... SET NOT NULL after the fact). The writer
+        # always assigns the real ``seq``; the default only satisfies NOT NULL for
+        # any raw insert. A real UNIQUE index additionally proves the writer never
+        # produces a duplicate ``seq`` (no CONCURRENTLY — SQLite serialises anyway).
+        op.add_column(
+            "audit_log",
+            sa.Column("seq", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
+        )
+        op.create_index(_SEQ_INDEX_NAME, "audit_log", ["seq"], unique=True)
 
     # The verified-clean watermark (ADR-0038 §4): a single-row table the daily job
     # advances over verified-clean segments and resumes the recompute from.
@@ -154,9 +208,11 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("audit_chain_checkpoint")
-    op.drop_index("ix_audit_log_seq", table_name="audit_log")
+    # Dropping the partitioned-parent index cascades to the attached child indexes;
+    # the column drop then removes the ``seq`` column. No sequence to drop — the
+    # append-order key is app-assigned, so no DB sequence was ever created (PR #76
+    # round-2 #1).
+    op.drop_index(_SEQ_INDEX_NAME, table_name="audit_log")
     op.drop_column("audit_log", "seq")
-    if _is_postgresql():
-        op.execute(sa.text(f"DROP SEQUENCE IF EXISTS {_SEQ_SEQUENCE_NAME}"))
     op.drop_column("audit_log", "entry_hash")
     op.drop_column("audit_log", "prev_hash")

@@ -202,14 +202,21 @@ async def test_audit_log_links_to_reasoning_trace(session: AsyncSession) -> None
     session.add(trace)
     await session.flush()
 
+    # ``seq`` is supplied explicitly (distinct values): it is UNIQUE (PR #76 round-2
+    # #4) and the model's MAX(seq)+1 default cannot disambiguate two rows added in
+    # the SAME batch flush (both read MAX=0 → 1 → clash). The real writer assigns it
+    # under the append advisory lock, one flush per append, so it never collides.
     linked = AuditLog(
+        seq=1,
         actor="agent:troubleshooting",
         action="tool.invoke",
         target_type="device",
         target_id=str(uuid.uuid4()),
         reasoning_trace_id=trace.id,
     )
-    unlinked = AuditLog(actor="admin", action="auth.login", target_type="user", target_id=None)
+    unlinked = AuditLog(
+        seq=2, actor="admin", action="auth.login", target_type="user", target_id=None
+    )
     session.add_all([linked, unlinked])
     await session.commit()
 

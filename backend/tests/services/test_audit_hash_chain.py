@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import event, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -125,9 +126,16 @@ async def test_canonical_created_at_fixed_microsecond_precision() -> None:
 
 
 def test_canonical_field_set_excludes_secret_and_chain_columns() -> None:
-    """The canonical field set is exactly the immutable, secret-free audit columns."""
+    """The canonical field set is exactly the immutable, secret-free audit columns.
+
+    ``seq`` (the append-order key) is INCLUDED (PR #76 round-2 #5): it is the chain's
+    order key and the verifier's incremental keyset boundary, so a tampered ``seq``
+    on a checkpointed row could otherwise silently shift the boundary and SKIP
+    entries. Hashing ``seq`` means a tampered value breaks ``entry_hash`` instead.
+    """
     assert set(chain.CANONICAL_FIELDS) == {
         "id",
+        "seq",
         "created_at",
         "actor",
         "action",
@@ -141,6 +149,36 @@ def test_canonical_field_set_excludes_secret_and_chain_columns() -> None:
     # and no secret-bearing/mutable column may participate.
     forbidden = {"prev_hash", "entry_hash", "ciphertext", "nonce", "wrapped_dek", "password"}
     assert not (set(chain.CANONICAL_FIELDS) & forbidden)
+
+
+async def test_tampered_seq_breaks_entry_hash(session: AsyncSession) -> None:
+    """Mutating a row's ``seq`` (the keyset boundary) is detected (PR #76 round-2 #5).
+
+    ``seq`` is the verifier's incremental keyset boundary (verify.py resumes strictly
+    after the anchor's ``seq``). If ``seq`` did not participate in ``entry_hash`` a
+    privileged actor could mutate it without breaking the hash and silently shift the
+    boundary so the incremental walk skips entries. With ``seq`` hashed, a tampered
+    ``seq`` makes the recompute mismatch the stored ``entry_hash`` — a chain break.
+    """
+    entries = await _seed_chain(session, 4)
+    # Tamper the LAST entry's seq to a larger value: the walk order (ORDER BY seq) is
+    # unchanged so its predecessor link still matches (no prev_hash_mismatch), which
+    # ISOLATES the seq-in-hash check — the recompute now sees the new seq and must
+    # diverge from the stored entry_hash. Use a free value so the unique index (on
+    # SQLite) does not reject the write.
+    target = entries[-1]
+    await session.execute(
+        update(AuditLog)
+        .where(AuditLog.id == target.id, AuditLog.created_at == target.created_at)
+        .values(seq=10_000)
+    )
+    await session.flush()
+
+    result = await verify_chain(session)
+    assert result.ok is False
+    assert result.break_ is not None
+    assert result.break_.entry_id == str(target.id)
+    assert result.break_.reason == "entry_hash_mismatch"
 
 
 async def test_secret_like_column_not_in_canonical_bytes(session: AsyncSession) -> None:
@@ -488,6 +526,50 @@ async def test_seq_is_monotonic_in_append_order(session: AsyncSession) -> None:
     assert len(set(seqs)) == len(seqs)
     # Strictly increasing (no plateau): the head read + assignment never repeats.
     assert all(b > a for a, b in zip(seqs, seqs[1:], strict=False))
+
+
+async def test_seq_is_app_assigned_starting_at_one(session: AsyncSession) -> None:
+    """The writer app-assigns ``seq`` (MAX(seq)+1), starting at 1 (PR #76 round-2 #1).
+
+    ``seq`` must be known BEFORE the insert (it participates in the canonical hash),
+    so the writer assigns it rather than relying on a DB default. The first entry
+    seeds the chain at ``seq == 1`` and each subsequent entry is the previous + 1.
+    """
+    [first] = await _seed_chain(session, 1)
+    assert first.seq == 1
+    [second] = [
+        e
+        for e in await _seed_chain(session, 1)
+        # the just-appended row is the only new one
+    ]
+    assert second.seq == 2
+
+
+async def test_duplicate_seq_is_rejected(session: AsyncSession) -> None:
+    """A duplicate ``seq`` is rejected by the unique index (PR #76 round-2 #4).
+
+    ``seq`` is the chain's order key and the verifier's keyset boundary; a duplicate
+    would make head/verify order ambiguous (a false tamper report). On the unit-test
+    (SQLite) backend the model's UNIQUE index makes a duplicate impossible — proving
+    the constraint exists and bites. (On the partitioned PostgreSQL parent a global
+    UNIQUE folds in the partition key, so uniqueness rests on the writer's
+    MAX(seq)+1 assignment under the append advisory lock — documented in 0011.)
+    """
+    [existing] = await _seed_chain(session, 1)
+    dup = AuditLog(
+        seq=existing.seq,  # collide with an existing seq
+        actor="x",
+        action="y",
+        target_type="t",
+        target_id=None,
+        detail=None,
+        prev_hash=b"\x00" * 32,
+        entry_hash=b"\x11" * 32,
+    )
+    session.add(dup)
+    with pytest.raises(IntegrityError):
+        await session.flush()
+    await session.rollback()
 
 
 async def test_equal_created_at_rows_verify_clean_by_seq(session: AsyncSession) -> None:

@@ -52,8 +52,19 @@ GENESIS_HASH: Final = b"\x00" * HASH_LEN
 #: independently. A test pins this set so no secret-bearing / mutable column can be
 #: folded into the hash silently (ADR-0038 §5). ``created_at`` is rendered as a
 #: fixed-precision RFC 3339 UTC string; everything else is its JSON-native form.
+#:
+#: ``seq`` (the monotonic append-order key, W4-T1 A4) is included BECAUSE it is the
+#: chain's ORDER key AND the verifier's incremental keyset boundary
+#: (``verify.py`` resumes strictly after ``anchor.seq``). If ``seq`` did not
+#: participate in ``entry_hash``, a privileged actor could mutate the ``seq`` of an
+#: already-checkpointed row without breaking its hash — silently shifting the
+#: keyset boundary so the incremental walk SKIPS entries (PR #76 round-2 #5). With
+#: ``seq`` hashed, any tampered ``seq`` breaks ``entry_hash`` and is detected.
+#: ``seq`` is app-assigned BEFORE the insert (under the append advisory lock) so it
+#: is known when the hash is computed (single INSERT, no insert-then-UPDATE).
 CANONICAL_FIELDS: Final = (
     "id",
+    "seq",
     "created_at",
     "actor",
     "action",

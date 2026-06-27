@@ -135,6 +135,14 @@ async def _enforce_scope(
     autonomous commit is sound — mirrors :func:`_audit_provider_unavailable`). When
     it is ``None`` (unit tests asserting on the same session) the row is flushed on
     the caller's session as before — non-durable, but behaviourally correct.
+
+    PR #76 round-2 #7: the structural deny must NOT be downgraded to a DB error.
+    The deny-audit write (record + autonomous commit) is wrapped in try/except so
+    that if it RAISES — the audit DB is also down, a constraint trips, the commit
+    fails — the caller still gets the fail-closed :class:`CredentialScopeError`
+    (a 403), never that DB error (a 500). The lost audit row is logged (ids/coarse
+    reason only, no scope values or secret) but never swallows the deny — mirrors
+    how :func:`_audit_provider_unavailable` preserves its original 503.
     """
     if not credential.is_scoped:
         return
@@ -145,26 +153,39 @@ async def _enforce_scope(
         "reason": reason,
         "device_id": str(target.id) if target is not None else None,
     }
-    if sessionmaker is not None:
-        async with sessionmaker() as audit_session:
+    try:
+        if sessionmaker is not None:
+            async with sessionmaker() as audit_session:
+                await audit.record(
+                    audit_session,
+                    actor=actor,
+                    action=audit.CREDENTIAL_SCOPE_DENIED,
+                    target_type=_TARGET_TYPE,
+                    target_id=str(credential.id),
+                    detail=detail,
+                )
+                await audit_session.commit()
+        else:
             await audit.record(
-                audit_session,
+                session,
                 actor=actor,
                 action=audit.CREDENTIAL_SCOPE_DENIED,
                 target_type=_TARGET_TYPE,
                 target_id=str(credential.id),
                 detail=detail,
             )
-            await audit_session.commit()
-    else:
-        await audit.record(
-            session,
-            actor=actor,
-            action=audit.CREDENTIAL_SCOPE_DENIED,
-            target_type=_TARGET_TYPE,
-            target_id=str(credential.id),
-            detail=detail,
+    except Exception as audit_exc:  # noqa: BLE001 - never mask the structural deny
+        # The deny-audit write failed (audit DB down, constraint trip, commit
+        # error). Preserve the fail-closed 403 the caller must see rather than
+        # letting the audit DB error replace it with a 500. Log ids/coarse reason
+        # only — never the scope values, device attributes, or any secret.
+        _logger.error(
+            "credential.scope_denied.audit_failed",
+            credential_id=str(credential.id),
+            reason=reason,
+            audit_error_class=type(audit_exc).__name__,
         )
+    # ALWAYS raise the structural deny — whether or not the audit write succeeded.
     raise CredentialScopeError(f"credential {credential.id} is not scoped for the requested device")
 
 

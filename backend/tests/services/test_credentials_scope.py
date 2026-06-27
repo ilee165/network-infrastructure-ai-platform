@@ -301,3 +301,50 @@ async def test_scope_deny_audit_survives_caller_rollback(
         # Still ids/coarse-reason only — no scope values leak via the autonomous row.
         assert "nyc" not in str(row.detail)
         assert "lon" not in str(row.detail)
+
+
+# ---------------------------------------------------------------------------
+# PR #76 round-2 #7: a FAILING deny-audit write must NOT downgrade the 403 to a 500
+# ---------------------------------------------------------------------------
+
+
+async def test_scope_deny_still_raises_when_deny_audit_write_fails(
+    session: AsyncSession,
+) -> None:
+    """A failing deny-audit write still raises CredentialScopeError (PR #76 round-2 #7).
+
+    The C6 fix writes the deny audit through an autonomous session that COMMITS
+    before the deny re-raises. If that autonomous write/commit RAISES (audit DB
+    down, constraint trip), the caller must still get the fail-closed
+    CredentialScopeError (403) — never the DB error (a 500). Here the autonomous
+    sessionmaker is rigged to raise on use; the structural deny must survive it.
+    """
+    provider = _provider()
+    credential = await _create(session, provider, scope_site="nyc", name="audit-fails")
+
+    target = _device(mgmt_ip="10.6.6.6", site="lon")  # out of scope
+    session.add(target)
+    await session.flush()
+
+    class _ExplodingSessionmaker:
+        """Stands in for ``async_sessionmaker``; raises the moment it is opened."""
+
+        def __call__(self) -> object:
+            raise RuntimeError("audit DB unavailable")
+
+    with pytest.raises(CredentialScopeError) as excinfo:
+        await vault.decrypt(
+            session,
+            provider,
+            credential,
+            actor="user:mallory",
+            reason="ssh",
+            target=target,
+            sessionmaker=_ExplodingSessionmaker(),  # type: ignore[arg-type]
+        )
+    # The fail-closed 403 family — the audit DB error never replaces it.
+    assert isinstance(excinfo.value, ForbiddenError)
+    assert excinfo.value.status_code == 403
+    # And the boundary values never leak in the surfaced message.
+    assert "nyc" not in str(excinfo.value)
+    assert "lon" not in str(excinfo.value)

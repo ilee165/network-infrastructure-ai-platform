@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
+from app.models.audit import _SEQ_UNIQUE_INDEX_NAME as _SEQ_INDEX_NAME
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
@@ -119,17 +120,45 @@ def test_offline_sql_keeps_genesis_default_for_rolling_deploy() -> None:
 
 
 @pytest.mark.usefixtures("_postgres_dialect_env")
-def test_offline_sql_adds_monotonic_seq_column_and_sequence() -> None:
-    """A monotonic BIGINT ``seq`` column + shared sequence are added (W4-T1 A4)."""
+def test_offline_sql_adds_app_assigned_seq_without_volatile_default() -> None:
+    """``seq`` is added expand-safe (no nextval default, no rewrite) (PR #76 round-2 #1).
+
+    ``seq`` is app-assigned (``MAX(seq)+1`` under the append advisory lock), so the
+    migration must NOT add a DB sequence or a ``nextval`` volatile default — that
+    would force a full table REWRITE + long lock on a large audit_log. The expand
+    pattern is: ADD COLUMN NULLABLE → deterministic backfill → SET NOT NULL.
+    """
     sql = _offline_upgrade_sql()
     lowered = sql.lower()
-    # A dedicated sequence backs the column, drawn from on every INSERT (any
-    # partition) so seq is globally monotonic; the column defaults to nextval.
-    assert "create sequence" in lowered and "audit_log_seq" in lowered
+    # No DB sequence and no volatile nextval default (the round-2 #1 regression).
+    assert "create sequence" not in lowered, "no DB sequence — seq is app-assigned"
+    assert "nextval" not in lowered, "no volatile nextval default (would rewrite the table)"
+    # Expand-safe shape: add nullable, deterministic backfill in append order, then
+    # SET NOT NULL — never an ADD COLUMN ... NOT NULL with a volatile default.
     assert "add column seq bigint" in lowered
-    assert "nextval('audit_log_seq'" in lowered
-    # The column is indexed for the head read (MAX seq) and the verifier ORDER BY.
-    assert "ix_audit_log_seq" in lowered
+    assert "row_number() over (order by created_at, id)" in lowered
+    assert "set not null" in lowered or "alter column seq set not null" in lowered
+
+
+@pytest.mark.usefixtures("_postgres_dialect_env")
+def test_offline_sql_builds_seq_index_concurrently_per_partition() -> None:
+    """The ``seq`` index is built CONCURRENTLY per child partition (PR #76 round-2 #2).
+
+    A non-concurrent index build on the partitioned parent would block audit inserts
+    across all partitions during the upgrade. Instead the index is created on ONLY
+    the parent (brief catalog lock), then each child-partition index is built
+    CONCURRENTLY and ATTACHed — so inserts are never blocked by a long index scan.
+    """
+    sql = _offline_upgrade_sql()
+    lowered = sql.lower()
+    # Parent index created on ONLY the parent (no scan, brief lock), then concurrent
+    # per-partition builds + ATTACH (the non-blocking pattern for a partitioned table).
+    assert f"create index {_SEQ_INDEX_NAME} on only audit_log".lower() in lowered
+    assert "create index concurrently" in lowered
+    assert "attach partition" in lowered
+    # The concurrent builds target the child partitions (2026_06 / 2026_07 / default).
+    assert "audit_log_2026_06" in lowered
+    assert "audit_log_default" in lowered
 
 
 @pytest.mark.usefixtures("_postgres_dialect_env")
@@ -141,18 +170,18 @@ def test_offline_sql_creates_checkpoint_table() -> None:
 
 @pytest.mark.usefixtures("_postgres_dialect_env")
 def test_offline_downgrade_reverses_upgrade() -> None:
-    """The downgrade drops both chain columns and the checkpoint table."""
+    """The downgrade drops both chain columns, the seq column, and the checkpoint table."""
     sql = _offline_sql("downgrade")
     assert "ALTER TABLE audit_log DROP COLUMN entry_hash" in sql
     assert "ALTER TABLE audit_log DROP COLUMN prev_hash" in sql
     assert "ALTER TABLE audit_log DROP COLUMN seq" in sql
     assert "DROP TABLE audit_chain_checkpoint" in sql
-    # The shared sequence is dropped too (clean down, no orphaned object).
-    assert "drop sequence" in sql.lower() and "audit_log_seq" in sql.lower()
+    # No sequence is created on upgrade (seq is app-assigned), so none is dropped.
+    assert "drop sequence" not in sql.lower()
 
 
-def test_migration_seq_sequence_name_pinned_to_model() -> None:
-    """Migration's inlined sequence name equals the model constant (D4 — pinned)."""
+def test_migration_seq_index_name_pinned_to_model() -> None:
+    """Migration's inlined seq-index name equals the model constant (D4 — pinned)."""
     from app.models import audit as audit_model
 
     # The revision file name starts with a digit (``0011_...``), so it is not a
@@ -162,7 +191,26 @@ def test_migration_seq_sequence_name_pinned_to_model() -> None:
     revision = script.get_revision("0011")
     migration_module = revision.module
 
-    assert migration_module._SEQ_SEQUENCE_NAME == audit_model._SEQ_SEQUENCE_NAME == "audit_log_seq"
+    assert (
+        migration_module._SEQ_INDEX_NAME == audit_model._SEQ_UNIQUE_INDEX_NAME == "uq_audit_log_seq"
+    )
+
+
+def test_migration_audit_log_partition_suffixes_pinned_to_0001() -> None:
+    """0011's inlined partition suffixes match migration 0001's windows (D4 — pinned).
+
+    The concurrent per-partition index build (PR #76 round-2 #2) targets each child
+    partition by name; those names must track migration 0001's partition windows so a
+    future partition change can never leave a child unindexed silently.
+    """
+    script = ScriptDirectory.from_config(_alembic_config())
+    mod_0011 = script.get_revision("0011").module
+    mod_0001 = script.get_revision("0001").module
+
+    expected = tuple(suffix for suffix, _lower, _upper in mod_0001._PARTITION_WINDOWS) + (
+        "default",
+    )
+    assert expected == mod_0011._AUDIT_LOG_PARTITION_SUFFIXES
 
 
 # ---------------------------------------------------------------------------

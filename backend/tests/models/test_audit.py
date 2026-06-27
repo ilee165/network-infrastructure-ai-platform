@@ -17,6 +17,12 @@ from app.models import AuditLog
 # hash-chain columns themselves (ADR-0038 §1: prev_hash/entry_hash are NOT NULL —
 # the application writer normally sets them; here a fixed genesis-shaped placeholder
 # keeps the focus on the PK/detail behaviour under test).
+#
+# ``seq`` is also supplied explicitly: it is UNIQUE (PR #76 round-2 #4) and the
+# model's ``_next_seq`` default reads MAX(seq)+1, which cannot disambiguate two rows
+# added in the SAME batch flush (both would read MAX=0 → 1 → unique-index clash).
+# The real writer reads MAX(seq)+1 under the append advisory lock with one flush per
+# append, so it never collides; direct-construct tests pass distinct ``seq`` values.
 _CHAIN = {"prev_hash": b"\x00" * 32, "entry_hash": b"\x11" * 32}
 
 
@@ -69,6 +75,7 @@ async def test_composite_pk_allows_same_id_in_different_partitions(
             AuditLog(
                 id=shared_id,
                 created_at=datetime(2026, 5, 1, tzinfo=UTC),
+                seq=1,
                 actor="a",
                 action="x",
                 target_type="t",
@@ -77,6 +84,7 @@ async def test_composite_pk_allows_same_id_in_different_partitions(
             AuditLog(
                 id=shared_id,
                 created_at=datetime(2026, 6, 1, tzinfo=UTC),
+                seq=2,
                 actor="a",
                 action="x",
                 target_type="t",
