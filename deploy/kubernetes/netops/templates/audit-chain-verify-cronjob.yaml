@@ -93,7 +93,19 @@ spec:
                 - |
                   set -euo pipefail
                   echo "[audit-chain-verify] recomputing audit_log hash chain ({{ .mode }}) (ADR-0038 §4)"
-                  export NETOPS_DATABASE_URL="postgresql+asyncpg://${NETOPS_POSTGRES_USER}:${NETOPS_POSTGRES_PASSWORD}@${NETOPS_POSTGRES_HOST}:${NETOPS_POSTGRES_PORT}/${NETOPS_POSTGRES_DB}"
+                  # cubic #80 (PR#76): PERCENT-ENCODE the user + password before
+                  # assembling the DB URL — an unencoded ':' / '@' / '/' / '%' in a
+                  # credential would otherwise corrupt the DSN (or split the
+                  # authority). Done with python (present on the backend image);
+                  # the encoded values stay in shell locals, never logged.
+                  NETOPS_PG_USER_ENC="$(python -c 'import os,urllib.parse;print(urllib.parse.quote(os.environ["NETOPS_POSTGRES_USER"],safe=""))')"
+                  NETOPS_PG_PASS_ENC="$(python -c 'import os,urllib.parse;print(urllib.parse.quote(os.environ["NETOPS_POSTGRES_PASSWORD"],safe=""))')"
+                  export NETOPS_DATABASE_URL="postgresql+asyncpg://${NETOPS_PG_USER_ENC}:${NETOPS_PG_PASS_ENC}@${NETOPS_POSTGRES_HOST}:${NETOPS_POSTGRES_PORT}/${NETOPS_POSTGRES_DB}"
+                  # mTLS (ADR-0039 §4, A10/PR#76): when mtls.postgres.enabled the
+                  # NETOPS_DB_SSL_* env (below) + the mounted client cert material
+                  # make app.db build the verify-full SSLContext; with the pg_hba
+                  # hostssl-only refusal rule, a plaintext connection would be
+                  # rejected, so this Job MUST present the client cert.
                   mkdir -p "${AUDIT_CHAIN_METRICS_DIR}"
                   # Non-zero exit here (a chain break) FAILS the pod via set -e — the
                   # alert (ADR-0015). A clean pass advances the verified checkpoint.
@@ -148,6 +160,11 @@ spec:
                       name: {{ $fullname }}-dev-secrets
                       {{- end }}
                       key: {{ $ctx.Values.secrets.keys.postgresPassword }}
+                {{- /* A10 (PR#76): the api/worker -> Postgres mTLS CLIENT env so
+                this CronJob presents the verify-full client cert (the same helper
+                the api/worker use), WITHOUT NETOPS_DATABASE_URL (the sh -c script
+                assembles the DSN itself). Renders nothing when mTLS is off. */ -}}
+                {{- include "netops.dbClientTlsSslEnv" $ctx | nindent 16 }}
               resources:
                 {{- toYaml $v.resources | nindent 16 }}
               volumeMounts:
@@ -157,6 +174,8 @@ spec:
                   mountPath: {{ $v.metricsDir }}
                 - name: tmp
                   mountPath: /tmp
+                {{- /* A10: read-only client cert/key + CA mount for mTLS. */ -}}
+                {{- include "netops.dbClientTlsVolumeMount" $ctx | nindent 16 }}
           volumes:
             - name: metrics
               emptyDir:
@@ -164,15 +183,14 @@ spec:
             - name: tmp
               emptyDir:
                 sizeLimit: 64Mi
+            {{- include "netops.dbClientTlsVolume" $ctx | nindent 12 }}
 {{- end -}}
 
 {{- if .Values.audit.chainVerify.enabled }}
 {{- $v := .Values.audit.chainVerify -}}
-{{- /* DAILY incremental verify (resumes after the checkpoint — cheap). */ -}}
+{{- /* DAILY incremental verify (resumes after the checkpoint — cheap). This file
+emits EXACTLY ONE document (helm-lint rejects two YAML docs separated by `---` from
+a single template file, PR#76 lint fix); the WEEKLY FULL scan is its own template
+file (audit-chain-verify-cronjob-full.yaml) re-invoking this same shared define. */ -}}
 {{- include "netops.auditVerifyCronJob" (dict "ctx" . "nameSuffix" "" "schedule" $v.schedule "full" false "mode" "incremental checkpoint -> head") }}
-{{- if $v.fullScan.enabled }}
----
-{{- /* WEEKLY FULL scan (A3): re-walk from genesis to catch a historical tamper. */ -}}
-{{- include "netops.auditVerifyCronJob" (dict "ctx" . "nameSuffix" "-full" "schedule" $v.fullScan.schedule "full" true "mode" "FULL genesis -> head") }}
-{{- end }}
 {{- end }}

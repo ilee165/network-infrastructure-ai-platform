@@ -48,10 +48,30 @@ def build_ssl_connect_args(settings: Settings) -> dict[str, Any]:
         trust anchor must fail closed, never silently downgrade to no-verify), or
         when the client cert/key pair is missing/half-set while a mode is set
         (mutual TLS must present a client cert — fail closed at the client layer,
-        never silently downgrade to one-way server-auth-only TLS).
+        never silently downgrade to one-way server-auth-only TLS), or when TLS cert
+        material is configured but no SSL mode is set (M6 — never silently downgrade
+        a cert-bearing deployment to a plaintext link).
     """
     mode = settings.db_ssl_mode
     if mode is None:
+        # M6 (PR#76): fail closed if TLS cert material is configured but no SSL mode
+        # is set. A missing mode used to silently return {} (plaintext) even when
+        # cert paths were mounted — a misconfiguration that downgrades a deployment
+        # intended to do mTLS to an unencrypted link. When ANY cert path is present,
+        # an explicit db_ssl_mode (NETOPS_DB_SSL_MODE) is REQUIRED — error, never
+        # silently plaintext.
+        if (
+            settings.db_ssl_root_cert is not None
+            or settings.db_ssl_cert is not None
+            or settings.db_ssl_key is not None
+        ):
+            raise ValueError(
+                "DB TLS cert material is configured (NETOPS_DB_SSL_ROOT_CERT / "
+                "NETOPS_DB_SSL_CERT / NETOPS_DB_SSL_KEY) but NETOPS_DB_SSL_MODE is "
+                "unset — refusing to silently fall back to a plaintext DB link; set "
+                "an explicit ssl mode (verify-full) or remove the cert paths "
+                "(ADR-0039 §4, M6/PR#76)"
+            )
         return {}
     if settings.db_ssl_root_cert is None:
         raise ValueError(

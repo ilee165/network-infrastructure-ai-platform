@@ -753,6 +753,27 @@ deny contains msg if {
 	msg := "collector mgmt-egress NetworkPolicy must select the worker/collector pods (podSelector app.kubernetes.io/component=worker; ADR-0041 §1)"
 }
 
+# --- ALLOW-LIST MINIMALITY (cont., P1net/PR#76): every external `to` target MUST be
+# `ipBlock`-ONLY. The earlier `collector_allows_management_cidr` only checks that AN
+# ipBlock is PRESENT — a MIXED `to` target (ipBlock + a podSelector/namespaceSelector
+# in the SAME target, or a non-ipBlock target alongside the ipBlock) would silently
+# re-permit in-cluster/other-namespace destinations the ADR-0041 §1 minimality control
+# forbids. Assert ipBlock-ONLY: any `to` target that carries a selector key (pod/
+# namespace/ipBlock-missing) on this policy is denied. ---
+collector_to_target_is_ipblock_only(target) if {
+	target.ipBlock
+	not target.podSelector
+	not target.namespaceSelector
+}
+
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	some rule in object.get(input.spec, "egress", [])
+	some target in object.get(rule, "to", [])
+	not collector_to_target_is_ipblock_only(target)
+	msg := "collector mgmt-egress NetworkPolicy `to` targets must be ipBlock-ONLY — a mixed ipBlock+selector (or a non-ipBlock) target re-permits in-cluster/other-namespace destinations the minimality control forbids (ADR-0041 §1 / §Alt #2, P1net/PR#76)"
+}
+
 # ===========================================================================
 # W4-T5 — RBAC + admission allow-list singularity (ADR-0029 §5, exit §7.4/§7.5)
 #
@@ -2481,13 +2502,18 @@ is_postgres_tls_configmap(obj) if {
 	endswith(obj.metadata.name, "-postgres-tls-config")
 }
 
-# The hba MUST carry a `hostssl … clientcert=verify-full` rule — TLS + a verified
-# client cert REQUIRED. Its absence means the server does not require mutual TLS.
+# The hba MUST carry a `hostssl … scram-sha-256 clientcert=verify-full` rule — TLS
+# + the scram password layer + a verified client cert ALL REQUIRED. Its absence
+# means the server does not require mutual TLS.
+# M3 (PR#76): the auth METHOD must be `scram-sha-256` EXPLICITLY — the prior regex
+# accepted ANY method before clientcert=verify-full, so `trust clientcert=verify-full`
+# (which drops the password factor) would pass. Pin scram-sha-256 in the match so a
+# weakened method fails the policy (mirrors the M2 template hardcode).
 deny contains msg if {
 	is_postgres_tls_configmap(input)
 	hba := object.get(input.data, "pg_hba.conf", "")
-	not regex.match(`(?m)^hostssl\s+.*clientcert=verify-full`, hba)
-	msg := "postgres pg_hba.conf must carry a `hostssl … clientcert=verify-full` rule — the server must REQUIRE + verify the client cert (ADR-0039 §3)"
+	not regex.match(`(?m)^hostssl\s+\S+\s+\S+\s+\S+\s+scram-sha-256\s+clientcert=verify-full`, hba)
+	msg := "postgres pg_hba.conf must carry a `hostssl … scram-sha-256 clientcert=verify-full` rule — TLS + the scram-sha-256 password layer + a verified client cert are ALL required (a weaker method like `trust` is denied) (ADR-0039 §3, M3/PR#76)"
 }
 
 # The hba MUST NOT carry a plaintext TCP line (`host …` / `hostnossl …`). Such a
@@ -2565,42 +2591,60 @@ postgres_args_have_prefix(obj, prefix) if {
 
 # The server cert/key volume must be mounted READ-ONLY (cert keys are mounted
 # files, never writable in-pod; ADR-0039 §5).
+# M8 (PR#76): `m.readOnly != true` is UNDEFINED (not true) when the field is
+# ABSENT, so a mount that simply OMITS readOnly would slip past. object.get with a
+# `false` default makes a missing field deterministic — an omitted readOnly is
+# treated as NOT read-only and the deny fires.
 deny contains msg if {
 	postgres_statefulset_has_db_tls(input)
 	some c in input.spec.template.spec.containers
 	some m in c.volumeMounts
 	m.name == "db-tls-server"
-	m.readOnly != true
+	object.get(m, "readOnly", false) != true
 	msg := "postgres db-tls-server cert mount must be readOnly:true (ADR-0039 §5)"
 }
 
-# --- The api/worker CLIENT side must connect verify-full (mutual). When the mTLS
-# client env is present (NETOPS_DB_SSL_MODE), it MUST be verify-full — a downgrade
-# to a weaker mode (e.g. require, which skips server verification) is denied. ---
+# --- The api/worker CLIENT side must connect verify-full (mutual). The mTLS MARKER
+# is the db-tls-client cert MOUNT (M9, PR#76): a Deployment that mounts the client
+# cert material is doing mTLS and MUST carry NETOPS_DB_SSL_MODE=verify-full with a
+# LITERAL value. Keying the requirement on the MOUNT (not on the env existing) closes
+# the M9 gap where a Deployment mounted db-tls-client WITHOUT the env passed policy. ---
 
 mtls_client_components := {"api", "worker"}
 
-client_db_ssl_mode_env(obj) := mode if {
+# The NETOPS_DB_SSL_MODE env entry (the object), present whether it carries a literal
+# `value` OR a `valueFrom`. Used to test PRESENCE independent of the value source.
+client_db_ssl_mode_entry(obj) := e if {
 	some c in obj.spec.template.spec.containers
 	some e in object.get(c, "env", [])
 	e.name == "NETOPS_DB_SSL_MODE"
-	mode := e.value
 }
 
+# True iff the workload sets NETOPS_DB_SSL_MODE as a LITERAL `value` of exactly
+# "verify-full". M10 (PR#76): keyed on the literal `value` ONLY — a `valueFrom`
+# (configMap/secret) indirection carries no `value`, so it does NOT satisfy this and
+# cannot smuggle a weaker/absent mode past the verify-full requirement.
+deployment_sets_verify_full_literal(obj) if {
+	e := client_db_ssl_mode_entry(obj)
+	object.get(e, "value", "") == "verify-full"
+}
+
+# A db-tls-client Deployment that does NOT set the literal verify-full mode is denied.
+# Covers: missing env (M9), wrong mode, and a valueFrom-only env (M10 — no literal).
 deny contains msg if {
 	input.kind == "Deployment"
 	mtls_client_components[input.metadata.labels["app.kubernetes.io/component"]]
-	mode := client_db_ssl_mode_env(input)
-	mode != "verify-full"
-	msg := sprintf("%s NETOPS_DB_SSL_MODE must be verify-full (server identity verified + client cert presented), got %q (ADR-0039 §4)", [input.metadata.labels["app.kubernetes.io/component"], mode])
+	deployment_mounts_client_tls(input)
+	not deployment_sets_verify_full_literal(input)
+	msg := sprintf("%s mounts the db-tls-client cert material but does not set NETOPS_DB_SSL_MODE to a LITERAL \"verify-full\" — mutual TLS requires server identity verified + client cert presented, and a missing/valueFrom/weaker mode is denied (ADR-0039 §4, M9+M10/PR#76)", [input.metadata.labels["app.kubernetes.io/component"]])
 }
 
-# When an api/worker carries the mTLS client env it MUST also mount the client
-# cert material read-only — env without the mounted cert files cannot handshake.
+# Symmetric guard: an api/worker that sets the mTLS client env MUST also mount the
+# client cert material read-only — env without the mounted cert files cannot handshake.
 deny contains msg if {
 	input.kind == "Deployment"
 	mtls_client_components[input.metadata.labels["app.kubernetes.io/component"]]
-	client_db_ssl_mode_env(input)
+	client_db_ssl_mode_entry(input)
 	not deployment_mounts_client_tls(input)
 	msg := sprintf("%s sets NETOPS_DB_SSL_MODE but does not mount the db-tls-client cert material read-only (ADR-0039 §4/§5)", [input.metadata.labels["app.kubernetes.io/component"]])
 }
@@ -2609,7 +2653,7 @@ deployment_mounts_client_tls(obj) if {
 	some c in obj.spec.template.spec.containers
 	some m in c.volumeMounts
 	m.name == "db-tls-client"
-	m.readOnly == true
+	object.get(m, "readOnly", false) == true
 }
 
 # --- The dev/CI fallback TLS Secrets must be marked dev-convenience (so the

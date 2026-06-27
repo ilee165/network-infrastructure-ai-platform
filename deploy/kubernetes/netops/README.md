@@ -59,8 +59,15 @@ helm install netops deploy/kubernetes/netops \
 
 Prerequisites for the hardened path:
 
-- **cert-manager** + an Issuer/ClusterIssuer (`ingress.tls.issuerRef`) for the
-  TLS Ingress (no key material ever passes through Helm values).
+- **cert-manager** (REQUIRED by default) — it issues BOTH the TLS Ingress cert
+  (`ingress.tls.issuerRef`) AND, since PR#76, the api/worker/cronjob ↔ Postgres
+  **DB-link mTLS** cert material (`mtls.postgres.enabled=true` is now the secure
+  default; the chart renders the bootstrap self-signed Issuer → DB CA → server +
+  client `Certificate` CRs that cert-manager provisions + auto-rotates). No key
+  material ever passes through Helm values. If cert-manager is not installed you
+  must either run the self-signed dev/CI fallback
+  (`mtls.postgres.certManager.enabled=false`, NOT for production) or take the
+  documented opt-out (`mtls.postgres.enabled=false`, a warned plaintext DB link).
 - An **ingress controller** matching `ingress.className` (default `nginx`).
 - **Kyverno** (default `admission.engine=kyverno`) **or** set
   `admission.engine=vap` for a webhook-free ValidatingAdmissionPolicy.
@@ -85,6 +92,9 @@ Prerequisites for the hardened path:
 | `namespaceLabels.podSecurity.enforce` | `restricted` | weakening is a warned opt-out |
 | `ingress.enabled` / `ingress.host` | `true` / placeholder | set `host` to your real FQDN |
 | `ingress.tls.certManager.enabled` / `issuerRef` | `true` / placeholder | cert-manager issues the TLS Secret; no key in values |
+| `mtls.postgres.enabled` | `true` | DB-link mutual TLS ON by default (ADR-0039); needs cert-manager (or the dev fallback). Disabling is a warned plaintext opt-out |
+| `mtls.postgres.certManager.enabled` | `true` | cert-manager issues + auto-rotates the DB cert material; `false` = self-signed dev/CI fallback (not for production) |
+| `mtls.postgres.certManager.caDuration` / `duration` | `87600h` / `2160h` | the CA outlives the leaves by ~40x so CA rotation is rare/planned (M5) |
 | `networkPolicy.enabled` | `true` | default-deny floor + §2 per-edge allows |
 | `networkPolicy.collectorEgress.enabled` | `true` | collector/worker default-deny egress to the device mgmt subnet (ADR-0041); disabling is a warned opt-out |
 | `networkPolicy.collectorEgress.managementCidrs` | `[10.0.0.0/8]` | device mgmt subnet `ipBlock` CIDR(s) — NARROW to your real range; `0.0.0.0/0` and blanket RFC1918 are rejected by the allow-list-minimality policy |

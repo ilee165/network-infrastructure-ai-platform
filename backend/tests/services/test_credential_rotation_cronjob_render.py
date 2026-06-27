@@ -35,8 +35,14 @@ def test_template_source_applies_l3_and_l5_guards() -> None:
     # L3: a single `sh -c` command, NOT a raw exec argv doing its own $(VAR).
     assert "- sh" in src
     assert "- -c" in src
-    # The DSN is assembled from ${VAR} shell expansions inside the sh -c script.
-    assert 'export NETOPS_DATABASE_URL="postgresql+asyncpg://${NETOPS_POSTGRES_USER}' in src
+    # cubic #80 (PR#76): the DSN PERCENT-ENCODES the user + password before assembly.
+    assert "urllib.parse.quote" in src
+    assert "NETOPS_PG_USER_ENC" in src
+    assert "NETOPS_PG_PASS_ENC" in src
+    assert (
+        'export NETOPS_DATABASE_URL="postgresql+asyncpg://${NETOPS_PG_USER_ENC}:${NETOPS_PG_PASS_ENC}@'
+        in src
+    )
     # L5: pipefail + a non-empty guard on the summary file.
     assert "set -euo pipefail" in src
     assert 'test -s "${CREDENTIAL_ROTATION_SUMMARY_DIR}/credential_rotation.prom"' in src
@@ -46,6 +52,11 @@ def test_template_source_applies_l3_and_l5_guards() -> None:
     # Disjoint from W6-T3 KEK rotation: the device-secret module, not re_wrap_keys.
     assert "python -m app.workers.tasks.credential_rotation" in src
     assert "re_wrap_keys" not in src
+    # A10 (PR#76): the mTLS client SSL env + cert mount/volume are wired (mTLS on by
+    # default → hostssl-only pg_hba refuses a plaintext Job).
+    assert 'include "netops.dbClientTlsSslEnv"' in src
+    assert 'include "netops.dbClientTlsVolumeMount"' in src
+    assert 'include "netops.dbClientTlsVolume"' in src
 
 
 def test_scheduled_rotation_is_disabled_by_default() -> None:
@@ -133,3 +144,48 @@ def test_rendered_cronjob_invokes_rotation_module_via_sh_c() -> None:
     # The hardened security context flows through (runAsNonRoot, drop ALL).
     assert "runAsNonRoot: true" in rendered
     assert "readOnlyRootFilesystem: true" in rendered
+    # A10 (PR#76): mTLS on by default → the rotation CronJob presents the client cert.
+    assert "NETOPS_DB_SSL_MODE" in rendered
+    assert 'value: "verify-full"' in rendered
+    assert "name: db-tls-client" in rendered
+
+
+@pytest.mark.skipif(_helm() is None, reason="helm not installed; manifest gates run in CI")
+def test_rendered_chart_has_postgres_egress_for_audit_and_credentials() -> None:
+    """A9 (PR#76): the audit + credential CronJob pods get a Postgres egress allow.
+
+    Under the default-deny floor, the audit-chain-verify job (component=audit, ON by
+    default) and the credential-rotation job (component=credentials) cannot reach
+    postgres:5432 without a dedicated egress NetworkPolicy — they would fail every
+    run. This asserts both allows render (credentials needs the tier enabled).
+    """
+    helm = _helm()
+    assert helm is not None
+    result = subprocess.run(  # noqa: S603 - fixed, trusted argv (no shell)
+        [
+            helm,
+            "template",
+            "netops",
+            str(CHART_DIR),
+            "--namespace",
+            "netops",
+            "--kube-version",
+            "1.29.0",
+            "--set",
+            "credentials.rotation.enabled=true",
+            "--show-only",
+            "templates/networkpolicies.yaml",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    rendered = result.stdout
+    # audit egress (default-on tier) — the audit-integrity regression A9 fixes.
+    assert "name: netops-allow-audit-egress" in rendered
+    assert "app.kubernetes.io/component: audit" in rendered
+    # credentials egress (rendered because the tier is enabled here).
+    assert "name: netops-allow-credentials-egress" in rendered
+    assert "app.kubernetes.io/component: credentials" in rendered
+    # both target postgres:5432 (the canonical port).
+    assert "port: 5432" in rendered

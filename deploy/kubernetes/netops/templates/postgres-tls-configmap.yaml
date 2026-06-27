@@ -20,6 +20,14 @@ Rendered only when mtls.postgres.enabled.
 */ -}}
 {{- if .Values.mtls.postgres.enabled }}
 {{- $m := .Values.mtls.postgres -}}
+{{- /* M2 (PR#76): the pg_hba auth method is HARDCODED to scram-sha-256 — it must
+NOT be overridable to a weaker method (e.g. `trust`, which would drop the password
+layer entirely and leave the client cert as the sole factor). If an operator has
+set mtls.postgres.hbaAuthMethod to anything other than scram-sha-256, FAIL the
+render rather than silently weakening the password layer (ADR-0039 §3). */ -}}
+{{- if ne $m.hbaAuthMethod "scram-sha-256" -}}
+{{- fail (printf "mtls.postgres.hbaAuthMethod must be \"scram-sha-256\" (the password layer paired with clientcert=verify-full); got %q — weakening it (e.g. to trust) drops the password factor (ADR-0039 §3, M2/PR#76)" $m.hbaAuthMethod) -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -39,6 +47,6 @@ data:
     # No plaintext `host`/`hostnossl` line exists, so non-TLS connections are
     # refused (they match no rule). IPv4 + IPv6 any-source (NetworkPolicy already
     # confines who can reach 5432; this enforces TLS + cert on every TCP client).
-    hostssl     all       all   0.0.0.0/0     {{ $m.hbaAuthMethod }} clientcert=verify-full
-    hostssl     all       all   ::/0          {{ $m.hbaAuthMethod }} clientcert=verify-full
+    hostssl     all       all   0.0.0.0/0     scram-sha-256 clientcert=verify-full
+    hostssl     all       all   ::/0          scram-sha-256 clientcert=verify-full
 {{- end }}

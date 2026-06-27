@@ -202,6 +202,35 @@ if [ "${reuse_stable}" -eq 1 ]; then
   ok "reuse branch is STABLE across renders — render-twice idempotency holds (L4)"
 fi
 
+# --- 4. FAIL CLOSED on an INCOMPLETE prior (M4, PR#76) -------------------------
+# A half-set prior Secret (e.g. the server triple present but the CLIENT key
+# missing/empty) must NOT take the reuse branch and emit EMPTY client cert/key
+# material (fail-open) — it must REGENERATE the whole triple consistently. Feed the
+# fixture a prior with the client key BLANKED and assert the rendered client cert is
+# (a) NON-EMPTY and (b) a valid regenerated PEM, not the empty injected member.
+render_partial_reuse() { # <out>
+  set -o pipefail
+  helm template fx "${FIXTURE_DIR}" --namespace netops --kube-version 1.29.0 \
+    --set-file prior.caCrt="${PRIOR}/ca.crt" \
+    --set-file prior.srvCrt="${PRIOR}/srv.crt" \
+    --set-file prior.srvKey="${PRIOR}/srv.key" \
+    --set-file prior.cliCrt="${PRIOR}/cli.crt" \
+    --set prior.cliKey="" \
+    | tr -d '\r' > "$1"
+  test -s "$1"
+}
+render_partial_reuse "${WORK}/partial.yaml"
+partial_cli_crt="${WORK}/partial_cli.crt"
+partial_cli_key="${WORK}/partial_cli.key"
+extract "${WORK}/partial.yaml" netops-db-client-tls tls.crt > "${partial_cli_crt}"
+extract "${WORK}/partial.yaml" netops-db-client-tls tls.key > "${partial_cli_key}"
+if [ -s "${partial_cli_crt}" ] && [ -s "${partial_cli_key}" ] \
+   && openssl x509 -in "${partial_cli_crt}" -noout >/dev/null 2>&1; then
+  ok "incomplete prior REGENERATES non-empty client cert/key (fail closed, never empty — M4)"
+else
+  bad "incomplete prior emitted EMPTY/invalid client cert material (fail-open — M4 regression)"
+fi
+
 echo "== render-twice summary: ${fail} failure(s) =="
 if [ "${fail}" -ne 0 ]; then
   echo "::error::mTLS render-twice L4 guard found ${fail} violation(s)" >&2

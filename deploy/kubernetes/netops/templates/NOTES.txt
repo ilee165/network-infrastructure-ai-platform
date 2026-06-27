@@ -13,6 +13,7 @@ Secure-by-default posture (every control below is ON):
   - Packet-capture: NET_RAW/NET_ADMIN scoped to the tainted packet pool only.
   - RBAC: own ServiceAccount per workload, automountServiceAccountToken=false, zero ClusterRoleBinding.
   - Admission: {{ .Values.admission.engine }} policy enforcing no-latest + PSS-deviation allow-list.
+  - DB-link mTLS: {{ if .Values.mtls.postgres.enabled }}ON (api/worker/cronjobs ↔ Postgres verify-full; pg_hba refuses plaintext){{ else }}OFF (plaintext, NetworkPolicy-isolated){{ end }} — {{ if and .Values.mtls.postgres.enabled .Values.mtls.postgres.certManager.enabled }}REQUIRES cert-manager (issues + auto-rotates the DB cert material).{{ else if .Values.mtls.postgres.enabled }}self-signed dev/CI fallback (NOT for production).{{ else }}re-enable mtls.postgres.enabled for the ADR-0039 target posture.{{ end }}
 
 {{- $warn := list }}
 {{- if not .Values.namespaceLabels.enabled }}{{ $warn = append $warn "namespaceLabels.enabled=false — PSA restricted labels NOT applied; the namespace is unprotected." }}{{ end }}
@@ -49,6 +50,9 @@ Secure-by-default posture (every control below is ON):
 {{- /* W4-T4 Ingress + TLS opt-out warnings (ADR-0029 §4 — TLS-only single front door). */ -}}
 {{- if not .Values.ingress.enabled }}{{ $warn = append $warn "ingress.enabled=false — NO Ingress is rendered; the platform has no front door and is unreachable until one is wired out-of-band. The cert-manager TLS Ingress → frontend is the secure default (ADR-0029 §4)." }}{{ end }}
 {{- if and .Values.ingress.enabled (not .Values.ingress.tls.certManager.enabled) }}{{ $warn = append $warn (printf "ingress.tls.certManager.enabled=false — the chart issues NO Certificate; you MUST provision the TLS Secret %q out-of-band or the Ingress has no keypair to terminate TLS with (ADR-0029 §4)." .Values.ingress.tls.secretName) }}{{ end }}
+{{- /* M7 (PR#76) DB-link mTLS posture warnings (ADR-0039 — mutual TLS is now the secure default; opt-out never opt-in). */ -}}
+{{- if not .Values.mtls.postgres.enabled }}{{ $warn = append $warn "mtls.postgres.enabled=false — the api/worker/cronjob ↔ Postgres link is PLAINTEXT (NetworkPolicy-isolated only). Mutual TLS (verify-full + a hostssl-only pg_hba that REFUSES plaintext) is the ADR-0039 §3/§4 target and the secure default; only disable it if your platform terminates the DB-link TLS out-of-band (e.g. a service-mesh mTLS sidecar). Re-enable mtls.postgres.enabled (M7)." }}{{ end }}
+{{- if and .Values.mtls.postgres.enabled (not .Values.mtls.postgres.certManager.enabled) }}{{ $warn = append $warn "mtls.postgres.certManager.enabled=false — the DB-link mTLS cert material is a SELF-SIGNED dev/CI fallback (helm-generated, long-lived, NOT auto-rotated). This is DEV/CI ONLY. In production install cert-manager and keep certManager.enabled=true so the DB CA + server/client certs are issued and AUTO-ROTATED (ADR-0039 §1/§5)." }}{{ end }}
 {{- $svcTypeOptOut := list }}
 {{- range $svc := list "api" "frontend" }}{{- $t := (index $.Values.services $svc).type }}{{- if and $t (ne $t "ClusterIP") }}{{ $svcTypeOptOut = append $svcTypeOptOut (printf "%s=%s" $svc $t) }}{{ end }}{{- end }}
 {{- if $svcTypeOptOut }}{{ $warn = append $warn (printf "services.<svc>.type opted away from ClusterIP for [%s] — this opens a Service-level NodePort/LoadBalancer side door that BYPASSES the Ingress TLS termination + ssl-redirect/HSTS. All platform Services are ClusterIP by default; the cert-manager TLS Ingress → frontend is the SINGLE intended front door (ADR-0029 §4)." (join ", " $svcTypeOptOut)) }}{{ end }}

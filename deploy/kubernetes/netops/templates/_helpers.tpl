@@ -326,14 +326,33 @@ Renders nothing when mtls.postgres.enabled is false.
 # verify-full SSLContext (app.db). The password stays a separate secretKeyRef env.
 - name: NETOPS_DATABASE_URL
   value: postgresql+asyncpg://{{ .Values.config.postgres.user }}:$(NETOPS_POSTGRES_PASSWORD)@{{ .Values.config.postgres.host }}:{{ .Values.config.postgres.port }}/{{ .Values.config.postgres.database }}
+{{- include "netops.dbClientTlsSslEnv" . }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+netops.dbClientTlsSslEnv — JUST the NETOPS_DB_SSL_* client env (mode + mounted
+cert/key/CA FILE paths), WITHOUT NETOPS_DATABASE_URL. The api/worker deployments
+get the URL from netops.dbClientTlsEnv (K8s $(VAR) expansion); the audit /
+credential CronJobs assemble their own DSN inside a `sh -c` script (L3) and only
+need the SSL settings here so app.db.build_ssl_connect_args mounts the verify-full
+SSLContext. Renders nothing when mtls.postgres.enabled is false.
+Usage: {{- include "netops.dbClientTlsSslEnv" . | nindent 16 }}
+*/}}
+{{- define "netops.dbClientTlsSslEnv" -}}
+{{- $m := .Values.mtls.postgres -}}
+{{- if $m.enabled }}
 - name: NETOPS_DB_SSL_MODE
   value: {{ $m.sslMode | quote }}
 - name: NETOPS_DB_SSL_ROOT_CERT
   value: {{ printf "%s/%s" $m.mountPath ($m.caFile | default "ca.crt") | quote }}
+# M1 (PR#76): the CLIENT cert/key paths derive from the CLIENT file-name settings
+# (clientCertFile/clientKeyFile), NOT the server ones — the client mounts its own
+# Secret, so customizing the server Secret key names must not break the client paths.
 - name: NETOPS_DB_SSL_CERT
-  value: {{ printf "%s/%s" $m.mountPath ($m.serverCertFile | default "tls.crt") | quote }}
+  value: {{ printf "%s/%s" $m.mountPath ($m.clientCertFile | default "tls.crt") | quote }}
 - name: NETOPS_DB_SSL_KEY
-  value: {{ printf "%s/%s" $m.mountPath ($m.serverKeyFile | default "tls.key") | quote }}
+  value: {{ printf "%s/%s" $m.mountPath ($m.clientKeyFile | default "tls.key") | quote }}
 {{- end -}}
 {{- end -}}
 

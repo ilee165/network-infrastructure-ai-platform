@@ -52,8 +52,11 @@ spec:
   isCA: true
   commonName: {{ $m.caCommonName | quote }}
   secretName: {{ $m.caSecretName }}
-  duration: {{ $cm.duration }}
-  renewBefore: {{ $cm.renewBefore }}
+  # M5 (PR#76): the CA lives MUCH longer than the leaves it signs (caDuration ~10y
+  # vs the 90d leaf duration) so CA rotation is a rare planned event and leaves can
+  # rotate freely underneath it — sharing the leaf lifetime made CA rotation brittle.
+  duration: {{ $cm.caDuration }}
+  renewBefore: {{ $cm.caRenewBefore }}
   privateKey:
     algorithm: ECDSA
     size: 256
@@ -154,24 +157,50 @@ server Secret keeps the CA/server/client triple internally consistent. */ -}}
 {{- $srvPrior := (lookup "v1" "Secret" $ns $m.serverSecretName) -}}
 {{- $caCrt := "" -}}{{- $srvCrt := "" -}}{{- $srvKey := "" -}}
 {{- $cliCrt := "" -}}{{- $cliKey := "" -}}
-{{- if and $srvPrior $srvPrior.data (hasKey $srvPrior.data "tls.crt") -}}
-  {{- /* Reuse the installed triple — keeps mTLS consistent across upgrades (L4). */ -}}
-  {{- $caPrior := (lookup "v1" "Secret" $ns $m.caSecretName) -}}
-  {{- $cliPrior := (lookup "v1" "Secret" $ns $m.clientSecretName) -}}
-  {{- $srvCrt = index $srvPrior.data "tls.crt" | b64dec -}}
-  {{- $srvKey = index $srvPrior.data "tls.key" | b64dec -}}
-  {{- $caCrt = index $srvPrior.data "ca.crt" | b64dec -}}
-  {{- if and $cliPrior $cliPrior.data (hasKey $cliPrior.data "tls.crt") -}}
-    {{- $cliCrt = index $cliPrior.data "tls.crt" | b64dec -}}
-    {{- $cliKey = index $cliPrior.data "tls.key" | b64dec -}}
+{{- $df := $m.devFallback -}}
+{{- $caDays := int ($df.caValidityDays | default 3650) -}}
+{{- $leafDays := int ($df.leafValidityDays | default 825) -}}
+{{- /* M4 (PR#76): FAIL CLOSED on a half-set prior Secret. The reuse branch may
+ONLY be taken when the ENTIRE triple is present + non-empty (server cert+key+ca AND
+client cert+key); a prior Secret that has tls.crt but is MISSING any other member
+would otherwise emit EMPTY tls.crt/tls.key (fail-open) and silently sever mTLS.
+When the prior is incomplete we fall through to a CONSISTENT regenerate of the whole
+triple rather than writing partial/empty material. */ -}}
+{{- $priorComplete := false -}}
+{{- $caPrior := (lookup "v1" "Secret" $ns $m.caSecretName) -}}
+{{- $cliPrior := (lookup "v1" "Secret" $ns $m.clientSecretName) -}}
+{{- if and $srvPrior $srvPrior.data
+        (hasKey $srvPrior.data "tls.crt") (hasKey $srvPrior.data "tls.key") (hasKey $srvPrior.data "ca.crt")
+        $cliPrior $cliPrior.data
+        (hasKey $cliPrior.data "tls.crt") (hasKey $cliPrior.data "tls.key") -}}
+  {{- $pSrvCrt := index $srvPrior.data "tls.crt" | b64dec -}}
+  {{- $pSrvKey := index $srvPrior.data "tls.key" | b64dec -}}
+  {{- $pCaCrt := index $srvPrior.data "ca.crt" | b64dec -}}
+  {{- $pCliCrt := index $cliPrior.data "tls.crt" | b64dec -}}
+  {{- $pCliKey := index $cliPrior.data "tls.key" | b64dec -}}
+  {{- /* every decoded member must be NON-EMPTY — an empty value is as fail-open as
+  a missing key (would mount a zero-byte cert/key). */ -}}
+  {{- if and (ne $pSrvCrt "") (ne $pSrvKey "") (ne $pCaCrt "") (ne $pCliCrt "") (ne $pCliKey "") -}}
+    {{- $priorComplete = true -}}
+    {{- $srvCrt = $pSrvCrt -}}{{- $srvKey = $pSrvKey -}}{{- $caCrt = $pCaCrt -}}
+    {{- $cliCrt = $pCliCrt -}}{{- $cliKey = $pCliKey -}}
   {{- end -}}
-{{- else -}}
-  {{- $ca := genCA $m.caCommonName 3650 -}}
-  {{- $srv := genSignedCert $pgSvc (list) (list $pgSvc $pgFqdn $pgFqdnFull) 3650 $ca -}}
-  {{- $cli := genSignedCert $m.clientCommonName (list) (list $m.clientCommonName) 3650 $ca -}}
+{{- end -}}
+{{- if not $priorComplete -}}
+  {{- /* No usable prior (first install / fresh CI render / incomplete prior) =>
+  regenerate the WHOLE triple consistently. M5: the CA outlives the leaves. */ -}}
+  {{- $ca := genCA $m.caCommonName $caDays -}}
+  {{- $srv := genSignedCert $pgSvc (list) (list $pgSvc $pgFqdn $pgFqdnFull) $leafDays $ca -}}
+  {{- $cli := genSignedCert $m.clientCommonName (list) (list $m.clientCommonName) $leafDays $ca -}}
   {{- $caCrt = $ca.Cert -}}
   {{- $srvCrt = $srv.Cert -}}{{- $srvKey = $srv.Key -}}
   {{- $cliCrt = $cli.Cert -}}{{- $cliKey = $cli.Key -}}
+{{- end -}}
+{{- /* Belt-and-braces fail-closed: NEVER emit empty cert material (M4). If we
+somehow reach here with an empty member the chart MUST fail to render rather than
+ship a zero-byte cert that fails open. */ -}}
+{{- if or (eq $caCrt "") (eq $srvCrt "") (eq $srvKey "") (eq $cliCrt "") (eq $cliKey "") -}}
+  {{- fail "mtls-postgres dev fallback would emit EMPTY DB-TLS cert material — refusing to render (fail closed, M4/ADR-0039 §5). Check the existing TLS Secrets or let the chart regenerate them." -}}
 {{- end -}}
 ---
 # Dev/CI fallback CA Secret (CA cert only; the CA key is never shipped).

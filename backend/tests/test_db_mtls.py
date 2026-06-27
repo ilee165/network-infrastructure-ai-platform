@@ -77,6 +77,38 @@ def test_no_ssl_settings_keeps_plaintext_connect_args() -> None:
     assert args == {}
 
 
+def test_cert_paths_without_mode_fail_closed(tmp_path: Path) -> None:
+    """M6 (PR#76): cert material configured but no SSL mode must FAIL CLOSED.
+
+    A missing db_ssl_mode used to silently return ``{}`` (plaintext) even when cert
+    paths were mounted — a misconfiguration that downgrades a deployment intended to
+    do mTLS to an unencrypted link. With any cert path set and no mode, the builder
+    must raise rather than silently fall back to plaintext.
+    """
+    ca, cert, key = _write_cert_material(tmp_path)
+    settings = Settings(
+        database_url="postgresql+asyncpg://netops:netops@netops-postgres:5432/netops",
+        db_ssl_root_cert=ca,
+        db_ssl_cert=cert,
+        db_ssl_key=key,
+    )
+    assert settings.db_ssl_mode is None
+    with pytest.raises(ValueError, match="NETOPS_DB_SSL_MODE is unset"):
+        db.build_ssl_connect_args(settings)
+
+
+def test_only_root_cert_without_mode_fails_closed(tmp_path: Path) -> None:
+    """M6: even a SINGLE cert path (root CA only) with no mode must fail closed."""
+    ca, _, _ = _write_cert_material(tmp_path)
+    settings = Settings(
+        database_url="postgresql+asyncpg://netops:netops@netops-postgres:5432/netops",
+        db_ssl_root_cert=ca,
+    )
+    assert settings.db_ssl_mode is None
+    with pytest.raises(ValueError, match="NETOPS_DB_SSL_MODE is unset"):
+        db.build_ssl_connect_args(settings)
+
+
 def test_verify_full_builds_mutual_tls_context(tmp_path: Path) -> None:
     """sslmode=verify-full + cert material => a mutual-TLS SSLContext connect-arg."""
     ca, cert, key = _write_cert_material(tmp_path)

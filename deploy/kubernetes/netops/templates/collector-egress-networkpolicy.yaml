@@ -34,6 +34,27 @@ namespace); this is the ADR-0041 collector/worker control in the INSTALL
 namespace, distinct from it.
 */ -}}
 {{- if and .Values.networkPolicy.enabled .Values.networkPolicy.collectorEgress.enabled .Values.services.worker.enabled }}
+{{- $ce := .Values.networkPolicy.collectorEgress -}}
+{{- /* P2net (CRITICAL, PR#76): an EMPTY managementCidrs would render `to:` empty
+with `ports:` set, which a NetworkPolicy interprets as ALLOW egress to ALL
+destinations on those ports (fail-open) — the exact exfiltration/pivot path
+ADR-0041 §1 closes. An EMPTY ports list (P3net) is likewise a footgun (an all-ports
+allow to the CIDR). FAIL CLOSED: refuse to render the policy at all rather than emit
+an empty-`to`/empty-`ports` allow. Disabling the tier is the supported opt-out
+(collectorEgress.enabled=false, a warned NOTES entry) — NOT an empty allow-list. */ -}}
+{{- if not $ce.managementCidrs -}}
+{{- fail "networkPolicy.collectorEgress.managementCidrs is EMPTY but collectorEgress.enabled=true — an empty `to` would ALLOW egress to ALL destinations on the mgmt ports (fail-open, ADR-0041 §1). Set the device management CIDR(s) or disable the tier (collectorEgress.enabled=false) (P2net/PR#76)." -}}
+{{- end -}}
+{{- /* Also reject a list of EMPTY-STRING CIDRs — `cidr: ""` is a malformed/over-broad
+allow that defeats minimality (P2net hardening). */ -}}
+{{- range $ce.managementCidrs -}}
+{{- if not . -}}
+{{- fail "networkPolicy.collectorEgress.managementCidrs contains an EMPTY CIDR — every entry must be a real device management CIDR, never \"\" (fail-open, ADR-0041 §1, P2net/PR#76)." -}}
+{{- end -}}
+{{- end -}}
+{{- if not $ce.ports -}}
+{{- fail "networkPolicy.collectorEgress.ports is EMPTY but collectorEgress.enabled=true — an empty `ports` would ALLOW ALL ports to the mgmt CIDR(s). Set the device-mgmt ports or disable the tier (P3net/PR#76)." -}}
+{{- end -}}
 {{- $fullname := include "netops.fullname" . }}
 {{- $ns := .Release.Namespace }}
 apiVersion: networking.k8s.io/v1

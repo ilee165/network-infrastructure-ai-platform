@@ -954,13 +954,20 @@ ingress:
 #    (ci/mtls/render-twice.sh) is the guard.
 mtls:
   postgres:
-    # OFF by default: enabling mutual TLS on the DB link requires cert material
-    # mounted into postgres + api + worker and a cert-manager install (or the dev
-    # fallback). It is the ADR-0039 target posture; operators turn it on once
-    # cert-manager is present (the secure-by-default ingress TLS is already on).
-    # When false the chart renders NO mTLS CR / Secret / mount and the DB link is
-    # the existing in-namespace plaintext (NetworkPolicy-isolated) connection.
-    enabled: false
+    # ON by default (M7, PR#76): mutual TLS on the api/worker/cronjob ↔ Postgres
+    # link is the ADR-0039 target posture and is now the secure default (opt-out
+    # never opt-in, ADR-0029 §0). It requires cert material mounted into postgres +
+    # api + worker + the audit/credential CronJobs and a **cert-manager install**
+    # (certManager.enabled=true, the default) OR the self-signed dev/CI fallback
+    # (certManager.enabled=false). cert-manager is therefore a REQUIRED chart
+    # dependency in the default posture — see the chart README "Dependencies" and
+    # the NOTES.txt post-install banner. DOCUMENTED OPT-OUT: set
+    # `mtls.postgres.enabled=false` to render NO mTLS CR / Secret / mount and fall
+    # back to the in-namespace plaintext (NetworkPolicy-isolated) DB link (a warned
+    # downgrade — NOTES.txt). When false the pg_hba refusal rule is NOT emitted, so
+    # plaintext is accepted; only disable it if your platform terminates the DB-link
+    # TLS out-of-band (e.g. a service mesh mTLS sidecar).
+    enabled: true
     # cert-manager issuance + auto-rotation (ADR-0039 §1/§5). When true the chart
     # renders the bootstrap self-signed Issuer → CA Certificate → CA Issuer →
     # server + client Certificates; cert-manager provisions + ROTATES the keypairs
@@ -968,12 +975,20 @@ mtls:
     # generates a self-signed CA + pair via lookup reuse-or-generate, L4).
     certManager:
       enabled: true
-      # Certificate validity + renation window cert-manager honours (auto-rotation,
-      # ADR-0039 §5). cert-manager renews at (duration - renewBefore) with NO
-      # operator hand-rotation. The `lookup` dev fallback uses a long-lived
-      # self-signed pair instead (rotation is a cert-manager-only property).
+      # LEAF (server + client) certificate validity + renewal window cert-manager
+      # honours (auto-rotation, ADR-0039 §5). cert-manager renews at
+      # (duration - renewBefore) with NO operator hand-rotation. The `lookup` dev
+      # fallback uses a long-lived self-signed pair instead (rotation is a
+      # cert-manager-only property).
       duration: 2160h # 90d
       renewBefore: 360h # 15d — renew well before expiry
+      # CA certificate validity + renewal window (M5, PR#76). The CA MUST outlive
+      # the leaves it signs by a wide margin: if the CA and the leaves expired
+      # together, a CA rotation would have to re-issue + redistribute every leaf in
+      # lock-step (brittle). A long-lived CA lets leaves rotate freely underneath it
+      # and makes CA rotation a rare, planned event. ~10y CA vs 90d leaf.
+      caDuration: 87600h # 3650d (~10y) — far longer than the 90d leaf duration
+      caRenewBefore: 720h # 30d
     # The in-cluster CA Issuer the server/client certs chain to. The bootstrap
     # self-signed Issuer signs the CA cert; the CA Issuer then signs the leaves.
     caCommonName: netops-db-ca
@@ -1006,6 +1021,21 @@ mtls:
     serverCertFile: tls.crt
     serverKeyFile: tls.key
     caFile: ca.crt
+    # File names inside the api/worker/cronjob CLIENT Secret (M1, PR#76). These are
+    # DERIVED INDEPENDENTLY of the server file names above: the client mounts its
+    # OWN Secret (clientSecretName), so customizing the server Secret's key names
+    # (e.g. for an out-of-band server cert) must NOT silently break the client cert
+    # paths. cert-manager writes the standard tls keys into the client Secret too.
+    clientCertFile: tls.crt
+    clientKeyFile: tls.key
+    # Dev/CI self-signed fallback validity (certManager.enabled=false ONLY). M5
+    # (PR#76): the dev CA also outlives the dev leaves by a wide margin so the
+    # fallback mirrors the cert-manager posture (a long-lived CA, shorter leaves).
+    # These are NOT used on the production cert-manager path (which honours the
+    # certManager.* durations above).
+    devFallback:
+      caValidityDays: 3650 # ~10y dev CA — long-lived signing anchor
+      leafValidityDays: 825 # ~27mo dev leaf — shorter than the CA it chains to
 
 # -- Non-secret application config (rendered into configmap.yaml as NETOPS_*
 #    env). NO credential material here — secrets are by-reference only (see the
