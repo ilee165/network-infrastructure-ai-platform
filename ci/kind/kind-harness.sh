@@ -189,21 +189,44 @@ kubectl create namespace "${CHART_NS}" --dry-run=client -o yaml | kubectl apply 
 # installed`. ANY OTHER apply failure (a broken Deployment / Secret /
 # NetworkPolicy, a schema rejection, an admission denial) means the harness would
 # run assertions against an INCOMPLETE chart = false-green; that is a HARD FAILURE.
+#
+# N6.1 (PR#76 round 2, #15): default FAIL-CLOSED. The prior else branch grepped
+# FOR a fixed set of error patterns and only failed when it could POSITIVELY
+# identify an "unexpected" line. If apply failed with text matching NONE of those
+# patterns (a connection/timeout error, an admission webhook denial worded
+# differently, a server-side parse error), `unexpected` was EMPTY and the harness
+# FELL THROUGH to the warning + assertions = fail-open against an incomplete chart.
+# We now invert the logic: a NON-ZERO apply is a HARD FAIL UNLESS *every*
+# non-trivial line of the apply log is provably either a successful-apply line or
+# the known optional-CRD-missing class. We SUBTRACT the known-good lines from the
+# WHOLE log; ANY residue (including lines no positive pattern would have caught)
+# fails the run. There is no path from a failed apply to the assertions that does
+# not first prove the entire log is accounted for.
 apply_log="${APPLY_LOG:-$(mktemp)}"
 if kubectl apply -n "${CHART_NS}" -f "${RENDERED}" 2>&1 | tee "${apply_log}"; then
   log "all chart objects applied cleanly"
 else
-  # Keep only lines that look like apply ERRORS, then subtract the known
-  # optional-CRD-missing class. Anything left over is an UNEXPECTED failure.
-  err_lines="$(grep -E '^(error|Error)|unable to recognize|no matches for kind' "${apply_log}" || true)"
-  unexpected="$(printf '%s\n' "${err_lines}" \
+  # Apply returned NON-ZERO. Start fail-closed: take EVERY non-blank log line and
+  # subtract the lines we can ACCOUNT FOR — successful per-object apply outputs
+  # (`<kind>/<name> created|configured|unchanged|serverside-applied`) and the
+  # tolerated optional-CRD-missing error class. Whatever REMAINS is an
+  # unaccounted-for failure, so the chart is incomplete -> HARD FAIL.
+  #   - `grep -E '\S'`            : drop blank lines.
+  #   - first `grep -vE` (good)   : drop successful-apply object lines.
+  #   - second `grep -vE` (crd)   : drop the known optional-CRD-missing error text.
+  # `|| true` keeps the pipeline alive when a stage matches nothing (empty residue
+  # is the GOOD case here); the residue emptiness is what we then gate on.
+  residue="$(grep -E '\S' "${apply_log}" \
+    | grep -vE '^(configmap|secret|service|serviceaccount|deployment|deployment\.apps|statefulset|statefulset\.apps|daemonset|daemonset\.apps|cronjob|cronjob\.batch|job|job\.batch|networkpolicy|networkpolicy\.networking\.k8s\.io|role|rolebinding|clusterrole|clusterrolebinding|ingress|ingress\.networking\.k8s\.io|persistentvolumeclaim|poddisruptionbudget|namespace|priorityclass|horizontalpodautoscaler)[^ ]* (created|configured|unchanged|serverside-applied)$' \
     | grep -vE 'no matches for kind|unable to recognize|ensure CRDs are installed|the server could not find the requested resource' \
-    | grep -E '\S' || true)"
-  if [ -n "${unexpected}" ]; then
-    echo "::error::chart apply FAILED with non-CRD errors — the chart is incomplete; refusing to run assertions against it (N6):" >&2
-    printf '%s\n' "${unexpected}" >&2
+    || true)"
+  if [ -n "${residue}" ]; then
+    echo "::error::chart apply FAILED and the apply log contains lines that are NEITHER a successful apply NOR the tolerated optional-CRD-missing class — the chart is incomplete; refusing to run assertions against it (fail-closed, N6/#15):" >&2
+    printf '%s\n' "${residue}" >&2
     exit 1
   fi
+  # Reaching here means apply was non-zero but EVERY non-blank line was either a
+  # successful apply or a tolerated CRD-missing error — the only fall-through.
   echo "::warning::some chart objects require optional CRDs the scaffold does not" \
        "install (cert-manager / Kyverno) — W4-T4/T5 install their prerequisites." \
        "Only those CRD-missing errors were tolerated; the scaffold continues." >&2

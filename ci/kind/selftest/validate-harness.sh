@@ -107,6 +107,31 @@ grep_must "${HARNESS}" 'refusing to run assertions against it' \
 grep_must_not "${HARNESS}" 'kubectl apply -n "\$\{CHART_NS\}" -f "\$\{RENDERED\}" \|\| \{' \
   "harness does NOT blanket-catch ALL chart-apply failures into a warning (N6)"
 
+# --- N6.1 (#15): the apply-failed else branch is FAIL-CLOSED ------------------
+# The prior else branch grepped FOR a fixed set of error patterns and only failed
+# on a POSITIVELY identified "unexpected" line; an apply error matching NONE of
+# those patterns left the match empty and FELL THROUGH to the warning + assertions
+# (fail-open). The fix inverts the logic: it SUBTRACTS the accountable lines
+# (successful-apply object outputs + the tolerated CRD-missing class) from the
+# WHOLE log and HARD-FAILS on ANY residue. Assert that inversion is in place so a
+# regression back to the positive-grep (fail-open) form trips this validator.
+#
+# (a) the residue is computed from the WHOLE apply log via a SUBTRACTIVE pipeline
+#     that strips successful-apply object lines, NOT a positive `grep -E` FOR error
+#     patterns. The successful-apply allow-list line is the load-bearing marker.
+grep_must "${HARNESS}" 'created\|configured\|unchanged\|serverside-applied' \
+  "harness else branch SUBTRACTS successful-apply lines from the whole log (fail-closed residue), not a positive grep FOR errors (N6.1/#15)"
+grep_must "${HARNESS}" 'residue=' \
+  "harness computes a fail-closed 'residue' of unaccounted-for apply-log lines (N6.1/#15)"
+# (b) a NON-EMPTY residue HARD-FAILS — the only fall-through to the warning is an
+#     EMPTY residue (every line accounted for). Assert the residue gates exit 1.
+grep_must "${HARNESS}" 'if \[ -n "\$\{residue\}" \]; then' \
+  "harness HARD-FAILS when the residue is non-empty (fail-closed; an unmatched apply error cannot fall through) (N6.1/#15)"
+# (c) the OLD fail-open form (collecting err_lines then testing 'unexpected') must
+#     be GONE — its presence would mean the positive-grep fall-through is back.
+grep_must_not "${HARNESS}" 'unexpected="\$\(printf' \
+  "harness no longer uses the positive-grep 'unexpected' collection that fell through on an unmatched error (N6.1/#15)"
+
 # --- ephemerality: teardown on ANY exit (trap / always) ----------------------
 grep_must "${HARNESS}" "trap teardown EXIT" \
   "harness tears down the cluster on EVERY exit via a trap (no leaked clusters)"

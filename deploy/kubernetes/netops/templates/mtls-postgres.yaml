@@ -23,6 +23,21 @@ file renders NOTHING and cert-manager need not be installed.
 */ -}}
 {{- if .Values.mtls.postgres.enabled }}
 {{- $m := .Values.mtls.postgres -}}
+{{- /*
+M8 (PR#76 round-2 #25): FAIL FAST on the EXTERNAL-Postgres + mTLS-on combination.
+When the DB is external (services.postgres.enabled=false) this chart renders NO
+in-chart Postgres server (no server cert, no pg_hba ConfigMap, no StatefulSet ssl
+wiring) — yet the api/worker/cronjobs STILL receive verify-full mTLS CLIENT config
+pointed at that external host. Silently shipping that produces a BROKEN deploy:
+every client dials a server that was never configured for mutual TLS. Refuse to
+render unless the operator sets mtls.postgres.external.enabled=true to attest they
+have provisioned the external server's mTLS out-of-band (server cert from a CA the
+client trusts + a pg_hba that requires `hostssl … scram-sha-256
+clientcert=verify-full`). See the external block in values.yaml + the chart README.
+*/ -}}
+{{- if and (not .Values.services.postgres.enabled) (not $m.external.enabled) -}}
+{{- fail "mtls.postgres.enabled=true with services.postgres.enabled=false (external Postgres) renders the api/worker/cronjob mTLS CLIENT config but NO in-chart server cert / pg_hba / ssl wiring — the clients would dial a server never configured for mutual TLS (a silently broken deploy). Provision the EXTERNAL server's mTLS out-of-band (server cert from a CA the client trusts + a pg_hba requiring `hostssl … scram-sha-256 clientcert=verify-full`), then set mtls.postgres.external.enabled=true to attest it; OR set mtls.postgres.enabled=false to use the plaintext (NetworkPolicy-isolated) DB link. (ADR-0039 §3/§4, M8/PR#76 round-2 #25)" -}}
+{{- end -}}
 {{- $cm := $m.certManager -}}
 {{- $fullname := include "netops.fullname" . -}}
 {{- $pgSvc := printf "%s-postgres" $fullname -}}

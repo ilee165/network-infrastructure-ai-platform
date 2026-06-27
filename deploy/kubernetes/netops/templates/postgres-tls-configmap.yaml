@@ -16,9 +16,15 @@ probes (PGHOST=/var/run/postgresql) keep working without a cert; the socket is
 not reachable off-pod, so this is not a plaintext network path.
 
 Config only — NO key material here (the cert/key live in the mounted Secret).
-Rendered only when mtls.postgres.enabled.
+Rendered only when mtls.postgres.enabled AND the IN-CHART Postgres server is
+present (services.postgres.enabled). For an EXTERNAL Postgres
+(services.postgres.enabled=false) this pg_hba would have no server to mount it, so
+it is NOT rendered — the external server's pg_hba is provisioned out-of-band and
+attested via mtls.postgres.external.enabled (the mtls-postgres.yaml fail-fast,
+M8/PR#76 round-2 #25). The netops.hardening pg_hba policy therefore only asserts
+the IN-CHART server's pg_hba (the only one this chart owns).
 */ -}}
-{{- if .Values.mtls.postgres.enabled }}
+{{- if and .Values.mtls.postgres.enabled .Values.services.postgres.enabled }}
 {{- $m := .Values.mtls.postgres -}}
 {{- /* M2 (PR#76): the pg_hba auth method is HARDCODED to scram-sha-256 — it must
 NOT be overridable to a weaker method (e.g. `trust`, which would drop the password

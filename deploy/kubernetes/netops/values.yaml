@@ -968,6 +968,32 @@ mtls:
     # plaintext is accepted; only disable it if your platform terminates the DB-link
     # TLS out-of-band (e.g. a service mesh mTLS sidecar).
     enabled: true
+    # EXTERNAL-Postgres mTLS acknowledgement (M8, PR#76 round-2 #25). When the DB
+    # is EXTERNAL (services.postgres.enabled=false) the chart renders NO in-chart
+    # Postgres server: no server cert, no pg_hba ConfigMap, no StatefulSet ssl
+    # wiring. But the api/worker/cronjobs STILL get verify-full mTLS CLIENT config
+    # (NETOPS_DB_SSL_* + the client cert mount) pointed at that external host — so
+    # unless the EXTERNAL server has been configured for the SAME mutual TLS
+    # out-of-band (server cert from this chart's CA / your CA, and a pg_hba that
+    # requires `hostssl … scram-sha-256 clientcert=verify-full`), the deploy is
+    # silently BROKEN: every client dials a server that never offered mTLS.
+    #
+    # To avoid that silent breakage the chart FAILS the render when
+    # mtls.postgres.enabled=true AND services.postgres.enabled=false UNLESS you set
+    # `external.enabled=true` to ATTEST that you have provisioned the external
+    # server's mTLS out-of-band. Operator checklist before setting this true:
+    #   1. the external Postgres presents a SERVER cert whose CA the client trusts
+    #      (mount the matching ca.crt into the clientSecretName/caSecretName Secret,
+    #      or point config.postgres.* + the client Secret at your own CA material);
+    #   2. the external server's pg_hba REQUIRES
+    #      `hostssl … scram-sha-256 clientcert=verify-full` (no weaker/plaintext row
+    #      — the same posture this chart's pg_hba ConfigMap encodes for the in-chart
+    #      server, asserted by the netops.hardening pg_hba policy);
+    #   3. config.postgres.host points at that external host and the client cert CN
+    #      equals config.postgres.user (clientcert=verify-full checks CN==username).
+    # See the chart README "External Postgres + mTLS" section.
+    external:
+      enabled: false
     # cert-manager issuance + auto-rotation (ADR-0039 §1/§5). When true the chart
     # renders the bootstrap self-signed Issuer → CA Certificate → CA Issuer →
     # server + client Certificates; cert-manager provisions + ROTATES the keypairs

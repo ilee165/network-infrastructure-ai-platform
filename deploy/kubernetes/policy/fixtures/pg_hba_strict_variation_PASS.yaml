@@ -1,0 +1,25 @@
+# POSITIVE fixture (PR#76 round-2 #29 reconciliation) — MUST PASS the
+# netops.hardening pg_hba rule. The fixed rule must reject WEAK hostssl rows
+# (negative fixture) WITHOUT false-rejecting EQUIVALENT secure rows that differ
+# only in benign whitespace/column spacing or carry optional trailing pg_hba
+# options after clientcert=verify-full. If this fixture is DENIED the regex is
+# too strict (a false-reject regression) and the gate is broken.
+#
+# conftest expectation: `conftest test <this> --policy deploy/kubernetes/policy/rego`
+# MUST report 0 failures. Run by run-pg-hba-bite.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netops-postgres-tls-config
+  namespace: netops
+  labels:
+    app.kubernetes.io/component: postgres
+data:
+  pg_hba.conf: |
+    # Strict rows with valid whitespace/column variation + optional trailing opts.
+    local   all   all                       trust
+    # single-space columns, strict method/clientcert — secure, must PASS.
+    hostssl all all 0.0.0.0/0 scram-sha-256 clientcert=verify-full
+    # wide/tab-ish spacing + a trailing pg_hba option after clientcert — still the
+    # strict form (scram-sha-256 + clientcert=verify-full), must PASS.
+    hostssl     all       all   ::/0          scram-sha-256 clientcert=verify-full map=netops

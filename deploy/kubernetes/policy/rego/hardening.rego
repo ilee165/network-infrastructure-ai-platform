@@ -2509,11 +2509,48 @@ is_postgres_tls_configmap(obj) if {
 # accepted ANY method before clientcert=verify-full, so `trust clientcert=verify-full`
 # (which drops the password factor) would pass. Pin scram-sha-256 in the match so a
 # weakened method fails the policy (mirrors the M2 template hardcode).
+#
+# R2 #26/#27 (PR#76 round 2): pg_hba is FIRST-MATCH-WINS. Proving a strict row
+# merely EXISTS is insufficient — a WEAKER hostssl row placed ABOVE it (missing
+# scram, missing clientcert, a different method) silently downgrades auth for the
+# clients it matches first, yet the strict row still "exists" so the old rule
+# passed (a false-green). We therefore assert BOTH polarities:
+#   (a) at least one STRICT hostssl row exists (the control is wired), AND
+#   (b) EVERY hostssl row is the strict form (no weaker row can win a match).
+# `strict_hostssl_re` is deliberately TOLERANT of valid whitespace/column variation
+# and optional trailing pg_hba options after clientcert=verify-full, so it does NOT
+# false-reject EQUIVALENT secure rows (R2 #29 reconciliation).
+
+# A `hostssl` row in the strict form: scram-sha-256 + clientcert=verify-full, with
+# any benign inter-column whitespace and an OPTIONAL trailing option list. `$`
+# anchors the END so `… verify-full-but-weaker` cannot sneak through (it must be
+# end-of-line or a whitespace-separated option).
+strict_hostssl_re := `(?m)^hostssl\s+\S+\s+\S+\s+\S+\s+scram-sha-256\s+clientcert=verify-full(\s.*)?$`
+
+# Any line that is a `hostssl` rule at all (used to enumerate rows to vet).
+hostssl_line(line) if {
+	regex.match(`^hostssl\s`, line)
+}
+
+# (a) at least one STRICT hostssl row exists — the mTLS refusal control is wired.
 deny contains msg if {
 	is_postgres_tls_configmap(input)
 	hba := object.get(input.data, "pg_hba.conf", "")
-	not regex.match(`(?m)^hostssl\s+\S+\s+\S+\s+\S+\s+scram-sha-256\s+clientcert=verify-full`, hba)
+	not regex.match(strict_hostssl_re, hba)
 	msg := "postgres pg_hba.conf must carry a `hostssl … scram-sha-256 clientcert=verify-full` rule — TLS + the scram-sha-256 password layer + a verified client cert are ALL required (a weaker method like `trust` is denied) (ADR-0039 §3, M3/PR#76)"
+}
+
+# (b) EVERY hostssl row must be the strict form. pg_hba is first-match-wins, so a
+# single weaker hostssl row (e.g. `trust clientcert=verify-full`, a missing
+# clientcert, or a different method) placed ANYWHERE weakens auth for the clients
+# it matches first — DENY if any hostssl row is not the strict form (R2 #26/#27).
+deny contains msg if {
+	is_postgres_tls_configmap(input)
+	hba := object.get(input.data, "pg_hba.conf", "")
+	some line in split(hba, "\n")
+	hostssl_line(line)
+	not regex.match(strict_hostssl_re, line)
+	msg := sprintf("postgres pg_hba.conf hostssl row %q is NOT the strict form — pg_hba is first-match-wins, so a weaker hostssl row (missing scram-sha-256, missing clientcert=verify-full, or a different method) downgrades auth for the clients it matches first. EVERY hostssl row must be `hostssl <db> <user> <addr> scram-sha-256 clientcert=verify-full` (ADR-0039 §3, R2 #26/#27/PR#76)", [trim_space(line)])
 }
 
 # The hba MUST NOT carry a plaintext TCP line (`host …` / `hostnossl …`). Such a

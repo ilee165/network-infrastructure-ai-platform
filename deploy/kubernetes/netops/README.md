@@ -81,6 +81,36 @@ Prerequisites for the hardened path:
   external-secrets operator or a CSI secrets-store backed by your KMS/Vault
   (ADR-0029 §6). Leaving it empty renders a **dev-only** generated Secret (warned).
 
+### External Postgres + mTLS
+
+When the DB is **external** (`services.postgres.enabled=false`) the chart renders
+**no in-chart Postgres server** — no server `Certificate`, no `pg_hba` ConfigMap,
+no StatefulSet `ssl=on`/`hba_file` wiring. But with `mtls.postgres.enabled=true`
+the api/worker/cronjobs **still** get `verify-full` mTLS **client** config
+(`NETOPS_DB_SSL_*` + the client cert mount) pointed at that external host. If the
+external server was never configured for the same mutual TLS, every client dials a
+server that does not offer mTLS — a **silently broken** deploy.
+
+To prevent that, the chart **fails the render** when
+`mtls.postgres.enabled=true` **and** `services.postgres.enabled=false` **unless**
+you set `mtls.postgres.external.enabled=true`. Before setting it, provision the
+external server's mTLS **out-of-band**:
+
+1. the external Postgres presents a **server cert** whose CA the client trusts —
+   mount the matching `ca.crt` into `clientSecretName`/`caSecretName` (or point the
+   client Secret at your own CA material);
+2. the external server's `pg_hba` requires
+   `hostssl … scram-sha-256 clientcert=verify-full` (no weaker/plaintext row — the
+   same posture the in-chart `pg_hba` ConfigMap encodes, asserted by the
+   `netops.hardening` pg_hba policy);
+3. `config.postgres.host` points at the external host and the client cert CN
+   (`mtls.postgres.clientCommonName`) equals `config.postgres.user`
+   (`clientcert=verify-full` checks `CN == username`).
+
+Alternatively set `mtls.postgres.enabled=false` for a plaintext
+(NetworkPolicy-isolated) DB link (a warned opt-out). (ADR-0039 §3/§4; M8/PR#76
+round-2 #25.)
+
 ## Key values
 
 | Key | Default | Notes |
@@ -95,6 +125,7 @@ Prerequisites for the hardened path:
 | `mtls.postgres.enabled` | `true` | DB-link mutual TLS ON by default (ADR-0039); needs cert-manager (or the dev fallback). Disabling is a warned plaintext opt-out |
 | `mtls.postgres.certManager.enabled` | `true` | cert-manager issues + auto-rotates the DB cert material; `false` = self-signed dev/CI fallback (not for production) |
 | `mtls.postgres.certManager.caDuration` / `duration` | `87600h` / `2160h` | the CA outlives the leaves by ~40x so CA rotation is rare/planned (M5) |
+| `mtls.postgres.external.enabled` | `false` | attest the EXTERNAL Postgres (`services.postgres.enabled=false`) has mTLS provisioned out-of-band. REQUIRED when `mtls.postgres.enabled=true` AND `services.postgres.enabled=false`, else the render FAILS fast (see "External Postgres + mTLS") |
 | `networkPolicy.enabled` | `true` | default-deny floor + §2 per-edge allows |
 | `networkPolicy.collectorEgress.enabled` | `true` | collector/worker default-deny egress to the device mgmt subnet (ADR-0041); disabling is a warned opt-out |
 | `networkPolicy.collectorEgress.managementCidrs` | `[10.0.0.0/8]` | device mgmt subnet `ipBlock` CIDR(s) — NARROW to your real range; `0.0.0.0/0` and blanket RFC1918 are rejected by the allow-list-minimality policy |
