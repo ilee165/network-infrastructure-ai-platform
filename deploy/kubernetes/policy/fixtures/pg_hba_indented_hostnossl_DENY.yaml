@@ -1,0 +1,22 @@
+# NEGATIVE fixture (PR#76 round-4 #05 + R3 #11) — MUST be DENIED. Same as
+# pg_hba_hostnossl_DENY.yaml but the `hostnossl` row is INDENTED (leading
+# whitespace). pg_hba ignores leading whitespace, so an indented `hostnossl` row is
+# just as live a plaintext path; the `^[ \t]*(host|hostnossl)\s` matcher must still
+# see it and DENY. Proves the #05 alternation composes with the R3 leading-whitespace
+# tolerance.
+#
+# conftest expectation: MUST report >=1 failure. Run by run-pg-hba-bite.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netops-postgres-tls-config
+  namespace: netops
+  labels:
+    app.kubernetes.io/component: postgres
+data:
+  pg_hba.conf: |
+    local       all       all                 trust
+      # INDENTED explicit non-TLS row — leading whitespace must not let it bypass.
+      hostnossl   all       all   0.0.0.0/0     scram-sha-256
+    hostssl     all       all   0.0.0.0/0     scram-sha-256 clientcert=verify-full
+    hostssl     all       all   ::/0          scram-sha-256 clientcert=verify-full

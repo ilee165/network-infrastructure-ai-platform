@@ -223,6 +223,14 @@ async def _prepare(
                 row,
                 actor=_ACTOR,
                 reason="discovery",
+                # ADR-0040 §2: no `target=` here — discovery is the path that
+                # CREATES inventory, so a fully-resolved Device (with scope
+                # attributes) does not yet exist at decrypt time. The run targets a
+                # bare mgmt_ip; the device id is resolved AFTER this loop and may be a
+                # fresh placeholder for a not-yet-inventoried device. Scope is
+                # enforced on the SESSION-OPEN paths that act on a known device
+                # (config backup, packet capture); discovery credentials are
+                # operator-provisioned for a discovery run, not bound to a device.
                 sessionmaker=credentials.autonomous_sessionmaker(session),
             )
             materialized.append(

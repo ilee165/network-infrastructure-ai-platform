@@ -8,3 +8,7 @@
 *.yml  text eol=lf
 *.rego text eol=lf
 *.json text eol=lf
+# Policy-as-test BITE harnesses (e.g. policy/fixtures/run-pg-hba-bite.sh) are bash
+# and MUST stay LF — a CRLF shebang/line breaks the script under core.autocrlf=true
+# (mirrors ci/.gitattributes for the kind-harness scripts).
+*.sh   text eol=lf

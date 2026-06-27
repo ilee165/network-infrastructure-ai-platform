@@ -588,10 +588,15 @@ deny contains msg if {
 }
 
 # --- every egress allow port must map to a known §2 edge. An egress port outside
-# netpol_known_egress_ports is not a §3.1 arrow and is denied.
+# netpol_known_egress_ports is not a §3.1 arrow and is denied. The W4-T5 collector
+# mgmt-subnet egress policy (ADR-0041) is EXCLUDED here — it reaches device
+# MANAGEMENT ports (SSH/SNMP/NETCONF…), not §2 in-cluster edges, and is governed by
+# its own device-mgmt port allow-set in the W4-T5 region below (same exclusion shape
+# as the packet policies).
 deny contains msg if {
 	input.kind == "NetworkPolicy"
 	not is_packet_netpol(input)
+	not is_collector_egress_netpol(input)
 	some rule in object.get(input.spec, "egress", [])
 	some p in object.get(rule, "ports", [])
 	not netpol_known_egress_ports[p.port]
@@ -609,6 +614,164 @@ deny contains msg if {
 	input.kind == "NetworkPolicy"
 	input.metadata.labels["app.kubernetes.io/component"] == "external-llm-egress"
 	msg := "external-LLM egress NetworkPolicy must NOT render unless networkPolicy.externalLlmEgress.enabled — it is opt-in, default-off (ADR-0029 §2)"
+}
+
+# ===========================================================================
+# W4-T5 — collector/worker default-deny egress to the device MANAGEMENT subnet
+# (ADR-0041 §1, PRODUCTION.md §9 collector network segmentation, gate G-SEC).
+#
+# The collector/worker pods are the components that reach out to managed devices.
+# A default-deny egress floor (networkpolicies.yaml `-default-deny-all`) already
+# denies ALL egress; the §2 allows re-permit the in-cluster data stores + DNS, and
+# this ADR-0041 policy re-permits the ONE external destination collectors
+# legitimately reach — the device MANAGEMENT subnet(s) — as `ipBlock` CIDR(s) on a
+# confined device-mgmt port set. The external allow-list is `ipBlock` ONLY
+# (selectors cannot express an external CIDR) and is the mgmt subnet + named
+# in-cluster services ONLY: NO 0.0.0.0/0, NO blanket RFC1918 (the over-broad
+# allow-list ADR-0041 §Consequences/Alt #2 rejects). These rules assert that shape
+# on the RENDERED manifest, per document (conftest --all-namespaces, no --combine).
+#
+# Identified by its component label `collector-egress` (label-based, matching the
+# rest of this file), so a fullname-prefix rename cannot slip a policy past the
+# guard. The packet-capture policy carries its OWN ADR-0031 mgmt-egress rules
+# above; this is the ADR-0041 collector/worker control, distinct from it.
+# ===========================================================================
+
+# The device-MANAGEMENT {port, protocol} edges a collector legitimately reaches
+# (ADR-0041 §1): SSH (22/TCP), SNMP (161/UDP), NETCONF (830/TCP), HTTPS device APIs
+# (443/TCP). The PROTOCOL is part of the edge: SNMP is UDP, so a TCP/161 render does
+# NOT permit SNMP polling under the default-deny floor — modelling protocol here is
+# the guard against that false promise. An egress {port, protocol} on the collector
+# mgmt policy outside this set is not a device-mgmt edge and is denied. This is a
+# SCOPED allow-set for this policy ONLY — it is NOT folded into the §2 in-cluster
+# `netpol_known_egress_ports` (those are cluster edges; these are device ports). A
+# new device-mgmt edge is added here consciously, never silently.
+collector_mgmt_ports := {
+	{"port": 22, "protocol": "TCP"},
+	{"port": 161, "protocol": "UDP"},
+	{"port": 443, "protocol": "TCP"},
+	{"port": 830, "protocol": "TCP"},
+}
+
+# True for the W4-T5 collector mgmt-subnet egress NetworkPolicy. Identified by the
+# policy's OWN metadata component label `collector-egress` (its identity), NOT its
+# podSelector (which targets the `worker` pods it binds) — same identification shape
+# as the `external-llm-egress` policy above.
+is_collector_egress_netpol(np) if {
+	np.metadata.labels["app.kubernetes.io/component"] == "collector-egress"
+}
+
+# --- the collector mgmt-egress policy must be EGRESS-typed (it is an egress
+# control; an ingress-only render would be inert). ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	not policy_has_egress(input)
+	msg := "collector mgmt-egress NetworkPolicy must declare policyTypes Egress (default-deny egress re-permitting the mgmt subnet only; ADR-0041 §1)"
+}
+
+# --- the collector mgmt-egress policy must re-permit a device MANAGEMENT subnet
+# via an `ipBlock` CIDR — that is the whole point (ADR-0041 §1; selectors cannot
+# express an external CIDR). A policy with no ipBlock allow reaches no device. ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	not collector_allows_management_cidr(input)
+	msg := "collector mgmt-egress NetworkPolicy must allow egress to a device management subnet (ipBlock CIDR) — the ONLY external destination collectors legitimately reach (ADR-0041 §1 / PRODUCTION.md §9)"
+}
+
+collector_allows_management_cidr(np) if {
+	some rule in np.spec.egress
+	some target in rule.to
+	target.ipBlock.cidr
+}
+
+# --- ALLOW-LIST MINIMALITY (the load-bearing W4-T5 guard, ADR-0041 §Consequences
+# / Alt #2): an over-broad allow-list silently reopens the exfiltration/pivot path
+# the control exists to close. NO collector mgmt-egress ipBlock CIDR may be the
+# whole internet (`0.0.0.0/0`) or an IPv6 default route (`::/0`). ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	some rule in object.get(input.spec, "egress", [])
+	some target in object.get(rule, "to", [])
+	cidr := target.ipBlock.cidr
+	cidr in {"0.0.0.0/0", "::/0"}
+	msg := sprintf("collector mgmt-egress NetworkPolicy must NOT allow the whole internet (found ipBlock %q) — the allow-list is the device mgmt subnet only, never 0.0.0.0/0 (ADR-0041 §Alt #2 / minimality)", [cidr])
+}
+
+# --- ALLOW-LIST MINIMALITY (cont.): the allow-list must not be BLANKET RFC1918 —
+# permitting all three private supernets (10/8, 172.16/12, 192.168/16) at once
+# re-permits the entire private address space (every other namespace, every other
+# subnet), which is the over-broad allow-list ADR-0041 rejects. The mgmt subnet is
+# a NARROW range an operator configures, not "all of RFC1918". An exact-match on
+# all three /8-/12-/16 supernets in the same policy is the blanket-RFC1918 tell. ---
+rfc1918_supernets := {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+
+collector_cidrs := {cidr |
+	some rule in object.get(input.spec, "egress", [])
+	some target in object.get(rule, "to", [])
+	cidr := target.ipBlock.cidr
+}
+
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	# every one of the three RFC1918 supernets is present verbatim in the allow-list
+	count(rfc1918_supernets - collector_cidrs) == 0
+	msg := "collector mgmt-egress NetworkPolicy must NOT allow BLANKET RFC1918 (10/8 + 172.16/12 + 192.168/16 together re-permit the whole private space) — narrow it to the operator-configured device mgmt subnet(s) (ADR-0041 §Alt #2 / minimality)"
+}
+
+# --- the collector mgmt-egress policy must NOT contain a wide-open (no `to`) rule:
+# a missing `to` = allow-to-anywhere, exactly what default-deny forbids (ADR-0041
+# §1). (The generic no-blanket-egress rule above also covers this; this is the
+# W4-T5-named guard so a regression names the control it broke.) ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	some rule in object.get(input.spec, "egress", [])
+	not rule.to
+	msg := "collector mgmt-egress NetworkPolicy must not contain an unrestricted (no `to`) egress rule — the allow-list is the mgmt subnet only (ADR-0041 §1)"
+}
+
+# --- every mgmt-egress {port, protocol} must be a known device-MGMT edge
+# (SSH 22/TCP, SNMP 161/UDP, NETCONF 830/TCP, HTTPS-API 443/TCP). A {port, protocol}
+# outside collector_mgmt_ports is not a device-mgmt edge and is denied — keeps the
+# control confined to the device-reaching protocols, not "any port to the mgmt
+# subnet", and rejects a TCP/161 render that would silently fail to permit UDP SNMP.
+# K8s defaults an omitted `protocol` to TCP, so normalize before the set lookup. ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	some rule in object.get(input.spec, "egress", [])
+	some p in object.get(rule, "ports", [])
+	proto := object.get(p, "protocol", "TCP")
+	not collector_mgmt_ports[{"port": p.port, "protocol": proto}]
+	msg := sprintf("collector mgmt-egress NetworkPolicy targets %v/%v, not a known device-management edge (22/TCP, 161/UDP, 443/TCP, 830/TCP) (ADR-0041 §1)", [proto, p.port])
+}
+
+# --- the collector mgmt-egress policy must SELECT the collector/worker pods (by
+# their existing `worker` app label, ADR-0041 §1) — a policy that selects the wrong
+# pods confines nothing. Asserted via podSelector matchLabels component=worker. ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	not input.spec.podSelector.matchLabels["app.kubernetes.io/component"] == "worker"
+	msg := "collector mgmt-egress NetworkPolicy must select the worker/collector pods (podSelector app.kubernetes.io/component=worker; ADR-0041 §1)"
+}
+
+# --- ALLOW-LIST MINIMALITY (cont., P1net/PR#76): every external `to` target MUST be
+# `ipBlock`-ONLY. The earlier `collector_allows_management_cidr` only checks that AN
+# ipBlock is PRESENT — a MIXED `to` target (ipBlock + a podSelector/namespaceSelector
+# in the SAME target, or a non-ipBlock target alongside the ipBlock) would silently
+# re-permit in-cluster/other-namespace destinations the ADR-0041 §1 minimality control
+# forbids. Assert ipBlock-ONLY: any `to` target that carries a selector key (pod/
+# namespace/ipBlock-missing) on this policy is denied. ---
+collector_to_target_is_ipblock_only(target) if {
+	target.ipBlock
+	not target.podSelector
+	not target.namespaceSelector
+}
+
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	some rule in object.get(input.spec, "egress", [])
+	some target in object.get(rule, "to", [])
+	not collector_to_target_is_ipblock_only(target)
+	msg := "collector mgmt-egress NetworkPolicy `to` targets must be ipBlock-ONLY — a mixed ipBlock+selector (or a non-ipBlock) target re-permits in-cluster/other-namespace destinations the minimality control forbids (ADR-0041 §1 / §Alt #2, P1net/PR#76)"
 }
 
 # ===========================================================================
@@ -2317,4 +2480,249 @@ deny contains msg if {
 	some c in fp_drill_pod_spec(input).containers
 	endswith(c.image, ":latest")
 	msg := sprintf("full-platform DR drill %q image %q must not use the `latest` tag (ADR-0029 §5)", [input.metadata.name, c.image])
+}
+
+# ===========================================================================
+# W4-T4 — api/worker↔postgres mTLS (ADR-0039 §3/§4/§5)
+#
+# Mutual TLS on the two DB links: Postgres presents a SERVER cert and REQUIRES +
+# verifies the api/worker CLIENT certs (`hostssl … clientcert=verify-full`),
+# REFUSING plaintext / untrusted-CA; the clients verify the server (verify-full)
+# and present their cert. These rules assert, on the RENDERED manifests, that the
+# control is wired AND not silently weakened. They only fire when the mTLS
+# objects are present (mtls.postgres.enabled), so a default (mTLS-off) render is
+# unaffected — the chart's existing posture is unchanged. NEVER weaken a rule to
+# make it green; fix the manifest.
+# ===========================================================================
+
+# --- The Postgres pg_hba ConfigMap (postgres-tls-config) is the REFUSAL bite ---
+
+is_postgres_tls_configmap(obj) if {
+	obj.kind == "ConfigMap"
+	endswith(obj.metadata.name, "-postgres-tls-config")
+}
+
+# The hba MUST carry a `hostssl … scram-sha-256 clientcert=verify-full` rule — TLS
+# + the scram password layer + a verified client cert ALL REQUIRED. Its absence
+# means the server does not require mutual TLS.
+# M3 (PR#76): the auth METHOD must be `scram-sha-256` EXPLICITLY — the prior regex
+# accepted ANY method before clientcert=verify-full, so `trust clientcert=verify-full`
+# (which drops the password factor) would pass. Pin scram-sha-256 in the match so a
+# weakened method fails the policy (mirrors the M2 template hardcode).
+#
+# R2 #26/#27 (PR#76 round 2): pg_hba is FIRST-MATCH-WINS. Proving a strict row
+# merely EXISTS is insufficient — a WEAKER hostssl row placed ABOVE it (missing
+# scram, missing clientcert, a different method) silently downgrades auth for the
+# clients it matches first, yet the strict row still "exists" so the old rule
+# passed (a false-green). We therefore assert BOTH polarities:
+#   (a) at least one STRICT hostssl row exists (the control is wired), AND
+#   (b) EVERY hostssl row is the strict form (no weaker row can win a match).
+# `strict_hostssl_re` is deliberately TOLERANT of valid whitespace/column variation
+# and optional trailing pg_hba options after clientcert=verify-full, so it does NOT
+# false-reject EQUIVALENT secure rows (R2 #29 reconciliation).
+
+# A `hostssl` row in the strict form: scram-sha-256 + clientcert=verify-full, with
+# any benign inter-column whitespace and an OPTIONAL trailing option list. `$`
+# anchors the END so `… verify-full-but-weaker` cannot sneak through (it must be
+# end-of-line or a whitespace-separated option).
+# R3 #12 (PR#76 round 3): tolerate leading whitespace (`^[ \t]*`) so an INDENTED
+# but otherwise-strict hostssl row is NOT false-rejected as non-strict — pg_hba
+# ignores leading whitespace, so an indented strict row is still strict.
+strict_hostssl_re := `(?m)^[ \t]*hostssl\s+\S+\s+\S+\s+\S+\s+scram-sha-256\s+clientcert=verify-full(\s.*)?$`
+
+# Any line that is a `hostssl` rule at all (used to enumerate rows to vet).
+# R3 #11 (PR#76 round 3): tolerate leading whitespace (`^[ \t]*`) so an INDENTED
+# weak hostssl row is still SEEN as a hostssl row and subjected to the per-row
+# strictness check — otherwise a whitespace-prefixed downgraded auth rule bypasses
+# the check (pg_hba ignores leading whitespace, so the indented row is live).
+hostssl_line(line) if {
+	regex.match(`^[ \t]*hostssl\s`, line)
+}
+
+# (a) at least one STRICT hostssl row exists — the mTLS refusal control is wired.
+deny contains msg if {
+	is_postgres_tls_configmap(input)
+	hba := object.get(input.data, "pg_hba.conf", "")
+	not regex.match(strict_hostssl_re, hba)
+	msg := "postgres pg_hba.conf must carry a `hostssl … scram-sha-256 clientcert=verify-full` rule — TLS + the scram-sha-256 password layer + a verified client cert are ALL required (a weaker method like `trust` is denied) (ADR-0039 §3, M3/PR#76)"
+}
+
+# (b) EVERY hostssl row must be the strict form. pg_hba is first-match-wins, so a
+# single weaker hostssl row (e.g. `trust clientcert=verify-full`, a missing
+# clientcert, or a different method) placed ANYWHERE weakens auth for the clients
+# it matches first — DENY if any hostssl row is not the strict form (R2 #26/#27).
+deny contains msg if {
+	is_postgres_tls_configmap(input)
+	hba := object.get(input.data, "pg_hba.conf", "")
+	some line in split(hba, "\n")
+	hostssl_line(line)
+	not regex.match(strict_hostssl_re, line)
+	msg := sprintf("postgres pg_hba.conf hostssl row %q is NOT the strict form — pg_hba is first-match-wins, so a weaker hostssl row (missing scram-sha-256, missing clientcert=verify-full, or a different method) downgrades auth for the clients it matches first. EVERY hostssl row must be `hostssl <db> <user> <addr> scram-sha-256 clientcert=verify-full` (ADR-0039 §3, R2 #26/#27/PR#76)", [trim_space(line)])
+}
+
+# The hba MUST NOT carry a plaintext TCP line (`host …` / `hostnossl …`). Such a
+# line would admit a non-TLS connection — exactly the plaintext path ADR-0039 §3
+# refuses. Only `local` (unix socket) and `hostssl` lines are permitted.
+deny contains msg if {
+	is_postgres_tls_configmap(input)
+	hba := object.get(input.data, "pg_hba.conf", "")
+	# Intent (round-4 #05): deny the two PLAINTEXT-capable TCP connection types —
+	# `host` (matches SSL *and* non-SSL, so it admits plaintext) and `hostnossl`
+	# (explicitly non-TLS). `hostssl` (TLS-required) is the ONLY permitted TCP form
+	# and is deliberately NOT matched here. This is NOT "deny any non-hostssl line":
+	# `hostgssenc` (GSSAPI-encrypted) is a separate transport concern, out of scope of
+	# this TLS-link rule (handle elsewhere if GSS is ever in scope). RE2 has no
+	# negative lookahead, so the two plaintext types are matched by explicit
+	# alternation. `^[ \t]*` tolerates leading whitespace — pg_hba ignores it, so an
+	# indented `host`/`hostnossl` row is still a live non-TLS listener path (R3 #12).
+	regex.match(`(?m)^[ \t]*(host|hostnossl)\s`, hba)
+	msg := "postgres pg_hba.conf must NOT carry a plaintext `host` or non-TLS `hostnossl` line — a non-TLS listener path defeats the mTLS refusal; only `hostssl` (and `local`) are permitted (ADR-0039 §3, round-4 #05)"
+}
+
+# --- The Postgres StatefulSet must turn ssl on + point hba_file at the mounted
+# pg_hba (so the refusal rule above is the file actually used) when mTLS material
+# is mounted (the `db-tls-server` volume is the marker). ---
+
+postgres_statefulset_has_db_tls(obj) if {
+	obj.kind == "StatefulSet"
+	obj.metadata.labels["app.kubernetes.io/component"] == "postgres"
+	some v in obj.spec.template.spec.volumes
+	v.name == "db-tls-server"
+}
+
+postgres_container_args(obj) := obj.spec.template.spec.containers[0].args
+
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	not "ssl=on" in postgres_container_args(input)
+	msg := "postgres with mTLS material mounted must set `-c ssl=on` (ADR-0039 §3)"
+}
+
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	not postgres_args_set_hba_file(input)
+	msg := "postgres with mTLS material mounted must set `-c hba_file=` to the mounted pg_hba.conf so the clientcert=verify-full rule is the file in effect (ADR-0039 §3)"
+}
+
+postgres_args_set_hba_file(obj) if {
+	some a in postgres_container_args(obj)
+	startswith(a, "hba_file=")
+}
+
+# The server cert/key + the CA the server verifies CLIENT certs against must all
+# be configured — a missing ssl_ca_file would mean the server cannot verify
+# client certs (clientcert would have no trust anchor).
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	not postgres_args_have_prefix(input, "ssl_cert_file=")
+	msg := "postgres mTLS must set `-c ssl_cert_file=` (the server cert; ADR-0039 §3)"
+}
+
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	not postgres_args_have_prefix(input, "ssl_key_file=")
+	msg := "postgres mTLS must set `-c ssl_key_file=` (the server key; ADR-0039 §3)"
+}
+
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	not postgres_args_have_prefix(input, "ssl_ca_file=")
+	msg := "postgres mTLS must set `-c ssl_ca_file=` (the CA it verifies client certs against; ADR-0039 §3)"
+}
+
+postgres_args_have_prefix(obj, prefix) if {
+	some a in postgres_container_args(obj)
+	startswith(a, prefix)
+}
+
+# The server cert/key volume must be mounted READ-ONLY (cert keys are mounted
+# files, never writable in-pod; ADR-0039 §5).
+# M8 (PR#76): `m.readOnly != true` is UNDEFINED (not true) when the field is
+# ABSENT, so a mount that simply OMITS readOnly would slip past. object.get with a
+# `false` default makes a missing field deterministic — an omitted readOnly is
+# treated as NOT read-only and the deny fires.
+deny contains msg if {
+	postgres_statefulset_has_db_tls(input)
+	some c in input.spec.template.spec.containers
+	some m in c.volumeMounts
+	m.name == "db-tls-server"
+	object.get(m, "readOnly", false) != true
+	msg := "postgres db-tls-server cert mount must be readOnly:true (ADR-0039 §5)"
+}
+
+# --- The api/worker CLIENT side must connect verify-full (mutual). The mTLS MARKER
+# is the db-tls-client cert MOUNT (M9, PR#76): a Deployment that mounts the client
+# cert material is doing mTLS and MUST carry NETOPS_DB_SSL_MODE=verify-full with a
+# LITERAL value. Keying the requirement on the MOUNT (not on the env existing) closes
+# the M9 gap where a Deployment mounted db-tls-client WITHOUT the env passed policy. ---
+
+mtls_client_components := {"api", "worker"}
+
+# The NETOPS_DB_SSL_MODE env entry (the object), present whether it carries a literal
+# `value` OR a `valueFrom`. Used to test PRESENCE independent of the value source.
+client_db_ssl_mode_entry(obj) := e if {
+	some c in obj.spec.template.spec.containers
+	some e in object.get(c, "env", [])
+	e.name == "NETOPS_DB_SSL_MODE"
+}
+
+# True iff the workload sets NETOPS_DB_SSL_MODE as a LITERAL `value` of exactly
+# "verify-full". M10 (PR#76): keyed on the literal `value` ONLY — a `valueFrom`
+# (configMap/secret) indirection carries no `value`, so it does NOT satisfy this and
+# cannot smuggle a weaker/absent mode past the verify-full requirement.
+deployment_sets_verify_full_literal(obj) if {
+	e := client_db_ssl_mode_entry(obj)
+	object.get(e, "value", "") == "verify-full"
+}
+
+# A db-tls-client Deployment that does NOT set the literal verify-full mode is denied.
+# Covers: missing env (M9), wrong mode, and a valueFrom-only env (M10 — no literal).
+deny contains msg if {
+	input.kind == "Deployment"
+	mtls_client_components[input.metadata.labels["app.kubernetes.io/component"]]
+	deployment_mounts_client_tls(input)
+	not deployment_sets_verify_full_literal(input)
+	msg := sprintf("%s mounts the db-tls-client cert material but does not set NETOPS_DB_SSL_MODE to a LITERAL \"verify-full\" — mutual TLS requires server identity verified + client cert presented, and a missing/valueFrom/weaker mode is denied (ADR-0039 §4, M9+M10/PR#76)", [input.metadata.labels["app.kubernetes.io/component"]])
+}
+
+# Symmetric guard: an api/worker that sets the mTLS client env MUST also mount the
+# client cert material read-only — env without the mounted cert files cannot handshake.
+deny contains msg if {
+	input.kind == "Deployment"
+	mtls_client_components[input.metadata.labels["app.kubernetes.io/component"]]
+	client_db_ssl_mode_entry(input)
+	not deployment_mounts_client_tls(input)
+	msg := sprintf("%s sets NETOPS_DB_SSL_MODE but does not mount the db-tls-client cert material read-only (ADR-0039 §4/§5)", [input.metadata.labels["app.kubernetes.io/component"]])
+}
+
+deployment_mounts_client_tls(obj) if {
+	some c in obj.spec.template.spec.containers
+	some m in c.volumeMounts
+	m.name == "db-tls-client"
+	object.get(m, "readOnly", false) == true
+}
+
+# --- The dev/CI fallback TLS Secrets must be marked dev-convenience (so the
+# existing "chart ships no unmarked credential Secret" rule does not fire) AND
+# carry cert material under `data:` only (PEM bytes), NEVER an inlined literal in
+# stringData. They are exempt from the platform-secret literal check by the
+# dev-secret annotation; this rule asserts they actually carry that marker. ---
+is_db_tls_secret(obj) if {
+	obj.kind == "Secret"
+	obj.metadata.labels["app.kubernetes.io/component"] == "mtls"
+}
+
+deny contains msg if {
+	is_db_tls_secret(input)
+	not is_dev_convenience_secret(input)
+	msg := sprintf("db mTLS dev-fallback Secret %q must be annotated netops.io/dev-secret=true (cert-manager owns the production material; ADR-0039 §5)", [input.metadata.name])
+}
+
+# Cert material must never be inlined under stringData (it belongs under `data:`
+# as base64 PEM, like the pgBackRest TLS precedent) — a stringData cert key is a
+# plaintext-in-history regression.
+deny contains msg if {
+	is_db_tls_secret(input)
+	some k, _ in object.get(input, "stringData", {})
+	msg := sprintf("db mTLS Secret %q must carry cert material under `data:` (base64 PEM), not stringData key %q (ADR-0039 §5)", [input.metadata.name, k])
 }

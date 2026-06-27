@@ -120,7 +120,12 @@ def test_raw_artifact_id_is_plain_indexed_uuid_without_fk() -> None:
 
 
 def test_device_credential_has_no_plaintext_secret_column() -> None:
-    """The credential table stores ciphertext only — exact column allowlist."""
+    """The credential table stores ciphertext only — exact column allowlist.
+
+    The W4-T2 scope columns (ADR-0040 §2) are non-secret least-privilege metadata
+    (site / role / device-group labels), so they extend this allowlist; the guard
+    still asserts there is NO plaintext-secret column on the table.
+    """
     expected = {
         "id",
         "created_at",
@@ -134,5 +139,9 @@ def test_device_credential_has_no_plaintext_secret_column() -> None:
         "dek_nonce",
         "kek_version",
         "params",
+        # ADR-0040 §2 per-credential scope (non-secret metadata).
+        "scope_site",
+        "scope_role",
+        "scope_device_group",
     }
     assert set(_table("device_credentials").columns.keys()) == expected

@@ -102,6 +102,48 @@ class TestCredentialCreate:
         )
         assert decrypted.plaintext == SECRET_SENTINEL.encode()
 
+    async def test_create_plumbs_scope_through_the_route(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+        session: AsyncSession,
+    ) -> None:
+        """CR C2: scope_* in the create body is persisted on the row and echoed back."""
+        created = await _create_credential(
+            client,
+            auth_headers("engineer"),
+            name="scoped-api",
+            scope_site="nyc",
+            scope_role="firewall",
+            scope_device_group="dc-a",
+        )
+        assert created["scope_site"] == "nyc"
+        assert created["scope_role"] == "firewall"
+        assert created["scope_device_group"] == "dc-a"
+        row = await session.get(DeviceCredential, uuid.UUID(created["id"]))
+        assert row is not None
+        assert row.scope_site == "nyc"
+        assert row.scope_role == "firewall"
+        assert row.scope_device_group == "dc-a"
+        assert row.is_scoped is True
+
+    async def test_create_without_scope_is_unscoped(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+        session: AsyncSession,
+    ) -> None:
+        """CR C2: omitting scope yields an UNSCOPED credential (all-NULL = covers all)."""
+        created = await _create_credential(client, auth_headers("engineer"))
+        assert created["scope_site"] is None
+        assert created["scope_role"] is None
+        assert created["scope_device_group"] is None
+        row = await session.get(DeviceCredential, uuid.UUID(created["id"]))
+        assert row is not None
+        assert row.is_scoped is False
+
     @pytest.mark.parametrize("role", ["viewer", "operator"])
     async def test_below_engineer_is_403(
         self,

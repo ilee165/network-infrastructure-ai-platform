@@ -262,6 +262,75 @@ spec:
           port: {{ .Values.services.ollama.port }}
     {{- end }}
 {{- end }}
+{{- if .Values.audit.chainVerify.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-audit-egress (A9, PR#76) — the audit-chain-verify CronJob pods (component
+# `audit`) recompute the append-only audit_log hash chain and so MUST reach
+# postgres:5432. Without this allow the default-deny floor (podSelector {}) blocks
+# the connection and the audit-integrity job FAILS EVERY RUN (a default-on
+# regression — audit.chainVerify.enabled is true by default). DNS is already
+# granted cluster-wide by allow-dns-egress; this adds the ONE missing data-store
+# edge (mirrors allow-worker-egress, scoped to Postgres only). No empty-`to` rule.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-audit-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: audit
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "audit") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # audit-chain-verify → postgres:5432 (recomputes the audit_log hash chain).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+{{- end }}
+{{- if .Values.credentials.rotation.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-credentials-egress (A9, PR#76) — the credential-rotation CronJob pods
+# (component `credentials`) run the confirm-then-swap device-secret rotation pass,
+# which reads/writes the credential rows in postgres:5432. Same default-deny gap as
+# the audit job: without this allow the rotation pass cannot reach Postgres. Renders
+# only when the (default-off) rotation tier is enabled. DNS is cluster-wide via
+# allow-dns-egress; this adds the Postgres edge only. No empty-`to` rule.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-credentials-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: credentials
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "credentials") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # credential-rotation → postgres:5432 (reads/updates the credential rows).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+{{- end }}
 {{- if .Values.services.ollama.enabled }}
 {{- if or .Values.services.api.enabled .Values.services.worker.enabled }}
 ---

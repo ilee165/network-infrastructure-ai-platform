@@ -75,6 +75,9 @@ async def create_credential(
         secret=body.secret.get_secret_value(),
         params=body.params,
         actor=_actor(user),
+        scope_site=body.scope_site,
+        scope_role=body.scope_role,
+        scope_device_group=body.scope_device_group,
         sessionmaker=sessionmaker,
     )
     response = CredentialRead.model_validate(credential)

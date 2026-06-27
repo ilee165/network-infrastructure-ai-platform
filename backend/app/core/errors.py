@@ -117,6 +117,21 @@ class ForbiddenError(NetOpsError):
     slug = "forbidden"
 
 
+class CredentialScopeError(ForbiddenError):
+    """A device credential was used against a target outside its scope (ADR-0040 §2).
+
+    Raised by the credentials service when, at session open, a scoped credential
+    is asked to materialize for a device its scope does not cover — a structural
+    least-privilege deny, not advisory. It is a 403 (authenticated, but the
+    credential is not authorized for this target); the ``detail`` carries the
+    credential/device IDS ONLY (never the scope values, the device attributes, or
+    any secret material) so the deny is auditable without leaking the boundary.
+    """
+
+    title = "Credential Out Of Scope"
+    slug = "credential-out-of-scope"
+
+
 class RateLimitedError(NetOpsError):
     """Too many requests/attempts in a window (W6-T6; PRODUCTION.md §5).
 

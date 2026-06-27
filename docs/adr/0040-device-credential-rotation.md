@@ -65,6 +65,18 @@ the device** is **out of P2 scope** (named-deferred); if a later wave scopes it 
 that device write goes through the ADR-0020 four-eyes ChangeRequest spine — never a
 direct write. This keeps W4-T2 unambiguous.
 
+**Consequence for the SCHEDULED CronJob (CR C1+C4):** because the on-device change
+is deferred, a scheduled pass that generates a *new* random secret would verify it
+against a device that still holds the *old* one — verify fails and the credential
+degrades on **every** run. The scheduled `credential-rotation` CronJob is therefore
+shipped **disabled by default** (`credentials.rotation.enabled=false`): it must not
+render an always-degrading job. Enabling it emits a NOTES warning that scheduled
+auto-rotation needs the deferred on-device-change capability. The confirm-then-swap
+`rotate_device_secret()` service stays intact for **on-demand / coordinated**
+rotation (a caller that has already changed the secret on the device, e.g. via the
+CR spine). The default flips to enabled only once a transport-backed
+on-device-change capability is wired (the named follow-up above).
+
 ### 5. Disjoint from KEK rotation (ADR-0032 / W6-T3)
 
 This ADR governs device-secret rotation only. KEK/master-key rotation is ADR-0032

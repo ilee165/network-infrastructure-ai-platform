@@ -1,0 +1,32 @@
+# NEGATIVE fixture (PR#76 round-2 #26/#27) — MUST be DENIED by the
+# netops.hardening pg_hba rule. This is the policy-as-test BITE for the
+# first-match-wins weakening: pg_hba evaluates rows TOP-DOWN and uses the FIRST
+# matching row, so a WEAKER hostssl row placed ABOVE a strict one silently
+# downgrades auth even though a strict row still "exists" later in the file.
+#
+# Here a `trust clientcert=verify-full` row (drops the scram-sha-256 password
+# factor) sits BEFORE the strict scram row. The OLD rule only proved a strict row
+# EXISTED, so it passed this file (false-green). The fixed rule DENIES because at
+# least one hostssl row is NOT the strict form.
+#
+# conftest expectation: `conftest test <this> --policy deploy/kubernetes/policy/rego`
+# MUST report >=1 failure (the weak-hostssl deny). Run by
+# deploy/kubernetes/policy/fixtures/run-pg-hba-bite.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netops-postgres-tls-config
+  namespace: netops
+  labels:
+    app.kubernetes.io/component: postgres
+data:
+  pg_hba.conf: |
+    # netops mTLS pg_hba — DELIBERATELY WEAKENED for the negative bite.
+    local       all       all                 trust
+    # WEAK ROW (first-match-wins): TLS is required but the password factor is
+    # dropped (trust). pg_hba matches this BEFORE the strict row below, so a
+    # client with only a verified cert (no password) is admitted.
+    hostssl     all       all   0.0.0.0/0     trust clientcert=verify-full
+    # A strict row still exists — but it is unreachable for 0.0.0.0/0 clients.
+    hostssl     all       all   0.0.0.0/0     scram-sha-256 clientcert=verify-full
+    hostssl     all       all   ::/0          scram-sha-256 clientcert=verify-full

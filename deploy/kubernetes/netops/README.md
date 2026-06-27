@@ -28,7 +28,7 @@ RBAC + admission policy, and the packet-sandbox OS-isolation workloads
 | `postgres`/`neo4j`/`redis` StatefulSets | ADR-0013 §4 | toggleable (`services.<svc>.enabled=false` → external/operator-managed); hardened, resource req+limits, native probes |
 | `ollama` StatefulSet | ADR-0009 | OPT-IN (`enabled:false`, replicas 0 by default); external provider is the default posture |
 | `Ingress` + cert-manager `Certificate` | ADR-0029 §4 | ONE HTTPS-only Ingress → frontend; ssl-redirect + HSTS; TLS Secret cert-manager-managed (no key in values); all Services ClusterIP |
-| `NetworkPolicy` set | ADR-0029 §2 | `default-deny-all` floor + one additive allow per §3.1 arrow; DNS-only egress; external-LLM egress opt-in default-off |
+| `NetworkPolicy` set | ADR-0029 §2 / ADR-0041 | `default-deny-all` floor + one additive allow per §3.1 arrow; DNS-only egress; collector/worker mgmt-subnet egress (`ipBlock` CIDR only, device-mgmt ports; ADR-0041 — deny asserted on the W4-T3 kind cluster); external-LLM egress opt-in default-off |
 | `Namespace` PSA labels | ADR-0029 §3 | `enforce/audit/warn = restricted` (install namespace); capture namespace relaxed for its NET_RAW deviation |
 | `packet-capture` Deployment | ADR-0031 §1 | `NET_RAW`+`NET_ADMIN`, tainted pool, own SA, confined management-subnet egress |
 | `packet-analysis` Deployment | ADR-0031 §2 | drop-ALL caps (no add), non-root uid≥10000, RO-rootfs, Localhost seccomp, RO pcap, bounded scratch, resource limits, default-deny egress |
@@ -59,8 +59,15 @@ helm install netops deploy/kubernetes/netops \
 
 Prerequisites for the hardened path:
 
-- **cert-manager** + an Issuer/ClusterIssuer (`ingress.tls.issuerRef`) for the
-  TLS Ingress (no key material ever passes through Helm values).
+- **cert-manager** (REQUIRED by default) — it issues BOTH the TLS Ingress cert
+  (`ingress.tls.issuerRef`) AND, since PR#76, the api/worker/cronjob ↔ Postgres
+  **DB-link mTLS** cert material (`mtls.postgres.enabled=true` is now the secure
+  default; the chart renders the bootstrap self-signed Issuer → DB CA → server +
+  client `Certificate` CRs that cert-manager provisions + auto-rotates). No key
+  material ever passes through Helm values. If cert-manager is not installed you
+  must either run the self-signed dev/CI fallback
+  (`mtls.postgres.certManager.enabled=false`, NOT for production) or take the
+  documented opt-out (`mtls.postgres.enabled=false`, a warned plaintext DB link).
 - An **ingress controller** matching `ingress.className` (default `nginx`).
 - **Kyverno** (default `admission.engine=kyverno`) **or** set
   `admission.engine=vap` for a webhook-free ValidatingAdmissionPolicy.
@@ -74,6 +81,36 @@ Prerequisites for the hardened path:
   external-secrets operator or a CSI secrets-store backed by your KMS/Vault
   (ADR-0029 §6). Leaving it empty renders a **dev-only** generated Secret (warned).
 
+### External Postgres + mTLS
+
+When the DB is **external** (`services.postgres.enabled=false`) the chart renders
+**no in-chart Postgres server** — no server `Certificate`, no `pg_hba` ConfigMap,
+no StatefulSet `ssl=on`/`hba_file` wiring. But with `mtls.postgres.enabled=true`
+the api/worker/cronjobs **still** get `verify-full` mTLS **client** config
+(`NETOPS_DB_SSL_*` + the client cert mount) pointed at that external host. If the
+external server was never configured for the same mutual TLS, every client dials a
+server that does not offer mTLS — a **silently broken** deploy.
+
+To prevent that, the chart **fails the render** when
+`mtls.postgres.enabled=true` **and** `services.postgres.enabled=false` **unless**
+you set `mtls.postgres.external.enabled=true`. Before setting it, provision the
+external server's mTLS **out-of-band**:
+
+1. the external Postgres presents a **server cert** whose CA the client trusts —
+   mount the matching `ca.crt` into `clientSecretName`/`caSecretName` (or point the
+   client Secret at your own CA material);
+2. the external server's `pg_hba` requires
+   `hostssl … scram-sha-256 clientcert=verify-full` (no weaker/plaintext row — the
+   same posture the in-chart `pg_hba` ConfigMap encodes, asserted by the
+   `netops.hardening` pg_hba policy);
+3. `config.postgres.host` points at the external host and the client cert CN
+   (`mtls.postgres.clientCommonName`) equals `config.postgres.user`
+   (`clientcert=verify-full` checks `CN == username`).
+
+Alternatively set `mtls.postgres.enabled=false` for a plaintext
+(NetworkPolicy-isolated) DB link (a warned opt-out). (ADR-0039 §3/§4; M8/PR#76
+round-2 #25.)
+
 ## Key values
 
 | Key | Default | Notes |
@@ -85,7 +122,13 @@ Prerequisites for the hardened path:
 | `namespaceLabels.podSecurity.enforce` | `restricted` | weakening is a warned opt-out |
 | `ingress.enabled` / `ingress.host` | `true` / placeholder | set `host` to your real FQDN |
 | `ingress.tls.certManager.enabled` / `issuerRef` | `true` / placeholder | cert-manager issues the TLS Secret; no key in values |
+| `mtls.postgres.enabled` | `true` | DB-link mutual TLS ON by default (ADR-0039); needs cert-manager (or the dev fallback). Disabling is a warned plaintext opt-out |
+| `mtls.postgres.certManager.enabled` | `true` | cert-manager issues + auto-rotates the DB cert material; `false` = self-signed dev/CI fallback (not for production) |
+| `mtls.postgres.certManager.caDuration` / `duration` | `87600h` / `2160h` | the CA outlives the leaves by ~40x so CA rotation is rare/planned (M5) |
+| `mtls.postgres.external.enabled` | `false` | attest the EXTERNAL Postgres (`services.postgres.enabled=false`) has mTLS provisioned out-of-band. REQUIRED when `mtls.postgres.enabled=true` AND `services.postgres.enabled=false`, else the render FAILS fast (see "External Postgres + mTLS") |
 | `networkPolicy.enabled` | `true` | default-deny floor + §2 per-edge allows |
+| `networkPolicy.collectorEgress.enabled` | `true` | collector/worker default-deny egress to the device mgmt subnet (ADR-0041); disabling is a warned opt-out |
+| `networkPolicy.collectorEgress.managementCidrs` | `[10.0.0.0/8]` | device mgmt subnet `ipBlock` CIDR(s) — NARROW to your real range; `0.0.0.0/0` and blanket RFC1918 are rejected by the allow-list-minimality policy |
 | `networkPolicy.externalLlmEgress.enabled` | `false` | OPT-IN; local-first/air-gapped is the default |
 | `admission.enabled` / `admission.engine` | `true` / `kyverno` | `vap` fallback for webhook-free clusters |
 | `admission.signedImages.enabled` | `false` | W6 wires the cosign verifier key |

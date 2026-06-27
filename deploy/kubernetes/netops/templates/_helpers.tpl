@@ -306,3 +306,88 @@ spec:
           emptyDir:
             sizeLimit: 128Mi
 {{- end -}}
+
+{{/*
+netops.dbClientTlsEnv — the api/worker -> Postgres mTLS CLIENT env (W4-T4,
+ADR-0039 §4). Authored ONCE so the api + worker cannot drift. Renders the
+NETOPS_DB_SSL_* settings (sslmode + the mounted cert/key/CA FILE paths) the
+backend reads in app.db.build_ssl_connect_args. NO key material — only file
+paths into the read-only Secret mount (ADR-0039 §5). Also sets NETOPS_DATABASE_URL
+to the in-cluster DSN so the client dials the postgres Service over the verified
+link (the app default DSN points at the compose host, not the chart Service).
+Usage: {{- include "netops.dbClientTlsEnv" . | nindent 12 }}
+Renders nothing when mtls.postgres.enabled is false.
+*/}}
+{{- define "netops.dbClientTlsEnv" -}}
+{{- $m := .Values.mtls.postgres -}}
+{{- if $m.enabled }}
+# api/worker -> Postgres mTLS (ADR-0039 §4). The DSN targets the in-cluster
+# postgres Service; the SSL mode + mounted client cert/key/CA drive the asyncpg
+# verify-full SSLContext (app.db). The password stays a separate secretKeyRef env.
+- name: NETOPS_DATABASE_URL
+  value: postgresql+asyncpg://{{ .Values.config.postgres.user }}:$(NETOPS_POSTGRES_PASSWORD)@{{ .Values.config.postgres.host }}:{{ .Values.config.postgres.port }}/{{ .Values.config.postgres.database }}
+{{- include "netops.dbClientTlsSslEnv" . }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+netops.dbClientTlsSslEnv — JUST the NETOPS_DB_SSL_* client env (mode + mounted
+cert/key/CA FILE paths), WITHOUT NETOPS_DATABASE_URL. The api/worker deployments
+get the URL from netops.dbClientTlsEnv (K8s $(VAR) expansion); the audit /
+credential CronJobs assemble their own DSN inside a `sh -c` script (L3) and only
+need the SSL settings here so app.db.build_ssl_connect_args mounts the verify-full
+SSLContext. Renders nothing when mtls.postgres.enabled is false.
+Usage: {{- include "netops.dbClientTlsSslEnv" . | nindent 16 }}
+*/}}
+{{- define "netops.dbClientTlsSslEnv" -}}
+{{- $m := .Values.mtls.postgres -}}
+{{- if $m.enabled }}
+- name: NETOPS_DB_SSL_MODE
+  value: {{ $m.sslMode | quote }}
+- name: NETOPS_DB_SSL_ROOT_CERT
+  value: {{ printf "%s/%s" $m.mountPath ($m.caFile | default "ca.crt") | quote }}
+# M1 (PR#76): the CLIENT cert/key paths derive from the CLIENT file-name settings
+# (clientCertFile/clientKeyFile), NOT the server ones — the client mounts its own
+# Secret, so customizing the server Secret key names must not break the client paths.
+- name: NETOPS_DB_SSL_CERT
+  value: {{ printf "%s/%s" $m.mountPath ($m.clientCertFile | default "tls.crt") | quote }}
+- name: NETOPS_DB_SSL_KEY
+  value: {{ printf "%s/%s" $m.mountPath ($m.clientKeyFile | default "tls.key") | quote }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+netops.dbClientTlsVolumeMount — the read-only CLIENT cert mount for api/worker
+(W4-T4, ADR-0039 §5). The client Secret (cert-manager-issued or dev-fallback)
+mounted at mtls.postgres.mountPath. Usage:
+  {{- include "netops.dbClientTlsVolumeMount" . | nindent 12 }}
+*/}}
+{{- define "netops.dbClientTlsVolumeMount" -}}
+{{- if .Values.mtls.postgres.enabled }}
+# api/worker -> Postgres mTLS client cert/key + CA, mounted read-only from the
+# Secret (cert-manager-issued or dev-fallback). Never image-baked (ADR-0039 §5).
+- name: db-tls-client
+  mountPath: {{ .Values.mtls.postgres.mountPath }}
+  readOnly: true
+{{- end -}}
+{{- end -}}
+
+{{/*
+netops.dbClientTlsVolume — the CLIENT cert Secret volume for api/worker
+(W4-T4, ADR-0039 §5). defaultMode 0440: with fsGroup set (podSecurityContext
+fsGroup == runAsGroup == 10001) K8s writes the Secret files owned root:10001, so
+the key is OWNED BY ROOT and GROUP-READABLE by the pod's fsGroup — the non-root
+app uid 10001 reads it via its gid, never world. 0400 (owner-only) would deny the
+app group read and break the asyncpg verify-full client-chain load; this mirrors
+the postgres server mount's 0640 group-read pattern (key non-world-readable).
+Usage:
+  {{- include "netops.dbClientTlsVolume" . | nindent 8 }}
+*/}}
+{{- define "netops.dbClientTlsVolume" -}}
+{{- if .Values.mtls.postgres.enabled }}
+- name: db-tls-client
+  secret:
+    secretName: {{ .Values.mtls.postgres.clientSecretName }}
+    defaultMode: 0440
+{{- end -}}
+{{- end -}}

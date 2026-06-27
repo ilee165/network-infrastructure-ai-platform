@@ -1,0 +1,19 @@
+{{- /*
+WEEKLY FULL audit-chain-verify CronJob (W4-T1 A3, ADR-0038 §4).
+
+The WEEKLY FULL scan half of the audit hash-chain verify tier — it re-invokes the
+SAME shared `netops.auditVerifyCronJob` define (in audit-chain-verify-cronjob.yaml)
+with full=true so the two pod specs stay byte-identical except name/schedule/flag.
+
+It lives in its OWN template file (not appended after the daily CronJob with a `---`
+separator) because helm lint rejects two YAML documents emitted from one template
+file ("invalid Yaml document separator", PR#76 lint fix). One document per file
+keeps `helm lint` green on both helm v3.16 (CI) and newer builds.
+
+Renders only when the chain-verify tier AND its full-scan sub-tier are enabled.
+*/ -}}
+{{- if and .Values.audit.chainVerify.enabled .Values.audit.chainVerify.fullScan.enabled }}
+{{- $v := .Values.audit.chainVerify -}}
+{{- /* WEEKLY FULL scan (A3): re-walk from genesis to catch a historical tamper. */ -}}
+{{- include "netops.auditVerifyCronJob" (dict "ctx" . "nameSuffix" "-full" "schedule" $v.fullScan.schedule "full" true "mode" "FULL genesis -> head") }}
+{{- end }}

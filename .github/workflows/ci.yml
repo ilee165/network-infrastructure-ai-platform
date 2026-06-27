@@ -632,6 +632,34 @@ jobs:
             --policy deploy/kubernetes/policy/rego \
             --all-namespaces
 
+      # PR#76 round-2 #26/#27/#29 — pg_hba weak-hostssl policy BITE. The conftest
+      # gate above proves the chart render PASSES; this proves the rule actually
+      # BITES: a NEGATIVE fixture (a weaker `trust clientcert=verify-full` hostssl
+      # row sitting BEFORE a strict row — first-match-wins downgrade) is DENIED,
+      # while a POSITIVE fixture (strict rows with whitespace/column variation +
+      # optional trailing pg_hba options) still PASSES (no false-reject). RED gate.
+      - name: conftest pg_hba weak-hostssl bite (negative + positive fixtures)
+        run: bash deploy/kubernetes/policy/fixtures/run-pg-hba-bite.sh
+
+      # W4-T4 L4 idempotency guard for the api/worker↔postgres mTLS cert material
+      # (ADR-0039 §5 / P1-W4-LESSONS L4): a `helm upgrade` that REGENERATES the DB
+      # certs would sever every connection. This proves the dev-fallback uses the
+      # `lookup` reuse-or-generate branch (so upgrades reuse) and that a fresh
+      # render produces internally-consistent, usable cert material. helm + python3
+      # + openssl are all present on the runner. RED gate (no continue-on-error).
+      - name: mTLS render-twice L4 idempotency guard
+        run: bash ci/mtls/render-twice.sh
+
+      # PR#76 round-2 #25 — external-Postgres + mTLS fail-fast guard. When the DB
+      # is external (services.postgres.enabled=false) and DB-link mTLS is on, the
+      # chart must REFUSE to render (no in-chart server cert / pg_hba) unless the
+      # operator attests external mTLS via mtls.postgres.external.enabled=true.
+      # Proves: (A) the unattested external combo FAILS fast, (B) the attested one
+      # renders with NO in-chart pg_hba, (C) the in-chart pg path still renders.
+      # RED gate (needs only helm).
+      - name: external-Postgres + mTLS fail-fast guard
+        run: bash ci/mtls/external-pg-failfast.sh
+
       # IaC misconfiguration scan (Trivy `config` target). GATING on its OWN
       # findings: exit-code 1 on fixable HIGH/CRITICAL misconfig, mirroring the
       # image-scan posture (ignore-unfixed). Scoped to IaC misconfig
@@ -675,6 +703,96 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
+
+  # Ephemeral kind cluster harness (P2 W4-T3, ADR-0039 §6 / ADR-0041 §2/§3). This
+  # is the "kind for cheap" enforcement validation the two W4 enforcement tasks
+  # assert against: it creates a throwaway kind cluster with an ENFORCING CNI
+  # (Calico — kindnet ADMITS but does NOT enforce NetworkPolicy, ADR-0041 §2),
+  # runs a CNI SELF-TEST (a harness default-deny MUST block a known egress, else
+  # the run FAILS — the L1 false-green guard), applies the chart, runs the
+  # assertion-runner (W4-T4 mTLS handshake + W4-T5 egress-deny checks plug in),
+  # and tears the cluster down on exit (success OR failure) via a trap.
+  #
+  # NOT YET A BLOCKING GATE — deliberately ABSENT from the `all-gates` aggregator
+  # `needs` list below. P1-W4-LESSONS L1: a new gating CI tool must be validated
+  # LOCALLY before it is pushed as a required gate; the kind/CNI live path could
+  # not be run on the W4-T3 authoring host (Windows, no Docker/Linux kind). Until
+  # the live run is exercised and the local-validation lesson is satisfied (named
+  # for the W5 release auditor — see docs/runbooks/kind-harness.md), this job runs
+  # for SIGNAL only so a kind/CNI bring-up quirk that only manifests in CI cannot
+  # mask the rest of the suite by flipping the required aggregator red. The STATIC
+  # validator step (validate-harness.sh) needs no cluster and always runs; the
+  # live `kind-harness.sh` step is `continue-on-error` until promoted in W5.
+  kind-harness:
+    name: kind-harness (enforcing-CNI self-test + assertions — non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Static validator — no cluster needed. Asserts the harness artifacts carry
+      # every load-bearing invariant (enforcing CNI install, disableDefaultCNI,
+      # the self-test failure-on-no-block, pipefail, the teardown trap, the
+      # runner's non-zero-on-failure contract). This step BITES on a silently
+      # weakened harness and is reliable on any runner, so it is NOT
+      # continue-on-error.
+      - name: Validate harness invariants (static, no cluster)
+        run: bash ci/kind/selftest/validate-harness.sh
+
+      # Empirical self-tests for the assertion library (no cluster). These RUN
+      # lib.sh as a real check subprocess and assert observable behaviour:
+      #  - assert-trap-bite.sh: a recorded ASSERT_FAIL bites THROUGH a registered
+      #    cleanup (N1 trap-clobber) and survives a leaked ASSERT_LIB_NO_TRAP (N5);
+      #  - egress-probe-tristate.sh: a broken probe (nc missing / exec error) never
+      #    reads as a confirmed deny (N4) and the deny retry polls correctly (N3).
+      # Both carry negative controls, so they BITE if the fix regresses. Blocking.
+      - name: Assertion-library self-tests (trap-bite + egress tristate, no cluster)
+        run: |
+          bash ci/kind/selftest/assert-trap-bite.sh
+          bash ci/kind/selftest/egress-probe-tristate.sh
+
+      # extract_secret.py hardening tests (N9 metadata-scoped name + N10 strict
+      # base64). Stdlib-only; runs as a plain script so no pip install is needed.
+      - name: mTLS extract_secret.py tests (no cluster)
+        run: python3 ci/mtls/test_extract_secret.py
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      # kind brings up the throwaway cluster on the Docker backend the GH runner
+      # already provides. The action installs the kind binary; the harness drives
+      # create/CNI/self-test/apply/assert/teardown.
+      - name: Install kind
+        uses: helm/kind-action@v1.10.0
+        with:
+          install_only: true
+          version: v0.24.0
+
+      # The live enforcement run. continue-on-error until the live path is
+      # locally validated and promoted to a blocking gate in W5 (L1). Teardown is
+      # inside the harness trap, so a failure here still deletes the cluster.
+      - name: Run kind harness (create → CNI self-test → apply → assert → teardown)
+        id: harness
+        continue-on-error: true
+        run: bash ci/kind/kind-harness.sh
+
+      # Surface the live-run result in the job summary without flipping the
+      # required aggregator. When the live path is promoted (W5), drop
+      # continue-on-error above and add this job to the all-gates `needs` list.
+      - name: Report kind harness outcome
+        if: always()
+        run: |
+          set -euo pipefail
+          outcome='${{ steps.harness.outcome }}'
+          echo "kind harness live-run outcome: ${outcome}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${outcome}" != "success" ]; then
+            echo "::warning::kind-harness live run did not succeed (outcome=${outcome}) —" \
+                 "this job is NON-BLOCKING (L1: not locally validated on the authoring" \
+                 "host). Investigate before promoting it to a required gate in W5."
+          fi
 
   # KMS-emulator integration gate (P1 W6-T2, ADR-0032 §2/§148). The offline
   # backend job drives the providers via in-memory doubles + contract tests; THIS
@@ -797,6 +915,15 @@ jobs:
   # no orphan gate that is advisory-in-practice. `if: always()` makes this job run
   # even when a dependency fails; it then inspects the `needs.*.result` values and
   # FAILS unless every one is "success", so a failed OR skipped gate is a red gate.
+  #
+  # DELIBERATE OMISSION (P2 W4-T3): `kind-harness` is NOT in `needs`. Its live
+  # kind/CNI path could not be validated on the W4-T3 authoring host (no
+  # Docker/Linux kind) and is `continue-on-error` until promoted (L1: validate a
+  # new gating tool locally before making it required). Adding it here NOW would
+  # let a CI-only kind/CNI bring-up quirk mask the whole suite by flipping the
+  # required aggregator red on a path nobody has run green. W5 promotes it: once
+  # the live run is exercised, drop `continue-on-error` on the harness step AND
+  # add `kind-harness` to this list (see docs/runbooks/kind-harness.md).
   all-gates:
     name: all-gates (required-check aggregator)
     runs-on: ubuntu-latest

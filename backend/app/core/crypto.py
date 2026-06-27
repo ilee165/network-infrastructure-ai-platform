@@ -1045,11 +1045,16 @@ def _split_wrapped(wrapped: WrappedDek) -> tuple[bytes, bytes]:
     return wrapped.ciphertext[:NONCE_BYTES], wrapped.ciphertext[NONCE_BYTES:]
 
 
-def envelope_encrypt(plaintext: bytes, aad: bytes, provider: KeyProvider) -> EncryptedSecret:
+def envelope_encrypt(
+    plaintext: bytes | bytearray | memoryview, aad: bytes, provider: KeyProvider
+) -> EncryptedSecret:
     """Encrypt *plaintext* under a fresh random DEK, wrapping the DEK with the KEK.
 
     Args:
-        plaintext: Secret bytes to protect.
+        plaintext: Secret bytes to protect. A ``bytearray`` / ``memoryview`` is
+            accepted (and consumed directly by AES-GCM) so a caller holding the
+            secret in a zeroizable ``bytearray`` does not have to materialize an
+            immutable ``bytes`` copy it can never wipe (ADR-0032 §6; CR C5).
         aad: Associated data authenticated with **both** envelope layers — per
             ADR-0011/ADR-0032 the credential row id, binding the payload *and*
             the wrapped DEK to its row.

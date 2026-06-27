@@ -1,0 +1,33 @@
+# NEGATIVE fixture (PR#76 round-3 #11) — MUST be DENIED by the
+# netops.hardening pg_hba rule. This is the policy-as-test BITE for the
+# leading-whitespace BYPASS: pg_hba ignores leading whitespace, so an INDENTED
+# weak hostssl row is a live, first-match-wins downgrade — yet the OLD matcher
+# anchored `^hostssl` (no whitespace tolerance), so the indented weak row was not
+# even SEEN as a hostssl row and BYPASSED the per-row strictness check (false-green).
+#
+# Here a `trust clientcert=verify-full` row (drops the scram-sha-256 password
+# factor) is INDENTED with leading whitespace and sits BEFORE the strict scram
+# rows. The fixed `hostssl_line` matcher (`^[ \t]*hostssl\s`) now sees it and the
+# per-row strict check DENIES because this row is not the strict form.
+#
+# conftest expectation: `conftest test <this> --policy deploy/kubernetes/policy/rego`
+# MUST report >=1 failure (the weak-hostssl deny). Run by run-pg-hba-bite.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netops-postgres-tls-config
+  namespace: netops
+  labels:
+    app.kubernetes.io/component: postgres
+data:
+  pg_hba.conf: |
+    # netops mTLS pg_hba — DELIBERATELY WEAKENED via an INDENTED weak row.
+    local       all       all                 trust
+    # WEAK ROW, INDENTED (leading whitespace): TLS is required but the password
+    # factor is dropped (trust). pg_hba ignores the leading whitespace, so this is
+    # a LIVE first-match-wins row that downgrades 0.0.0.0/0 clients to cert-only.
+    # The OLD `^hostssl` matcher missed it; the fixed `^[ \t]*hostssl` catches it.
+        hostssl     all       all   0.0.0.0/0     trust clientcert=verify-full
+    # Strict rows still exist — but are unreachable for 0.0.0.0/0 clients.
+    hostssl     all       all   0.0.0.0/0     scram-sha-256 clientcert=verify-full
+    hostssl     all       all   ::/0          scram-sha-256 clientcert=verify-full

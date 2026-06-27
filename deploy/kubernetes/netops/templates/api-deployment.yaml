@@ -102,6 +102,11 @@ spec:
                   name: {{ include "netops.fullname" . }}-dev-secrets
                   key: {{ .Values.secrets.keys.oidcClientSecret }}
             {{- end }}
+            {{- /* api -> Postgres mTLS env (ADR-0039 §4). Placed AFTER the
+            NETOPS_POSTGRES_PASSWORD env above so the DSN's $(NETOPS_POSTGRES_
+            PASSWORD) dependent-env reference resolves (K8s expands $(VAR) in env
+            VALUES — distinct from the exec-argv case L3 warns about). */ -}}
+            {{- include "netops.dbClientTlsEnv" . | nindent 12 }}
           resources:
             {{- toYaml .Values.services.api.resources | nindent 12 }}
           # startupProbe: generous window for first boot + Alembic migration (ADR-0029 §7).
@@ -132,6 +137,7 @@ spec:
             # /var/run: unix sockets, uvicorn --uds, pidfiles.
             - name: varrun
               mountPath: /var/run
+            {{- include "netops.dbClientTlsVolumeMount" . | nindent 12 }}
       volumes:
         - name: tmp
           emptyDir:
@@ -139,4 +145,5 @@ spec:
         - name: varrun
           emptyDir:
             sizeLimit: 16Mi
+        {{- include "netops.dbClientTlsVolume" . | nindent 8 }}
 {{- end }}

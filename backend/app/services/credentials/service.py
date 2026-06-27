@@ -42,9 +42,9 @@ from app.core.crypto import (
     is_production_grade,
     rewrap,
 )
-from app.core.errors import NotFoundError
+from app.core.errors import CredentialScopeError, NotFoundError
 from app.core.logging import get_logger
-from app.models.inventory import CredentialKind, DeviceCredential
+from app.models.inventory import CredentialKind, Device, DeviceCredential
 from app.services import audit
 
 _logger = get_logger(__name__)
@@ -99,6 +99,94 @@ def _store(credential: DeviceCredential, envelope: EncryptedSecret) -> None:
     credential.wrapped_dek = envelope.wrapped_dek
     credential.dek_nonce = envelope.dek_nonce
     credential.kek_version = envelope.kek_version
+
+
+async def _enforce_scope(
+    session: AsyncSession,
+    credential: DeviceCredential,
+    target: Device | None,
+    *,
+    actor: str,
+    reason: str,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
+    """Refuse, structurally, to materialize a credential outside its scope (ADR-0040 §2).
+
+    A scoped credential (any of ``scope_site`` / ``scope_role`` /
+    ``scope_device_group`` set) may only open a session against a device its scope
+    covers (:meth:`DeviceCredential.covers`). An UNSCOPED credential (all NULL)
+    covers every device — the pre-W4-T2 behaviour, so callers with no target
+    (``target=None``) are allowed iff the credential is unscoped; a scoped
+    credential with *no* target is refused (fail-closed — a scoped secret is never
+    materialized without proving the target is in scope).
+
+    On a deny the refusal is audited (``credential.scope_denied``, ids only — never
+    the scope values or device attributes) and a :class:`CredentialScopeError` is
+    raised BEFORE any KEK unwrap, so a denied target never triggers key access and
+    no plaintext is produced.
+
+    CR C6: the deny is the one path where the CALLER's transaction is rolled back —
+    the credential transports open the credential session inside an ``async with
+    _session()`` that exits via this exception WITHOUT committing, so a deny row
+    written on *session* would be DROPPED by that rollback (a denied access would
+    leave no trail). When *sessionmaker* is supplied, the deny audit is therefore
+    written through a separate short-lived session that COMMITS before the
+    ``CredentialScopeError`` re-raises (``audit_log`` is append-only, so an
+    autonomous commit is sound — mirrors :func:`_audit_provider_unavailable`). When
+    it is ``None`` (unit tests asserting on the same session) the row is flushed on
+    the caller's session as before — non-durable, but behaviourally correct.
+
+    PR #76 round-2 #7: the structural deny must NOT be downgraded to a DB error.
+    The deny-audit write (record + autonomous commit) is wrapped in try/except so
+    that if it RAISES — the audit DB is also down, a constraint trips, the commit
+    fails — the caller still gets the fail-closed :class:`CredentialScopeError`
+    (a 403), never that DB error (a 500). The lost audit row is logged (ids/coarse
+    reason only, no scope values or secret) but never swallows the deny — mirrors
+    how :func:`_audit_provider_unavailable` preserves its original 503.
+    """
+    if not credential.is_scoped:
+        return
+    if target is not None and credential.covers(target):
+        return
+    # ids + the coarse reason ONLY — never the scope values or device attributes.
+    detail = {
+        "reason": reason,
+        "device_id": str(target.id) if target is not None else None,
+    }
+    try:
+        if sessionmaker is not None:
+            async with sessionmaker() as audit_session:
+                await audit.record(
+                    audit_session,
+                    actor=actor,
+                    action=audit.CREDENTIAL_SCOPE_DENIED,
+                    target_type=_TARGET_TYPE,
+                    target_id=str(credential.id),
+                    detail=detail,
+                )
+                await audit_session.commit()
+        else:
+            await audit.record(
+                session,
+                actor=actor,
+                action=audit.CREDENTIAL_SCOPE_DENIED,
+                target_type=_TARGET_TYPE,
+                target_id=str(credential.id),
+                detail=detail,
+            )
+    except Exception as audit_exc:  # noqa: BLE001 - never mask the structural deny
+        # The deny-audit write failed (audit DB down, constraint trip, commit
+        # error). Preserve the fail-closed 403 the caller must see rather than
+        # letting the audit DB error replace it with a 500. Log ids/coarse reason
+        # only — never the scope values, device attributes, or any secret.
+        _logger.error(
+            "credential.scope_denied.audit_failed",
+            credential_id=str(credential.id),
+            reason=reason,
+            audit_error_class=type(audit_exc).__name__,
+        )
+    # ALWAYS raise the structural deny — whether or not the audit write succeeded.
+    raise CredentialScopeError(f"credential {credential.id} is not scoped for the requested device")
 
 
 def autonomous_sessionmaker(session: AsyncSession) -> async_sessionmaker[AsyncSession]:
@@ -225,6 +313,9 @@ async def create_credential(
     secret: str,
     params: dict[str, Any] | None,
     actor: str,
+    scope_site: str | None = None,
+    scope_role: str | None = None,
+    scope_device_group: str | None = None,
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> DeviceCredential:
     """Encrypt *secret* under a fresh DEK and persist a new credential row.
@@ -233,6 +324,14 @@ async def create_credential(
     the ciphertext is cryptographically bound to this row before it exists.
     Audits ``credential.created`` and ``kek.wrap``; the detail carries metadata
     and the KEK version only, never the secret.
+
+    *scope_site* / *scope_role* / *scope_device_group* bind the new credential to a
+    least-privilege slice of the inventory (ADR-0040 §2 / ADR-0011; CR C2). NULL on
+    a dimension means "matches any"; ALL three NULL (the default) is UNSCOPED —
+    covers every device, the backward-compatible behaviour, so callers that omit
+    scope keep working. NULL is explicitly unscoped/broad, NOT deny: least-privilege
+    is opt-in (an operator narrows a credential by setting one or more dimensions).
+    The structural session-open check in :func:`decrypt` enforces a SET scope.
 
     *sessionmaker* lets the fail-closed ``kek.provider.unavailable`` audit row be
     persisted durably in its own transaction (the caller's transaction rolls back
@@ -256,6 +355,9 @@ async def create_credential(
         kind=kind,
         username=username,
         params=params,
+        scope_site=scope_site,
+        scope_role=scope_role,
+        scope_device_group=scope_device_group,
     )
     _store(credential, envelope)
     session.add(credential)
@@ -334,6 +436,7 @@ async def decrypt(
     *,
     actor: str,
     reason: str,
+    target: Device | None = None,
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> DecryptedSecret:
     """Decrypt *credential*'s payload, auditing ``kek.unwrap`` + ``credential.decrypted``.
@@ -343,7 +446,19 @@ async def decrypt(
     *sessionmaker* makes the fail-closed ``kek.provider.unavailable`` audit row
     durable (ADR-0032 §4/§5).
 
+    *target* is the device this session is being opened against. When the
+    credential is SCOPED (ADR-0040 §2), the structural least-privilege check runs
+    FIRST: a credential whose scope does not cover *target* (or a scoped credential
+    with no *target*) is refused with :class:`CredentialScopeError` BEFORE any KEK
+    unwrap — a denied target never triggers key access and no plaintext is
+    produced. An UNSCOPED credential ignores *target* (covers everything), so
+    existing callers that pass no target keep working unchanged.
+
     Raises:
+        CredentialScopeError: If the credential is scoped and does not cover
+            *target* — a structural deny audited as ``credential.scope_denied``
+            (written durably through *sessionmaker* so it survives the caller's
+            rollback on this raised error — CR C6).
         DecryptionError: If authentication fails (ciphertext moved to another
             row, tampered data, or wrong key).
         UnknownKekVersionError: If the provider cannot supply the KEK version
@@ -352,6 +467,15 @@ async def decrypt(
             as ``kek.provider.unavailable`` and re-raised so the dependent task
             fails and retries (Celery ``acks_late``); no plaintext is returned.
     """
+    # ADR-0040 §2: enforce per-credential scope BEFORE any KEK access — a deny
+    # raises CredentialScopeError without unwrapping the DEK (no key access, no
+    # plaintext on an out-of-scope target). The deny audit is written through the
+    # autonomous *sessionmaker* (CR C6) so it COMMITS durably before the caller's
+    # transaction rolls back on the raised error — a denied access always leaves a
+    # trail.
+    await _enforce_scope(
+        session, credential, target, actor=actor, reason=reason, sessionmaker=sessionmaker
+    )
     # CR9: split the KEK->DEK unwrap (key access) from payload authentication so
     # the kek.unwrap audit is written the moment key access happens — BEFORE the
     # payload GCM auth can abort. envelope_decrypt() unwraps then authenticates in

@@ -1,0 +1,270 @@
+{{- /*
+api/worker↔postgres mTLS — cert-manager issuance + auto-rotation (W4-T4, ADR-0039).
+
+cert-manager OWNS issuance and rotation of the DB-link cert material (ADR-0039
+§1/§5, the same posture as the ingress TLS Certificate). This template renders
+ONLY cert-manager CR SPECS — never a private key. cert-manager provisions the
+keypairs into the Secrets named in values and RENEWS them before expiry
+(duration/renewBefore), so a regenerated cert never has to be hand-rotated, and
+no key material passes through values.yaml or Helm release history.
+
+The trust chain (an in-cluster CA, ADR-0039 §1 — NOT SPIFFE):
+  1. a SELF-SIGNED bootstrap Issuer signs
+  2. a CA Certificate (the netops DB CA), whose Secret backs
+  3. a CA Issuer, which signs
+  4. the Postgres SERVER cert (SAN = the postgres Service DNS names) and
+  5. the api + worker CLIENT certs (CN = mtls.postgres.clientCommonName), which
+     Postgres authenticates via `clientcert=verify-full` and the clients present.
+
+Renders only when mtls.postgres.enabled AND mtls.postgres.certManager.enabled.
+Set certManager.enabled=false to use the dev/CI fallback (secret.yaml generates a
+self-signed CA + pair via the `lookup` reuse-or-generate pattern, L4) — then this
+file renders NOTHING and cert-manager need not be installed.
+*/ -}}
+{{- if .Values.mtls.postgres.enabled }}
+{{- $m := .Values.mtls.postgres -}}
+{{- /*
+M8 (PR#76 round-2 #25): FAIL FAST on the EXTERNAL-Postgres + mTLS-on combination.
+When the DB is external (services.postgres.enabled=false) this chart renders NO
+in-chart Postgres server (no server cert, no pg_hba ConfigMap, no StatefulSet ssl
+wiring) — yet the api/worker/cronjobs STILL receive verify-full mTLS CLIENT config
+pointed at that external host. Silently shipping that produces a BROKEN deploy:
+every client dials a server that was never configured for mutual TLS. Refuse to
+render unless the operator sets mtls.postgres.external.enabled=true to attest they
+have provisioned the external server's mTLS out-of-band (server cert from a CA the
+client trusts + a pg_hba that requires `hostssl … scram-sha-256
+clientcert=verify-full`). See the external block in values.yaml + the chart README.
+*/ -}}
+{{- if and (not .Values.services.postgres.enabled) (not $m.external.enabled) -}}
+{{- fail "mtls.postgres.enabled=true with services.postgres.enabled=false (external Postgres) renders the api/worker/cronjob mTLS CLIENT config but NO in-chart server cert / pg_hba / ssl wiring — the clients would dial a server never configured for mutual TLS (a silently broken deploy). Provision the EXTERNAL server's mTLS out-of-band (server cert from a CA the client trusts + a pg_hba requiring `hostssl … scram-sha-256 clientcert=verify-full`), then set mtls.postgres.external.enabled=true to attest it; OR set mtls.postgres.enabled=false to use the plaintext (NetworkPolicy-isolated) DB link. (ADR-0039 §3/§4, M8/PR#76 round-2 #25)" -}}
+{{- end -}}
+{{- $cm := $m.certManager -}}
+{{- $fullname := include "netops.fullname" . -}}
+{{- $pgSvc := printf "%s-postgres" $fullname -}}
+{{- $ns := .Release.Namespace -}}
+{{- if $cm.enabled }}
+# 1. Bootstrap self-signed Issuer — signs the CA cert below (and nothing else).
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-db-selfsigned
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "mtls") | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+# 2. The netops DB CA Certificate — issued by the self-signed Issuer; its keypair
+#    is written to caSecretName and backs the CA Issuer in step 3. isCA:true.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-db-ca
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "mtls") | nindent 4 }}
+spec:
+  isCA: true
+  commonName: {{ $m.caCommonName | quote }}
+  secretName: {{ $m.caSecretName }}
+  # M5 (PR#76): the CA lives MUCH longer than the leaves it signs (caDuration ~10y
+  # vs the 90d leaf duration) so CA rotation is a rare planned event and leaves can
+  # rotate freely underneath it — sharing the leaf lifetime made CA rotation brittle.
+  duration: {{ $cm.caDuration }}
+  renewBefore: {{ $cm.caRenewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: {{ $fullname }}-db-selfsigned
+    kind: Issuer
+    group: cert-manager.io
+---
+# 3. The CA Issuer — signs the server + client leaves below using the CA keypair.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-db-ca
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "mtls") | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ $m.caSecretName }}
+---
+# 4. Postgres SERVER certificate. SANs are the postgres Service DNS names the
+#    api/worker dial, so the clients' verify-full hostname check passes. usages
+#    include server auth; cert-manager writes tls.crt/tls.key/ca.crt to the Secret
+#    postgres mounts. Auto-rotated (duration/renewBefore) — no hand-rotation.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-postgres-server
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "mtls") | nindent 4 }}
+spec:
+  secretName: {{ $m.serverSecretName }}
+  duration: {{ $cm.duration }}
+  renewBefore: {{ $cm.renewBefore }}
+  commonName: {{ $pgSvc | quote }}
+  dnsNames:
+    - {{ $pgSvc | quote }}
+    - {{ printf "%s.%s.svc" $pgSvc $ns | quote }}
+    - {{ printf "%s.%s.svc.cluster.local" $pgSvc $ns | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - server auth
+  issuerRef:
+    name: {{ $fullname }}-db-ca
+    kind: Issuer
+    group: cert-manager.io
+---
+# 5. api/worker CLIENT certificate. ONE client cert shared by both clients (they
+#    authenticate as the same DB role — clientCommonName). usages = client auth;
+#    Postgres authenticates it via clientcert=verify-full. Auto-rotated.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-db-client
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "mtls") | nindent 4 }}
+spec:
+  secretName: {{ $m.clientSecretName }}
+  duration: {{ $cm.duration }}
+  renewBefore: {{ $cm.renewBefore }}
+  commonName: {{ $m.clientCommonName | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - client auth
+  issuerRef:
+    name: {{ $fullname }}-db-ca
+    kind: Issuer
+    group: cert-manager.io
+{{- end }}
+{{- /*
+DEV/CI FALLBACK (mtls.postgres.enabled AND NOT certManager.enabled): when
+cert-manager is not installed, generate a self-signed CA + server (SAN = the
+postgres Service) + client (CN = clientCommonName) pair and write them into the
+SAME three Secret names the mounts reference. L4 (P1-W4-LESSONS): the material is
+REUSED from the installed Secrets on `helm upgrade` via `lookup` and only
+generated on first install / fresh CI render — a regen on upgrade would re-issue
+every cert and SEVER every DB connection. `lookup` returns empty during
+`helm template`/CI (no API server), so a fresh render still produces a valid
+self-signed pair and the static gates pass; the render-twice test
+(ci/mtls/render-twice.sh) proves the material is STABLE across renders when a
+prior Secret exists. Cert PEM is under `data:` (multi-line bytes), annotated
+`netops.io/dev-secret: true` (NOT a production secret store — cert-manager is).
+The CA PRIVATE key is NOT shipped (peers only need the CA cert to verify); the
+server/client keys ARE shipped (postgres + api/worker present their cert).
+*/ -}}
+{{- if not $cm.enabled }}
+{{- $pgFqdn := printf "%s.%s.svc" $pgSvc $ns -}}
+{{- $pgFqdnFull := printf "%s.%s.svc.cluster.local" $pgSvc $ns -}}
+{{- /* Reuse the installed server Secret's material if present (the stable seam):
+all three Secrets are generated together, so keying the reuse decision on the
+server Secret keeps the CA/server/client triple internally consistent. */ -}}
+{{- $srvPrior := (lookup "v1" "Secret" $ns $m.serverSecretName) -}}
+{{- $caCrt := "" -}}{{- $srvCrt := "" -}}{{- $srvKey := "" -}}
+{{- $cliCrt := "" -}}{{- $cliKey := "" -}}
+{{- $df := $m.devFallback -}}
+{{- $caDays := int ($df.caValidityDays | default 3650) -}}
+{{- $leafDays := int ($df.leafValidityDays | default 825) -}}
+{{- /* M4 (PR#76): FAIL CLOSED on a half-set prior Secret. The reuse branch may
+ONLY be taken when the ENTIRE triple is present + non-empty (server cert+key+ca AND
+client cert+key); a prior Secret that has tls.crt but is MISSING any other member
+would otherwise emit EMPTY tls.crt/tls.key (fail-open) and silently sever mTLS.
+When the prior is incomplete we fall through to a CONSISTENT regenerate of the whole
+triple rather than writing partial/empty material. */ -}}
+{{- $priorComplete := false -}}
+{{- $caPrior := (lookup "v1" "Secret" $ns $m.caSecretName) -}}
+{{- $cliPrior := (lookup "v1" "Secret" $ns $m.clientSecretName) -}}
+{{- if and $srvPrior $srvPrior.data
+        (hasKey $srvPrior.data "tls.crt") (hasKey $srvPrior.data "tls.key") (hasKey $srvPrior.data "ca.crt")
+        $cliPrior $cliPrior.data
+        (hasKey $cliPrior.data "tls.crt") (hasKey $cliPrior.data "tls.key") -}}
+  {{- $pSrvCrt := index $srvPrior.data "tls.crt" | b64dec -}}
+  {{- $pSrvKey := index $srvPrior.data "tls.key" | b64dec -}}
+  {{- $pCaCrt := index $srvPrior.data "ca.crt" | b64dec -}}
+  {{- $pCliCrt := index $cliPrior.data "tls.crt" | b64dec -}}
+  {{- $pCliKey := index $cliPrior.data "tls.key" | b64dec -}}
+  {{- /* every decoded member must be NON-EMPTY — an empty value is as fail-open as
+  a missing key (would mount a zero-byte cert/key). */ -}}
+  {{- if and (ne $pSrvCrt "") (ne $pSrvKey "") (ne $pCaCrt "") (ne $pCliCrt "") (ne $pCliKey "") -}}
+    {{- $priorComplete = true -}}
+    {{- $srvCrt = $pSrvCrt -}}{{- $srvKey = $pSrvKey -}}{{- $caCrt = $pCaCrt -}}
+    {{- $cliCrt = $pCliCrt -}}{{- $cliKey = $pCliKey -}}
+  {{- end -}}
+{{- end -}}
+{{- if not $priorComplete -}}
+  {{- /* No usable prior (first install / fresh CI render / incomplete prior) =>
+  regenerate the WHOLE triple consistently. M5: the CA outlives the leaves. */ -}}
+  {{- $ca := genCA $m.caCommonName $caDays -}}
+  {{- $srv := genSignedCert $pgSvc (list) (list $pgSvc $pgFqdn $pgFqdnFull) $leafDays $ca -}}
+  {{- $cli := genSignedCert $m.clientCommonName (list) (list $m.clientCommonName) $leafDays $ca -}}
+  {{- $caCrt = $ca.Cert -}}
+  {{- $srvCrt = $srv.Cert -}}{{- $srvKey = $srv.Key -}}
+  {{- $cliCrt = $cli.Cert -}}{{- $cliKey = $cli.Key -}}
+{{- end -}}
+{{- /* Belt-and-braces fail-closed: NEVER emit empty cert material (M4). If we
+somehow reach here with an empty member the chart MUST fail to render rather than
+ship a zero-byte cert that fails open. */ -}}
+{{- if or (eq $caCrt "") (eq $srvCrt "") (eq $srvKey "") (eq $cliCrt "") (eq $cliKey "") -}}
+  {{- fail "mtls-postgres dev fallback would emit EMPTY DB-TLS cert material — refusing to render (fail closed, M4/ADR-0039 §5). Check the existing TLS Secrets or let the chart regenerate them." -}}
+{{- end -}}
+---
+# Dev/CI fallback CA Secret (CA cert only; the CA key is never shipped).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $m.caSecretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "mtls") | nindent 4 }}
+  annotations:
+    netops.io/dev-secret: "true"
+    netops.io/secret-source: helm-generated-dev-convenience
+type: Opaque
+data:
+  ca.crt: {{ $caCrt | b64enc }}
+---
+# Dev/CI fallback Postgres SERVER keypair (+ CA for client-cert verification).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $m.serverSecretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "mtls") | nindent 4 }}
+  annotations:
+    netops.io/dev-secret: "true"
+    netops.io/secret-source: helm-generated-dev-convenience
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ $srvCrt | b64enc }}
+  tls.key: {{ $srvKey | b64enc }}
+  ca.crt: {{ $caCrt | b64enc }}
+---
+# Dev/CI fallback api/worker CLIENT keypair (+ CA for server verification).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $m.clientSecretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "mtls") | nindent 4 }}
+  annotations:
+    netops.io/dev-secret: "true"
+    netops.io/secret-source: helm-generated-dev-convenience
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ $cliCrt | b64enc }}
+  tls.key: {{ $cliKey | b64enc }}
+  ca.crt: {{ $caCrt | b64enc }}
+{{- end }}
+{{- end }}
