@@ -170,8 +170,17 @@ async def rotate_device_secret(
                 )
                 raise
             # VERIFY: authenticate the staged secret against the device. The
-            # plaintext is handed over inside a redaction-safe DecryptedSecret.
-            confirmed = await verify(device, DecryptedSecret(bytes(secret_buf)))
+            # plaintext is handed over inside a redaction-safe DecryptedSecret. A
+            # verifier that RAISES (transport timeout, auth-protocol error, a
+            # device-side KeyProviderUnavailable) is a verification *failure*, not a
+            # crash: ADR-0040 §3 treats anything that did not confirm as fail-closed
+            # (discard the staged envelope, retry, then degrade). Swallowing it here
+            # also keeps the rotation worker's run() loop alive so it finishes the
+            # pass and writes its summary instead of aborting on one bad device.
+            try:
+                confirmed = await verify(device, DecryptedSecret(bytes(secret_buf)))
+            except Exception:  # noqa: BLE001 — any verify failure is fail-closed (ADR-0040 §3)
+                confirmed = False
         finally:
             # Zeroize the transient plaintext on EVERY path (ADR-0032 §6).
             _zeroize_str_secret(secret_buf)

@@ -273,6 +273,80 @@ async def test_recovers_on_later_attempt_when_verify_eventually_succeeds(
     assert len(await _audit_rows(session, "credential.secret_rotation_failed")) == 1
 
 
+async def test_raising_verifier_degrades_fail_closed(session: AsyncSession) -> None:
+    """A verifier that RAISES (transport/auth error) is a verification FAILURE.
+
+    ADR-0040 §3: anything that did not confirm is fail-closed — the raise is caught,
+    treated as confirmed=False, audited+retried, then degraded. The exception must
+    NOT propagate out of rotate_device_secret (it would abort the worker run() loop
+    and skip the summary write); the prior credential must stay unchanged + usable.
+    """
+    provider = _provider()
+    credential = await _create(session, provider)
+    old_ciphertext = bytes(credential.ciphertext)
+    old_wrapped_dek = bytes(credential.wrapped_dek)
+    device = _device()
+
+    async def _boom(_device: Device, _secret: vault.DecryptedSecret) -> bool:
+        raise TimeoutError("device SSH handshake timed out")
+
+    outcome = await rotate_device_secret(
+        session,
+        provider,
+        credential_id=credential.id,
+        new_secret=_NEW_SECRET,
+        device=device,
+        verify=_boom,
+        actor="system:rotation",
+        max_attempts=2,
+    )
+
+    # Degraded fail-closed: the raise did not propagate; the prior credential is intact.
+    assert outcome.state is RotationState.DEGRADED
+    assert outcome.attempts == 2
+    assert outcome.kek_version is None
+    assert credential.ciphertext == old_ciphertext
+    assert credential.wrapped_dek == old_wrapped_dek
+
+    # Each raising attempt audited a failure; repeated failure degraded.
+    assert len(await _audit_rows(session, "credential.secret_rotation_failed")) == 2
+    assert len(await _audit_rows(session, "credential.secret_rotation_degraded")) == 1
+
+    # The device is NOT locked out: the prior secret still decrypts.
+    decrypted = await vault.decrypt(
+        session, provider, credential, actor="system:config", reason="fallback"
+    )
+    assert decrypted.plaintext == _OLD_SECRET.encode()
+
+
+async def test_raising_verifier_does_not_leak_secret(session: AsyncSession) -> None:
+    """A raising verifier still zeroizes + never leaks plaintext into audit/logs."""
+    provider = _provider()
+    credential = await _create(session, provider)
+    device = _device()
+
+    async def _boom(_device: Device, _secret: vault.DecryptedSecret) -> bool:
+        raise RuntimeError("auth-protocol error")
+
+    with structlog.testing.capture_logs() as captured:
+        await rotate_device_secret(
+            session,
+            provider,
+            credential_id=credential.id,
+            new_secret=_NEW_SECRET,
+            device=device,
+            verify=_boom,
+            actor="system:rotation",
+            max_attempts=1,
+        )
+
+    for row in (await session.execute(select(AuditLog))).scalars().all():
+        assert _NEW_SECRET not in str(row.detail)
+        assert _OLD_SECRET not in str(row.detail)
+    assert _NEW_SECRET not in str(captured)
+    assert _OLD_SECRET not in str(captured)
+
+
 # ---------------------------------------------------------------------------
 # Fail-closed against a down KMS provider; bad inputs
 # ---------------------------------------------------------------------------

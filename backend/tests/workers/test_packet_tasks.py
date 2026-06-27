@@ -212,8 +212,24 @@ def test_drive_eos_capture_waits_duration_between_start_and_stop(
 # ---------------------------------------------------------------------------
 
 
-def _seed_ssh_device(db_url: str, provider: Any, *, secret: str) -> uuid.UUID:
-    """Seed a REACHABLE EOS device with a real envelope-encrypted SSH credential."""
+def _seed_ssh_device(
+    db_url: str,
+    provider: Any,
+    *,
+    secret: str,
+    scope_site: str | None = None,
+    scope_role: str | None = None,
+    scope_device_group: str | None = None,
+    device_site: str | None = None,
+    device_role: str | None = None,
+    device_group: str | None = None,
+) -> uuid.UUID:
+    """Seed a REACHABLE EOS device with a real envelope-encrypted SSH credential.
+
+    The optional ``scope_*`` args bind the credential to a site/role/device-group
+    (ADR-0040 §2); the optional ``device_*`` args set the device's matching
+    attributes so a scope-deny / in-scope packet-capture path can be exercised.
+    """
     from app.models import Device, DeviceStatus
     from app.models.inventory import CredentialKind
     from app.services import credentials as credentials_service
@@ -233,12 +249,18 @@ def _seed_ssh_device(db_url: str, provider: Any, *, secret: str) -> uuid.UUID:
                     params={"port": 2222},
                     actor="test",
                 )
+                cred.scope_site = scope_site
+                cred.scope_role = scope_role
+                cred.scope_device_group = scope_device_group
                 device = Device(
                     hostname="eos-1",
                     mgmt_ip="10.0.0.5",
                     vendor_id="eos",
                     status=DeviceStatus.REACHABLE,
                     credential_id=cred.id,
+                    site=device_site,
+                    role=device_role,
+                    device_group=device_group,
                 )
                 session.add(device)
                 await session.commit()
@@ -309,6 +331,79 @@ def test_load_ssh_context_fail_closed_audit_is_durable(
     rows = [a for a in _fetch_all(db_url, AuditLog) if a.action == "kek.provider.unavailable"]
     assert len(rows) == 1
     assert rows[0].detail == {"reason_class": "TimeoutError"}
+
+
+def _provider(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A healthy EnvKeyProvider wired as the packet worker's key provider."""
+    import base64
+
+    from app.core.config import Settings
+    from app.core.crypto import KEY_BYTES, EnvKeyProvider
+
+    kek = base64.urlsafe_b64encode(os.urandom(KEY_BYTES)).decode("ascii")
+    provider = EnvKeyProvider(Settings(_env_file=None, kek=kek, kek_version="v1"))  # type: ignore[arg-type]
+    monkeypatch.setattr(tasks, "_key_provider", lambda: provider)
+    return provider
+
+
+def test_load_ssh_context_in_scope_credential_succeeds(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0040 §2: a credential whose scope COVERS the device opens the capture.
+
+    Packet capture is a device session open; the structural scope check must run
+    here too, but an in-scope credential must still succeed (enforcement is not an
+    over-deny).
+    """
+    provider = _provider(monkeypatch)
+    device_id = _seed_ssh_device(
+        db_url,
+        provider,
+        secret="eos-cli-pass",
+        scope_site="nyc",
+        scope_role="core",
+        device_site="nyc",
+        device_role="core",
+        device_group="dc-a",
+    )
+
+    context = asyncio.run(tasks._load_ssh_context(device_id))
+
+    assert context.params.password == "eos-cli-pass"
+    actions = {a.action for a in _fetch_all(db_url, AuditLog)}
+    assert "credential.decrypted" in actions
+    assert "credential.scope_denied" not in actions
+
+
+def test_load_ssh_context_out_of_scope_credential_denies(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0040 §2: a credential whose scope does NOT cover the device is refused.
+
+    The packet-capture session open passes ``target=device``, so a scoped credential
+    used against an out-of-scope device is hard-denied with CredentialScopeError
+    BEFORE any KEK unwrap — closing the packet-path bypass (W4-T2 finding 1).
+    """
+    from app.core.errors import CredentialScopeError
+
+    provider = _provider(monkeypatch)
+    device_id = _seed_ssh_device(
+        db_url,
+        provider,
+        secret="eos-cli-pass",
+        scope_site="nyc",  # credential bound to nyc
+        device_site="lon",  # device is in lon — out of scope
+    )
+
+    with pytest.raises(CredentialScopeError):
+        asyncio.run(tasks._load_ssh_context(device_id))
+
+    # The deny happens BEFORE any key access — no plaintext is produced, so no
+    # decrypt/unwrap row is committed (the worker session is rolled back on the
+    # raise; the scope check ran first, so no KEK was ever unwrapped).
+    actions = {a.action for a in _fetch_all(db_url, AuditLog)}
+    assert "credential.decrypted" not in actions
+    assert "kek.unwrap" not in actions
 
 
 # ---------------------------------------------------------------------------

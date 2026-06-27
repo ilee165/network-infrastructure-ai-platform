@@ -518,6 +518,11 @@ async def _load_ssh_context(device_id: UUID) -> _EosCaptureContext:
             row,
             actor=_ACTOR,
             reason="packet_capture",
+            # ADR-0040 §2: enforce the credential's scope against THIS device at
+            # session open — packet capture is a device session open, so a scoped
+            # credential cannot open a capture on a device outside its
+            # site/role/group (mirrors the config-backup path).
+            target=device,
             sessionmaker=credentials.autonomous_sessionmaker(session),
         )
         params = SshParams(
