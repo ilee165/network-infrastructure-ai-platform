@@ -2579,13 +2579,6 @@ deny contains msg if {
 	msg := "postgres pg_hba.conf must NOT carry a plaintext `host` or non-TLS `hostnossl` line — a non-TLS listener path defeats the mTLS refusal; only `hostssl` (and `local`) are permitted (ADR-0039 §3, round-4 #05)"
 }
 
-deny contains msg if {
-	is_postgres_tls_configmap(input)
-	hba := object.get(input.data, "pg_hba.conf", "")
-	regex.match(`(?m)^hostnossl\s`, hba)
-	msg := "postgres pg_hba.conf must NOT carry a `hostnossl` line — it would explicitly admit plaintext (ADR-0039 §3)"
-}
-
 # --- The Postgres StatefulSet must turn ssl on + point hba_file at the mounted
 # pg_hba (so the refusal rule above is the file actually used) when mTLS material
 # is mounted (the `db-tls-server` volume is the marker). ---
