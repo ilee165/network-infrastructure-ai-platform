@@ -1,0 +1,28 @@
+# CNI self-test default-deny egress policy (P2 W4-T3, ADR-0041 §2).
+#
+# Mirrors the chart's `default-deny-all` posture floor (networkpolicies.yaml):
+# selects the probe pod and denies ALL egress with NO allow rules. An ENFORCING
+# CNI (Calico/Cilium) makes the probe's egress fail once this is applied; a
+# NON-enforcing CNI (kindnet) admits this object but leaves egress working — the
+# harness self-test detects exactly that difference and FAILS if egress is not
+# blocked. This is the load-bearing "the CNI enforces, not just admits" guard
+# (ADR-0041 §2 / P1-W4-LESSONS L1).
+#
+# NOTE: this policy is applied AFTER the baseline egress-succeeds check, into the
+# self-test namespace only — it never touches the chart namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cni-selftest-default-deny-egress
+  labels:
+    app.kubernetes.io/name: cni-selftest
+    app.kubernetes.io/component: cni-selftest
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: cni-selftest-probe
+  # Egress only — we are proving egress denial bites. (Ingress denial is implied
+  # by the same enforcement engine; the W4-T5 control under test is egress.)
+  policyTypes:
+    - Egress
+  # No `egress:` rules at all = deny ALL egress for the selected pod.

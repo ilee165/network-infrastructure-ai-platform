@@ -103,11 +103,19 @@ def _wire_enum(enum_cls: type[StrEnum], *, length: int = 32) -> SaEnum:
 
 
 class DeviceCredential(UuidPkMixin, TimestampMixin, Base):
-    """Envelope-encrypted device credential (D11, ADR-0011).
+    """Envelope-encrypted device credential (D11, ADR-0011, ADR-0040).
 
     Secret material exists only as AES-256-GCM ciphertext plus the wrapped
     data-encryption key; ``params`` holds non-secret protocol metadata only
     (e.g. SNMPv3 auth/priv protocol names — never keys or passphrases).
+
+    Per-credential SCOPE (ADR-0040 §2): ``scope_site`` / ``scope_role`` /
+    ``scope_device_group`` bind the credential to a least-privilege slice of the
+    inventory. A NULL dimension means "matches any"; a credential with all three
+    NULL is UNSCOPED (covers every device — the pre-W4-T2 default). The credentials
+    service refuses, structurally, to materialize a credential for a device its
+    scope does not cover (see :meth:`covers` and
+    :func:`app.services.credentials.service.decrypt`).
     """
 
     __tablename__ = "device_credentials"
@@ -121,6 +129,36 @@ class DeviceCredential(UuidPkMixin, TimestampMixin, Base):
     dek_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     kek_version: Mapped[str] = mapped_column(String(64), nullable=False)
     params: Mapped[dict[str, Any] | None] = mapped_column(JSON_VARIANT)
+    # Per-credential scope (ADR-0040 §2 / migration 0012). NULL = "matches any";
+    # all-NULL = unscoped. Length mirrors devices.site (VARCHAR(128)).
+    scope_site: Mapped[str | None] = mapped_column(String(128))
+    scope_role: Mapped[str | None] = mapped_column(String(128))
+    scope_device_group: Mapped[str | None] = mapped_column(String(128))
+
+    @property
+    def is_scoped(self) -> bool:
+        """True iff any scope dimension is set (an unscoped credential covers all)."""
+        return any(
+            dim is not None for dim in (self.scope_site, self.scope_role, self.scope_device_group)
+        )
+
+    def covers(self, device: Device) -> bool:
+        """Structural least-privilege check: does this credential's scope cover *device*?
+
+        ADR-0040 §2: each SET scope dimension (``scope_site`` / ``scope_role`` /
+        ``scope_device_group``) must equal the device's corresponding attribute
+        (``site`` / ``role`` / ``device_group``); a NULL dimension matches anything.
+        An unscoped credential (all dimensions NULL) covers every device. A SET
+        dimension whose device attribute is absent (``None``) does NOT match — a
+        scoped credential is never widened by a device that simply omits the
+        dimension (fail-closed).
+        """
+        pairs = (
+            (self.scope_site, device.site),
+            (self.scope_role, device.role),
+            (self.scope_device_group, device.device_group),
+        )
+        return all(scope is None or scope == attr for scope, attr in pairs)
 
     def __repr__(self) -> str:
         """Identity only — secret-bearing columns are never rendered."""
@@ -142,6 +180,11 @@ class Device(UuidPkMixin, TimestampMixin, Base):
         _wire_enum(DeviceStatus), nullable=False, default=DeviceStatus.NEW
     )
     site: Mapped[str | None] = mapped_column(String(128))
+    # Least-privilege scope attributes (ADR-0040 §2 / migration 0012). A device's
+    # role + group + site are what a scoped credential's dimensions are matched
+    # against at session open. NULL means the dimension is unset on this device.
+    role: Mapped[str | None] = mapped_column(String(128))
+    device_group: Mapped[str | None] = mapped_column(String(128))
     credential_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("device_credentials.id"), index=True
     )

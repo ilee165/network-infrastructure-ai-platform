@@ -15,18 +15,46 @@ from __future__ import annotations
 import uuid
 from typing import Any, Final
 
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.models.audit import AuditLog
+from app.models.mixins import utcnow
+from app.services.audit.chain import GENESIS_HASH, compute_entry_hash, hex_short
 
 _logger = get_logger(__name__)
+
+# Fixed key for the audit-chain advisory lock (finding W4-T1 #1/#2). A single
+# transaction-scoped ``pg_advisory_xact_lock`` on this constant serialises every
+# concurrent ``record()`` append so two transactions can never read the same head
+# and fork the chain on legitimate traffic (PostgreSQL default READ COMMITTED).
+# The value is an arbitrary but stable 64-bit signed integer dedicated to this
+# one purpose; it is auto-released when the caller's transaction commits/rolls
+# back. SQLite (the single-connection unit-test backend) has no advisory locks,
+# so the guard is skipped there — its single connection serialises appends anyway.
+_CHAIN_LOCK_KEY: Final = 0x0A0D38  # mnemonic for "audit chain", matches checkpoint id tail.
 
 # M1 audit action vocabulary. Routes, services, and engines must reuse these
 # constants instead of re-typing the strings.
 CREDENTIAL_CREATED: Final = "credential.created"
 CREDENTIAL_ROTATED: Final = "credential.rotated"
 CREDENTIAL_DECRYPTED: Final = "credential.decrypted"
+# P2 W4-T2 device-secret rotation + scoping (ADR-0040). ``detail`` carries
+# ids/versions/outcome ONLY — never the secret, the scope values, or device
+# attributes (ADR-0040 §1/§2 no-leak). A session-open refused because the
+# credential's scope does not cover the target device.
+CREDENTIAL_SCOPE_DENIED: Final = "credential.scope_denied"
+# A confirm-then-swap device-secret rotation: staged a fresh wrapped DEK,
+# verified it against the device, then activated it (fail-closed — the prior
+# credential stays valid until the swap is confirmed).
+CREDENTIAL_SECRET_ROTATED: Final = "credential.secret_rotated"
+# A device-secret rotation whose verification failed: the unconfirmed staged
+# credential was DISCARDED, the prior credential remains usable (no lock-out).
+CREDENTIAL_SECRET_ROTATION_FAILED: Final = "credential.secret_rotation_failed"
+# Repeated rotation failure: the credential is marked DEGRADED and an alert is
+# raised (ADR-0015) — the device is never left silently unreachable.
+CREDENTIAL_SECRET_ROTATION_DEGRADED: Final = "credential.secret_rotation_degraded"
 DEVICE_CREATED: Final = "device.created"
 DEVICE_UPDATED: Final = "device.updated"
 DEVICE_DELETED: Final = "device.deleted"
@@ -171,9 +199,8 @@ async def record(
 ) -> AuditLog:
     """Append one audit entry and emit the matching structlog event.
 
-    Flushes (assigning ``id`` / ``created_at``) but never commits: the caller
-    owns the transaction, so the audit row commits or rolls back atomically
-    with the action it describes.
+    Flushes (a SINGLE INSERT) but never commits: the caller owns the transaction,
+    so the audit row commits or rolls back atomically with the action it describes.
 
     ``reasoning_trace_id`` links the audited action back to the reasoning trace
     that produced it (brief §6, ADR-0020 §4) — a plain indexed UUID with no FK
@@ -186,8 +213,38 @@ async def record(
     no FK — captured at the route layer and threaded down here. It is ``None``
     for actions raised outside an HTTP request (background/agent-driven calls
     that carry no inbound correlation id).
+
+    Hash chain (ADR-0038 §3): this single append path reads the current chain
+    head's ``entry_hash`` (or :data:`~app.services.audit.chain.GENESIS_HASH` for
+    the first entry) UNDER THE CALLER'S TRANSACTION, then writes ``prev_hash`` /
+    ``entry_hash`` on the new row before it commits — so a row can never land with
+    a missing or back-fillable chain link. The head read is serialised by a
+    transaction-scoped advisory lock (see :func:`_current_chain_head`) so two
+    concurrent appends queue rather than read the same head and FORK the chain
+    (W4-T1 #1/#2). ``audit_log`` append-only is enforced by the migration 0001
+    ``REVOKE UPDATE, DELETE ... FROM PUBLIC`` (the 0009 trigger guards
+    ``approvals``, not this table); a REVOKE does not bind the table owner /
+    superuser, which is exactly why this hash chain is the real backstop against a
+    privileged actor silently rewriting a row.
+
+    Append-only write shape (W4-T1 A2): every chain value — ``id`` (app-side
+    UUIDv4), ``created_at`` (app-side UTC), ``prev_hash`` and the real
+    ``entry_hash`` — is assigned BEFORE the flush, so a single INSERT carries the
+    finished row. The previous "INSERT placeholder then UPDATE entry_hash" shape
+    contradicted the append-only ``REVOKE UPDATE ... FROM PUBLIC`` posture and
+    failed under a least-privilege (non-owner) DB role; there is now NO UPDATE on
+    ``audit_log`` in the write path. The chain order is the monotonic append-order
+    column ``seq`` (a DB sequence on PostgreSQL — shared across the range
+    partitions; ``MAX(seq)+1`` under the serialised head read on SQLite) so
+    equal-``created_at`` rows can never be ordered ambiguously (A4).
     """
+    prev_hash = await _current_chain_head(session)
     entry = AuditLog(
+        # Assign id/created_at app-side (mixin-compatible defaults) BEFORE the
+        # flush so the canonical hashed form (ADR-0038 §2 covers id + created_at)
+        # is fully determined and a SINGLE INSERT carries the real entry_hash.
+        id=uuid.uuid4(),
+        created_at=utcnow(),
         actor=actor,
         action=action,
         target_type=target_type,
@@ -195,8 +252,19 @@ async def record(
         detail=detail,
         reasoning_trace_id=reasoning_trace_id,
         request_id=request_id,
+        prev_hash=prev_hash,
+        entry_hash=GENESIS_HASH,  # set to the real digest just below, pre-flush.
     )
+    # ``seq`` (the monotonic append-order key, A4) is left unset: its column default
+    # draws the next value on the SAME connection at INSERT time — ``nextval`` of the
+    # shared sequence on PostgreSQL (globally monotonic across the range partitions),
+    # ``MAX(seq)+1`` on SQLite — serialised by the advisory lock (PG) or the single
+    # connection (SQLite), so it never participates in the canonical hash (which is
+    # finalized here) yet always lands monotonic.
+    entry.entry_hash = compute_entry_hash(entry, prev_hash)
     session.add(entry)
+    # Single INSERT: id/created_at/prev_hash/entry_hash are all already populated,
+    # so the row lands complete — no second flush, no UPDATE on audit_log (A2).
     await session.flush()
     _logger.info(
         "audit.recorded",
@@ -208,5 +276,57 @@ async def record(
         detail=detail,
         reasoning_trace_id=str(reasoning_trace_id) if reasoning_trace_id is not None else None,
         request_id=str(request_id) if request_id is not None else None,
+        # Hex prefixes only (ADR-0038 §1): the stored form is raw bytes; the log
+        # stream carries a short correlation handle for the chain, never material.
+        prev_hash=hex_short(prev_hash),
+        entry_hash=hex_short(entry.entry_hash),
     )
     return entry
+
+
+def _is_postgresql(session: AsyncSession) -> bool:
+    """True iff the bound dialect is PostgreSQL (the prod backend).
+
+    SQLite (the unit-test backend) has no advisory locks and no sequences, so the
+    append path takes a per-backend branch for both the concurrency guard and the
+    monotonic ``seq`` assignment.
+    """
+    return session.bind is not None and session.bind.dialect.name == "postgresql"
+
+
+async def _current_chain_head(session: AsyncSession) -> bytes:
+    """Return the latest entry's ``entry_hash`` as the next ``prev_hash`` (ADR-0038 §3).
+
+    The chain order is the monotonic append-order column ``seq`` (W4-T1 A4): the
+    head is the row with the greatest ``seq``. Ordering by ``seq`` — not by
+    ``(created_at, id)`` — means two rows that share a ``created_at`` (clock
+    granularity, or two appends in the same millisecond) can never be ordered
+    ambiguously by a random-UUID tiebreak, which previously could INVERT the read
+    order and make the verifier report a FALSE ``prev_hash_mismatch`` (ADR-0038 §2
+    forbids false alarms on untampered data). Read under the caller's transaction so
+    the new row chains off the entry it actually follows. Returns
+    :data:`~app.services.audit.chain.GENESIS_HASH` when the log is empty (the first
+    entry seeds the chain and starts ``seq`` at 1, §1).
+
+    Concurrency (W4-T1 #1/#2): under PostgreSQL's default READ COMMITTED two
+    concurrent ``record()`` transactions would both read the same head ``H`` with a
+    plain SELECT and both insert rows with ``prev_hash=H`` — a CHAIN FORK on
+    legitimate traffic that the linear verifier then flags as a false
+    ``prev_hash_mismatch`` (ADR-0038 §2: "a recompute mismatch on untampered data is
+    a build bug, not an alert"). A transaction-scoped ``pg_advisory_xact_lock(:key)``
+    taken BEFORE the head read serialises the read+insert: a second appender blocks
+    until the first commits, then reads the now-current head — so concurrent appends
+    queue rather than fork. The lock is auto-released at commit/rollback. SQLite has
+    no advisory locks, but its single test connection already serialises appends, so
+    the guard is PostgreSQL-only.
+    """
+    if _is_postgresql(session):
+        # Serialise concurrent appenders: bound parameter (never string-formatted)
+        # so the fixed key can never be an injection vector.
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)").bindparams(bindparam("key", _CHAIN_LOCK_KEY))
+        )
+    head = (
+        await session.execute(select(AuditLog.entry_hash).order_by(AuditLog.seq.desc()).limit(1))
+    ).scalar_one_or_none()
+    return head if head is not None else GENESIS_HASH

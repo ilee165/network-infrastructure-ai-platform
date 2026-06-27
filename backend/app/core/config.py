@@ -37,6 +37,34 @@ class Settings(BaseSettings):
     #: Async SQLAlchemy DSN — asyncpg driver; host is the compose service name.
     database_url: str = "postgresql+asyncpg://netops:netops@postgres:5432/netops"
 
+    # -- api/worker -> Postgres mTLS (W4-T4, ADR-0039 §4) ----------------------
+    # When the deployment mounts cert-manager-issued client material, the engine
+    # presents a CLIENT certificate and verifies the SERVER (the ``verify-full``
+    # class). All four are by-FILE references to mounted Secret keys — NEVER the
+    # key bytes themselves (ADR-0039 §5: cert keys are mounted files, never inlined
+    # or logged). Unset (the default) keeps the connection plaintext, unchanged —
+    # mTLS is opt-in at the chart's ``mtls.postgres.enabled`` seam, which sets
+    # these env. The asyncpg ``ssl`` connect-arg is built in ``app.db`` from them.
+    # --------------------------------------------------------------------------
+
+    #: libpq-class SSL mode for the DB link. ``verify-full`` (server identity +
+    #: cert verified) is the ADR-0039 §4 target; ``verify-ca`` verifies the chain
+    #: but not the hostname. ``None`` (default) = plaintext (no SSL connect-arg).
+    db_ssl_mode: Literal["verify-ca", "verify-full"] | None = None
+
+    #: Path to the CA bundle the client verifies the Postgres SERVER cert against
+    #: (mounted ``ca.crt``). Required when :attr:`db_ssl_mode` is set — a verify
+    #: mode with no trust anchor must fail closed, never silently downgrade.
+    db_ssl_root_cert: Path | None = None
+
+    #: Path to the CLIENT certificate the api/worker PRESENTS to Postgres (mounted
+    #: ``tls.crt``); the server authenticates it via ``clientcert=verify-full``.
+    db_ssl_cert: Path | None = None
+
+    #: Path to the CLIENT private key for :attr:`db_ssl_cert` (mounted ``tls.key``).
+    #: A mounted file only — never logged, serialized, or inlined (ADR-0039 §5).
+    db_ssl_key: Path | None = None
+
     #: Celery broker/result backend + cache (ADR-0008).
     redis_url: str = "redis://redis:6379/0"
 

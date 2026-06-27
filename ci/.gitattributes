@@ -1,0 +1,12 @@
+# The kind harness scripts run on Linux CI runners (and local Linux/macOS); they
+# MUST check out with LF line endings. Under core.autocrlf=true these files would
+# materialize CRLF in the working tree, and a CRLF shebang / `set -o pipefail`
+# line breaks the script on Linux (the shell sees `\r` as part of the command).
+# Pinning eol=lf here keeps every harness artifact LF regardless of the cloner's
+# autocrlf setting — mirrors deploy/kubernetes/.gitattributes (the same CRLF trap
+# silently produced a false-green policy gate there, ADR-0029 §5).
+*.sh   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+# Python helpers invoked by the harness/render-twice scripts on Linux CI.
+*.py   text eol=lf

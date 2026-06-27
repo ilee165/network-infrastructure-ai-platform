@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Assertion-runner entrypoint for the W4-T3 kind harness (ADR-0039 §6, ADR-0041 §3).
+#
+# This is the reusable scaffold W4-T4 (mTLS handshake / plaintext-refusal) and
+# W4-T5 (collector egress allow / deny) plug their assertions into. Each task
+# drops one or more executable `*.sh` files under
+#   ci/kind/assertions/checks/
+# Each check sources lib.sh, performs its assertions via the assert_* helpers,
+# and signals failure either by exiting non-zero OR by recording a non-zero
+# ASSERT_FAIL count (lib.sh installs an EXIT trap in the check's subprocess that
+# turns a recorded ASSERT_FAIL into a non-zero exit — so the recorded count
+# propagates to this runner even without an explicit `exit`).
+#
+# CONTRACT (the bite): the runner exits NON-ZERO if ANY check fails. Because the
+# checks run in their own subprocesses, the runner can only see a check's EXIT
+# STATUS (and log emptiness), not its in-process ASSERT_FAIL — so lib.sh's trap
+# is what makes the "recorded assert_failures" path actually bite here. A green
+# run means every check passed. The harness calls this only AFTER the CNI
+# self-test passes (ADR-0041 §2/§3) — assertions never run on an unproven
+# (non-enforcing) CNI.
+#
+# L5 (P1-W4-LESSONS): `set -o pipefail` is on globally so a masked exit inside a
+# piped check cannot read green; each check's output is teed to a log and the
+# runner asserts the log is non-empty (`test -s`).
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CHECKS_DIR="${HERE}/checks"
+# The runner manages its OWN exit code (run_failures aggregation below), so it
+# must NOT inherit lib.sh's assert-failure EXIT trap — that trap exists to make a
+# CHECK's accumulated ASSERT_FAIL bite in the check's own subprocess. Opt out
+# here so the runner's exit logic stays authoritative.
+#
+# N5: this opt-out is the RUNNER's alone. It MUST NOT leak into the per-check
+# `bash "${check}"` subprocesses — if a child inherited ASSERT_LIB_NO_TRAP=1 its
+# assert-exit trap would be disarmed and a recorded ASSERT_FAIL would read
+# false-green. We therefore (a) keep it a PLAIN shell var (never `export` it) so it
+# is not in the child's environment, and (b) belt-and-braces strip it from the
+# child env at invocation time via `env -u` below.
+ASSERT_LIB_NO_TRAP=1
+# shellcheck source=lib.sh
+. "${HERE}/lib.sh"
+
+# Where to write per-check logs (CI uploads these as artifacts; the harness sets
+# ASSERT_LOG_DIR, falling back to a temp dir for a bare local run).
+LOG_DIR="${ASSERT_LOG_DIR:-$(mktemp -d)}"
+mkdir -p "${LOG_DIR}"
+
+echo "== W4 kind assertion-runner =="
+echo "checks dir: ${CHECKS_DIR}"
+echo "log dir:    ${LOG_DIR}"
+
+if [ ! -d "${CHECKS_DIR}" ]; then
+  echo "::error::checks dir ${CHECKS_DIR} missing — the assertion-runner scaffold is broken" >&2
+  exit 2
+fi
+
+# Collect checks deterministically (sorted). A run with ZERO checks is allowed
+# (the W4-T3 scaffold lands before T4/T5 add theirs) but is reported loudly so it
+# is never mistaken for "all assertions passed". nullglob makes a non-matching
+# glob expand to NOTHING (not the literal pattern), so an empty checks dir yields
+# a zero-length array — globbing straight into the array avoids the `printf '%s\n'`
+# trap of emitting one empty line when there are no matches.
+shopt -s nullglob
+checks=("${CHECKS_DIR}"/*.sh)
+shopt -u nullglob
+# Sort for deterministic order across filesystems.
+if [ "${#checks[@]}" -gt 0 ]; then
+  mapfile -t checks < <(printf '%s\n' "${checks[@]}" | sort)
+fi
+
+if [ "${#checks[@]}" -eq 0 ]; then
+  echo "NOTE: no assertion checks present yet (W4-T4 mTLS + W4-T5 egress add them)."
+  echo "      The scaffold is healthy; there is nothing to assert on this run."
+  exit 0
+fi
+
+run_failures=0
+for check in "${checks[@]}"; do
+  name="$(basename "${check}")"
+  log="${LOG_DIR}/${name}.log"
+  echo "::group::assertion check ${name}"
+  # pipefail (set above) propagates the check's exit through the `| tee` pipe so
+  # a failing check is never masked by tee's exit 0; `test -s` then guards an
+  # empty (silently no-op) check log (L5).
+  # N5: `env -u ASSERT_LIB_NO_TRAP` guarantees the child check sees the assert-exit
+  # trap ARMED even if some ancestor exported the opt-out — a leaked opt-out would
+  # disarm the child's bite and read false-green.
+  if env -u ASSERT_LIB_NO_TRAP bash "${check}" 2>&1 | tee "${log}"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ ! -s "${log}" ]; then
+    echo "::error::check ${name} produced NO output — a silent no-op check is a false-green; failing" >&2
+    run_failures=$((run_failures + 1))
+  fi
+  if [ "${status}" -ne 0 ]; then
+    echo "check ${name}: FAIL (exit ${status})"
+    run_failures=$((run_failures + 1))
+  else
+    echo "check ${name}: ok"
+  fi
+  echo "::endgroup::"
+done
+
+echo "== assertion-runner summary: ${run_failures} failed check(s) =="
+if [ "${run_failures}" -ne 0 ]; then
+  echo "::error::${run_failures} assertion check(s) failed" >&2
+  exit 1
+fi
+echo "all assertion checks passed."

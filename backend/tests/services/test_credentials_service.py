@@ -155,6 +155,54 @@ async def test_create_persists_envelope_and_decrypt_roundtrips(session: AsyncSes
     assert decrypted.plaintext == _SECRET.encode()
 
 
+async def test_create_defaults_to_unscoped(session: AsyncSession) -> None:
+    """CR C2: a credential created without scope args is UNSCOPED (all-NULL = covers all).
+
+    NULL on every dimension is explicitly "unscoped/broad" (least-privilege is
+    opt-in), NOT "deny" — the backward-compatible default. is_scoped is False.
+    """
+    provider = _provider()
+    credential = await _create(session, provider)
+    assert credential.scope_site is None
+    assert credential.scope_role is None
+    assert credential.scope_device_group is None
+    assert credential.is_scoped is False
+
+
+async def test_create_plumbs_scope_onto_the_row(session: AsyncSession) -> None:
+    """CR C2: scope args passed to create_credential are persisted on the row.
+
+    Before the fix create_credential ignored scope, so new creds were ALWAYS
+    unscoped regardless of intent. The scope must round-trip onto the stored row.
+    """
+    provider = _provider()
+    credential = await vault.create_credential(
+        session,
+        provider,
+        name="scoped-on-create",
+        kind=CredentialKind.SSH,
+        username="netops",
+        secret=_SECRET,
+        params=None,
+        actor="user:alice",
+        scope_site="nyc",
+        scope_role="firewall",
+        scope_device_group="dc-a",
+    )
+    await session.flush()
+    reloaded = (
+        await session.execute(
+            select(DeviceCredential)
+            .where(DeviceCredential.id == credential.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert reloaded.scope_site == "nyc"
+    assert reloaded.scope_role == "firewall"
+    assert reloaded.scope_device_group == "dc-a"
+    assert reloaded.is_scoped is True
+
+
 async def test_create_uses_row_id_as_aad_binding_ciphertext_to_row(session: AsyncSession) -> None:
     """Ciphertext copied onto another row fails decryption: AAD is the row id."""
     provider = _provider()

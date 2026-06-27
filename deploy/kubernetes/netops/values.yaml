@@ -766,6 +766,117 @@ backup:
           cpu: "2"
           memory: 2Gi
 
+# -- Audit-log hash-chain DAILY VERIFICATION (W4-T1, ADR-0038 §4 / ADR-0015). A
+#    CronJob recomputes the append-only audit_log hash chain from the last
+#    verified-clean checkpoint to head (avoiding a daily full-history recompute on
+#    a large log), emits a Prometheus textfile metric (`audit_chain_verified` 1/0 +
+#    last-verified position), and on ANY break ALERTS (the non-zero exit + the
+#    `audit_chain_verified 0` series ARE the alert) and exits non-zero so the Job is
+#    Failed — it NEVER silently passes (ADR-0038 §4). It uses the same Python-bearing
+#    backend image as the api/worker (it imports app.services.audit.verify_job) and
+#    connects READ/append-only to Postgres (the only write is advancing the
+#    checkpoint over a verified-clean segment; the 0009 append-only trigger stays).
+audit:
+  chainVerify:
+    # On by default (audit integrity is a release criterion — PRODUCTION.md §5,
+    # G-SEC/G-MNT). Disabling renders NO CronJob and emits a NOTES warning: the
+    # audit chain would then be unverified, a conscious warned opt-out.
+    enabled: true
+    # Daily at 02:30 (offset from the 01:00 backups + the 02:00 drills so the
+    # verify never contends with a backup/drill tick).
+    schedule: "30 2 * * *"
+    # Bound concurrency + history so a long verify never overlaps the next tick
+    # and finished Job pods are reaped.
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 3600
+    backoffLimit: 1
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # The node_exporter textfile-collector dir the metric .prom file is written to.
+    # The CronJob mounts an emptyDir here (the no-pushgateway pattern — a CronJob
+    # pod is not itself scrapable; the file survives the pod for a sidecar/agent to
+    # collect). Operators wiring a real node_exporter textfile path override this.
+    metricsDir: /var/lib/node_exporter/textfile
+    # Resource requests + limits (never absent — ADR-0029 §3). The verify is a
+    # single keyset scan + SHA-256 recompute from the checkpoint — light.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+    # WEEKLY FULL SCAN (W4 PR#76 A3). The daily run above resumes AFTER the verified
+    # checkpoint, so tampering of an already-checkpointed HISTORICAL row (below the
+    # watermark, and not the anchor — the anchor is re-proven each pass) is never
+    # re-detected by the incremental walk. A second CronJob runs the verifier with
+    # AUDIT_CHAIN_VERIFY_FULL=true on a slower cadence: it ignores the checkpoint and
+    # re-walks the whole chain from genesis, so a historical tamper still surfaces.
+    # Tradeoff: the full scan is O(all rows) vs the daily O(new rows) — heavier, so
+    # it runs weekly, not daily (see docs/runbooks/audit-chain-verify-and-reseal.md).
+    fullScan:
+      # On by default — the historical-tamper guard is a release criterion alongside
+      # the daily incremental (G-SEC/G-MNT). Disabling leaves the A3 gap open.
+      enabled: true
+      # Weekly, Sunday 03:30 (offset from the daily 02:30 verify so the two never
+      # contend; the full scan is heavier but infrequent).
+      schedule: "30 3 * * 0"
+
+# -- Device-credential ROTATION (W4-T2, ADR-0040 §1/§3; ADR-0015). A scheduled
+#    CronJob runs the confirm-then-swap, fail-closed device-secret rotation pass:
+#    for each credential due, it STAGES a fresh KMS-wrapped DEK (via the EXISTING
+#    ADR-0032 envelope — NO new crypto, disjoint from the W6-T3 KEK re-wrap),
+#    VERIFIES it against the device, and ACTIVATES it ONLY on success — the prior
+#    credential stays valid until the swap is confirmed, so a failed rotation NEVER
+#    locks a device out. Repeated verify failure marks the credential DEGRADED and
+#    the non-zero exit + the structured log line ARE the alert (ADR-0015). Transient
+#    plaintext is zeroized and never logged/queued/cached/returned/audited (ADR-0040
+#    §1 / ADR-0032 §6). It rotates the STORED COPY only (ADR-0040 §4): on-device
+#    secret change is out of P2 scope. It uses the same Python-bearing backend image
+#    as the api/worker (it imports app.workers.tasks.credential_rotation) and is a
+#    K8s CronJob, NOT Celery beat (keeps running when the app/Redis is degraded).
+credentials:
+  rotation:
+    # DISABLED by default (CR C1+C4). The SCHEDULED pass generates a NEW random
+    # device secret and verifies it against the device — but ADR-0040 §4 defers the
+    # ON-DEVICE secret change (it must route through the four-eyes CR spine), so the
+    # device still holds the OLD secret at verify time. An ENABLED scheduled job
+    # would therefore fail verify on EVERY credential and degrade it every run
+    # (non-functional-by-design until on-device change lands). It is shipped off so
+    # the chart never renders an always-degrading job; opt IN only once a
+    # transport-backed on-device-change capability is wired (a named follow-up).
+    # rotate_device_secret() stays intact for on-demand / coordinated rotation where
+    # the caller has already changed the secret on the device. Enabling it renders
+    # the CronJob and emits a NOTES warning that scheduled auto-rotation needs the
+    # deferred on-device-change capability.
+    enabled: false
+    # Daily at 03:00 (offset from the 01:00 backups, 02:00 drills, and 02:30 audit
+    # verify so the rotation never contends with another DR/integrity tick).
+    schedule: "0 3 * * *"
+    # Retry budget per credential before it is marked degraded + alerted (ADR-0040
+    # §3). Each attempt re-stages + re-verifies; the prior credential stays usable
+    # throughout, so exhausting the budget degrades — it never locks the device out.
+    maxAttempts: 3
+    # Bound concurrency + history so a long rotation never overlaps the next tick
+    # and finished Job pods are reaped.
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 3600
+    backoffLimit: 1
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # Dir the job writes the versions/counts-only run summary (.prom) to — an
+    # emptyDir (the no-pushgateway pattern; the file carries NO secret material).
+    summaryDir: /var/lib/node_exporter/textfile
+    # Resource requests + limits (never absent — ADR-0029 §3). The pass is a keyset
+    # scan + per-credential wrap/verify — light; the device verify is IO-bound.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+
 # -- Ingress + TLS (ADR-0029 §4 / ADR-0012 §2). The SINGLE front door: ONE
 #    HTTPS-only Ingress routing ALL paths to the `frontend` Service — NEVER a
 #    direct ingress → api door (nginx inside frontend is the same-origin reverse
@@ -820,6 +931,111 @@ ingress:
       name: letsencrypt-prod
       kind: ClusterIssuer
       group: cert-manager.io
+
+# -- In-cluster mTLS on the DB links (W4-T4, ADR-0039). MUTUAL TLS on
+#    api↔postgres + worker↔postgres ONLY: Postgres presents a SERVER cert and
+#    REQUIRES + verifies the api/worker CLIENT certs (`hostssl` +
+#    `clientcert=verify-full`), refusing plaintext / untrusted-CA; the clients
+#    verify the server (verify-full) and present their cert. SCOPE: these two DB
+#    links only — neo4j/redis/ingress mTLS are NAMED-DEFERRED (ADR-0039 §2), do
+#    NOT add them here.
+#
+#    Issuance + auto-rotation is cert-manager (ADR-0039 §1, NOT SPIFFE): an
+#    in-cluster CA Issuer signs the server + client certs and renews them before
+#    expiry. The chart renders only cert-manager CR specs (Issuer/Certificate) —
+#    cert-manager OWNS the keypairs, writing them into the named Secrets at
+#    runtime; NO private key is ever templated or in Helm history (ADR-0039 §5,
+#    same posture as ingress TLS).
+#
+#    DEV/CI FALLBACK (certManager.enabled=false): a self-signed CA + server/client
+#    pair is generated in secret.yaml via the `lookup` REUSE-OR-GENERATE pattern
+#    (P1-W4-LESSONS L4) — empty in CI render, REUSED on `helm upgrade` so a regen
+#    never severs every DB connection. The render-twice idempotency test
+#    (ci/mtls/render-twice.sh) is the guard.
+mtls:
+  postgres:
+    # ON by default (M7, PR#76): mutual TLS on the api/worker/cronjob ↔ Postgres
+    # link is the ADR-0039 target posture and is now the secure default (opt-out
+    # never opt-in, ADR-0029 §0). It requires cert material mounted into postgres +
+    # api + worker + the audit/credential CronJobs and a **cert-manager install**
+    # (certManager.enabled=true, the default) OR the self-signed dev/CI fallback
+    # (certManager.enabled=false). cert-manager is therefore a REQUIRED chart
+    # dependency in the default posture — see the chart README "Dependencies" and
+    # the NOTES.txt post-install banner. DOCUMENTED OPT-OUT: set
+    # `mtls.postgres.enabled=false` to render NO mTLS CR / Secret / mount and fall
+    # back to the in-namespace plaintext (NetworkPolicy-isolated) DB link (a warned
+    # downgrade — NOTES.txt). When false the pg_hba refusal rule is NOT emitted, so
+    # plaintext is accepted; only disable it if your platform terminates the DB-link
+    # TLS out-of-band (e.g. a service mesh mTLS sidecar).
+    enabled: true
+    # cert-manager issuance + auto-rotation (ADR-0039 §1/§5). When true the chart
+    # renders the bootstrap self-signed Issuer → CA Certificate → CA Issuer →
+    # server + client Certificates; cert-manager provisions + ROTATES the keypairs
+    # into the Secrets below. Disable ONLY for the dev/CI fallback (secret.yaml
+    # generates a self-signed CA + pair via lookup reuse-or-generate, L4).
+    certManager:
+      enabled: true
+      # LEAF (server + client) certificate validity + renewal window cert-manager
+      # honours (auto-rotation, ADR-0039 §5). cert-manager renews at
+      # (duration - renewBefore) with NO operator hand-rotation. The `lookup` dev
+      # fallback uses a long-lived self-signed pair instead (rotation is a
+      # cert-manager-only property).
+      duration: 2160h # 90d
+      renewBefore: 360h # 15d — renew well before expiry
+      # CA certificate validity + renewal window (M5, PR#76). The CA MUST outlive
+      # the leaves it signs by a wide margin: if the CA and the leaves expired
+      # together, a CA rotation would have to re-issue + redistribute every leaf in
+      # lock-step (brittle). A long-lived CA lets leaves rotate freely underneath it
+      # and makes CA rotation a rare, planned event. ~10y CA vs 90d leaf.
+      caDuration: 87600h # 3650d (~10y) — far longer than the 90d leaf duration
+      caRenewBefore: 720h # 30d
+    # The in-cluster CA Issuer the server/client certs chain to. The bootstrap
+    # self-signed Issuer signs the CA cert; the CA Issuer then signs the leaves.
+    caCommonName: netops-db-ca
+    # Secret NAMES cert-manager writes the issued keypairs into (the chart
+    # references names, never key material — ADR-0039 §5). postgres mounts the
+    # server Secret; api + worker mount their client Secret + the CA.
+    serverSecretName: netops-postgres-server-tls
+    clientSecretName: netops-db-client-tls
+    caSecretName: netops-db-ca-tls
+    # libpq SSL mode the api/worker connect with (ADR-0039 §4). verify-full =
+    # verify the server identity AND present the client cert (mutual). The backend
+    # reads this as NETOPS_DB_SSL_MODE and builds the asyncpg SSLContext (db.py).
+    sslMode: verify-full
+    # Where the cert material is mounted READ-ONLY in every pod (ADR-0039 §5 —
+    # mounted files, never image-baked or logged). The api/worker read these as
+    # NETOPS_DB_SSL_{ROOT_CERT,CERT,KEY}; postgres reads server.crt/key + ca.crt.
+    mountPath: /etc/netops/db-tls
+    # CN embedded in the api/worker CLIENT certs. `clientcert=verify-full`
+    # additionally requires the cert CN to EQUAL the connecting DB username
+    # (ADR-0039 §3), so this MUST match config.postgres.user — keep them in sync.
+    # The client authenticates with scram-sha-256 (the password) AND presents this
+    # cert; verify-full checks the chain, the hostname class, and CN==username.
+    clientCommonName: netops
+    # pg_hba auth method paired with clientcert=verify-full (ADR-0039 §3). The
+    # client presents BOTH a password (scram-sha-256) AND a verified client cert.
+    hbaAuthMethod: scram-sha-256
+    # File names inside the cert-manager-issued (kubernetes.io/tls) server Secret.
+    # cert-manager writes the standard tls keys; overridable for an out-of-band
+    # Secret that uses different key names.
+    serverCertFile: tls.crt
+    serverKeyFile: tls.key
+    caFile: ca.crt
+    # File names inside the api/worker/cronjob CLIENT Secret (M1, PR#76). These are
+    # DERIVED INDEPENDENTLY of the server file names above: the client mounts its
+    # OWN Secret (clientSecretName), so customizing the server Secret's key names
+    # (e.g. for an out-of-band server cert) must NOT silently break the client cert
+    # paths. cert-manager writes the standard tls keys into the client Secret too.
+    clientCertFile: tls.crt
+    clientKeyFile: tls.key
+    # Dev/CI self-signed fallback validity (certManager.enabled=false ONLY). M5
+    # (PR#76): the dev CA also outlives the dev leaves by a wide margin so the
+    # fallback mirrors the cert-manager posture (a long-lived CA, shorter leaves).
+    # These are NOT used on the production cert-manager path (which honours the
+    # certManager.* durations above).
+    devFallback:
+      caValidityDays: 3650 # ~10y dev CA — long-lived signing anchor
+      leafValidityDays: 825 # ~27mo dev leaf — shorter than the CA it chains to
 
 # -- Non-secret application config (rendered into configmap.yaml as NETOPS_*
 #    env). NO credential material here — secrets are by-reference only (see the
@@ -1107,6 +1323,51 @@ networkPolicy:
     - 10.0.0.0/8
     - 172.16.0.0/12
     - 192.168.0.0/16
+  # ---- W4-T5 collector/worker mgmt-subnet egress (ADR-0041) ----------------
+  # The collector/WORKER pods reach out to managed devices (discovery/config/
+  # troubleshooting over SSH/SNMP/NETCONF/HTTPS). The default-deny floor
+  # (-default-deny-all) denies ALL egress; the §2 allows re-permit the in-cluster
+  # data stores (PG/Neo4j/Redis) + DNS; this policy (collector-egress-network
+  # policy.yaml) re-permits the ONE external destination collectors legitimately
+  # reach — the device MANAGEMENT subnet(s) — as `ipBlock` CIDR(s) on a confined
+  # device-mgmt port set. Everything else (arbitrary internet, other namespaces,
+  # other subnets) stays denied, so a compromised collector cannot exfiltrate or
+  # pivot beyond the mgmt subnet + named services (ADR-0041 §1, PRODUCTION.md §9).
+  #
+  # SECURE-BY-DEFAULT, OPT-OUT NEVER OPT-IN (ADR-0029 §0): `enabled: true`.
+  # Disabling renders NO collector mgmt-egress policy — the worker then has NO
+  # egress to the device mgmt subnet (default-deny floor blocks it) and device
+  # operations fail; it is a WARNED opt-out (NOTES.txt), intended only when the
+  # worker drives no devices directly (an external collector/proxy does).
+  collectorEgress:
+    enabled: true
+    # The device MANAGEMENT subnet CIDR(s) the worker may reach — the ONLY external
+    # egress permitted. `ipBlock` ONLY (a NetworkPolicy selector cannot express an
+    # external CIDR; ADR-0041 §1). Operators MUST narrow this to their REAL, NARROW
+    # management range(s). The RFC1918 default below is a documented PLACEHOLDER for
+    # a render — NOT a production allow-list. The W4-T5 allow-list-minimality policy
+    # (hardening.rego) REJECTS 0.0.0.0/0 and BLANKET RFC1918 (all three private
+    # supernets at once); a single placeholder supernet renders so the chart works
+    # out of the box, but ship a narrower CIDR in production.
+    managementCidrs:
+      - 10.0.0.0/8
+    # Device-management ports the worker reaches on the mgmt subnet (ADR-0041 §1):
+    # SSH (22/TCP), SNMP (161/UDP), NETCONF (830/TCP), HTTPS device APIs (443/TCP).
+    # Confined to the device-reaching protocols — NOT "any port to the mgmt subnet".
+    # The protocol is modelled PER PORT (SNMP is UDP, not TCP — a TCP/161 allow does
+    # NOT permit SNMP polling), matching the in-repo DNS-egress convention that emits
+    # the transport protocol explicitly. `protocol` defaults to TCP when omitted. The
+    # W4-T5 port policy (hardening.rego collector_mgmt_ports) rejects a {port,protocol}
+    # pair outside this set.
+    ports:
+      - port: 22
+        protocol: TCP
+      - port: 161
+        protocol: UDP
+      - port: 443
+        protocol: TCP
+      - port: 830
+        protocol: TCP
 
 # -- Dedicated packet node pool (ADR-0031 §5). Taint + matching toleration so
 #    NET_RAW never co-schedules with general pods. nodeSelector/affinity is

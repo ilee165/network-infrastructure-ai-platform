@@ -1,0 +1,12 @@
+# Simulates the INSTALLED prior Secret that `lookup "v1" "Secret"` would return on
+# a real `helm upgrade`. The render-twice script injects fixed PEM material here so
+# the reuse branch has a deterministic prior to reuse; two renders with the same
+# prior MUST be byte-identical (the L4 upgrade-stability invariant).
+prior:
+  # When unset, the fixture takes the GENERATE branch (mirrors a fresh install with
+  # an empty lookup); when set, it takes the REUSE branch (mirrors an upgrade).
+  caCrt: ""
+  srvCrt: ""
+  srvKey: ""
+  cliCrt: ""
+  cliKey: ""

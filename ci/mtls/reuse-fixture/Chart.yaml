@@ -1,0 +1,13 @@
+apiVersion: v2
+# Throwaway fixture chart for the W4-T4 render-twice REUSE-STABILITY assertion
+# (ci/mtls/render-twice.sh). NOT shipped — it exists only so CI can prove the
+# dev-fallback reuse branch (templates/mtls-postgres.yaml) yields byte-identical
+# cert material when a prior Secret is present. `helm template`'s real `lookup`
+# cannot be primed without an API server, so the fixture injects the prior Secret
+# data via values and exercises the IDENTICAL Sprig reuse idiom
+# (`index $prior.data "tls.crt" | b64dec`) the production template uses.
+name: mtls-reuse-fixture
+description: W4-T4 render-twice reuse-stability fixture (not shipped)
+type: application
+version: 0.0.0
+appVersion: "0"
