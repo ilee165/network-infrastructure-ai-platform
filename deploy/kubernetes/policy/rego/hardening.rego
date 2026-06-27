@@ -637,13 +637,21 @@ deny contains msg if {
 # above; this is the ADR-0041 collector/worker control, distinct from it.
 # ===========================================================================
 
-# The device-MANAGEMENT ports a collector legitimately reaches (ADR-0041 §1): SSH
-# (22), SNMP (161), NETCONF (830), and HTTPS device APIs (443). An egress port on
-# the collector mgmt policy outside this set is not a device-mgmt edge and is
-# denied. This is a SCOPED allow-set for this policy ONLY — it is NOT folded into
-# the §2 in-cluster `netpol_known_egress_ports` (those are cluster edges; these are
-# device ports). A new device-mgmt port is added here consciously, never silently.
-collector_mgmt_ports := {22, 161, 443, 830}
+# The device-MANAGEMENT {port, protocol} edges a collector legitimately reaches
+# (ADR-0041 §1): SSH (22/TCP), SNMP (161/UDP), NETCONF (830/TCP), HTTPS device APIs
+# (443/TCP). The PROTOCOL is part of the edge: SNMP is UDP, so a TCP/161 render does
+# NOT permit SNMP polling under the default-deny floor — modelling protocol here is
+# the guard against that false promise. An egress {port, protocol} on the collector
+# mgmt policy outside this set is not a device-mgmt edge and is denied. This is a
+# SCOPED allow-set for this policy ONLY — it is NOT folded into the §2 in-cluster
+# `netpol_known_egress_ports` (those are cluster edges; these are device ports). A
+# new device-mgmt edge is added here consciously, never silently.
+collector_mgmt_ports := {
+	{"port": 22, "protocol": "TCP"},
+	{"port": 161, "protocol": "UDP"},
+	{"port": 443, "protocol": "TCP"},
+	{"port": 830, "protocol": "TCP"},
+}
 
 # True for the W4-T5 collector mgmt-subnet egress NetworkPolicy. Identified by the
 # policy's OWN metadata component label `collector-egress` (its identity), NOT its
@@ -721,16 +729,19 @@ deny contains msg if {
 	msg := "collector mgmt-egress NetworkPolicy must not contain an unrestricted (no `to`) egress rule — the allow-list is the mgmt subnet only (ADR-0041 §1)"
 }
 
-# --- every mgmt-egress port must be a known device-MGMT port (SSH/SNMP/NETCONF/
-# HTTPS-API). A port outside collector_mgmt_ports is not a device-mgmt edge and is
-# denied — keeps the control confined to the device-reaching protocols, not "any
-# port to the mgmt subnet". ---
+# --- every mgmt-egress {port, protocol} must be a known device-MGMT edge
+# (SSH 22/TCP, SNMP 161/UDP, NETCONF 830/TCP, HTTPS-API 443/TCP). A {port, protocol}
+# outside collector_mgmt_ports is not a device-mgmt edge and is denied — keeps the
+# control confined to the device-reaching protocols, not "any port to the mgmt
+# subnet", and rejects a TCP/161 render that would silently fail to permit UDP SNMP.
+# K8s defaults an omitted `protocol` to TCP, so normalize before the set lookup. ---
 deny contains msg if {
 	is_collector_egress_netpol(input)
 	some rule in object.get(input.spec, "egress", [])
 	some p in object.get(rule, "ports", [])
-	not collector_mgmt_ports[p.port]
-	msg := sprintf("collector mgmt-egress NetworkPolicy targets port %v, not a known device-management port (22/161/443/830) (ADR-0041 §1)", [p.port])
+	proto := object.get(p, "protocol", "TCP")
+	not collector_mgmt_ports[{"port": p.port, "protocol": proto}]
+	msg := sprintf("collector mgmt-egress NetworkPolicy targets %v/%v, not a known device-management edge (22/TCP, 161/UDP, 443/TCP, 830/TCP) (ADR-0041 §1)", [proto, p.port])
 }
 
 # --- the collector mgmt-egress policy must SELECT the collector/worker pods (by

@@ -64,7 +64,10 @@ spec:
         {{- end }}
       ports:
         {{- range .Values.networkPolicy.collectorEgress.ports }}
-        - protocol: TCP
-          port: {{ . }}
+        # Protocol modelled PER PORT — SNMP is UDP/161, the rest TCP. A TCP-only
+        # render of UDP/161 would NOT permit SNMP polling under the default-deny
+        # floor (same convention as the DNS-egress policy, which emits UDP+TCP/53).
+        - protocol: {{ .protocol | default "TCP" }}
+          port: {{ .port }}
         {{- end }}
 {{- end }}

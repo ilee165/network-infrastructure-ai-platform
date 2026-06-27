@@ -1298,14 +1298,22 @@ networkPolicy:
     managementCidrs:
       - 10.0.0.0/8
     # Device-management ports the worker reaches on the mgmt subnet (ADR-0041 §1):
-    # SSH (22), SNMP (161), NETCONF (830), HTTPS device APIs (443). Confined to the
-    # device-reaching protocols — NOT "any port to the mgmt subnet". The W4-T5 port
-    # policy (hardening.rego collector_mgmt_ports) rejects a port outside this set.
+    # SSH (22/TCP), SNMP (161/UDP), NETCONF (830/TCP), HTTPS device APIs (443/TCP).
+    # Confined to the device-reaching protocols — NOT "any port to the mgmt subnet".
+    # The protocol is modelled PER PORT (SNMP is UDP, not TCP — a TCP/161 allow does
+    # NOT permit SNMP polling), matching the in-repo DNS-egress convention that emits
+    # the transport protocol explicitly. `protocol` defaults to TCP when omitted. The
+    # W4-T5 port policy (hardening.rego collector_mgmt_ports) rejects a {port,protocol}
+    # pair outside this set.
     ports:
-      - 22
-      - 161
-      - 443
-      - 830
+      - port: 22
+        protocol: TCP
+      - port: 161
+        protocol: UDP
+      - port: 443
+        protocol: TCP
+      - port: 830
+        protocol: TCP
 
 # -- Dedicated packet node pool (ADR-0031 §5). Taint + matching toleration so
 #    NET_RAW never co-schedules with general pods. nodeSelector/affinity is
