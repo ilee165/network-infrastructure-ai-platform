@@ -168,6 +168,41 @@ grep_must "${MTLS_PROBE}" "readOnly: true" \
 grep_must_not "${MTLS_PROBE}" "image:.*:latest" \
   "no :latest image tag in the mTLS probe pod (admission would reject)"
 
+# --- W4-T5 collector egress check is present + carries the allow/deny bite -----
+# The T5 deny assertion plugs into this runner. Assert the check + its probe pod
+# exist and that the check proves BOTH polarities — an allowed (named-service)
+# egress SUCCEEDS and an arbitrary external egress is BLOCKED (the deterministic
+# deny bite, ADR-0041 §3) — so deleting the bite fails this static validator.
+COLLECTOR_CHECK="${CHECKS_DIR}/collector-egress.sh"
+COLLECTOR_PROBE="${CHECKS_DIR}/collector-egress-probe.yaml"
+require_file "${COLLECTOR_CHECK}" "W4-T5 collector egress assertion check"
+require_file "${COLLECTOR_PROBE}" "W4-T5 collector egress probe pod manifest"
+grep_must "${COLLECTOR_CHECK}" "assert_egress_allowed" \
+  "collector check asserts an allowed (named-service) egress SUCCEEDS (ADR-0041 §3)"
+grep_must "${COLLECTOR_CHECK}" "assert_egress_blocked" \
+  "collector check asserts an arbitrary external egress is BLOCKED (ADR-0041 §3 deny bite)"
+# The deny target must be an EXTERNAL destination (not the mgmt subnet / a named
+# service), or the "blocked" assertion proves nothing. The harness probe target
+# (1.1.1.1) is the same external class the CNI self-test proved is blockable.
+grep_must "${COLLECTOR_CHECK}" "DENY_HOST" \
+  "collector check denies an external destination distinct from the allowed target"
+# The check must SKIP loudly (never silently pass) if the collector policy is
+# absent — a missing control read as a pass is a false-green.
+grep_must "${COLLECTOR_CHECK}" "SKIP:" \
+  "collector check SKIPS loudly (not false-green) when the mgmt-egress policy is absent"
+# L3: the in-pod probe is driven via lib.sh's sh -c positional-arg helper, never a
+# \$(VAR) exec argv — assert the check uses the assert_* helpers (which do this).
+grep_must "${COLLECTOR_CHECK}" 'lib\.sh' \
+  "collector check sources lib.sh (uses the pipe-safe, L3-safe assert_* helpers)"
+# The probe pod must carry the WORKER labels so the default-deny floor + the §2
+# worker-egress allow + the W4-T5 collector mgmt-egress policy all select it.
+grep_must "${COLLECTOR_PROBE}" "app.kubernetes.io/component: worker" \
+  "collector probe pod carries the worker labels (every worker policy selects it; ADR-0041 §1)"
+grep_must "${COLLECTOR_PROBE}" "runAsNonRoot: true" \
+  "collector probe pod is non-root (restricted PSA admissible, ADR-0029 §3)"
+grep_must_not "${COLLECTOR_PROBE}" "image:.*:latest" \
+  "no :latest image tag in the collector probe pod (admission would reject)"
+
 # --- no `latest` image anywhere (admission would reject; chart parity) -------
 for f in "${PROBE}"; do
   grep_must_not "${f}" "image:.*:latest" "no :latest image tag in ${f##*/} (admission would reject)"

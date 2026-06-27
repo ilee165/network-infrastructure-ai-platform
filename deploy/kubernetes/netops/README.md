@@ -28,7 +28,7 @@ RBAC + admission policy, and the packet-sandbox OS-isolation workloads
 | `postgres`/`neo4j`/`redis` StatefulSets | ADR-0013 §4 | toggleable (`services.<svc>.enabled=false` → external/operator-managed); hardened, resource req+limits, native probes |
 | `ollama` StatefulSet | ADR-0009 | OPT-IN (`enabled:false`, replicas 0 by default); external provider is the default posture |
 | `Ingress` + cert-manager `Certificate` | ADR-0029 §4 | ONE HTTPS-only Ingress → frontend; ssl-redirect + HSTS; TLS Secret cert-manager-managed (no key in values); all Services ClusterIP |
-| `NetworkPolicy` set | ADR-0029 §2 | `default-deny-all` floor + one additive allow per §3.1 arrow; DNS-only egress; external-LLM egress opt-in default-off |
+| `NetworkPolicy` set | ADR-0029 §2 / ADR-0041 | `default-deny-all` floor + one additive allow per §3.1 arrow; DNS-only egress; collector/worker mgmt-subnet egress (`ipBlock` CIDR only, device-mgmt ports; ADR-0041 — deny asserted on the W4-T3 kind cluster); external-LLM egress opt-in default-off |
 | `Namespace` PSA labels | ADR-0029 §3 | `enforce/audit/warn = restricted` (install namespace); capture namespace relaxed for its NET_RAW deviation |
 | `packet-capture` Deployment | ADR-0031 §1 | `NET_RAW`+`NET_ADMIN`, tainted pool, own SA, confined management-subnet egress |
 | `packet-analysis` Deployment | ADR-0031 §2 | drop-ALL caps (no add), non-root uid≥10000, RO-rootfs, Localhost seccomp, RO pcap, bounded scratch, resource limits, default-deny egress |
@@ -86,6 +86,8 @@ Prerequisites for the hardened path:
 | `ingress.enabled` / `ingress.host` | `true` / placeholder | set `host` to your real FQDN |
 | `ingress.tls.certManager.enabled` / `issuerRef` | `true` / placeholder | cert-manager issues the TLS Secret; no key in values |
 | `networkPolicy.enabled` | `true` | default-deny floor + §2 per-edge allows |
+| `networkPolicy.collectorEgress.enabled` | `true` | collector/worker default-deny egress to the device mgmt subnet (ADR-0041); disabling is a warned opt-out |
+| `networkPolicy.collectorEgress.managementCidrs` | `[10.0.0.0/8]` | device mgmt subnet `ipBlock` CIDR(s) — NARROW to your real range; `0.0.0.0/0` and blanket RFC1918 are rejected by the allow-list-minimality policy |
 | `networkPolicy.externalLlmEgress.enabled` | `false` | OPT-IN; local-first/air-gapped is the default |
 | `admission.enabled` / `admission.engine` | `true` / `kyverno` | `vap` fallback for webhook-free clusters |
 | `admission.signedImages.enabled` | `false` | W6 wires the cosign verifier key |

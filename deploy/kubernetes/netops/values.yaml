@@ -1269,6 +1269,43 @@ networkPolicy:
     - 10.0.0.0/8
     - 172.16.0.0/12
     - 192.168.0.0/16
+  # ---- W4-T5 collector/worker mgmt-subnet egress (ADR-0041) ----------------
+  # The collector/WORKER pods reach out to managed devices (discovery/config/
+  # troubleshooting over SSH/SNMP/NETCONF/HTTPS). The default-deny floor
+  # (-default-deny-all) denies ALL egress; the §2 allows re-permit the in-cluster
+  # data stores (PG/Neo4j/Redis) + DNS; this policy (collector-egress-network
+  # policy.yaml) re-permits the ONE external destination collectors legitimately
+  # reach — the device MANAGEMENT subnet(s) — as `ipBlock` CIDR(s) on a confined
+  # device-mgmt port set. Everything else (arbitrary internet, other namespaces,
+  # other subnets) stays denied, so a compromised collector cannot exfiltrate or
+  # pivot beyond the mgmt subnet + named services (ADR-0041 §1, PRODUCTION.md §9).
+  #
+  # SECURE-BY-DEFAULT, OPT-OUT NEVER OPT-IN (ADR-0029 §0): `enabled: true`.
+  # Disabling renders NO collector mgmt-egress policy — the worker then has NO
+  # egress to the device mgmt subnet (default-deny floor blocks it) and device
+  # operations fail; it is a WARNED opt-out (NOTES.txt), intended only when the
+  # worker drives no devices directly (an external collector/proxy does).
+  collectorEgress:
+    enabled: true
+    # The device MANAGEMENT subnet CIDR(s) the worker may reach — the ONLY external
+    # egress permitted. `ipBlock` ONLY (a NetworkPolicy selector cannot express an
+    # external CIDR; ADR-0041 §1). Operators MUST narrow this to their REAL, NARROW
+    # management range(s). The RFC1918 default below is a documented PLACEHOLDER for
+    # a render — NOT a production allow-list. The W4-T5 allow-list-minimality policy
+    # (hardening.rego) REJECTS 0.0.0.0/0 and BLANKET RFC1918 (all three private
+    # supernets at once); a single placeholder supernet renders so the chart works
+    # out of the box, but ship a narrower CIDR in production.
+    managementCidrs:
+      - 10.0.0.0/8
+    # Device-management ports the worker reaches on the mgmt subnet (ADR-0041 §1):
+    # SSH (22), SNMP (161), NETCONF (830), HTTPS device APIs (443). Confined to the
+    # device-reaching protocols — NOT "any port to the mgmt subnet". The W4-T5 port
+    # policy (hardening.rego collector_mgmt_ports) rejects a port outside this set.
+    ports:
+      - 22
+      - 161
+      - 443
+      - 830
 
 # -- Dedicated packet node pool (ADR-0031 §5). Taint + matching toleration so
 #    NET_RAW never co-schedules with general pods. nodeSelector/affinity is

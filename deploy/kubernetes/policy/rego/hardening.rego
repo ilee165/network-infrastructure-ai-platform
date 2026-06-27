@@ -588,10 +588,15 @@ deny contains msg if {
 }
 
 # --- every egress allow port must map to a known §2 edge. An egress port outside
-# netpol_known_egress_ports is not a §3.1 arrow and is denied.
+# netpol_known_egress_ports is not a §3.1 arrow and is denied. The W4-T5 collector
+# mgmt-subnet egress policy (ADR-0041) is EXCLUDED here — it reaches device
+# MANAGEMENT ports (SSH/SNMP/NETCONF…), not §2 in-cluster edges, and is governed by
+# its own device-mgmt port allow-set in the W4-T5 region below (same exclusion shape
+# as the packet policies).
 deny contains msg if {
 	input.kind == "NetworkPolicy"
 	not is_packet_netpol(input)
+	not is_collector_egress_netpol(input)
 	some rule in object.get(input.spec, "egress", [])
 	some p in object.get(rule, "ports", [])
 	not netpol_known_egress_ports[p.port]
@@ -609,6 +614,132 @@ deny contains msg if {
 	input.kind == "NetworkPolicy"
 	input.metadata.labels["app.kubernetes.io/component"] == "external-llm-egress"
 	msg := "external-LLM egress NetworkPolicy must NOT render unless networkPolicy.externalLlmEgress.enabled — it is opt-in, default-off (ADR-0029 §2)"
+}
+
+# ===========================================================================
+# W4-T5 — collector/worker default-deny egress to the device MANAGEMENT subnet
+# (ADR-0041 §1, PRODUCTION.md §9 collector network segmentation, gate G-SEC).
+#
+# The collector/worker pods are the components that reach out to managed devices.
+# A default-deny egress floor (networkpolicies.yaml `-default-deny-all`) already
+# denies ALL egress; the §2 allows re-permit the in-cluster data stores + DNS, and
+# this ADR-0041 policy re-permits the ONE external destination collectors
+# legitimately reach — the device MANAGEMENT subnet(s) — as `ipBlock` CIDR(s) on a
+# confined device-mgmt port set. The external allow-list is `ipBlock` ONLY
+# (selectors cannot express an external CIDR) and is the mgmt subnet + named
+# in-cluster services ONLY: NO 0.0.0.0/0, NO blanket RFC1918 (the over-broad
+# allow-list ADR-0041 §Consequences/Alt #2 rejects). These rules assert that shape
+# on the RENDERED manifest, per document (conftest --all-namespaces, no --combine).
+#
+# Identified by its component label `collector-egress` (label-based, matching the
+# rest of this file), so a fullname-prefix rename cannot slip a policy past the
+# guard. The packet-capture policy carries its OWN ADR-0031 mgmt-egress rules
+# above; this is the ADR-0041 collector/worker control, distinct from it.
+# ===========================================================================
+
+# The device-MANAGEMENT ports a collector legitimately reaches (ADR-0041 §1): SSH
+# (22), SNMP (161), NETCONF (830), and HTTPS device APIs (443). An egress port on
+# the collector mgmt policy outside this set is not a device-mgmt edge and is
+# denied. This is a SCOPED allow-set for this policy ONLY — it is NOT folded into
+# the §2 in-cluster `netpol_known_egress_ports` (those are cluster edges; these are
+# device ports). A new device-mgmt port is added here consciously, never silently.
+collector_mgmt_ports := {22, 161, 443, 830}
+
+# True for the W4-T5 collector mgmt-subnet egress NetworkPolicy. Identified by the
+# policy's OWN metadata component label `collector-egress` (its identity), NOT its
+# podSelector (which targets the `worker` pods it binds) — same identification shape
+# as the `external-llm-egress` policy above.
+is_collector_egress_netpol(np) if {
+	np.metadata.labels["app.kubernetes.io/component"] == "collector-egress"
+}
+
+# --- the collector mgmt-egress policy must be EGRESS-typed (it is an egress
+# control; an ingress-only render would be inert). ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	not policy_has_egress(input)
+	msg := "collector mgmt-egress NetworkPolicy must declare policyTypes Egress (default-deny egress re-permitting the mgmt subnet only; ADR-0041 §1)"
+}
+
+# --- the collector mgmt-egress policy must re-permit a device MANAGEMENT subnet
+# via an `ipBlock` CIDR — that is the whole point (ADR-0041 §1; selectors cannot
+# express an external CIDR). A policy with no ipBlock allow reaches no device. ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	not collector_allows_management_cidr(input)
+	msg := "collector mgmt-egress NetworkPolicy must allow egress to a device management subnet (ipBlock CIDR) — the ONLY external destination collectors legitimately reach (ADR-0041 §1 / PRODUCTION.md §9)"
+}
+
+collector_allows_management_cidr(np) if {
+	some rule in np.spec.egress
+	some target in rule.to
+	target.ipBlock.cidr
+}
+
+# --- ALLOW-LIST MINIMALITY (the load-bearing W4-T5 guard, ADR-0041 §Consequences
+# / Alt #2): an over-broad allow-list silently reopens the exfiltration/pivot path
+# the control exists to close. NO collector mgmt-egress ipBlock CIDR may be the
+# whole internet (`0.0.0.0/0`) or an IPv6 default route (`::/0`). ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	some rule in object.get(input.spec, "egress", [])
+	some target in object.get(rule, "to", [])
+	cidr := target.ipBlock.cidr
+	cidr in {"0.0.0.0/0", "::/0"}
+	msg := sprintf("collector mgmt-egress NetworkPolicy must NOT allow the whole internet (found ipBlock %q) — the allow-list is the device mgmt subnet only, never 0.0.0.0/0 (ADR-0041 §Alt #2 / minimality)", [cidr])
+}
+
+# --- ALLOW-LIST MINIMALITY (cont.): the allow-list must not be BLANKET RFC1918 —
+# permitting all three private supernets (10/8, 172.16/12, 192.168/16) at once
+# re-permits the entire private address space (every other namespace, every other
+# subnet), which is the over-broad allow-list ADR-0041 rejects. The mgmt subnet is
+# a NARROW range an operator configures, not "all of RFC1918". An exact-match on
+# all three /8-/12-/16 supernets in the same policy is the blanket-RFC1918 tell. ---
+rfc1918_supernets := {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+
+collector_cidrs := {cidr |
+	some rule in object.get(input.spec, "egress", [])
+	some target in object.get(rule, "to", [])
+	cidr := target.ipBlock.cidr
+}
+
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	# every one of the three RFC1918 supernets is present verbatim in the allow-list
+	count(rfc1918_supernets - collector_cidrs) == 0
+	msg := "collector mgmt-egress NetworkPolicy must NOT allow BLANKET RFC1918 (10/8 + 172.16/12 + 192.168/16 together re-permit the whole private space) — narrow it to the operator-configured device mgmt subnet(s) (ADR-0041 §Alt #2 / minimality)"
+}
+
+# --- the collector mgmt-egress policy must NOT contain a wide-open (no `to`) rule:
+# a missing `to` = allow-to-anywhere, exactly what default-deny forbids (ADR-0041
+# §1). (The generic no-blanket-egress rule above also covers this; this is the
+# W4-T5-named guard so a regression names the control it broke.) ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	some rule in object.get(input.spec, "egress", [])
+	not rule.to
+	msg := "collector mgmt-egress NetworkPolicy must not contain an unrestricted (no `to`) egress rule — the allow-list is the mgmt subnet only (ADR-0041 §1)"
+}
+
+# --- every mgmt-egress port must be a known device-MGMT port (SSH/SNMP/NETCONF/
+# HTTPS-API). A port outside collector_mgmt_ports is not a device-mgmt edge and is
+# denied — keeps the control confined to the device-reaching protocols, not "any
+# port to the mgmt subnet". ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	some rule in object.get(input.spec, "egress", [])
+	some p in object.get(rule, "ports", [])
+	not collector_mgmt_ports[p.port]
+	msg := sprintf("collector mgmt-egress NetworkPolicy targets port %v, not a known device-management port (22/161/443/830) (ADR-0041 §1)", [p.port])
+}
+
+# --- the collector mgmt-egress policy must SELECT the collector/worker pods (by
+# their existing `worker` app label, ADR-0041 §1) — a policy that selects the wrong
+# pods confines nothing. Asserted via podSelector matchLabels component=worker. ---
+deny contains msg if {
+	is_collector_egress_netpol(input)
+	not input.spec.podSelector.matchLabels["app.kubernetes.io/component"] == "worker"
+	msg := "collector mgmt-egress NetworkPolicy must select the worker/collector pods (podSelector app.kubernetes.io/component=worker; ADR-0041 §1)"
 }
 
 # ===========================================================================

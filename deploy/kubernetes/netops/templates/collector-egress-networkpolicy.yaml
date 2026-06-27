@@ -1,0 +1,70 @@
+{{- /*
+W4-T5 collector/worker mgmt-subnet egress NetworkPolicy (ADR-0041 §1,
+PRODUCTION.md §9 collector network segmentation, gate G-SEC).
+
+The collector/WORKER pods are the components that reach out to managed devices
+(discovery / config / troubleshooting over SSH / SNMP / NETCONF / HTTPS device
+APIs). A compromised collector must NOT be able to exfiltrate or pivot beyond the
+device management subnet + the named in-cluster services.
+
+This policy is ADDITIVE on top of the posture floor in networkpolicies.yaml:
+  - `-default-deny-all`  denies ALL ingress + egress for every pod;
+  - `-allow-dns-egress`  re-permits kube-dns :53 (name resolution);
+  - `-allow-worker-egress` re-permits the in-cluster data stores
+                           (Postgres :5432 / Neo4j :7687 / Redis :6379, + ollama).
+This file re-permits the ONE external destination the collector legitimately
+reaches — the device MANAGEMENT subnet(s) — expressed as `ipBlock` CIDR(s) (a
+NetworkPolicy selector CANNOT express an external CIDR; ADR-0041 §1) on a confined
+device-management port set. Everything else (arbitrary internet, other
+namespaces, other subnets) stays denied by the floor.
+
+Allow-list = the mgmt subnet + named in-cluster services ONLY — NO 0.0.0.0/0, NO
+blanket RFC1918 (ADR-0041 §Alt #2). The W4-T5 allow-list-minimality policy
+(deploy/kubernetes/policy/rego/hardening.rego, component `collector-egress`)
+asserts that on the rendered manifest; the deny is asserted on the W4-T3
+enforcing-CNI kind cluster (ci/kind/assertions/checks/collector-egress.sh).
+
+SECURE-BY-DEFAULT, OPT-OUT NEVER OPT-IN (ADR-0029 §0): renders whenever
+networkPolicy.enabled AND networkPolicy.collectorEgress.enabled AND the worker is
+enabled. Disabling collectorEgress is a WARNED opt-out (NOTES.txt) — the worker
+then has NO egress to the device mgmt subnet (the default-deny floor blocks it).
+
+The packet-CAPTURE policy carries its OWN ADR-0031 mgmt-egress (capture
+namespace); this is the ADR-0041 collector/worker control in the INSTALL
+namespace, distinct from it.
+*/ -}}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.collectorEgress.enabled .Values.services.worker.enabled }}
+{{- $fullname := include "netops.fullname" . }}
+{{- $ns := .Release.Namespace }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-collector-mgmt-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    # The policy's IDENTITY label (the W4-T5 minimality policy keys on this); the
+    # podSelector below binds the `worker` pods this confines.
+    app.kubernetes.io/component: collector-egress
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "worker") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # Device MANAGEMENT subnet(s) only — the worker drives device SSH / SNMP /
+    # NETCONF / HTTPS-API operations. Confined to these ipBlock CIDR(s) on the
+    # device-mgmt port set. NEVER an empty-`to` rule; NEVER 0.0.0.0/0 or blanket
+    # RFC1918 (ADR-0041 §1 / §Alt #2 — the minimality policy is the guard).
+    - to:
+        {{- range .Values.networkPolicy.collectorEgress.managementCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.collectorEgress.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+{{- end }}
