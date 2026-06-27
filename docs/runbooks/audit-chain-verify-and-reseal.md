@@ -20,7 +20,7 @@ Continuously prove the append-only `audit_log` has not been mutated or deleted b
 | CronJob (weekly full) | `<release>-audit-chain-verify-full` (Helm; weekly Sun 03:30; full scan from genesis; `audit.chainVerify.fullScan.enabled`) |
 | Checkpoint | `audit_chain_checkpoint` (single-row `(entry_id, entry_created_at, entry_hash)` watermark) |
 | Metrics | `audit_chain_verified` (1 clean / 0 break), `audit_chain_last_verified_position`, `audit_chain_checked_total` (node_exporter textfile) |
-| Log line | `AUDIT_CHAIN_VERIFY OUTCOME=PASS|FAIL ...` |
+| Log line | `AUDIT_CHAIN_VERIFY OUTCOME=PASS\|FAIL ...` |
 
 ## How the daily (incremental) verify works
 

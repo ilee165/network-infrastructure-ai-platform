@@ -102,8 +102,9 @@ satisfied.
       (`continue-on-error` + absent from the required aggregator) until a Linux/Docker
       host or green CI run satisfies the local-validation lesson. L5 pipefail on all
       pipes: met (asserted by the validator).
-- [x] helm lint / kubeconform / kube-linter green (run on this host; conftest/OPA
-      policies are not present in the repo); one atomic commit.
+- [x] helm lint / kubeconform / kube-linter / conftest green (run on this host;
+      conftest IS present — deploy/kubernetes/policy/rego/hardening.rego — and CI
+      wires it in the `infra` job); one atomic commit.
 - [~] **Teardown on a forced mid-run failure**: the `trap` is authored and asserted
       statically, but firing it on a live mid-run failure was not observed here —
       live-validation deferred to W5.
