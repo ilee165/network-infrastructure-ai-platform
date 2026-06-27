@@ -24,6 +24,11 @@ POS="${HERE}/pg_hba_strict_variation_PASS.yaml"
 # strict row must still PASS (no leading-whitespace false-reject).
 NEG_INDENTED="${HERE}/pg_hba_indented_weak_hostssl_DENY.yaml"
 POS_INDENTED="${HERE}/pg_hba_indented_strict_hostssl_PASS.yaml"
+# round-4 #05: an explicit non-TLS `hostnossl` row (and its indented variant) must be
+# DENIED. `hostnossl` is a plaintext-capable connection type the old `^[ \t]*host\s`
+# matcher missed entirely (the `n` after `host` is not whitespace).
+NEG_HOSTNOSSL="${HERE}/pg_hba_hostnossl_DENY.yaml"
+NEG_HOSTNOSSL_INDENTED="${HERE}/pg_hba_indented_hostnossl_DENY.yaml"
 
 fail=0
 
@@ -70,8 +75,27 @@ else
   fail=1
 fi
 
+# NEGATIVE (round-4 #05): an explicit non-TLS `hostnossl` row MUST be DENIED — it is
+# a plaintext-capable connection type that the old `host`-only matcher never saw.
+echo "-- negative fixture (an explicit non-TLS \`hostnossl\` row) MUST be DENIED --"
+if conftest test "${NEG_HOSTNOSSL}" --policy "${POLICY}" --all-namespaces; then
+  echo "FAIL: hostnossl fixture PASSED conftest — an explicit non-TLS plaintext path BYPASSED the rule (#05)" >&2
+  fail=1
+else
+  echo "PASS: hostnossl fixture was DENIED (the non-TLS plaintext row bites)"
+fi
+
+# NEGATIVE (round-4 #05 + R3 #11): an INDENTED `hostnossl` row MUST also be DENIED.
+echo "-- negative fixture (an INDENTED non-TLS \`hostnossl\` row) MUST be DENIED --"
+if conftest test "${NEG_HOSTNOSSL_INDENTED}" --policy "${POLICY}" --all-namespaces; then
+  echo "FAIL: indented hostnossl fixture PASSED conftest — a whitespace-prefixed non-TLS row BYPASSED the rule (#05 + leading-whitespace)" >&2
+  fail=1
+else
+  echo "PASS: indented hostnossl fixture was DENIED (leading-whitespace non-TLS row bites)"
+fi
+
 if [ "${fail}" -ne 0 ]; then
   echo "::error::pg_hba weak-hostssl policy bite FAILED" >&2
   exit 1
 fi
-echo "pg_hba weak-hostssl policy bite: both directions correct (incl. indented rows)."
+echo "pg_hba weak-hostssl + hostnossl policy bite: all directions correct (incl. indented rows)."

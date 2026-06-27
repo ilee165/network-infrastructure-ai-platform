@@ -1,0 +1,26 @@
+# NEGATIVE fixture (PR#76 round-4 #05) — MUST be DENIED by the netops.hardening
+# pg_hba plaintext rule. `hostnossl` is an EXPLICITLY non-TLS TCP connection type:
+# it admits a plaintext connection, defeating the ADR-0039 §3 mTLS refusal. The OLD
+# rule only matched `^[ \t]*host\s`, which never matches `hostnossl` (the `n` after
+# `host` is not whitespace), so a `hostnossl` row slipped through (false-green). The
+# fixed rule matches `(host|hostnossl)\s` and DENIES it.
+#
+# Every `hostssl` row here IS the strict form and there is no plaintext `host` line,
+# so the ONLY denial this file should trigger is the `hostnossl` plaintext rule —
+# isolating the #05 bite.
+#
+# conftest expectation: MUST report >=1 failure. Run by run-pg-hba-bite.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netops-postgres-tls-config
+  namespace: netops
+  labels:
+    app.kubernetes.io/component: postgres
+data:
+  pg_hba.conf: |
+    local       all       all                 trust
+    # EXPLICIT non-TLS row — admits a plaintext connection. Must be DENIED (#05).
+    hostnossl   all       all   0.0.0.0/0     scram-sha-256
+    hostssl     all       all   0.0.0.0/0     scram-sha-256 clientcert=verify-full
+    hostssl     all       all   ::/0          scram-sha-256 clientcert=verify-full

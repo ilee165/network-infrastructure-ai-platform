@@ -2566,11 +2566,17 @@ deny contains msg if {
 deny contains msg if {
 	is_postgres_tls_configmap(input)
 	hba := object.get(input.data, "pg_hba.conf", "")
-	# R3 #12 (PR#76 round 3): tolerate leading whitespace so an INDENTED plaintext
-	# `host` line is caught too — pg_hba ignores leading whitespace, so an indented
-	# plaintext row is a live non-TLS listener path.
-	regex.match(`(?m)^[ \t]*host\s`, hba)
-	msg := "postgres pg_hba.conf must NOT carry a plaintext `host` line — a non-TLS listener path defeats the mTLS refusal (ADR-0039 §3)"
+	# Intent (round-4 #05): deny the two PLAINTEXT-capable TCP connection types —
+	# `host` (matches SSL *and* non-SSL, so it admits plaintext) and `hostnossl`
+	# (explicitly non-TLS). `hostssl` (TLS-required) is the ONLY permitted TCP form
+	# and is deliberately NOT matched here. This is NOT "deny any non-hostssl line":
+	# `hostgssenc` (GSSAPI-encrypted) is a separate transport concern, out of scope of
+	# this TLS-link rule (handle elsewhere if GSS is ever in scope). RE2 has no
+	# negative lookahead, so the two plaintext types are matched by explicit
+	# alternation. `^[ \t]*` tolerates leading whitespace — pg_hba ignores it, so an
+	# indented `host`/`hostnossl` row is still a live non-TLS listener path (R3 #12).
+	regex.match(`(?m)^[ \t]*(host|hostnossl)\s`, hba)
+	msg := "postgres pg_hba.conf must NOT carry a plaintext `host` or non-TLS `hostnossl` line — a non-TLS listener path defeats the mTLS refusal; only `hostssl` (and `local`) are permitted (ADR-0039 §3, round-4 #05)"
 }
 
 deny contains msg if {
