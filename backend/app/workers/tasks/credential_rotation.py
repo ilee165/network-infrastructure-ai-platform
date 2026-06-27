@@ -37,6 +37,7 @@ import os
 import secrets
 import sys
 import tempfile
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,20 +132,38 @@ def write_summary(summary: RotationPassSummary, *, summary_dir: Path) -> Path:
 
 
 async def _due_credentials(session: AsyncSession) -> list[tuple[DeviceCredential, Device]]:
-    """Credentials bound to a device, paired with that device (the rotation worklist).
+    """ONE entry per device-bound credential, paired with a representative device.
 
     ADR-0040 rotates the stored copy of a device login secret; a credential with no
     bound device has no target to verify against, so it is not in this pass's
-    worklist. Ordered by id for a stable, resumable worklist.
+    worklist.
+
+    A single credential may be bound by N devices (``Device.credential_id`` is not
+    unique). The rotation rewrites the credential ROW once, so the worklist is
+    deduped to ONE entry per credential (CR C7): a join would yield the credential N
+    times and rotate it N times, each activation overwriting the prior one and
+    inflating the considered/activated counts. We verify the new secret against a
+    SINGLE representative device — the device with the lowest id bound to the
+    credential — because the stored secret is shared across every bound device, so
+    confirming it on one is a sound proof for the swap (the device-secret is the
+    same value everywhere it is used). Ordered by credential id for a stable,
+    resumable worklist.
     """
     rows = (
         await session.execute(
             select(DeviceCredential, Device)
             .join(Device, Device.credential_id == DeviceCredential.id)
-            .order_by(DeviceCredential.id)
+            .order_by(DeviceCredential.id, Device.id)
         )
     ).all()
-    return [(row[0], row[1]) for row in rows]
+    worklist: list[tuple[DeviceCredential, Device]] = []
+    seen: set[uuid.UUID] = set()
+    for credential, device in rows:
+        if credential.id in seen:
+            continue
+        seen.add(credential.id)
+        worklist.append((credential, device))
+    return worklist
 
 
 async def run(

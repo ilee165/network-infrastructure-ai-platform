@@ -132,6 +132,62 @@ async def test_successful_rotation_activates_fresh_wrap(session: AsyncSession) -
     assert decrypted.plaintext != _OLD_SECRET.encode()
 
 
+# ---------------------------------------------------------------------------
+# CR C5: minimize immutable plaintext copies the finally-zeroization cannot wipe
+# ---------------------------------------------------------------------------
+
+
+def test_envelope_encrypt_round_trips_from_bytearray() -> None:
+    """CR C5: a bytearray plaintext encrypts and decrypts identically to bytes."""
+    from app.core.crypto import envelope_decrypt, envelope_encrypt
+
+    provider = _provider()
+    cred_id = uuid.uuid4()
+    aad = str(cred_id).encode()
+    plaintext = b"rot8-me-Sup3rS3cret!"
+    envelope = envelope_encrypt(bytearray(plaintext), aad, provider)
+    assert envelope_decrypt(envelope, aad, provider) == plaintext
+    # A memoryview is accepted too (the buffer the rotation path could hand over).
+    envelope_mv = envelope_encrypt(memoryview(bytearray(plaintext)), aad, provider)
+    assert envelope_decrypt(envelope_mv, aad, provider) == plaintext
+
+
+async def test_rotation_passes_a_zeroizable_buffer_to_envelope_encrypt(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CR C5: rotate_device_secret hands a bytearray (not immutable bytes) to the wrap.
+
+    Spying on envelope_encrypt proves the staged wrap receives a mutable, zeroizable
+    buffer — so the finally-block can actually wipe the transient plaintext. Before
+    the fix it received bytes(secret_buf), an immutable copy that survived the wipe.
+    """
+    import app.services.credentials.secret_rotation as sr
+
+    seen_types: list[type] = []
+    real = sr.envelope_encrypt
+
+    def _spy(plaintext: object, aad: bytes, provider: object) -> object:
+        seen_types.append(type(plaintext))
+        return real(plaintext, aad, provider)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sr, "envelope_encrypt", _spy)
+
+    provider = _provider()
+    credential = await _create(session, provider)
+    device = _device()
+    outcome = await rotate_device_secret(
+        session,
+        provider,
+        credential_id=credential.id,
+        new_secret=_NEW_SECRET,
+        device=device,
+        verify=_accept,
+        actor="system:rotation",
+    )
+    assert outcome.state is RotationState.ACTIVATED
+    assert seen_types == [bytearray], seen_types  # NOT immutable bytes
+
+
 async def test_no_leak_invariant_in_row_audit_and_logs(session: AsyncSession) -> None:
     """After rotation, no plaintext in the vault row, any audit detail, or the logs."""
     provider = _provider()

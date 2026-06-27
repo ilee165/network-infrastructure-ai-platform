@@ -837,10 +837,19 @@ audit:
 #    K8s CronJob, NOT Celery beat (keeps running when the app/Redis is degraded).
 credentials:
   rotation:
-    # On by default (rotation + least-privilege scoping is a release criterion —
-    # PRODUCTION.md §5, G-SEC). Disabling renders NO CronJob and emits a NOTES
-    # warning: stored device secrets would then never rotate, a warned opt-out.
-    enabled: true
+    # DISABLED by default (CR C1+C4). The SCHEDULED pass generates a NEW random
+    # device secret and verifies it against the device — but ADR-0040 §4 defers the
+    # ON-DEVICE secret change (it must route through the four-eyes CR spine), so the
+    # device still holds the OLD secret at verify time. An ENABLED scheduled job
+    # would therefore fail verify on EVERY credential and degrade it every run
+    # (non-functional-by-design until on-device change lands). It is shipped off so
+    # the chart never renders an always-degrading job; opt IN only once a
+    # transport-backed on-device-change capability is wired (a named follow-up).
+    # rotate_device_secret() stays intact for on-demand / coordinated rotation where
+    # the caller has already changed the secret on the device. Enabling it renders
+    # the CronJob and emits a NOTES warning that scheduled auto-rotation needs the
+    # deferred on-device-change capability.
+    enabled: false
     # Daily at 03:00 (offset from the 01:00 backups, 02:00 drills, and 02:30 audit
     # verify so the rotation never contends with another DR/integrity tick).
     schedule: "0 3 * * *"

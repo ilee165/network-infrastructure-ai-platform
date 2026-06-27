@@ -155,9 +155,17 @@ async def rotate_device_secret(
             # STAGE: wrap the new secret into a fresh envelope IN MEMORY. The row's
             # ciphertext columns are untouched here, so the prior secret remains the
             # credential of record until the swap is confirmed (ADR-0040 §1).
+            #
+            # CR C5: pass the zeroizable bytearray straight into envelope_encrypt
+            # (AES-GCM consumes a buffer) rather than bytes(secret_buf). An immutable
+            # bytes copy would survive the finally-zeroization below — Python cannot
+            # wipe an immutable object — so minimizing immutable copies of the
+            # plaintext keeps the transient secret wipeable (ADR-0032 §6). The
+            # one immutable copy we cannot avoid is the verifier's DecryptedSecret
+            # below, whose contract holds plaintext as bytes.
             try:
                 staged: EncryptedSecret = envelope_encrypt(
-                    bytes(secret_buf), _aad(credential.id), provider
+                    secret_buf, _aad(credential.id), provider
                 )
             except KeyProviderUnavailable as exc:
                 # Fail-closed (ADR-0032 §4): no row mutated, prior credential intact.

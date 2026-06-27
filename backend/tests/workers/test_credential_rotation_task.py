@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 import structlog.testing
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -81,6 +82,37 @@ async def _seed(
                 Device(
                     hostname=name,
                     mgmt_ip=mgmt_ip,
+                    status=DeviceStatus.NEW,
+                    credential_id=credential.id,
+                )
+            )
+        await session.commit()
+
+
+async def _seed_shared_credential(
+    maker: async_sessionmaker[AsyncSession],
+    provider: KeyProvider,
+    *,
+    n_devices: int,
+) -> None:
+    """One credential bound by *n_devices* devices (Device.credential_id is not unique)."""
+    async with maker() as session:
+        credential = await vault.create_credential(
+            session,
+            provider,
+            name="shared-ssh",
+            kind=CredentialKind.SSH,
+            username="netops",
+            secret="old-secret",
+            params=None,
+            actor="user:alice",
+        )
+        await session.flush()
+        for i in range(n_devices):
+            session.add(
+                Device(
+                    hostname=f"dev-{i}",
+                    mgmt_ip=f"10.0.0.{10 + i}",
                     status=DeviceStatus.NEW,
                     credential_id=credential.id,
                 )
@@ -179,6 +211,60 @@ async def test_unbound_credential_is_not_rotated(
     assert code == 0
     body = (summary_dir / "credential_rotation.prom").read_text(encoding="utf-8")
     assert "credential_rotation_considered_total 0" in body
+
+
+# ---------------------------------------------------------------------------
+# CR C7: a credential shared by N devices is rotated ONCE, not N times
+# ---------------------------------------------------------------------------
+
+
+async def test_shared_credential_is_rotated_once_not_per_device(
+    maker: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """A credential bound by 3 devices appears ONCE in the worklist and rotates once.
+
+    The pre-fix join yielded the credential once PER bound device, rotating it N
+    times (each activation overwriting the prior, considered/activated inflated to
+    N). The deduped worklist rotates the shared credential ROW exactly once.
+    """
+    provider = _provider()
+    await _seed_shared_credential(maker, provider, n_devices=3)
+    summary_dir = tmp_path / "summary"
+
+    # A counting verifier proves the new secret is verified exactly once (against a
+    # single representative device), not three times.
+    verify_calls = 0
+
+    async def _counting_accept(_device: Device, _secret: vault.DecryptedSecret) -> bool:
+        nonlocal verify_calls
+        verify_calls += 1
+        return True
+
+    code = await run(
+        sessionmaker=maker,
+        provider=provider,
+        verify=_counting_accept,
+        summary_dir=summary_dir,
+        secret_factory=lambda _c: _NEW_SECRET,
+    )
+
+    assert code == 0
+    assert verify_calls == 1
+    body = (summary_dir / "credential_rotation.prom").read_text(encoding="utf-8")
+    assert "credential_rotation_considered_total 1" in body
+    assert "credential_rotation_activated_total 1" in body
+    assert "credential_rotation_degraded_total 0" in body
+
+    # Exactly ONE secret-rotated audit row exists for the shared credential.
+    from app.models import AuditLog
+
+    async with maker() as session:
+        rotated = (
+            await session.execute(
+                select(AuditLog).where(AuditLog.action == "credential.secret_rotated")
+            )
+        ).scalars()
+        assert len(list(rotated)) == 1
 
 
 # ---------------------------------------------------------------------------
