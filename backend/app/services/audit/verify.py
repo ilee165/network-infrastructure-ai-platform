@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditChainCheckpoint, AuditLog
@@ -132,12 +132,14 @@ async def count_pre_chain_rows(session: AsyncSession) -> tuple[int, int]:
       N→N+1 rolling deploy before ``seq`` became NOT NULL (a later contract
       migration). They are pre-chain history (genesis ``entry_hash``), excluded from
       the chain walk (:func:`_entries_after`).
-    * ``suspicious`` — pre-chain rows whose ``entry_hash`` is NOT the genesis default.
-      A genuine old-writer row carries the genesis seed; a NULL-``seq`` row with a
-      real-looking hash means ``seq`` was likely NULLED by tampering (legacy
-      corruption). This must NEVER be hidden by the pre-chain classification — the job
-      treats ``suspicious > 0`` as a loud failure (ADR-0038 §4, fail toward
-      false-positive).
+    * ``suspicious`` — pre-chain rows whose ``entry_hash`` OR ``prev_hash`` is NOT the
+      genesis default. A genuine old-writer row carries the genesis seed in BOTH
+      columns; a NULL-``seq`` row with a real-looking hash in EITHER means ``seq`` was
+      likely NULLED by tampering (legacy corruption) — checking only ``entry_hash``
+      would misclassify a row whose ``prev_hash`` was mutated to a real predecessor
+      digest as benign (round-5 #01, a false PASS). This must NEVER be hidden by the
+      pre-chain classification — the job treats ``suspicious > 0`` as a loud failure
+      (ADR-0038 §4, fail toward false-positive).
 
     Outside a known rolling-deploy window ANY ``total > 0`` warrants investigation;
     the verify job logs the count explicitly so it is visible, never silent.
@@ -151,7 +153,13 @@ async def count_pre_chain_rows(session: AsyncSession) -> tuple[int, int]:
         await session.execute(
             select(func.count())
             .select_from(AuditLog)
-            .where(AuditLog.seq.is_(None), AuditLog.entry_hash != GENESIS_HASH)
+            .where(
+                AuditLog.seq.is_(None),
+                or_(
+                    AuditLog.entry_hash != GENESIS_HASH,
+                    AuditLog.prev_hash != GENESIS_HASH,
+                ),
+            )
         )
     ).scalar_one()
     return int(total), int(suspicious)

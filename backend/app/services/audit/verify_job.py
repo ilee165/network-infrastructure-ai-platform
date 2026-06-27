@@ -219,16 +219,18 @@ async def run(
         # one (non-genesis hash = likely tampering) is never hidden by the pre-chain
         # classification.
         pre_chain_rows, pre_chain_suspicious = await count_pre_chain_rows(session)
-        if result.ok:
+        # Overall health: the chain must be clean AND no pre-chain row may be suspicious
+        # (a NULL-seq row with a real hash is anomalous — fail toward false-positive,
+        # ADR-0038 §4). A benign rolling-window old-writer row (genesis hash) is logged
+        # but does not fail the gate. Gate the commit on `healthy`, NOT `result.ok`
+        # (round-5 #02): a suspicious pre-chain row makes the run FAIL (exit 1), so it
+        # must roll back too — otherwise verify_chain's advance_checkpoint would commit
+        # an advanced watermark on a run we are reporting as failed.
+        healthy = result.ok and pre_chain_suspicious == 0
+        if healthy:
             await session.commit()
         else:
             await session.rollback()
-
-    # Overall health: the chain must be clean AND no pre-chain row may be suspicious
-    # (a NULL-seq row with a real hash is anomalous — fail toward false-positive,
-    # ADR-0038 §4). A benign rolling-window old-writer row (genesis hash) is logged
-    # but does not fail the gate.
-    healthy = result.ok and pre_chain_suspicious == 0
 
     # A8: emit the alert log line + decide the exit code FIRST, so a metric-write
     # failure below can never swallow the alert signal or the non-zero exit.

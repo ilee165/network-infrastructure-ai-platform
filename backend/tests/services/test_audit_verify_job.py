@@ -26,13 +26,20 @@ from app.services.audit.chain import GENESIS_HASH, HASH_LEN
 from app.services.audit.verify import VerifyResult, count_pre_chain_rows
 
 
-async def _insert_pre_chain_row(maker: async_sessionmaker, *, entry_hash: bytes) -> None:
+async def _insert_pre_chain_row(
+    maker: async_sessionmaker,
+    *,
+    entry_hash: bytes,
+    prev_hash: bytes = GENESIS_HASH,
+) -> None:
     """Core-INSERT a NULL-``seq`` audit row (simulates an old pre-W4 writer).
 
     Uses a core insert with an explicit ``seq=None`` so the ORM's app-side
     ``_next_seq`` default is bypassed — exactly what an old (pre-``seq``) pod would
-    write during a rolling deploy. ``entry_hash`` is GENESIS for a benign old-writer
-    row, or a non-genesis digest for the SUSPICIOUS (likely-tampered) case.
+    write during a rolling deploy. A benign old-writer row carries the genesis seed in
+    BOTH ``entry_hash`` and ``prev_hash``; a non-genesis digest in EITHER is the
+    SUSPICIOUS (likely-tampered) case (round-5 #01 — a mutated ``prev_hash`` is just as
+    anomalous as a mutated ``entry_hash`` on a row that claims to be pre-chain).
     """
     async with maker() as session:
         await session.execute(
@@ -45,7 +52,7 @@ async def _insert_pre_chain_row(maker: async_sessionmaker, *, entry_hash: bytes)
                 target_type="device",
                 target_id="legacy",
                 detail=None,
-                prev_hash=GENESIS_HASH,
+                prev_hash=prev_hash,
                 entry_hash=entry_hash,
             )
         )
@@ -283,6 +290,23 @@ async def test_count_pre_chain_rows_classifies_genesis_vs_suspicious(engine: Asy
 
     assert total == 2
     assert suspicious == 1
+
+
+async def test_count_pre_chain_rows_flags_tampered_prev_hash(engine: AsyncEngine) -> None:
+    """A NULL-`seq` row with genesis entry_hash but a NON-genesis prev_hash is suspicious.
+
+    Round-5 #01: classifying on ``entry_hash`` alone misses a row whose ``prev_hash``
+    was mutated to a real predecessor digest — it would pass as a benign old-writer and
+    the chain walk (which excludes NULL-seq rows) would never catch it, a false PASS.
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    await _insert_pre_chain_row(maker, entry_hash=GENESIS_HASH, prev_hash=_NON_GENESIS_HASH)
+
+    async with maker() as session:
+        total, suspicious = await count_pre_chain_rows(session)
+
+    assert total == 1
+    assert suspicious == 1, "tampered prev_hash on a NULL-seq row must be suspicious"
 
 
 async def test_benign_pre_chain_row_is_logged_but_passes(
