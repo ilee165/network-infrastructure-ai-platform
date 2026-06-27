@@ -43,8 +43,10 @@ spec:
       type: RuntimeDefault
   containers:
     - name: probe
-      # netshoot carries nc for the egress probe; pinned explicit tag (no :latest).
-      image: ghcr.io/nicolaka/netshoot:v0.13
+      # netshoot carries nc for the egress probe. N12: pinned by sha256 DIGEST
+      # (tag retained for readability) — a bare tag is mutable; admission forbids
+      # :latest. Same multi-arch v0.13 index digest as the CNI self-test probe.
+      image: ghcr.io/nicolaka/netshoot:v0.13@sha256:a20c2531bf35436ed3766cd6cfe89d352b050ccc4d7005ce6400adf97503da1b
       command: ["sleep", "3600"]
       securityContext:
         allowPrivilegeEscalation: false

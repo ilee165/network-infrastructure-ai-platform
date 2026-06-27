@@ -81,14 +81,31 @@ grep_must "${HARNESS}" 'blocked.*-ne 1' \
   "harness gates on the egress being BLOCKED, not merely on the policy applying"
 # The self-test must run BEFORE the assertion-runner (assertions never trust an
 # unproven CNI). Verify ordering by source position.
-selftest_line="$(grep -n 'CNI self-test PASSED' "${HARNESS}" | head -1 | cut -d: -f1)"
-runner_line="$(grep -n 'bash "${ASSERT_RUNNER}"' "${HARNESS}" | head -1 | cut -d: -f1)"
+# N8: make the grep pipelines NON-FATAL. Under `set -e` a no-match grep exits 1
+# and (via the `$( … | head | cut )` substitution) would abort the validator early
+# instead of recording a violation via the `fails` accumulator. `|| true` lets the
+# explicit `if` below decide pass/fail on the (possibly empty) captured values.
+selftest_line="$(grep -n 'CNI self-test PASSED' "${HARNESS}" | head -1 | cut -d: -f1 || true)"
+runner_line="$(grep -n 'bash "${ASSERT_RUNNER}"' "${HARNESS}" | head -1 | cut -d: -f1 || true)"
 if [ -n "${selftest_line}" ] && [ -n "${runner_line}" ] && \
    [ "${selftest_line}" -lt "${runner_line}" ]; then
   ok "CNI self-test runs BEFORE the assertion-runner (assertions never trust an unproven CNI)"
 else
   bad "CNI self-test must precede the assertion-runner (self-test=${selftest_line:-?} runner=${runner_line:-?})"
 fi
+
+# --- N6: chart apply fails on UNEXPECTED errors, only downgrades missing CRDs --
+# A blanket `kubectl apply … || { warning }` lets a broken Deployment/Secret/
+# NetworkPolicy apply slide and runs assertions against an incomplete chart
+# (false-green). The harness must (a) match the specific optional-CRD-missing
+# error text and (b) have a HARD `exit 1` for anything else.
+grep_must "${HARNESS}" 'no matches for kind|unable to recognize' \
+  "harness only tolerates the SPECIFIC optional-CRD-missing apply error text (N6)"
+grep_must "${HARNESS}" 'refusing to run assertions against it' \
+  "harness HARD-FAILS the run on a non-CRD chart-apply error (incomplete chart = false-green) (N6)"
+# It must NOT swallow every apply failure into a bare warning-only block.
+grep_must_not "${HARNESS}" 'kubectl apply -n "\$\{CHART_NS\}" -f "\$\{RENDERED\}" \|\| \{' \
+  "harness does NOT blanket-catch ALL chart-apply failures into a warning (N6)"
 
 # --- ephemerality: teardown on ANY exit (trap / always) ----------------------
 grep_must "${HARNESS}" "trap teardown EXIT" \
@@ -103,8 +120,13 @@ grep_must "${HARNESS}" 'test -s "\$\{RENDERED\}"' \
   "harness guards an empty chart render with test -s (L5)"
 grep_must "${RUNNER}" "set -euo pipefail" \
   "assertion-runner sets pipefail (L5)"
-grep_must "${RUNNER}" 'test ! -s|-s "\$\{log\}"|! -s "\$\{log\}"' \
-  "assertion-runner guards an empty (silent no-op) check log (L5)"
+# N7: a SINGLE strict pattern for the negated form `[ ! -s "${log}" ]`. The old
+# 3-way alternation also matched a bare `-s "${log}"` (e.g. a POSITIVE `test -s`
+# doing the opposite check), so it was too permissive — a runner that dropped the
+# empty-log guard but kept some other `-s "${log}"` would still pass. Pin the
+# negated test exactly.
+grep_must "${RUNNER}" '\[ ! -s "\$\{log\}" \]' \
+  "assertion-runner guards an empty (silent no-op) check log via [ ! -s \"\${log}\" ] (L5)"
 
 # --- L3: no $(VAR) interpolated into an in-pod exec argv ----------------------
 # The harness drives exec via `sh -c '… "$1" …' _ "${VAR}"` — assert it uses the
@@ -131,8 +153,55 @@ grep_must "${LIB}" 'exit "\$\{ASSERT_FAIL\}"' \
 # trap; assert the opt-out is wired so the runner's run_failures stays authoritative.
 grep_must "${RUNNER}" "ASSERT_LIB_NO_TRAP=1" \
   "assertion-runner opts out of lib.sh's EXIT trap (runner owns its exit code)"
+# N5: the opt-out is the RUNNER's alone — it must NOT leak into the per-check
+# subprocesses (a child inheriting it would be disarmed → false-green). The runner
+# must (a) never `export` the opt-out and (b) strip it from the child env with
+# `env -u ASSERT_LIB_NO_TRAP` when invoking each check.
+grep_must_not "${RUNNER}" "export[[:space:]]+ASSERT_LIB_NO_TRAP" \
+  "assertion-runner does NOT export ASSERT_LIB_NO_TRAP (it must not leak into child checks) (N5)"
+grep_must "${RUNNER}" 'env -u ASSERT_LIB_NO_TRAP bash "\$\{check\}"' \
+  "assertion-runner strips ASSERT_LIB_NO_TRAP from each child check so its bite stays armed (N5)"
 grep_must "${LIB}" 'ASSERT_LIB_NO_TRAP' \
   "lib.sh honours the ASSERT_LIB_NO_TRAP opt-out (so the runner can suppress the trap)"
+
+# --- N1: cleanup must COMPOSE with the trap, never CLOBBER it ------------------
+# lib.sh must provide register_cleanup AND its assert-exit trap must run the
+# registered cleanups (otherwise a check needing teardown is forced back to a bare
+# `trap cleanup EXIT`, which bash makes the ONLY EXIT trap — clobbering the
+# assert-fail bite → false-green). The empirical proof is assert-trap-bite.sh; this
+# static guard keeps the wiring from silently regressing.
+grep_must "${LIB}" 'register_cleanup\(\)' \
+  "lib.sh provides register_cleanup so checks compose teardown with the assert-exit trap (N1)"
+grep_must "${LIB}" '_run_registered_cleanups' \
+  "lib.sh's assert-exit trap runs the registered cleanups before deciding the exit status (N1)"
+# No check under checks/ may install its OWN `trap … EXIT` — that clobbers lib.sh's
+# assert-exit trap (bash keeps only the last EXIT trap). Checks MUST use
+# register_cleanup. Scan every check; a single offender is a false-green hazard.
+if [ -d "${CHECKS_DIR}" ]; then
+  # Match an ACTUAL `trap <fn> EXIT` statement, not a comment mentioning one.
+  # `grep -v '^[[:space:]]*#'` drops comment lines before the trap match; -l lists
+  # files that still have a real offender.
+  trap_offenders=""
+  for _chk in "${CHECKS_DIR}"/*.sh; do
+    [ -f "${_chk}" ] || continue
+    if grep -v '^[[:space:]]*#' "${_chk}" | grep -Eq 'trap[[:space:]]+[^[:space:]#]+[[:space:]]+EXIT'; then
+      trap_offenders="${trap_offenders} ${_chk}"
+    fi
+  done
+  trap_offenders="${trap_offenders# }"
+  if [ -z "${trap_offenders}" ]; then
+    ok "no check installs its own 'trap … EXIT' (would clobber lib.sh's assert-exit trap; use register_cleanup) (N1)"
+  else
+    bad "check(s) install a bare 'trap … EXIT' which clobbers lib.sh's assert-fail bite — use register_cleanup: ${trap_offenders//$'\n'/ } (N1)"
+  fi
+fi
+# The two teardown-needing checks must register their cleanup (positive assertion).
+for chk in "${CHECKS_DIR}/collector-egress.sh" "${CHECKS_DIR}/mtls-postgres.sh"; do
+  if [ -f "${chk}" ]; then
+    grep_must "${chk}" 'register_cleanup' \
+      "${chk##*/} registers its probe-pod teardown via register_cleanup (not a clobbering EXIT trap) (N1)"
+  fi
+done
 
 # --- lib provides the T4 + T5 primitives -------------------------------------
 grep_must "${LIB}" "assert_egress_blocked" \
@@ -156,6 +225,14 @@ grep_must "${MTLS_CHECK}" "assert_handshake_refused .*wrong-CA" \
   "mTLS check asserts a WRONG-CA client is REFUSED (ADR-0039 §3/§6 bite)"
 grep_must "${MTLS_CHECK}" "sslmode=disable" \
   "mTLS plaintext case actually disables TLS (sslmode=disable) so the refusal is real"
+# N11: the DB password must be fed over STDIN (`kubectl exec -i` + `read … PGPASSWORD`),
+# never as a positional `sh -c` argv arg (argv is visible in the pod process list).
+grep_must "${MTLS_CHECK}" 'exec -i' \
+  "mTLS check feeds the DB password over stdin (kubectl exec -i), not argv (N11)"
+grep_must "${MTLS_CHECK}" 'read -r PGPASSWORD' \
+  "mTLS check reads PGPASSWORD from stdin inside the pod (not a visible argv arg) (N11)"
+grep_must_not "${MTLS_CHECK}" '_ "\$\{PG_HOST\}".*"\$\{PGPASSWORD_VALUE\}"' \
+  "mTLS check does NOT pass PGPASSWORD_VALUE as a positional sh -c argv arg (process-list leak) (N11)"
 # L3: the in-pod psql params are positional `sh -c` args, never \$(VAR) in argv.
 grep_must "${MTLS_CHECK}" "sh -c" \
   "mTLS check drives in-pod psql via sh -c positional args, not \$(VAR) in argv (L3)"
@@ -206,6 +283,16 @@ grep_must_not "${COLLECTOR_PROBE}" "image:.*:latest" \
 # --- no `latest` image anywhere (admission would reject; chart parity) -------
 for f in "${PROBE}"; do
   grep_must_not "${f}" "image:.*:latest" "no :latest image tag in ${f##*/} (admission would reject)"
+done
+
+# --- N12: probe images pinned by sha256 digest (a bare tag is mutable) --------
+# Every probe pod image must carry an @sha256: digest so a re-push of the tag
+# cannot silently swap the probe image out from under the harness.
+for f in "${PROBE}" "${MTLS_PROBE}" "${COLLECTOR_PROBE}"; do
+  if [ -f "${f}" ]; then
+    grep_must "${f}" 'image:.*@sha256:[0-9a-f]{64}' \
+      "${f##*/} pins its probe image by sha256 digest, not a mutable tag (N12)"
+  fi
 done
 
 echo "== validator summary: ${fails} failure(s) =="

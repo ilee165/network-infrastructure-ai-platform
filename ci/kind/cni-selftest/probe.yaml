@@ -33,10 +33,12 @@ spec:
       type: RuntimeDefault
   containers:
     - name: probe
-      # Pinned by digest-free explicit tag (admission forbids :latest). The image
+      # N12: pinned by sha256 DIGEST (tag retained for readability) — admission
+      # forbids :latest and a bare tag is mutable (a re-push could swap the image).
+      # The digest is the multi-arch OCI index for v0.13 (amd64/arm64). The image
       # carries wget/nc for the egress probe; the harness drives the actual probe
       # via `kubectl exec`, so the entrypoint just idles.
-      image: ghcr.io/nicolaka/netshoot:v0.13
+      image: ghcr.io/nicolaka/netshoot:v0.13@sha256:a20c2531bf35436ed3766cd6cfe89d352b050ccc4d7005ce6400adf97503da1b
       command: ["sleep", "3600"]
       securityContext:
         allowPrivilegeEscalation: false

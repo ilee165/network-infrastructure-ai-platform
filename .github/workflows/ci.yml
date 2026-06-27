@@ -721,6 +721,23 @@ jobs:
       - name: Validate harness invariants (static, no cluster)
         run: bash ci/kind/selftest/validate-harness.sh
 
+      # Empirical self-tests for the assertion library (no cluster). These RUN
+      # lib.sh as a real check subprocess and assert observable behaviour:
+      #  - assert-trap-bite.sh: a recorded ASSERT_FAIL bites THROUGH a registered
+      #    cleanup (N1 trap-clobber) and survives a leaked ASSERT_LIB_NO_TRAP (N5);
+      #  - egress-probe-tristate.sh: a broken probe (nc missing / exec error) never
+      #    reads as a confirmed deny (N4) and the deny retry polls correctly (N3).
+      # Both carry negative controls, so they BITE if the fix regresses. Blocking.
+      - name: Assertion-library self-tests (trap-bite + egress tristate, no cluster)
+        run: |
+          bash ci/kind/selftest/assert-trap-bite.sh
+          bash ci/kind/selftest/egress-probe-tristate.sh
+
+      # extract_secret.py hardening tests (N9 metadata-scoped name + N10 strict
+      # base64). Stdlib-only; runs as a plain script so no pip install is needed.
+      - name: mTLS extract_secret.py tests (no cluster)
+        run: python3 ci/mtls/test_extract_secret.py
+
       - name: Set up Helm
         uses: azure/setup-helm@v4
         with:

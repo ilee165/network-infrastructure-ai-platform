@@ -182,11 +182,32 @@ kubectl create namespace "${CHART_NS}" --dry-run=client -o yaml | kubectl apply 
 # out-of-scope for this scaffold; `--validate=false` is intentionally NOT set —
 # we want schema validation. CRD-dependent objects are owned by W4-T4/T5, which
 # install their prerequisites before applying).
-kubectl apply -n "${CHART_NS}" -f "${RENDERED}" || {
-  echo "::warning::some chart objects require CRDs the scaffold does not install" \
-       "(cert-manager / Kyverno) — W4-T4/T5 install their prerequisites. The" \
-       "scaffold continues to the assertion-runner." >&2
-}
+#
+# N6: do NOT blanket-catch ALL apply failures. The ONLY tolerable error is a
+# MISSING OPTIONAL CRD (cert-manager / Kyverno) — kubectl reports those as
+# `no matches for kind … in version …` / `unable to recognize … ensure CRDs are
+# installed`. ANY OTHER apply failure (a broken Deployment / Secret /
+# NetworkPolicy, a schema rejection, an admission denial) means the harness would
+# run assertions against an INCOMPLETE chart = false-green; that is a HARD FAILURE.
+apply_log="${APPLY_LOG:-$(mktemp)}"
+if kubectl apply -n "${CHART_NS}" -f "${RENDERED}" 2>&1 | tee "${apply_log}"; then
+  log "all chart objects applied cleanly"
+else
+  # Keep only lines that look like apply ERRORS, then subtract the known
+  # optional-CRD-missing class. Anything left over is an UNEXPECTED failure.
+  err_lines="$(grep -E '^(error|Error)|unable to recognize|no matches for kind' "${apply_log}" || true)"
+  unexpected="$(printf '%s\n' "${err_lines}" \
+    | grep -vE 'no matches for kind|unable to recognize|ensure CRDs are installed|the server could not find the requested resource' \
+    | grep -E '\S' || true)"
+  if [ -n "${unexpected}" ]; then
+    echo "::error::chart apply FAILED with non-CRD errors — the chart is incomplete; refusing to run assertions against it (N6):" >&2
+    printf '%s\n' "${unexpected}" >&2
+    exit 1
+  fi
+  echo "::warning::some chart objects require optional CRDs the scaffold does not" \
+       "install (cert-manager / Kyverno) — W4-T4/T5 install their prerequisites." \
+       "Only those CRD-missing errors were tolerated; the scaffold continues." >&2
+fi
 
 # --- 5. run the assertion-runner (W4-T4 + W4-T5 checks) -----------------------
 log "running assertion-runner (handshake + deny checks plug in here)"

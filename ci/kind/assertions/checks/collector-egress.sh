@@ -71,7 +71,11 @@ fi
 
 # --- bring up the worker-labelled probe pod -------------------------------------
 cleanup() { kubectl -n "${NS}" delete pod "${PROBE_POD}" --ignore-not-found --wait=false || true; }
-trap cleanup EXIT
+# N1: register with lib.sh's assert-exit trap instead of `trap cleanup EXIT` — a
+# bare EXIT trap here would CLOBBER lib.sh's _assert_exit_trap (bash keeps only the
+# last EXIT trap), so a recorded assert-fail with an rc=0 body would read
+# false-green. register_cleanup composes teardown WITH the assert-fail bite.
+register_cleanup cleanup
 kubectl -n "${NS}" delete pod "${PROBE_POD}" --ignore-not-found --wait=true || true
 kubectl -n "${NS}" apply -f "${PROBE_MANIFEST}"
 kubectl -n "${NS}" wait --for=condition=Ready "pod/${PROBE_POD}" --timeout=120s
@@ -82,11 +86,16 @@ assert_egress_allowed "${NS}" "${PROBE_POD}" "${PG_HOST}" "${PG_PORT}" 5 \
 
 # --- 2. DENIED: arbitrary external egress must be BLOCKED ------------------------
 # The deterministic deny bite (ADR-0041 §3): an external destination that is NOT
-# the device mgmt subnet and NOT a named service is unreachable. We retry a few
-# times so a slow dataplane-program does not read a transient block as the result,
-# but a PERSISTENTLY-reachable external target after default-deny is a HARD failure
-# (the assert helper records that as a fail).
-assert_egress_blocked "${NS}" "${PROBE_POD}" "${DENY_HOST}" "${DENY_PORT}" 5 \
+# the device mgmt subnet and NOT a named service is unreachable. N3: we ACTUALLY
+# retry now (assert_egress_blocked_retry) so a slow dataplane-program does not read
+# a transient reachability as the result — it polls until BLOCKED, up to
+# DENY_RETRIES attempts with DENY_RETRY_DELAY seconds between. A PERSISTENTLY-
+# reachable external target after default-deny is a HARD failure, and N4 a BROKEN
+# probe (nc missing / exec error) is recorded as a fail, never as a deny pass.
+# Step 1 (assert_egress_allowed above) already established probe sanity, so a block
+# here is attributable to policy, not tooling.
+assert_egress_blocked_retry "${NS}" "${PROBE_POD}" "${DENY_HOST}" "${DENY_PORT}" 5 \
+  "${DENY_RETRIES:-3}" "${DENY_RETRY_DELAY:-2}" \
   "arbitrary external egress (worker -> ${DENY_HOST}:${DENY_PORT}) must be denied"
 
 echo "== collector egress assertion complete: $(assert_failures) failure(s) =="

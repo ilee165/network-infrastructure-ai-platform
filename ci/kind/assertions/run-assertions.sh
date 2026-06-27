@@ -31,6 +31,13 @@ CHECKS_DIR="${HERE}/checks"
 # must NOT inherit lib.sh's assert-failure EXIT trap — that trap exists to make a
 # CHECK's accumulated ASSERT_FAIL bite in the check's own subprocess. Opt out
 # here so the runner's exit logic stays authoritative.
+#
+# N5: this opt-out is the RUNNER's alone. It MUST NOT leak into the per-check
+# `bash "${check}"` subprocesses — if a child inherited ASSERT_LIB_NO_TRAP=1 its
+# assert-exit trap would be disarmed and a recorded ASSERT_FAIL would read
+# false-green. We therefore (a) keep it a PLAIN shell var (never `export` it) so it
+# is not in the child's environment, and (b) belt-and-braces strip it from the
+# child env at invocation time via `env -u` below.
 ASSERT_LIB_NO_TRAP=1
 # shellcheck source=lib.sh
 . "${HERE}/lib.sh"
@@ -77,7 +84,10 @@ for check in "${checks[@]}"; do
   # pipefail (set above) propagates the check's exit through the `| tee` pipe so
   # a failing check is never masked by tee's exit 0; `test -s` then guards an
   # empty (silently no-op) check log (L5).
-  if bash "${check}" 2>&1 | tee "${log}"; then
+  # N5: `env -u ASSERT_LIB_NO_TRAP` guarantees the child check sees the assert-exit
+  # trap ARMED even if some ancestor exported the opt-out — a leaked opt-out would
+  # disarm the child's bite and read false-green.
+  if env -u ASSERT_LIB_NO_TRAP bash "${check}" 2>&1 | tee "${log}"; then
     status=0
   else
     status=$?

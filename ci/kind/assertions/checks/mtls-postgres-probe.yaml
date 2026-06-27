@@ -38,7 +38,10 @@ spec:
       type: RuntimeDefault
   containers:
     - name: probe
-      image: pgvector/pgvector:pg16
+      # N12: pinned by sha256 DIGEST (tag retained for readability). pgvector
+      # carries psql + openssl for the mTLS handshake probes; the multi-arch pg16
+      # index digest below is immutable (a re-push of the tag cannot swap it).
+      image: pgvector/pgvector:pg16@sha256:131dcf7ff6a900545df8e7e092c270aa8c6db2f2c818e408cb45ec21316b74e6
       command: ["sleep", "3600"]
       securityContext:
         allowPrivilegeEscalation: false

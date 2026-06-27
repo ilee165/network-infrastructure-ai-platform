@@ -67,7 +67,11 @@ fi
 
 # --- bring up the probe pod ----------------------------------------------------
 cleanup() { kubectl -n "${NS}" delete pod "${PROBE_POD}" --ignore-not-found --wait=false || true; }
-trap cleanup EXIT
+# N1: register with lib.sh's assert-exit trap instead of `trap cleanup EXIT` — a
+# bare EXIT trap here would CLOBBER lib.sh's _assert_exit_trap (bash keeps only the
+# last EXIT trap), so a recorded assert-fail with an rc=0 body would read
+# false-green. register_cleanup composes teardown WITH the assert-fail bite.
+register_cleanup cleanup
 kubectl -n "${NS}" delete pod "${PROBE_POD}" --ignore-not-found --wait=true || true
 kubectl -n "${NS}" apply -f "${PROBE_MANIFEST}"
 kubectl -n "${NS}" wait --for=condition=Ready "pod/${PROBE_POD}" --timeout=120s
@@ -94,46 +98,51 @@ kubectl -n "${NS}" exec "${PROBE_POD}" -- sh -c '
   chmod 0600 /tmp/bad/client.key
 ' _ "${PG_USER}"
 
-# psql runner inside the pod. All connection params + the SSL files are POSITIONAL
-# args to `sh -c` (L3); PGPASSWORD is exported inside the in-pod shell from a
-# positional arg so it is not in the argv of psql itself and is never echoed.
-# Args: $1 host $2 port $3 db $4 user $5 sslmode $6 sslcert $7 sslkey $8 sslroot $9 password
+# N11: the DB password is fed to the in-pod shell over STDIN (`kubectl exec -i`,
+# read into PGPASSWORD), NEVER as a `sh -c` positional argv arg — an argv arg is
+# visible in the pod's process listing (`ps` / /proc/<pid>/cmdline). The in-pod
+# shell `read`s the single line, exports PGPASSWORD, then execs psql; the value
+# never appears in any process's argv and is never echoed. Connection params + SSL
+# file paths remain positional args (L3 — they are not secret).
+#
+# psql runner inside the pod.
+# Args: $1 host $2 port $3 db $4 user $5 sslmode $6 sslcert $7 sslkey $8 sslroot
 psql_probe() {
   local sslmode="$1" certdir="$2"
-  kubectl -n "${NS}" exec "${PROBE_POD}" -- sh -c '
-    PGPASSWORD="$9"
+  printf '%s' "${PGPASSWORD_VALUE}" | kubectl -n "${NS}" exec -i "${PROBE_POD}" -- sh -c '
+    IFS= read -r PGPASSWORD
     export PGPASSWORD
     exec psql \
       "host=$1 port=$2 dbname=$3 user=$4 sslmode=$5 sslcert=$6 sslkey=$7 sslrootcert=$8 connect_timeout=10" \
       -tAc "SELECT 1" >/dev/null 2>&1
   ' _ "${PG_HOST}" "${PG_PORT}" "${PG_DB}" "${PG_USER}" \
-      "${sslmode}" "${certdir}/client.crt" "${certdir}/client.key" "${certdir}/ca.crt" \
-      "${PGPASSWORD_VALUE}"
+      "${sslmode}" "${certdir}/client.crt" "${certdir}/client.key" "${certdir}/ca.crt"
 }
 
 plaintext_probe() {
   # sslmode=disable — no cert files; the server must refuse (no plaintext line).
-  kubectl -n "${NS}" exec "${PROBE_POD}" -- sh -c '
-    PGPASSWORD="$5"
+  # Password via STDIN (N11), not argv.
+  printf '%s' "${PGPASSWORD_VALUE}" | kubectl -n "${NS}" exec -i "${PROBE_POD}" -- sh -c '
+    IFS= read -r PGPASSWORD
     export PGPASSWORD
     exec psql \
       "host=$1 port=$2 dbname=$3 user=$4 sslmode=disable connect_timeout=10" \
       -tAc "SELECT 1" >/dev/null 2>&1
-  ' _ "${PG_HOST}" "${PG_PORT}" "${PG_DB}" "${PG_USER}" "${PGPASSWORD_VALUE}"
+  ' _ "${PG_HOST}" "${PG_PORT}" "${PG_DB}" "${PG_USER}"
 }
 
 wrong_ca_probe() {
   # Present the throwaway (untrusted) client cert but verify the server with the
   # REAL CA, so only the CLIENT-side trust is wrong — the server rejects it.
   # Reuses the same positional-arg form as psql_probe (L3), pointing sslcert/key
-  # at /tmp/bad and sslrootcert at the real /tmp/cli/ca.crt.
-  kubectl -n "${NS}" exec "${PROBE_POD}" -- sh -c '
-    PGPASSWORD="$5"
+  # at /tmp/bad and sslrootcert at the real /tmp/cli/ca.crt. Password via STDIN (N11).
+  printf '%s' "${PGPASSWORD_VALUE}" | kubectl -n "${NS}" exec -i "${PROBE_POD}" -- sh -c '
+    IFS= read -r PGPASSWORD
     export PGPASSWORD
     exec psql \
       "host=$1 port=$2 dbname=$3 user=$4 sslmode=verify-full sslcert=/tmp/bad/client.crt sslkey=/tmp/bad/client.key sslrootcert=/tmp/cli/ca.crt connect_timeout=10" \
       -tAc "SELECT 1" >/dev/null 2>&1
-  ' _ "${PG_HOST}" "${PG_PORT}" "${PG_DB}" "${PG_USER}" "${PGPASSWORD_VALUE}"
+  ' _ "${PG_HOST}" "${PG_PORT}" "${PG_DB}" "${PG_USER}"
 }
 
 # --- 1. valid-cert client must HANDSHAKE (verify-full) ------------------------
