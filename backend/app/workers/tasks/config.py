@@ -179,6 +179,10 @@ async def _load_context(device_id: UUID) -> _CaptureContext | None:
             row,
             actor=_ACTOR,
             reason="config_backup",
+            # ADR-0040 §2: enforce the credential's scope against THIS device at
+            # session open — a scoped credential cannot open a session on a device
+            # outside its site/role/group.
+            target=device,
             sessionmaker=credentials.autonomous_sessionmaker(session),
         )
         context = _CaptureContext(

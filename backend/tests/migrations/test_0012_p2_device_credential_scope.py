@@ -1,10 +1,10 @@
-"""Migration 0011 (ADR-0038 audit hash chain): offline SQL + round-trip + single head.
+"""Migration 0012 (ADR-0040): device-credential scope columns + single head.
 
 Unit tests drive ``alembic upgrade head --sql`` in-process against the PostgreSQL
-dialect (no DB/Docker/network) and assert the emitted DDL adds the two BYTEA chain
-columns to ``audit_log`` and creates the ``audit_chain_checkpoint`` watermark
-table. A real SQLite round-trip (NullPool) proves up→down→up is clean, and
-``alembic heads`` is asserted to be the SINGLE head ``0011``.
+dialect (no DB/Docker/network) and assert the emitted DDL adds the three nullable
+scope columns to ``device_credentials``. A real PostgreSQL round-trip (NullPool,
+skipped when unreachable) proves up->down->up is clean, and ``alembic heads`` is
+asserted to be the SINGLE head ``0012`` chaining after W4-T1's ``0011``.
 """
 
 from __future__ import annotations
@@ -26,6 +26,9 @@ from app.core.config import get_settings
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
+_SCOPE_COLUMNS = {"scope_site", "scope_role", "scope_device_group"}
+_DEVICE_COLUMNS = {"role", "device_group"}
+
 
 def _alembic_config(output_buffer: io.StringIO | None = None) -> Config:
     """Programmatic Config: no ini file, so env.py skips fileConfig (caplog-safe)."""
@@ -41,12 +44,12 @@ def _offline_upgrade_sql() -> str:
 
 
 def _offline_sql(direction: str) -> str:
-    """Render ``alembic <direction> --sql`` for revision 0011 in isolation."""
+    """Render ``alembic <direction> --sql`` for revision 0012 in isolation."""
     buffer = io.StringIO()
     if direction == "upgrade":
-        command.upgrade(_alembic_config(buffer), "0010:0011", sql=True)
+        command.upgrade(_alembic_config(buffer), "0011:0012", sql=True)
     else:
-        command.downgrade(_alembic_config(buffer), "0011:0010", sql=True)
+        command.downgrade(_alembic_config(buffer), "0012:0011", sql=True)
     return buffer.getvalue()
 
 
@@ -65,26 +68,17 @@ def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> Generator[None, No
 # ---------------------------------------------------------------------------
 
 
-def test_revision_chain_has_single_head_and_0011_is_in_line() -> None:
-    """The chain stays linear (single head, no branch); 0011 is on the line, not orphaned.
-
-    0011 was the head when W4-T1 landed; W4-T2's 0012 now extends the SAME linear
-    chain after it (the current-head assertion lives in
-    ``test_0012_p2_device_credential_scope.test_single_head_is_0012``). This test
-    guards that adding 0012 did not FORK the chain: still exactly one head, and 0011
-    remains a reachable ancestor of it.
-    """
+def test_single_head_is_0012() -> None:
+    """`alembic heads` resolves to exactly one head, revision 0012 (no branch)."""
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert len(heads) == 1, f"expected a single head (no branch), got {heads}"
-    ancestry = {rev.revision for rev in script.iterate_revisions(heads[0], "base")}
-    assert "0011" in ancestry, f"0011 must be on the line to the head, got {ancestry}"
+    assert heads == ["0012"], f"expected single head 0012, got {heads}"
 
 
-def test_0011_revises_0010() -> None:
+def test_0012_revises_0011() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
-    rev = script.get_revision("0011")
-    assert rev.down_revision == "0010"
+    rev = script.get_revision("0012")
+    assert rev.down_revision == "0011"
 
 
 # ---------------------------------------------------------------------------
@@ -93,27 +87,34 @@ def test_0011_revises_0010() -> None:
 
 
 @pytest.mark.usefixtures("_postgres_dialect_env")
-def test_offline_sql_adds_bytea_chain_columns() -> None:
+def test_offline_sql_adds_nullable_scope_columns() -> None:
     sql = _offline_upgrade_sql()
-    # Both columns are added to audit_log as BYTEA (raw digest — no hex variant).
-    assert "ALTER TABLE audit_log ADD COLUMN prev_hash BYTEA" in sql
-    assert "ALTER TABLE audit_log ADD COLUMN entry_hash BYTEA" in sql
+    # All three scope dimensions are added to device_credentials, nullable (a NULL
+    # dimension means "matches any" — an all-NULL credential is unscoped, ADR-0040).
+    for column in _SCOPE_COLUMNS:
+        assert f"ALTER TABLE device_credentials ADD COLUMN {column} VARCHAR" in sql
+        # Nullable: the ADD COLUMN must NOT carry a NOT NULL clause for the scope cols.
+        for line in sql.splitlines():
+            if f"ADD COLUMN {column} " in line:
+                assert "NOT NULL" not in line
 
 
 @pytest.mark.usefixtures("_postgres_dialect_env")
-def test_offline_sql_creates_checkpoint_table() -> None:
+def test_offline_sql_adds_device_scope_attributes() -> None:
     sql = _offline_upgrade_sql()
-    assert "CREATE TABLE audit_chain_checkpoint (" in sql
-    assert "entry_hash BYTEA NOT NULL" in sql
+    # The device gains the attributes a scoped credential is matched against, so the
+    # session-open check is a real structural comparison (ADR-0040 §2).
+    for column in _DEVICE_COLUMNS:
+        assert f"ALTER TABLE devices ADD COLUMN {column} VARCHAR" in sql
 
 
 @pytest.mark.usefixtures("_postgres_dialect_env")
-def test_offline_downgrade_reverses_upgrade() -> None:
-    """The downgrade drops both chain columns and the checkpoint table."""
+def test_offline_downgrade_drops_scope_columns() -> None:
     sql = _offline_sql("downgrade")
-    assert "ALTER TABLE audit_log DROP COLUMN entry_hash" in sql
-    assert "ALTER TABLE audit_log DROP COLUMN prev_hash" in sql
-    assert "DROP TABLE audit_chain_checkpoint" in sql
+    for column in _SCOPE_COLUMNS:
+        assert f"ALTER TABLE device_credentials DROP COLUMN {column}" in sql
+    for column in _DEVICE_COLUMNS:
+        assert f"ALTER TABLE devices DROP COLUMN {column}" in sql
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +137,7 @@ def _postgres_reachable(url: str) -> bool:
         return False
 
 
-async def _audit_log_columns(url: str) -> set[str]:
+async def _device_credential_columns(url: str) -> set[str]:
     engine = create_async_engine(url, poolclass=NullPool)
     try:
         async with engine.connect() as conn:
@@ -145,7 +146,7 @@ async def _audit_log_columns(url: str) -> set[str]:
                     await conn.execute(
                         text(
                             "SELECT column_name FROM information_schema.columns "
-                            "WHERE table_name = 'audit_log'"
+                            "WHERE table_name = 'device_credentials'"
                         )
                     )
                 ).scalars()
@@ -155,8 +156,8 @@ async def _audit_log_columns(url: str) -> set[str]:
 
 
 @pytest.mark.integration
-def test_migration_0011_round_trip_real_postgres() -> None:
-    """upgrade head → downgrade 0010 → upgrade head, asserting the chain columns."""
+def test_migration_0012_round_trip_real_postgres() -> None:
+    """upgrade head -> downgrade 0011 -> upgrade head, asserting the scope columns."""
     url = get_settings().database_url
     if not url.startswith("postgresql") or not _postgres_reachable(url):
         pytest.skip("PostgreSQL unreachable at NETOPS_DATABASE_URL; skipping integration test")
@@ -164,11 +165,11 @@ def test_migration_0011_round_trip_real_postgres() -> None:
     cfg = _alembic_config()
     command.upgrade(cfg, "head")
     try:
-        after_up = asyncio.run(_audit_log_columns(url))
-        assert {"prev_hash", "entry_hash"} <= after_up
+        after_up = asyncio.run(_device_credential_columns(url))
+        assert after_up >= _SCOPE_COLUMNS
 
-        command.downgrade(cfg, "0010")
-        after_down = asyncio.run(_audit_log_columns(url))
-        assert not ({"prev_hash", "entry_hash"} & after_down), "downgrade must drop chain columns"
+        command.downgrade(cfg, "0011")
+        after_down = asyncio.run(_device_credential_columns(url))
+        assert not (_SCOPE_COLUMNS & after_down), "downgrade must drop scope columns"
     finally:
         command.upgrade(cfg, "head")

@@ -39,6 +39,21 @@ _CHAIN_LOCK_KEY: Final = 0x0A0D38  # mnemonic for "audit chain", matches checkpo
 CREDENTIAL_CREATED: Final = "credential.created"
 CREDENTIAL_ROTATED: Final = "credential.rotated"
 CREDENTIAL_DECRYPTED: Final = "credential.decrypted"
+# P2 W4-T2 device-secret rotation + scoping (ADR-0040). ``detail`` carries
+# ids/versions/outcome ONLY — never the secret, the scope values, or device
+# attributes (ADR-0040 §1/§2 no-leak). A session-open refused because the
+# credential's scope does not cover the target device.
+CREDENTIAL_SCOPE_DENIED: Final = "credential.scope_denied"
+# A confirm-then-swap device-secret rotation: staged a fresh wrapped DEK,
+# verified it against the device, then activated it (fail-closed — the prior
+# credential stays valid until the swap is confirmed).
+CREDENTIAL_SECRET_ROTATED: Final = "credential.secret_rotated"
+# A device-secret rotation whose verification failed: the unconfirmed staged
+# credential was DISCARDED, the prior credential remains usable (no lock-out).
+CREDENTIAL_SECRET_ROTATION_FAILED: Final = "credential.secret_rotation_failed"
+# Repeated rotation failure: the credential is marked DEGRADED and an alert is
+# raised (ADR-0015) — the device is never left silently unreachable.
+CREDENTIAL_SECRET_ROTATION_DEGRADED: Final = "credential.secret_rotation_degraded"
 DEVICE_CREATED: Final = "device.created"
 DEVICE_UPDATED: Final = "device.updated"
 DEVICE_DELETED: Final = "device.deleted"
