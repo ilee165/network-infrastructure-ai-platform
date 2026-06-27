@@ -2525,11 +2525,18 @@ is_postgres_tls_configmap(obj) if {
 # any benign inter-column whitespace and an OPTIONAL trailing option list. `$`
 # anchors the END so `… verify-full-but-weaker` cannot sneak through (it must be
 # end-of-line or a whitespace-separated option).
-strict_hostssl_re := `(?m)^hostssl\s+\S+\s+\S+\s+\S+\s+scram-sha-256\s+clientcert=verify-full(\s.*)?$`
+# R3 #12 (PR#76 round 3): tolerate leading whitespace (`^[ \t]*`) so an INDENTED
+# but otherwise-strict hostssl row is NOT false-rejected as non-strict — pg_hba
+# ignores leading whitespace, so an indented strict row is still strict.
+strict_hostssl_re := `(?m)^[ \t]*hostssl\s+\S+\s+\S+\s+\S+\s+scram-sha-256\s+clientcert=verify-full(\s.*)?$`
 
 # Any line that is a `hostssl` rule at all (used to enumerate rows to vet).
+# R3 #11 (PR#76 round 3): tolerate leading whitespace (`^[ \t]*`) so an INDENTED
+# weak hostssl row is still SEEN as a hostssl row and subjected to the per-row
+# strictness check — otherwise a whitespace-prefixed downgraded auth rule bypasses
+# the check (pg_hba ignores leading whitespace, so the indented row is live).
 hostssl_line(line) if {
-	regex.match(`^hostssl\s`, line)
+	regex.match(`^[ \t]*hostssl\s`, line)
 }
 
 # (a) at least one STRICT hostssl row exists — the mTLS refusal control is wired.
@@ -2559,7 +2566,10 @@ deny contains msg if {
 deny contains msg if {
 	is_postgres_tls_configmap(input)
 	hba := object.get(input.data, "pg_hba.conf", "")
-	regex.match(`(?m)^host\s`, hba)
+	# R3 #12 (PR#76 round 3): tolerate leading whitespace so an INDENTED plaintext
+	# `host` line is caught too — pg_hba ignores leading whitespace, so an indented
+	# plaintext row is a live non-TLS listener path.
+	regex.match(`(?m)^[ \t]*host\s`, hba)
 	msg := "postgres pg_hba.conf must NOT carry a plaintext `host` line — a non-TLS listener path defeats the mTLS refusal (ADR-0039 §3)"
 }
 

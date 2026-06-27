@@ -1,0 +1,24 @@
+# POSITIVE fixture (PR#76 round-3 #12) — MUST PASS the netops.hardening pg_hba
+# rule. This is the reconciliation guard for the leading-whitespace tolerance:
+# the fixed `strict_hostssl_re` (`^[ \t]*hostssl…`) must NOT false-reject an
+# INDENTED but otherwise-strict hostssl row. pg_hba ignores leading whitespace,
+# so an indented strict row (scram-sha-256 + clientcert=verify-full) is STILL the
+# strict form and must PASS. If this fixture is DENIED the matcher is too strict
+# (a leading-whitespace false-reject) and the gate is broken.
+#
+# conftest expectation: `conftest test <this> --policy deploy/kubernetes/policy/rego`
+# MUST report 0 failures. Run by run-pg-hba-bite.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netops-postgres-tls-config
+  namespace: netops
+  labels:
+    app.kubernetes.io/component: postgres
+data:
+  pg_hba.conf: |
+    # Strict rows, some INDENTED with leading whitespace — pg_hba ignores it, so
+    # these remain the strict form (scram-sha-256 + clientcert=verify-full).
+    local   all   all                       trust
+        hostssl all all 0.0.0.0/0 scram-sha-256 clientcert=verify-full
+    	hostssl     all       all   ::/0          scram-sha-256 clientcert=verify-full map=netops

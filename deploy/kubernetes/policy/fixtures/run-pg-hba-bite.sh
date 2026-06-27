@@ -19,6 +19,11 @@ REPO="$(cd "${HERE}/../../../.." && pwd)"
 POLICY="${REPO}/deploy/kubernetes/policy/rego"
 NEG="${HERE}/pg_hba_weak_hostssl_DENY.yaml"
 POS="${HERE}/pg_hba_strict_variation_PASS.yaml"
+# R3 #11/#12 (PR#76 round 3): leading-whitespace tolerance. An INDENTED weak
+# hostssl row must still be DENIED (the matcher must SEE it), and an INDENTED
+# strict row must still PASS (no leading-whitespace false-reject).
+NEG_INDENTED="${HERE}/pg_hba_indented_weak_hostssl_DENY.yaml"
+POS_INDENTED="${HERE}/pg_hba_indented_strict_hostssl_PASS.yaml"
 
 fail=0
 
@@ -44,8 +49,29 @@ else
   fail=1
 fi
 
+# NEGATIVE (indented): an INDENTED weak `trust clientcert=verify-full` hostssl row
+# MUST be DENIED — pg_hba ignores leading whitespace, so the matcher must still see
+# the row and the per-row strict check must bite (R3 #11).
+echo "-- negative fixture (an INDENTED weak hostssl row) MUST be DENIED --"
+if conftest test "${NEG_INDENTED}" --policy "${POLICY}" --all-namespaces; then
+  echo "FAIL: indented-weak fixture PASSED conftest — a whitespace-prefixed weak hostssl row BYPASSED the strictness check (leading-whitespace bypass)" >&2
+  fail=1
+else
+  echo "PASS: indented-weak fixture was DENIED (the leading-whitespace weak row bites)"
+fi
+
+# POSITIVE (indented): INDENTED but otherwise-strict hostssl rows MUST PASS — the
+# leading-whitespace tolerance must NOT false-reject an equivalent secure row (R3 #12).
+echo "-- positive fixture (INDENTED strict hostssl rows) MUST PASS --"
+if conftest test "${POS_INDENTED}" --policy "${POLICY}" --all-namespaces; then
+  echo "PASS: indented-strict fixture PASSED (no leading-whitespace false-reject)"
+else
+  echo "FAIL: indented-strict fixture was DENIED — the strict-hostssl regex false-rejects an indented secure row" >&2
+  fail=1
+fi
+
 if [ "${fail}" -ne 0 ]; then
   echo "::error::pg_hba weak-hostssl policy bite FAILED" >&2
   exit 1
 fi
-echo "pg_hba weak-hostssl policy bite: both directions correct."
+echo "pg_hba weak-hostssl policy bite: both directions correct (incl. indented rows)."
