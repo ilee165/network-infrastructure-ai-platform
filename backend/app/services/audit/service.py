@@ -15,10 +15,12 @@ from __future__ import annotations
 import uuid
 from typing import Any, Final
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.models.audit import AuditLog
+from app.services.audit.chain import GENESIS_HASH, compute_entry_hash, hex_short
 
 _logger = get_logger(__name__)
 
@@ -186,7 +188,16 @@ async def record(
     no FK — captured at the route layer and threaded down here. It is ``None``
     for actions raised outside an HTTP request (background/agent-driven calls
     that carry no inbound correlation id).
+
+    Hash chain (ADR-0038 §3): this single append path reads the current chain
+    head's ``entry_hash`` (or :data:`~app.services.audit.chain.GENESIS_HASH` for
+    the first entry) UNDER THE CALLER'S TRANSACTION, then writes ``prev_hash`` /
+    ``entry_hash`` on the new row before it commits — so a row can never land with
+    a missing or back-fillable chain link and the append-only trigger (migration
+    0009) keeps it from being silently rewritten. The chain order is the audit
+    log's natural append order ``(created_at, id)``.
     """
+    prev_hash = await _current_chain_head(session)
     entry = AuditLog(
         actor=actor,
         action=action,
@@ -195,8 +206,17 @@ async def record(
         detail=detail,
         reasoning_trace_id=reasoning_trace_id,
         request_id=request_id,
+        prev_hash=prev_hash,
+        # Placeholder; overwritten below once id/created_at are assigned by the
+        # flush (both participate in the canonical hashed form, ADR-0038 §2).
+        entry_hash=GENESIS_HASH,
     )
     session.add(entry)
+    # First flush assigns the server/app defaults (id, created_at) that the
+    # canonical hash covers; compute the real entry_hash from the populated row,
+    # then flush again so the chain digest is persisted with the entry.
+    await session.flush()
+    entry.entry_hash = compute_entry_hash(entry, prev_hash)
     await session.flush()
     _logger.info(
         "audit.recorded",
@@ -208,5 +228,28 @@ async def record(
         detail=detail,
         reasoning_trace_id=str(reasoning_trace_id) if reasoning_trace_id is not None else None,
         request_id=str(request_id) if request_id is not None else None,
+        # Hex prefixes only (ADR-0038 §1): the stored form is raw bytes; the log
+        # stream carries a short correlation handle for the chain, never material.
+        prev_hash=hex_short(prev_hash),
+        entry_hash=hex_short(entry.entry_hash),
     )
     return entry
+
+
+async def _current_chain_head(session: AsyncSession) -> bytes:
+    """Return the latest entry's ``entry_hash`` as the next ``prev_hash`` (ADR-0038 §3).
+
+    The chain order is the audit log's natural append order ``(created_at, id)``;
+    the head is the row with the greatest such key. Read under the caller's
+    transaction so the new row chains off the entry it actually follows. Returns
+    :data:`~app.services.audit.chain.GENESIS_HASH` when the log is empty (the first
+    entry seeds the chain, §1).
+    """
+    head = (
+        await session.execute(
+            select(AuditLog.entry_hash)
+            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return head if head is not None else GENESIS_HASH

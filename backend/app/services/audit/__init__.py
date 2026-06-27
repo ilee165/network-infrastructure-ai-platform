@@ -1,5 +1,11 @@
-"""Append-only audit trail writer (brief §7, ADR-0004, ADR-0011)."""
+"""Append-only audit trail writer (brief §7, ADR-0004, ADR-0011, ADR-0038)."""
 
+from app.services.audit.chain import (
+    CANONICAL_FIELDS,
+    GENESIS_HASH,
+    canonical_bytes,
+    compute_entry_hash,
+)
 from app.services.audit.service import (
     AGENT_SESSION_COMPLETED,
     AGENT_SESSION_STARTED,
@@ -49,11 +55,23 @@ from app.services.audit.service import (
     USER_UPDATED,
     record,
 )
+from app.services.audit.verify import (
+    ChainBreak,
+    VerifyResult,
+    verify_chain,
+)
 
 __all__ = [
+    "CANONICAL_FIELDS",
+    "GENESIS_HASH",
     "AGENT_SESSION_COMPLETED",
     "AGENT_SESSION_STARTED",
     "AGENT_TRACE_RECORDED",
+    "ChainBreak",
+    "VerifyResult",
+    "canonical_bytes",
+    "compute_entry_hash",
+    "verify_chain",
     "AUTH_LOCAL_BREAKGLASS_LOGIN",
     "AUTH_LOGIN",
     "AUTH_LOGIN_FAILED",

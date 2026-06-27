@@ -766,6 +766,47 @@ backup:
           cpu: "2"
           memory: 2Gi
 
+# -- Audit-log hash-chain DAILY VERIFICATION (W4-T1, ADR-0038 §4 / ADR-0015). A
+#    CronJob recomputes the append-only audit_log hash chain from the last
+#    verified-clean checkpoint to head (avoiding a daily full-history recompute on
+#    a large log), emits a Prometheus textfile metric (`audit_chain_verified` 1/0 +
+#    last-verified position), and on ANY break ALERTS (the non-zero exit + the
+#    `audit_chain_verified 0` series ARE the alert) and exits non-zero so the Job is
+#    Failed — it NEVER silently passes (ADR-0038 §4). It uses the same Python-bearing
+#    backend image as the api/worker (it imports app.services.audit.verify_job) and
+#    connects READ/append-only to Postgres (the only write is advancing the
+#    checkpoint over a verified-clean segment; the 0009 append-only trigger stays).
+audit:
+  chainVerify:
+    # On by default (audit integrity is a release criterion — PRODUCTION.md §5,
+    # G-SEC/G-MNT). Disabling renders NO CronJob and emits a NOTES warning: the
+    # audit chain would then be unverified, a conscious warned opt-out.
+    enabled: true
+    # Daily at 02:30 (offset from the 01:00 backups + the 02:00 drills so the
+    # verify never contends with a backup/drill tick).
+    schedule: "30 2 * * *"
+    # Bound concurrency + history so a long verify never overlaps the next tick
+    # and finished Job pods are reaped.
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 3600
+    backoffLimit: 1
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # The node_exporter textfile-collector dir the metric .prom file is written to.
+    # The CronJob mounts an emptyDir here (the no-pushgateway pattern — a CronJob
+    # pod is not itself scrapable; the file survives the pod for a sidecar/agent to
+    # collect). Operators wiring a real node_exporter textfile path override this.
+    metricsDir: /var/lib/node_exporter/textfile
+    # Resource requests + limits (never absent — ADR-0029 §3). The verify is a
+    # single keyset scan + SHA-256 recompute from the checkpoint — light.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+
 # -- Ingress + TLS (ADR-0029 §4 / ADR-0012 §2). The SINGLE front door: ONE
 #    HTTPS-only Ingress routing ALL paths to the `frontend` Service — NEVER a
 #    direct ingress → api door (nginx inside frontend is the same-origin reverse

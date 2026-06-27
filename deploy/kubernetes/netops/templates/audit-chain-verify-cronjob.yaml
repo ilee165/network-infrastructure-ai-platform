@@ -1,0 +1,149 @@
+{{- /*
+AUDIT-LOG HASH-CHAIN DAILY VERIFICATION CronJob (W4-T1, ADR-0038 §4; ADR-0015).
+
+ONE daily CronJob (<fullname>-audit-chain-verify) that recomputes the append-only
+audit_log hash chain from the last verified-clean checkpoint to the current head
+(ADR-0038 §4 — a checkpointed walk, NOT a daily full-history recompute), then:
+
+  * emits a Prometheus TEXTFILE metric (`audit_chain_verified` 1/0 + last-verified
+    position + entries checked) to the node_exporter textfile dir — a scraped
+    value, not just a log line (ADR-0015). A CronJob pod is not itself scrapable,
+    so it writes a `.prom` file to an emptyDir the platform's node_exporter / agent
+    collects (the established no-pushgateway pattern);
+  * prints one structured `AUDIT_CHAIN_VERIFY OUTCOME=PASS|FAIL ...` line for
+    log-based alerting;
+  * on ANY break it does NOT advance the checkpoint, and EXITS NON-ZERO so the Job
+    is marked Failed — the non-zero exit + the `audit_chain_verified 0` series ARE
+    the alert (ADR-0015). It NEVER silently passes (ADR-0038 §4).
+
+It runs `python -m app.services.audit.verify_job` on the SAME Python-bearing
+backend image as the api/worker (it imports the shared verifier). It is READ/
+append-only against Postgres: the only write is advancing the verified-clean
+checkpoint; the migration 0009 append-only trigger STAYS and forbids UPDATE/DELETE
+on audit_log itself.
+
+W4-LESSONS guards applied:
+  L3 — the Postgres password + the assembled DSN live INSIDE one `sh -c '...'`
+       script; the k8s exec argv never does its own $(VAR) substitution. The DSN
+       is assembled from the (non-secret) host/port/db/user env + the by-reference
+       password env, all expanded by the shell (never inlined in a manifest).
+  L5 — `set -o pipefail` and a `test -s` non-empty guard on the metric file so a
+       silently-empty metric write FAILS the job rather than passing.
+  L4 — this Job generates NO chart secret (it references existing Secret keys);
+       nothing to make idempotent here.
+
+Backups/verify are K8s CronJobs, NOT Celery beat — they keep running when the
+app/Redis is degraded. Disabling the tier (audit.chainVerify.enabled=false)
+renders NOTHING here (a warned opt-out, NOTES.txt).
+*/ -}}
+{{- if .Values.audit.chainVerify.enabled }}
+{{- $v := .Values.audit.chainVerify -}}
+{{- $fullname := include "netops.fullname" . -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-audit-chain-verify
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "audit") | nindent 4 }}
+spec:
+  schedule: {{ $v.schedule | quote }}
+  concurrencyPolicy: {{ $v.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $v.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $v.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $v.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $v.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            {{- include "netops.componentLabels" (dict "ctx" . "component" "audit") | nindent 12 }}
+        spec:
+          automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+          restartPolicy: Never
+          securityContext:
+            {{- include "netops.podSecurityContext" . | nindent 12 }}
+          containers:
+            - name: audit-chain-verify
+              image: {{ include "netops.backendImage" . }}
+              imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+              securityContext:
+                {{- include "netops.hardenedSecurityContext" . | nindent 16 }}
+              command:
+                - sh
+                - -c
+                # ONE sh -c script (L3: env vars — including the by-reference
+                # Postgres password — expand HERE; a raw exec argv would NOT do
+                # $(VAR)). The DSN is assembled from the non-secret host/port/db/
+                # user config + the secret password, never inlined in the manifest.
+                # set -o pipefail (L5); the verify module exits non-zero on a chain
+                # break (the loud signal), and the `test -s` belt-and-braces asserts
+                # the metric file was actually written.
+                - |
+                  set -euo pipefail
+                  echo "[audit-chain-verify] recomputing audit_log hash chain from checkpoint -> head (ADR-0038 §4)"
+                  export NETOPS_DATABASE_URL="postgresql+asyncpg://${NETOPS_POSTGRES_USER}:${NETOPS_POSTGRES_PASSWORD}@${NETOPS_POSTGRES_HOST}:${NETOPS_POSTGRES_PORT}/${NETOPS_POSTGRES_DB}"
+                  mkdir -p "${AUDIT_CHAIN_METRICS_DIR}"
+                  # Non-zero exit here (a chain break) FAILS the pod via set -e — the
+                  # alert (ADR-0015). A clean pass advances the verified checkpoint.
+                  python -m app.services.audit.verify_job
+                  echo "[audit-chain-verify] asserting the textfile metric was written (L5 belt-and-braces)"
+                  test -s "${AUDIT_CHAIN_METRICS_DIR}/audit_chain_verify.prom"
+                  echo "[audit-chain-verify] daily verification complete (chain clean, checkpoint advanced)"
+              env:
+                # Where the job writes the node_exporter textfile metric (consumed
+                # by app.services.audit.verify_job; used by the sh -c script, never
+                # a raw exec argv).
+                - name: AUDIT_CHAIN_METRICS_DIR
+                  value: {{ $v.metricsDir | quote }}
+                # Non-secret Postgres coordinates from the platform ConfigMap; the
+                # sh -c script assembles the DSN from these + the password below.
+                - name: NETOPS_POSTGRES_HOST
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {{ $fullname }}-config
+                      key: NETOPS_POSTGRES_HOST
+                - name: NETOPS_POSTGRES_PORT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {{ $fullname }}-config
+                      key: NETOPS_POSTGRES_PORT
+                - name: NETOPS_POSTGRES_DB
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {{ $fullname }}-config
+                      key: NETOPS_POSTGRES_DB
+                - name: NETOPS_POSTGRES_USER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {{ $fullname }}-config
+                      key: NETOPS_POSTGRES_USER
+                # Postgres password — external-secret REF only; NEVER inlined
+                # (ADR-0029 §6). Mirrors the api/worker deployments.
+                - name: NETOPS_POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      {{- if .Values.secrets.existingSecret }}
+                      name: {{ .Values.secrets.existingSecret }}
+                      {{- else }}
+                      name: {{ $fullname }}-dev-secrets
+                      {{- end }}
+                      key: {{ .Values.secrets.keys.postgresPassword }}
+              resources:
+                {{- toYaml $v.resources | nindent 16 }}
+              volumeMounts:
+                # readOnlyRootFilesystem:true — the textfile metric dir + /tmp are
+                # the ONLY writable mounts (emptyDir; torn down with the pod).
+                - name: metrics
+                  mountPath: {{ $v.metricsDir }}
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: metrics
+              emptyDir:
+                sizeLimit: 16Mi
+            - name: tmp
+              emptyDir:
+                sizeLimit: 64Mi
+{{- end }}
