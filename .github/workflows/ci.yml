@@ -283,7 +283,7 @@ jobs:
       # not itself be a supply-chain risk). syft + cosign are installed at a
       # pinned version via their official actions, themselves pinned to a release.
       - name: Install syft (SBOM, pinned)
-        uses: anchore/sbom-action/download-syft@v0.17.9
+        uses: anchore/sbom-action/download-syft@v0.24.0
         with:
           syft-version: v1.18.1
 
