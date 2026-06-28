@@ -7,6 +7,18 @@ reviews:
   incremental_commits: true
   resolve_threads_when_addressed: true
 
+  ignore:
+    # Platform documentation is intentionally skipped: the goal is to spend
+    # review capacity on code, not prose. ADRs are the deliberate exception —
+    # ADR changes/violations are in scope (custom rule "ADR Compliance"), and
+    # ignore.files uses .gitignore syntax where the last matching rule wins, so
+    # the trailing negation re-includes docs/adr after the broad doc/md skips.
+    files:
+      - "docs/**"        # all platform documentation (runbooks, specs, guides)
+      - "**/*.md"        # README, CLAUDE.md, and scattered markdown anywhere
+      - "!docs/adr/"     # re-include the ADR directory itself ...
+      - "!docs/adr/**"   # ... and every ADR under it (must be the last match)
+
   custom_instructions: |
     You are a senior architecture and platform reviewer. Your job is to enforce
     structural correctness, operational safety, and architectural integrity.
