@@ -1,0 +1,101 @@
+# CodeRabbit configuration for the AI Network Operations Platform.
+#
+# Authority model (see docs/CODERABBIT_REVIEW_POLICY.md for the full rationale):
+#   * Claude Code is the implementation authority. It owns design, structure,
+#     naming, refactors, and documentation. CodeRabbit does not.
+#   * CodeRabbit is an ADVISORY reviewer scoped to four domains only:
+#     correctness, security, test gaps, and performance regressions.
+#   * Comments outside those four domains are out of scope and are rejected.
+#
+# Schema: https://docs.coderabbit.ai/reference/yaml-template
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+
+language: en-US
+
+# Short global steer (hard 250-char limit). The authoritative, detailed contract
+# lives in reviews.path_instructions below.
+tone_instructions: >-
+  Review ONLY correctness, security, test gaps, and performance regressions. Do
+  NOT comment on architecture, refactors, style, naming, doc rewrites, or
+  speculative improvements. Claude Code owns implementation; you are advisory.
+
+reviews:
+  # "chill" suppresses nitpick/opinion comments; we only want substantive findings.
+  profile: chill
+  poem: false
+  high_level_summary: true
+  review_status: true
+  # Advisory only: CodeRabbit must never gate merge by requesting changes.
+  request_changes_workflow: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+      - "claude/.*"
+
+  path_instructions:
+    # Global authority model — applied to every file in every review.
+    - path: "**"
+      instructions: |
+        AUTHORITY MODEL — read before every review.
+
+        Claude Code is the implementation authority for this repository. It owns
+        all design, architecture, module boundaries, refactoring, naming,
+        formatting, and documentation decisions. You (CodeRabbit) are an
+        ADVISORY reviewer, not a co-author. Your job is to catch defects the
+        author may have missed within a strictly bounded scope.
+
+        YOU MAY COMMENT ONLY ON THESE FOUR DOMAINS:
+          1. CORRECTNESS — logic errors, wrong results, unhandled edge cases,
+             broken control flow, race conditions, incorrect API usage, data
+             corruption, off-by-one, null/None handling, incorrect error paths.
+          2. SECURITY — injection, authn/authz flaws, secret/credential leakage,
+             unsafe deserialization, SSRF/path traversal, missing input
+             validation on trust boundaries, audit-trail gaps, broken
+             least-privilege, weaknesses in the ChangeRequest/four-eyes flow.
+          3. TEST GAPS — code paths with no test, missing failure-case tests,
+             assertions that do not actually verify the claimed behavior,
+             tests that pass regardless of the code under test.
+          4. PERFORMANCE REGRESSIONS — new N+1 queries, unbounded memory growth,
+             accidental O(n^2)+ on hot paths, blocking I/O in async paths,
+             missing pagination/streaming on large result sets.
+
+        YOU MUST NOT COMMENT ON (out of scope — stay silent):
+          - Architecture changes or alternative designs.
+          - Refactors or "cleaner way to write this" suggestions.
+          - Style, formatting, or lint-level preferences (ruff/eslint own this).
+          - Naming of variables, functions, files, or modules.
+          - Documentation rewrites, wording, or docstring phrasing.
+          - Speculative or "you might also want to" improvements.
+          - Anything not clearly inside the four domains above.
+
+        RULES OF ENGAGEMENT:
+          - When uncertain whether a finding is in scope, do NOT raise it.
+          - Every comment must name which of the four domains it falls under and
+            describe a concrete, demonstrable failure (input -> wrong outcome),
+            not a preference. If you cannot show a concrete failure, omit it.
+          - Do not restate or re-litigate the author's design choices.
+          - Out-of-scope comments will be rejected/resolved without action.
+
+    # Repo-specific reinforcement for the security-critical surfaces. Still
+    # bounded to the four domains — this only sharpens what "security" means here.
+    - path: "backend/app/security/**"
+      instructions: |
+        SECURITY-CRITICAL PATH. Within the correctness + security domains only,
+        scrutinize: credential/secret handling and storage, KMS/KEK usage and key
+        rotation, the credential vault, authn/authz and OIDC/SSO flows, the
+        audit-log hash chain, and the ChangeRequest four-eyes approval path. Flag
+        any secret material in code, fixtures, or logs. Do NOT propose redesigns
+        of the security architecture — that is an ADR decision owned by the author.
+
+    - path: "**/tests/**"
+      instructions: |
+        Within the test-gaps domain only: flag tests that pass regardless of the
+        code under test, assertions that do not verify the claimed behavior, and
+        missing failure-case coverage. Do NOT comment on test naming, structure,
+        or style.
+
+chat:
+  auto_reply: true

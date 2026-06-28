@@ -35,6 +35,13 @@ changes require an ADR; security is reviewed on every change.
       (from `frontend/`)
 - [ ] Module-boundary rules respected (`docs/architecture/REPO-STRUCTURE.md` section 3)
 
+## Review scope (CodeRabbit)
+
+CodeRabbit is an advisory reviewer scoped to **correctness, security, test gaps,
+and performance regressions** only. Comments on architecture, refactors, style,
+naming, documentation, or speculative improvements are out of scope and are
+rejected per [`docs/CODERABBIT_REVIEW_POLICY.md`](../docs/CODERABBIT_REVIEW_POLICY.md).
+
 ## Security notes
 
 <!-- Findings from the security review above, or "none". State-changing behavior

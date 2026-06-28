@@ -158,6 +158,16 @@ Every feature must include:
 - Documentation
 - API documentation
 
+### PR review authority
+
+Claude Code is the implementation authority — it owns design, architecture,
+refactors, naming, and documentation. CodeRabbit is an advisory PR reviewer
+bounded to four domains only: **correctness, security, test gaps, performance
+regressions**. Comments on architecture, refactors, style, naming, doc
+rewrites, or speculative improvements are out of scope and are rejected. The
+contract is machine-enforced in `.coderabbit.yaml` and documented in
+`docs/CODERABBIT_REVIEW_POLICY.md`.
+
 ### Orchestrated builds
 
 Milestones are built with the multi-agent Workflow tool. The build process,
