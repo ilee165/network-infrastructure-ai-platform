@@ -689,6 +689,53 @@ jobs:
       - name: CNPG render-twice L4 idempotency guard
         run: bash ci/cnpg/render-twice.sh
 
+      # W1-T4 (ADR-0044) — Redis Sentinel HA tier render + policy validation. The
+      # Sentinel Redis/Sentinel StatefulSets + Services + config ConfigMap + the
+      # Sentinel/Redis NetworkPolicy edges are OPT-IN (default OFF), so the default
+      # `rendered.yaml` above does NOT contain them and the redis-sentinel.* conftest
+      # rules pass vacuously there. This step renders the chart with the HA tier
+      # ENABLED (services.redis.enabled=false — mutual exclusion) and runs
+      # kubeconform + kube-linter + conftest on THAT render, so the Sentinel
+      # manifests are actually schema/policy-gated in CI, not just locally.
+      - name: Render + validate Redis Sentinel HA tier (ADR-0044)
+        run: |
+          set -o pipefail
+          helm template netops deploy/kubernetes/netops \
+            --namespace netops --kube-version 1.29.0 \
+            --set redisSentinel.enabled=true \
+            --set services.redis.enabled=false | tr -d '\r' > rendered-redis-sentinel.yaml
+          test -s rendered-redis-sentinel.yaml
+          kubeconform -strict -summary \
+            -kubernetes-version 1.29.0 \
+            -ignore-missing-schemas \
+            -skip ClusterPolicy,Cluster,Pooler \
+            rendered-redis-sentinel.yaml
+          kube-linter lint rendered-redis-sentinel.yaml --config deploy/kubernetes/.kube-linter.yaml
+          conftest test rendered-redis-sentinel.yaml \
+            --policy deploy/kubernetes/policy/rego \
+            --all-namespaces
+
+      # W1-T4 — Redis Sentinel HA-tier policy BITE (ADR-0044 §1). The conftest gate
+      # above proves the COMPLIANT Sentinel render PASSES; this proves the
+      # redis-sentinel.* rules actually BITE: NEGATIVE fixtures (AOF disabled, an
+      # inlined requirepass / REDIS_PASSWORD literal, a 1-replica shard, a 1-Sentinel
+      # quorum, a Sentinel that runs plain redis-server) are each DENIED, while
+      # POSITIVE fixtures (compliant AOF config + 3-replica Redis + 3-Sentinel
+      # StatefulSets) still PASS. RED gate.
+      - name: conftest Redis Sentinel HA-tier bite (AOF + auth-by-ref + quorum + monitor)
+        run: bash deploy/kubernetes/policy/fixtures/run-redis-sentinel-bite.sh
+
+      # W1-T4 L4 idempotency guard for the dev Redis password the Sentinel tier
+      # consumes by-reference (ADR-0044 §1 / P1-W4 L4): a `helm upgrade` that
+      # REGENERATES it would sever every broker/replication/Sentinel-auth connection
+      # (the CNPG case, for Redis). Proves the dev-fallback uses the `lookup`
+      # reuse-or-generate branch (upgrades reuse, never regenerate), the reuse branch
+      # is byte-stable + returns the prior verbatim, and the Sentinel/Redis pods
+      # consume the password by-reference (no inline literal). helm + python3 present
+      # on the runner. RED gate (no continue-on-error).
+      - name: Redis Sentinel render-twice L4 idempotency guard
+        run: bash ci/redis-sentinel/render-twice.sh
+
       # W4-T4 L4 idempotency guard for the api/worker↔postgres mTLS cert material
       # (ADR-0039 §5 / P1-W4-LESSONS L4): a `helm upgrade` that REGENERATES the DB
       # certs would sever every connection. This proves the dev-fallback uses the
@@ -756,6 +803,25 @@ jobs:
         with:
           scan-type: config
           scan-ref: rendered-cnpg.yaml
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      # The opt-in Redis Sentinel HA-tier render (rendered-redis-sentinel.yaml) is its
+      # OWN set of objects (Redis + Sentinel StatefulSets / Services / config ConfigMap
+      # / Sentinel+Redis NetworkPolicies) absent from rendered.yaml — kubeconform/
+      # kube-linter/conftest gate it above, but the Trivy IaC misconfig gate must ALSO
+      # cover it, else a HIGH/CRITICAL misconfig isolated to the HA tier would not fail
+      # CI. Same posture as the rendered.yaml scan (fixable HIGH/CRIT, ignore-unfixed,
+      # sanctioned-deviation ignorefile).
+      - name: Trivy config scan (rendered Redis Sentinel HA tier)
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
+        with:
+          scan-type: config
+          scan-ref: rendered-redis-sentinel.yaml
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"

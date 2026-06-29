@@ -1,0 +1,17 @@
+# NEGATIVE fixture (ADR-0044 §1) — a Redis Sentinel config ConfigMap with AOF
+# DISABLED (`appendonly no`). A full-shard restart would then start EMPTY rather
+# than recovering the last durable state — the persistence guarantee the §1 AOF
+# requirement exists to provide. MUST be DENIED by the AOF rule.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netops-redis-sentinel-config
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: redis
+data:
+  redis.conf: |
+    appendonly no
+    appendfsync everysec
+    dir /data
+    port 6379

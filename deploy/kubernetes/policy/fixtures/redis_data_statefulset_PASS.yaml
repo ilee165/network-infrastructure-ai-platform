@@ -1,0 +1,67 @@
+# POSITIVE fixture (ADR-0044 §1) — a compliant Redis (data) StatefulSet for the
+# Sentinel tier: 3 replicas (1 primary + 2 replicas), REDIS_PASSWORD by-reference
+# (secretKeyRef, no inline value), mounts the -redis-sentinel-config ConfigMap (the
+# Sentinel-tier disambiguator), and fully hardened (drop-ALL, non-root, RO-rootfs,
+# no-privesc, RuntimeDefault seccomp, resource requests+limits). MUST PASS conftest.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: netops-redis
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: redis
+spec:
+  replicas: 3
+  serviceName: netops-redis-headless
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netops
+        app.kubernetes.io/component: redis
+    spec:
+      serviceAccountName: redis-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command: ["sh", "-c", "exec redis-server /etc/redis/redis.conf --requirepass $REDIS_PASSWORD --masterauth $REDIS_PASSWORD"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: netops-dev-secrets
+                  key: redis-password
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/redis
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: netops-redis-sentinel-config

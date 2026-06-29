@@ -1,0 +1,64 @@
+# NEGATIVE fixture (ADR-0044 §1) — a Sentinel StatefulSet with only 1 Sentinel.
+# A single Sentinel cannot form the odd-majority quorum that authorizes a failover
+# (a single loss deadlocks the vote / a minority could split-brain). MUST be DENIED
+# by the >=3-Sentinels rule. Fully hardened + runs sentinel monitor — the ONLY
+# violation is the Sentinel count.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: netops-redis-sentinel
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: redis-sentinel
+spec:
+  replicas: 1
+  serviceName: netops-redis-sentinel-headless
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: redis-sentinel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netops
+        app.kubernetes.io/component: redis-sentinel
+    spec:
+      serviceAccountName: redis-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sentinel
+          image: redis:7-alpine
+          command:
+            - sh
+            - -c
+            - |
+              echo "sentinel monitor netops-redis netops-redis-0.netops-redis-headless 6379 2" >> /data/sentinel.conf
+              exec redis-server /data/sentinel.conf --sentinel
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: netops-dev-secrets
+                  key: redis-password
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

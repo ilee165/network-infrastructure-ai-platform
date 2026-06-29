@@ -516,6 +516,96 @@ cloudNativePg:
     # Cluster's barman-cloud destinationPath/credentials reuse the existing repo.
     enabled: true
 
+# -- Redis Sentinel HA data tier (W1-T4, ADR-0044 §1 / ADR-0008). The HA
+#    replacement for the single-instance services.redis StatefulSet above: ONE
+#    Redis shard — 1 primary + 2 streaming replicas — monitored by 3 Sentinel
+#    processes that perform quorum-based failure detection and AUTOMATIC primary
+#    election/promotion, with AOF persistence (`appendonly yes`) so a full-shard
+#    restart recovers the last durable state rather than starting empty. Clients
+#    (api/worker/KEDA) discover the current primary VIA SENTINEL (a Sentinel-aware
+#    `sentinel://` URL), so a primary change is transparent — there is NO static
+#    Redis host pin (ADR-0044 §1, the load-bearing failover-aware-client decision).
+#
+#    OPT-IN, default OFF. This wave (W1-T4) ships the manifests + policy gates +
+#    the failover-aware client config; the LIVE Sentinel-failover drill is W4-T1
+#    (rendered emulation locally — kind absent). Enabling it is MUTUALLY EXCLUSIVE
+#    with services.redis.enabled (the chart REFUSES to render both — one Redis
+#    tier, never two colliding on the Service name; see redis-sentinel.yaml). The
+#    single-instance StatefulSet stays the default so the GA render is unchanged.
+#
+#    BROKER-LOSS TOLERANCE (the explicit ADR-0044 §1 posture, the W4-T5 rationale):
+#    Redis stays EXPENDABLE (ADR-0008) — durable job/session state lives in
+#    Postgres, so a Redis/Sentinel failover loses at most in-flight queue entries,
+#    never committed data. Celery tasks are IDEMPOTENT + RE-ENQUEUEABLE (ADR-0008
+#    §5: acks_late, reject_on_worker_lost, upsert-style writes) and scheduled jobs
+#    (backups, retention) RE-FIRE on the next Celery-beat tick. Sentinel HA reduces
+#    the WINDOW of broker unavailability; the idempotency + Postgres-as-record
+#    design already covers the data-loss dimension. Single-shard Sentinel only —
+#    Redis Cluster (hash-slot) sharding is OUT of scope (ADR-0044 §1).
+#
+#    SECURE BY DEFAULT (ADR-0029 §3): auth REQUIRED (requirepass + masterauth +
+#    Sentinel auth-pass, all by-reference to secrets.keys.redisPassword — NEVER
+#    inlined); non-root; readOnlyRootFilesystem; dropped-ALL caps; RuntimeDefault
+#    seccomp; resource requests+limits. The dev Redis password is the SAME
+#    `lookup` reuse-or-generate value as the single-instance tier (secret.yaml,
+#    L4 — reused on upgrade, NEVER regenerated, or a regen would sever every
+#    broker connection just like the CNPG case).
+redisSentinel:
+  # OPT-IN HA tier — default OFF (the services.redis StatefulSet is the GA
+  # default). Set true (and services.redis.enabled=false) to run Redis under
+  # Sentinel. Enabling both is a REFUSED render (one Redis tier only).
+  enabled: false
+  # 1 primary + 2 replicas (ADR-0044 §1). 3 is the minimum for a meaningful
+  # replica set and matches the Sentinel quorum below — do not lower.
+  replicas: 3
+  # Redis data port (clients + replication). Mirrors services.redis.port so the
+  # NetworkPolicy broker edge (networkPolicy.broker.port) is unchanged.
+  port: 6379
+  # Per-Redis-pod persistent storage (the AOF/RDB PVC, ReadWriteOnce).
+  storage:
+    size: 2Gi
+  # Per-Redis-pod resource requests + limits (never absent — ADR-0029 §3). Sized
+  # at the single-instance tier so an HA primary is not under-provisioned.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # AOF persistence (ADR-0044 §1 — `appendonly yes` so recent state survives a
+  # full-shard restart). everysec fsync is the durability/throughput default;
+  # `always` is heavier, `no` defeats the AOF guarantee. Keep AOF on.
+  aof:
+    enabled: true
+    appendfsync: everysec
+  # Sentinel quorum (ADR-0044 §1). 3 Sentinels with a quorum of 2 is the odd
+  # majority so a single Sentinel loss cannot deadlock the failover vote.
+  sentinel:
+    # 3 Sentinel processes (odd quorum). Do not lower below 3.
+    replicas: 3
+    # Sentinel control port (Sentinel pub/sub + the clients' primary-discovery
+    # query). The NetworkPolicy sentinel edge opens exactly this port.
+    port: 26379
+    # Agreeing Sentinels required to authorize a failover. 2-of-3 majority: a
+    # single Sentinel partition/loss still leaves a quorum, but no MINORITY can
+    # promote a split-brain primary (ADR-0044 §1).
+    quorum: 2
+    # The logical primary name Sentinel monitors + clients pass as master_name on
+    # the `sentinel://` URL. Stable so the client coordinate never drifts.
+    masterName: netops-redis
+    # Failover tuning (Sentinel defaults, surfaced so operators can tune RTO).
+    downAfterMilliseconds: 5000
+    failoverTimeoutMilliseconds: 60000
+    # Per-Sentinel-pod resources (never absent — ADR-0029 §3). Sentinel is light.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+
 # -- Backup / DR tier (W5-T1, ADR-0030 §1/§4). pgBackRest continuous WAL
 #    archiving + weekly-full / daily-incr backups of the Postgres system of
 #    record, repo-encrypted (aes-256-cbc), written to a MinIO/S3 object store.
@@ -1298,6 +1388,23 @@ config:
   redis:
     host: netops-redis
     port: 6379
+    # Redis DB index the Celery broker/result-backend + cache use (the `/0` on the
+    # redis_url). Kept explicit so the Sentinel `sentinel://…/<db>` URL the
+    # netops.redisUrl helper builds carries the same DB as the single-instance URL.
+    db: 0
+    # -- Sentinel failover-aware client coordinates (W1-T4, ADR-0044 §1). When the
+    #    redisSentinel HA tier is enabled, the api/worker/KEDA dial Redis VIA
+    #    SENTINEL (a `sentinel://h0:26379;h1:26379;h2:26379/<db>` URL) instead of a
+    #    fixed host, so a primary change is transparent (no static Redis host pin).
+    #    These are NON-SECRET coordinates only (the password is by-reference via
+    #    secrets.keys.redisPassword); the netops.redisUrl helper composes the URL +
+    #    the configmap surfaces NETOPS_REDIS_SENTINEL_MASTER/_HOSTS so a
+    #    Sentinel-aware client (kombu/redis-py) resolves the primary at connect time.
+    sentinel:
+      # The Sentinel master name clients pass as master_name (mirrors
+      # redisSentinel.sentinel.masterName — keep them in sync; the chart reads the
+      # redisSentinel value when the tier is on, this is the documented coordinate).
+      masterName: netops-redis
   # External LLM provider selection (ADR-0009). "ollama" routes to the in-cluster
   # ollama Service when services.ollama.enabled; otherwise an external provider.
   llm:
@@ -1509,6 +1616,23 @@ networkPolicy:
       app.kubernetes.io/name: netops
       app.kubernetes.io/component: redis
     port: 6379
+  # -- Redis Sentinel HA edges (W1-T4, ADR-0044 §1). Under the default-deny floor
+  #    the Sentinel/Redis components get NO ingress/egress; these seams open EXACTLY
+  #    the edges the Sentinel topology needs (allow-list minimal, no blanket egress):
+  #      - api/worker/KEDA → sentinel:26379  (clients query Sentinel for the primary)
+  #      - api/worker      → redis:6379      (already the §2 broker edge above)
+  #      - sentinel        → redis:6379      (Sentinel monitors every Redis instance)
+  #      - sentinel        → sentinel:26379  (Sentinel pub/sub gossip for quorum)
+  #      - redis           → redis:6379      (replica → primary streaming replication)
+  #    These render ONLY with the redisSentinel tier; the single-instance default
+  #    render is byte-unchanged. The Sentinel pods carry component=redis-sentinel.
+  sentinel:
+    # Selector for the Sentinel pods (the api/worker/KEDA query, and Sentinel
+    # gossips to its peers). W1-T4 owns the Sentinel StatefulSet; this is the seam.
+    podSelectorLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: redis-sentinel
+    port: 26379
   # ---- W4 GA per-edge allow seams (ADR-0029 §2 edge table) -----------------
   # The W4 networkpolicies.yaml renders the platform default-deny floor plus one
   # additive allow per ADR-0029 §2 / PRODUCTION.md §3.1 arrow — NO edge that is

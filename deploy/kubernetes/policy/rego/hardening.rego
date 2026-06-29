@@ -524,7 +524,12 @@ deny contains msg if {
 # pgBackRest TLS-server edge: the backup CronJob → the in-postgres `pgbackrest
 # server` sidecar (mTLS), since the CronJob pod has no PGDATA volume of its own
 # and cannot read pg1-path directly (ADR-0030 §4).
-netpol_known_egress_ports := {5432, 7687, 6379, 11434, 9000, 8432, 443, 53}
+# Port 26379 is the W1-T4 Redis Sentinel control port (ADR-0044 §1): the
+# api/worker → sentinel discovery edge and the sentinel↔sentinel quorum-gossip
+# edge ride it under the default-deny floor. It renders ONLY on the opt-in
+# redisSentinel HA tier; on the default single-instance render no egress targets
+# it, so adding it to the known set does not loosen the GA default.
+netpol_known_egress_ports := {5432, 7687, 6379, 11434, 9000, 8432, 443, 53, 26379}
 
 # Names of the W3-owned packet NetworkPolicies — excluded from the W4 platform
 # assertions below (they carry their own ADR-0031 rules earlier in this file).
@@ -905,8 +910,11 @@ deny contains msg if {
 # ===========================================================================
 
 # The platform workload components every generic §3 control applies to. packet-*
-# is intentionally absent (governed by the named ADR-0031 rules above).
-platform_workload_components := {"api", "worker", "frontend", "postgres", "neo4j", "redis", "ollama"}
+# is intentionally absent (governed by the named ADR-0031 rules above). The W1-T4
+# Redis Sentinel pods (`redis-sentinel`) are INCLUDED so every ADR-0029 §3 control
+# (drop-ALL, non-root, RO-rootfs, no-privesc, RuntimeDefault seccomp, limits) is
+# asserted on them too — they render only on the opt-in redisSentinel HA tier.
+platform_workload_components := {"api", "worker", "frontend", "postgres", "neo4j", "redis", "ollama", "redis-sentinel"}
 
 # True for a rendered Deployment/StatefulSet that is one of the platform services.
 is_platform_workload(obj) if {
@@ -3156,4 +3164,178 @@ deny contains msg if {
 	some c in neo4j_auto_rebuild_pod_spec(input).containers
 	not c.resources.limits
 	msg := sprintf("neo4j auto-rebuild %q container %q must declare resource limits (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+# ===========================================================================
+# W1-T4 — Redis Sentinel HA tier (ADR-0044 §1, ADR-0008)
+#
+# The opt-in redisSentinel tier (default OFF) renders a Redis StatefulSet (1 seed
+# primary + 2 replicas, component `redis`), a Sentinel StatefulSet (3 Sentinels,
+# component `redis-sentinel`), a Redis config ConfigMap, and the Sentinel/Redis
+# NetworkPolicy edges. The generic per-workload hardening rules above ALSO cover
+# both StatefulSets by component label (`redis` and `redis-sentinel` are both in
+# platform_workload_components), so drop-ALL / non-root / RO-rootfs / no-privesc /
+# RuntimeDefault-seccomp / limits are already gated there — these rules add the
+# Sentinel-SPECIFIC controls (ADR-0044 §1): AOF on, auth required + by-reference,
+# 3 Sentinels at an odd quorum, and the failover-aware (sentinel-monitored) shape.
+# They pass VACUOUSLY on the default single-instance render (no redis-sentinel
+# objects there) and BITE on a non-compliant Sentinel render (ci/redis-sentinel/
+# bite fixtures). The W1-T4 mutual-exclusion (redisSentinel + services.redis both
+# on) is a Helm `fail` (redis-sentinel.yaml), proven by the bite script, not a rego
+# rule (a `fail` never renders YAML to test).
+# ===========================================================================
+
+# True for the W1-T4 Redis config ConfigMap (carries the AOF + replication coords).
+is_redis_sentinel_configmap(obj) if {
+	obj.kind == "ConfigMap"
+	obj.metadata.labels["app.kubernetes.io/component"] == "redis"
+	endswith(obj.metadata.name, "-redis-sentinel-config")
+}
+
+# --- AOF ON (ADR-0044 §1): the Redis config MUST set `appendonly yes` so a
+# full-shard restart recovers the last durable state rather than starting empty.
+# A `appendonly no` (or a missing directive) defeats the persistence guarantee. ---
+deny contains msg if {
+	is_redis_sentinel_configmap(input)
+	some k, v in object.get(input, "data", {})
+	k == "redis.conf"
+	not contains(v, "appendonly yes")
+	msg := sprintf("Redis Sentinel config %q must set `appendonly yes` — AOF persistence is required so a full-shard restart recovers durable state (ADR-0044 §1)", [input.metadata.name])
+}
+
+# --- the Redis config MUST NOT inline a password literal: requirepass/masterauth
+# are injected at startup from the platform Secret env (sh -c expansion), NEVER
+# baked into the ConfigMap (ADR-0029 §6 / ADR-0044 §1). A `requirepass <value>` or
+# `masterauth <value>` directive in the .conf is a denied inline secret. ---
+redis_config_inlines_secret(line) if {
+	regex.match(`^\s*requirepass\s+\S`, line)
+}
+
+redis_config_inlines_secret(line) if {
+	regex.match(`^\s*masterauth\s+\S`, line)
+}
+
+redis_config_inlines_secret(line) if {
+	regex.match(`sentinel\s+auth-pass\s+\S+\s+\S`, line)
+}
+
+deny contains msg if {
+	is_redis_sentinel_configmap(input)
+	some _, v in object.get(input, "data", {})
+	some line in split(v, "\n")
+	redis_config_inlines_secret(line)
+	msg := sprintf("Redis Sentinel config %q must NOT inline requirepass/masterauth/auth-pass — the password is supplied as REDIS_PASSWORD env from the Secret at startup, never baked into the ConfigMap (ADR-0029 §6 / ADR-0044 §1)", [input.metadata.name])
+}
+
+# True for the W1-T4 Redis (data) StatefulSet — component `redis` AND it mounts the
+# `-redis-sentinel-config` ConfigMap. The serviceName-disambiguation matters: the
+# DEFAULT single-instance services.redis StatefulSet ALSO carries component `redis`
+# (and 1 replica), so the Sentinel rules below MUST NOT fire on it — they are scoped
+# by the sentinel-config volume, which only the HA-tier StatefulSet mounts. This
+# keeps the GA default render passing while biting on a non-compliant Sentinel tier.
+is_redis_data_statefulset(obj) if {
+	obj.kind == "StatefulSet"
+	obj.metadata.labels["app.kubernetes.io/component"] == "redis"
+	statefulset_mounts_sentinel_config(obj)
+}
+
+statefulset_mounts_sentinel_config(obj) if {
+	some v in object.get(obj.spec.template.spec, "volumes", [])
+	endswith(object.get(object.get(v, "configMap", {}), "name", ""), "-redis-sentinel-config")
+}
+
+# True for the W1-T4 Sentinel StatefulSet — component `redis-sentinel`.
+is_redis_sentinel_statefulset(obj) if {
+	obj.kind == "StatefulSet"
+	obj.metadata.labels["app.kubernetes.io/component"] == "redis-sentinel"
+}
+
+# --- auth REQUIRED + by-reference: every Redis/Sentinel container MUST source a
+# REDIS_PASSWORD env from a secretKeyRef and carry NO inline `value:` literal
+# (ADR-0044 §1 secure-by-default auth / ADR-0029 §6). ---
+redis_container_has_secret_password(c) if {
+	some e in object.get(c, "env", [])
+	e.name == "REDIS_PASSWORD"
+	e.valueFrom.secretKeyRef
+	object.get(e, "value", null) == null
+}
+
+deny contains msg if {
+	is_redis_data_statefulset(input)
+	some c in input.spec.template.spec.containers
+	not redis_container_has_secret_password(c)
+	msg := sprintf("Redis Sentinel data StatefulSet %q container %q must set REDIS_PASSWORD from valueFrom.secretKeyRef (auth required + by-reference; ADR-0044 §1 / ADR-0029 §6)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_redis_sentinel_statefulset(input)
+	some c in input.spec.template.spec.containers
+	not redis_container_has_secret_password(c)
+	msg := sprintf("Redis Sentinel StatefulSet %q container %q must set REDIS_PASSWORD from valueFrom.secretKeyRef (Sentinel auth-pass by-reference; ADR-0044 §1 / ADR-0029 §6)", [input.metadata.name, c.name])
+}
+
+# A REDIS_PASSWORD env carrying an inline `value:` literal is a denied inline secret.
+deny contains msg if {
+	is_redis_data_statefulset(input)
+	some c in input.spec.template.spec.containers
+	some e in object.get(c, "env", [])
+	e.name == "REDIS_PASSWORD"
+	object.get(e, "value", null) != null
+	msg := sprintf("Redis Sentinel data StatefulSet %q env REDIS_PASSWORD must NOT carry an inline `value:` literal — it is an external-secret ref only (ADR-0029 §6)", [input.metadata.name])
+}
+
+deny contains msg if {
+	is_redis_sentinel_statefulset(input)
+	some c in input.spec.template.spec.containers
+	some e in object.get(c, "env", [])
+	e.name == "REDIS_PASSWORD"
+	object.get(e, "value", null) != null
+	msg := sprintf("Redis Sentinel StatefulSet %q env REDIS_PASSWORD must NOT carry an inline `value:` literal — it is an external-secret ref only (ADR-0029 §6)", [input.metadata.name])
+}
+
+# --- the seed Redis shard MUST have >= 3 instances (1 primary + 2 replicas,
+# ADR-0044 §1 — 3 is the minimum for a meaningful replica set). ---
+deny contains msg if {
+	is_redis_data_statefulset(input)
+	input.spec.replicas < 3
+	msg := sprintf("Redis Sentinel data StatefulSet %q must run >= 3 replicas (1 primary + 2 replicas; ADR-0044 §1), got %v", [input.metadata.name, input.spec.replicas])
+}
+
+# --- there MUST be 3 Sentinels (ADR-0044 §1 — an odd quorum so a single Sentinel
+# loss cannot deadlock the failover vote). Fewer than 3 cannot form the 2-of-3
+# majority the design requires. ---
+deny contains msg if {
+	is_redis_sentinel_statefulset(input)
+	input.spec.replicas < 3
+	msg := sprintf("Redis Sentinel StatefulSet %q must run >= 3 Sentinels (odd quorum, single-loss-tolerant; ADR-0044 §1), got %v", [input.metadata.name, input.spec.replicas])
+}
+
+# --- the Sentinel container MUST actually run sentinel (a `--sentinel` flag or a
+# `sentinel monitor` in its startup script): a Sentinel StatefulSet that runs a
+# plain redis-server is not monitoring anything and provides NO failover. Asserted
+# on the rendered command/args text. ---
+deny contains msg if {
+	is_redis_sentinel_statefulset(input)
+	some c in input.spec.template.spec.containers
+	not sentinel_runs_sentinel(c)
+	msg := sprintf("Redis Sentinel StatefulSet %q container %q must run Sentinel (a `--sentinel` flag / `sentinel monitor` directive) — without it there is no monitoring or automatic failover (ADR-0044 §1)", [input.metadata.name, c.name])
+}
+
+sentinel_runs_sentinel(c) if {
+	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
+	contains(arg, "sentinel")
+}
+
+# --- the Sentinel startup MUST monitor the shard (a `sentinel monitor <name> ...
+# <quorum>` line) — the monitor directive is the whole point. Asserted on argv. ---
+deny contains msg if {
+	is_redis_sentinel_statefulset(input)
+	some c in input.spec.template.spec.containers
+	not sentinel_has_monitor(c)
+	msg := sprintf("Redis Sentinel StatefulSet %q container %q must declare a `sentinel monitor` directive (name + seed primary + quorum) — Sentinel must monitor the shard to drive failover (ADR-0044 §1)", [input.metadata.name, c.name])
+}
+
+sentinel_has_monitor(c) if {
+	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
+	contains(arg, "sentinel monitor")
 }

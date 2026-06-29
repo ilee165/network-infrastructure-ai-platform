@@ -38,6 +38,60 @@ Usage: {{ include "netops.postgresHost" . }}
 {{- end -}}
 
 {{/*
+netops.redisSentinelHosts — the `;`-joined Sentinel host:port list the
+failover-aware client uses for primary discovery (W1-T4, ADR-0044 §1). Each
+Sentinel StatefulSet pod has a stable headless-Service DNS name
+(<fullname>-redis-sentinel-<ordinal>.<fullname>-redis-sentinel-headless), so the
+client can reach EVERY Sentinel even while one is down — there is NO single
+Sentinel host pin. Usage: {{ include "netops.redisSentinelHosts" . }}
+*/}}
+{{- define "netops.redisSentinelHosts" -}}
+{{- $fullname := include "netops.fullname" . -}}
+{{- $svc := printf "%s-redis-sentinel-headless" $fullname -}}
+{{- $port := .Values.redisSentinel.sentinel.port -}}
+{{- $hosts := list -}}
+{{- range $i := until (int .Values.redisSentinel.sentinel.replicas) -}}
+{{- $hosts = append $hosts (printf "%s-redis-sentinel-%d.%s:%v" $fullname $i $svc $port) -}}
+{{- end -}}
+{{- $hosts | join ";" -}}
+{{- end -}}
+
+{{/*
+netops.redisUrl — the failover-aware Redis URL the api/worker/KEDA dial as
+NETOPS_REDIS_URL (W1-T4, ADR-0044 §1). When the redisSentinel HA tier is enabled
+this is a `sentinel://h0:26379;h1:26379;h2:26379/<db>` URL pointing at the 3
+Sentinels — so the client (kombu/redis-py Sentinel transport) resolves the
+CURRENT primary at connect time and re-points on failover with NO config change
+(the load-bearing no-static-host-pin decision). When the tier is OFF this is the
+plain single-instance `redis://<host>:<port>/<db>` URL — the GA default render is
+byte-for-byte unchanged. The password is NEVER in this URL (it is a separate
+NETOPS_REDIS_PASSWORD secretKeyRef env); the URL carries only non-secret
+coordinates. Usage: {{ include "netops.redisUrl" . }}
+*/}}
+{{- define "netops.redisUrl" -}}
+{{- $db := .Values.config.redis.db | default 0 -}}
+{{- if .Values.redisSentinel.enabled -}}
+{{- printf "sentinel://%s/%v" (include "netops.redisSentinelHosts" .) $db -}}
+{{- else -}}
+{{- printf "redis://%s:%v/%v" .Values.config.redis.host .Values.config.redis.port $db -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+netops.redisSentinelMaster — the Sentinel master_name the failover-aware client
+passes in its transport options (W1-T4, ADR-0044 §1). Reads the live
+redisSentinel value when the HA tier is on (the source of truth), else the
+config coordinate. Usage: {{ include "netops.redisSentinelMaster" . }}
+*/}}
+{{- define "netops.redisSentinelMaster" -}}
+{{- if .Values.redisSentinel.enabled -}}
+{{- .Values.redisSentinel.sentinel.masterName -}}
+{{- else -}}
+{{- .Values.config.redis.sentinel.masterName -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Whether THIS CHART renders the in-chart api/worker↔Postgres mTLS (W1-T2 / ADR-0039).
 True ("true") only when mtls.postgres.enabled AND the CNPG HA tier is OFF: the
 chart's mtls.postgres machinery (server cert + pg_hba + verify-full client config)

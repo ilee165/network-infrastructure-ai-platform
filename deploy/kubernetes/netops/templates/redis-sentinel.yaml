@@ -1,0 +1,449 @@
+{{- /*
+Redis Sentinel HA data tier (W1-T4, ADR-0044 §1 / ADR-0008).
+
+ONE Redis shard — 1 primary + 2 replicas — monitored by 3 Sentinel processes
+that perform quorum-based failure detection and AUTOMATIC primary promotion, with
+AOF persistence (`appendonly yes`) so a full-shard restart recovers the last
+durable state. Clients (api/worker/KEDA) discover the current primary VIA SENTINEL
+(the netops.redisUrl `sentinel://` URL), so a primary change is transparent — NO
+static Redis host pin (ADR-0044 §1, the load-bearing failover-aware-client decision).
+
+OPT-IN: rendered only when redisSentinel.enabled. MUTUALLY EXCLUSIVE with the
+single-instance services.redis StatefulSet — rendering both would run two Redis
+tiers colliding on the `<fullname>-redis` Service name. The chart REFUSES that
+combination (fail-fast below), matching the CNPG↔services.postgres precedent
+(cloudnativepg-cluster.yaml).
+
+TOPOLOGY (canonical kube-Sentinel, fully declarative):
+  - The Redis StatefulSet's pod-0 is the SEED primary; pods 1..N start
+    `--replicaof <fullname>-redis-0.<headless> 6379`. On failover Sentinel promotes
+    a replica and rewrites the others' replicaof — the seed is only the BOOTSTRAP
+    primary, not a pin (clients never address it directly; they go through Sentinel).
+  - The 3 Sentinels monitor `<masterName> <seed> 6379 <quorum>` and gossip over
+    :26379. With AOF, a promoted replica holds the durable state.
+
+SECURE BY DEFAULT (ADR-0029 §3): auth REQUIRED (requirepass + masterauth +
+sentinel auth-pass, all by-reference to secrets.keys.redisPassword — NEVER
+inlined); non-root; readOnlyRootFilesystem (writable paths are enumerated
+emptyDir/PVC mounts only); dropped-ALL caps; RuntimeDefault seccomp; resource
+requests+limits. The dev Redis password is the SAME `lookup` reuse-or-generate
+value as the single-instance tier (secret.yaml, L4 — reused on upgrade, never
+regenerated; a regen would sever every broker/replication connection).
+*/ -}}
+{{- if .Values.redisSentinel.enabled }}
+{{- if .Values.services.redis.enabled }}
+{{- fail "redisSentinel.enabled=true AND services.redis.enabled=true — these are TWO Redis tiers for the SAME platform (the in-chart StatefulSet and the Sentinel HA shard) and would collide on the `<fullname>-redis` Service. Choose ONE: set services.redis.enabled=false to run the Redis Sentinel HA tier (ADR-0044), or set redisSentinel.enabled=false to keep the single-instance StatefulSet (ADR-0008, the GA default)." -}}
+{{- end }}
+{{- $fullname := include "netops.fullname" . -}}
+{{- $rs := .Values.redisSentinel -}}
+{{- $secretName := include "netops.platformSecretName" . -}}
+{{- $redisName := printf "%s-redis" $fullname -}}
+{{- $redisHeadless := printf "%s-redis-headless" $fullname -}}
+{{- $sentinelName := printf "%s-redis-sentinel" $fullname -}}
+{{- $sentinelHeadless := printf "%s-redis-sentinel-headless" $fullname -}}
+{{- $seedHost := printf "%s-0.%s" $redisName $redisHeadless -}}
+{{- $masterName := $rs.sentinel.masterName -}}
+# ---------------------------------------------------------------------------
+# Redis config ConfigMap (NON-SECRET coordinates only — the password is supplied
+# at runtime from the platform Secret as REDIS_PASSWORD env, NEVER baked here).
+# The AOF + replication directives implement the ADR-0044 §1 persistence + shard
+# topology. requirepass/masterauth are injected at startup by the entrypoint
+# (`sh -c` env expansion, L3) so no credential lands in this ConfigMap.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $redisName }}-sentinel-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "redis") | nindent 4 }}
+data:
+  redis.conf: |
+    # ADR-0044 §1 — AOF persistence so a full-shard restart recovers durable state.
+    appendonly {{ $rs.aof.enabled | ternary "yes" "no" }}
+    appendfsync {{ $rs.aof.appendfsync }}
+    dir /data
+    port {{ $rs.port }}
+    # Non-loopback bind so peers + Sentinel + clients can reach this instance under
+    # the default-deny NetworkPolicy (the allow-list confines who may actually dial).
+    bind 0.0.0.0
+    protected-mode no
+    # save points keep an RDB snapshot alongside AOF (belt-and-braces durability).
+    save 900 1
+    save 300 10
+  sentinel.conf.tmpl: |
+    # Sentinel base config (ADR-0044 §1). The `sentinel monitor` line + the auth-pass
+    # are appended at startup by the entrypoint (the password is env, never inlined).
+    port {{ $rs.sentinel.port }}
+    bind 0.0.0.0
+    protected-mode no
+    dir /data
+    sentinel down-after-milliseconds {{ $masterName }} {{ $rs.sentinel.downAfterMilliseconds }}
+    sentinel failover-timeout {{ $masterName }} {{ $rs.sentinel.failoverTimeoutMilliseconds }}
+    sentinel parallel-syncs {{ $masterName }} 1
+---
+# ---------------------------------------------------------------------------
+# Headless Service for stable per-pod Redis DNS (the seed primary + replicas
+# address each other and Sentinel monitors them by these names).
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $redisHeadless }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "redis") | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "netops.serviceSelector" (dict "ctx" . "component" "redis") | nindent 4 }}
+  ports:
+    - name: redis
+      port: {{ $rs.port }}
+      targetPort: redis
+      protocol: TCP
+---
+# ---------------------------------------------------------------------------
+# Stable ClusterIP `<fullname>-redis` Service. Keeps the SAME name as the
+# single-instance tier so the NetworkPolicy broker selector + config.redis.host
+# resolve identically; under Sentinel clients use the sentinel:// URL for the
+# PRIMARY, but the data Service is retained for the headless/selector identity.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $redisName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "redis") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "netops.serviceSelector" (dict "ctx" . "component" "redis") | nindent 4 }}
+  ports:
+    - name: redis
+      port: {{ $rs.port }}
+      targetPort: redis
+      protocol: TCP
+---
+# ---------------------------------------------------------------------------
+# Sentinel headless Service — stable per-Sentinel DNS so the failover-aware
+# client (netops.redisSentinelHosts) reaches EVERY Sentinel for primary discovery
+# even while one is down, and Sentinels gossip to their peers.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $sentinelHeadless }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "redis-sentinel") | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "netops.serviceSelector" (dict "ctx" . "component" "redis-sentinel") | nindent 4 }}
+  ports:
+    - name: sentinel
+      port: {{ $rs.sentinel.port }}
+      targetPort: sentinel
+      protocol: TCP
+---
+# ---------------------------------------------------------------------------
+# Sentinel ClusterIP Service — the discovery endpoint clients may also dial.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $sentinelName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "redis-sentinel") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "netops.serviceSelector" (dict "ctx" . "component" "redis-sentinel") | nindent 4 }}
+  ports:
+    - name: sentinel
+      port: {{ $rs.sentinel.port }}
+      targetPort: sentinel
+      protocol: TCP
+---
+# ---------------------------------------------------------------------------
+# Redis StatefulSet — 1 seed primary (pod-0) + 2 replicas (ADR-0044 §1). AOF on.
+# requirepass + masterauth are injected from the platform Secret at startup via
+# `sh -c` env expansion (L3) — NEVER inlined into the ConfigMap/argv. Replicas
+# bootstrap `replicaof` the seed; on failover Sentinel rewrites this — the seed is
+# the BOOTSTRAP primary, not a client-facing pin (clients go through Sentinel).
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $redisName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "redis") | nindent 4 }}
+spec:
+  replicas: {{ $rs.replicas }}
+  serviceName: {{ $redisHeadless }}
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "redis") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "redis") | nindent 8 }}
+    spec:
+      serviceAccountName: redis-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      # HA spread (ADR-0044 §1): a soft anti-affinity keeps the Redis replicas off
+      # the SAME node so a single node loss cannot take the whole shard down — the
+      # precondition for Sentinel failover to find a surviving replica to promote.
+      # Preferred (not required) so a single-node dev cluster still schedules.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "netops.serviceSelector" (dict "ctx" . "component" "redis") | nindent 20 }}
+      containers:
+        - name: redis
+          image: {{ include "netops.image" (dict "img" .Values.images.redis) }}
+          imagePullPolicy: {{ .Values.images.redis.pullPolicy }}
+          # ONE `sh -c` script (L3: env expands here; exec argv would NOT do $(VAR)).
+          # pod-0 is the seed primary; pods 1..N start as replicas of the seed. The
+          # password is read from the REDIS_PASSWORD env (secretKeyRef) and passed
+          # as --requirepass/--masterauth so it is NEVER in the ConfigMap or argv list.
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              ORD="${HOSTNAME##*-}"
+              ARGS="/etc/redis/redis.conf --requirepass $REDIS_PASSWORD --masterauth $REDIS_PASSWORD"
+              if [ "$ORD" != "0" ]; then
+                ARGS="$ARGS --replicaof {{ $seedHost }} {{ $rs.port }}"
+              fi
+              exec redis-server $ARGS
+          ports:
+            - name: redis
+              containerPort: {{ $rs.port }}
+              protocol: TCP
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ .Values.secrets.keys.redisPassword }}
+          resources:
+            {{- toYaml $rs.resources | nindent 12 }}
+          # exec-probe argv is run directly (no shell) and does NOT undergo $(VAR)
+          # substitution; wrap in `sh -c` so REDIS_PASSWORD expands at probe time.
+          # --no-auth-warning keeps the secret off stderr (ADR-0029 §7).
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/redis
+              readOnly: true
+            - name: varrun
+              mountPath: /var/run
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $redisName }}-sentinel-config
+            items:
+              - key: redis.conf
+                path: redis.conf
+        - name: varrun
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "netops.componentLabels" (dict "ctx" . "component" "redis") | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ $rs.storage.size }}
+---
+# ---------------------------------------------------------------------------
+# Sentinel StatefulSet — 3 Sentinels (ADR-0044 §1, odd quorum). Each writes its
+# runnable sentinel.conf from the ConfigMap template + the `sentinel monitor` +
+# auth-pass lines at startup (the password is env, never inlined). component=
+# redis-sentinel (its own identity; covered by the redis-sentinel.* hardening rego).
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $sentinelName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "redis-sentinel") | nindent 4 }}
+spec:
+  replicas: {{ $rs.sentinel.replicas }}
+  serviceName: {{ $sentinelHeadless }}
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "redis-sentinel") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "redis-sentinel") | nindent 8 }}
+    spec:
+      serviceAccountName: redis-sa
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      # HA spread (ADR-0044 §1): keep the 3 Sentinels off the SAME node so a single
+      # node loss cannot drop the quorum below the majority needed to authorize a
+      # failover. Preferred so a single-node dev cluster still schedules.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "netops.serviceSelector" (dict "ctx" . "component" "redis-sentinel") | nindent 20 }}
+      containers:
+        - name: sentinel
+          image: {{ include "netops.image" (dict "img" .Values.images.redis) }}
+          imagePullPolicy: {{ .Values.images.redis.pullPolicy }}
+          # ONE `sh -c` script (L3): assemble a writable sentinel.conf from the
+          # ConfigMap template, append the `sentinel monitor` line (seed primary +
+          # quorum) and the auth-pass (env, NEVER inlined), then exec sentinel.
+          # Sentinel discovers the real current primary from the seed at startup and
+          # tracks promotions thereafter — the seed is the bootstrap pointer only.
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              CONF=/data/sentinel.conf
+              cp /etc/redis/sentinel.conf.tmpl "$CONF"
+              echo "sentinel monitor {{ $masterName }} {{ $seedHost }} {{ $rs.port }} {{ $rs.sentinel.quorum }}" >> "$CONF"
+              echo "sentinel auth-pass {{ $masterName }} $REDIS_PASSWORD" >> "$CONF"
+              exec redis-server "$CONF" --sentinel
+          ports:
+            - name: sentinel
+              containerPort: {{ $rs.sentinel.port }}
+              protocol: TCP
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ .Values.secrets.keys.redisPassword }}
+          resources:
+            {{- toYaml $rs.sentinel.resources | nindent 12 }}
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -p {{ $rs.sentinel.port }} ping
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -p {{ $rs.sentinel.port }} ping
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -p {{ $rs.sentinel.port }} ping
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            # Sentinel REWRITES its conf at runtime (it records discovered replicas),
+            # so /data is a writable PVC — the conf cannot live on the RO ConfigMap mount.
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/redis
+              readOnly: true
+            - name: varrun
+              mountPath: /var/run
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $redisName }}-sentinel-config
+            items:
+              - key: sentinel.conf.tmpl
+                path: sentinel.conf.tmpl
+        - name: varrun
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "netops.componentLabels" (dict "ctx" . "component" "redis-sentinel") | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+{{- end }}
