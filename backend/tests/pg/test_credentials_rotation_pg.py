@@ -175,8 +175,19 @@ async def test_scope_deny_refuses_out_of_scope_device_under_pg(
     :class:`CredentialScopeError` and writes a ``credential.scope_denied`` audit row
     carrying IDS ONLY — never the scope values or device attributes. Asserted over
     the real PG row + JSONB ``detail``.
+
+    "Before any KEK access" is GATED, not just claimed: after the credential is
+    created (which needs a working KEK to wrap), the shared fake Vault client is put
+    ``down`` so EVERY subsequent KEK operation (read_key_version / encrypt / decrypt)
+    raises. If the scope check correctly short-circuits first, ``decrypt`` raises
+    ``CredentialScopeError`` and the client is never touched (test passes). A
+    regression that reached the KEK provider BEFORE the scope check would instead
+    surface the down-client failure (a provider-unavailable error, not a
+    ``CredentialScopeError``), so ``pytest.raises(CredentialScopeError)`` would fail
+    — the "before any KEK access" ordering is now what the assertion bites on.
     """
-    v1 = _vault_provider(_FakeVaultTransitClient(current_version=1))
+    client = _FakeVaultTransitClient(current_version=1)
+    v1 = _vault_provider(client)
     credential = await _create(pg_session, v1, name="hq-cred", secret=_SECRET, scope_site="hq")
     device = Device(
         hostname="branch-sw1",
@@ -186,6 +197,10 @@ async def test_scope_deny_refuses_out_of_scope_device_under_pg(
     )
     pg_session.add(device)
     await pg_session.flush()
+
+    # Fail-on-ANY-KEK-access: from here on, any unwrap/encrypt/version read raises.
+    # The scope deny must happen WITHOUT touching the KEK, so this stays invisible.
+    client.down = True
 
     with pytest.raises(CredentialScopeError):
         await vault.decrypt(
@@ -238,9 +253,14 @@ async def test_rotation_emits_no_secret_or_key_bytes_under_pg(
 
     The whole create + re-wrap pass is run under PG, then EVERY ``kek.rotate.*`` and
     ``credential.*`` audit row's JSONB ``detail`` is scanned for the plaintext
-    secret and the wrapped-DEK / DEK-nonce bytes (hex + repr). The log stream
-    captured during the pass is scanned too. Nothing secret may surface — this is
-    the credential-rotation no-leak gate asserted against the real database.
+    secret and the key material — the OLD wrapped DEK, the NEW (post-rotation)
+    wrapped DEK, and the DEK nonce — in BOTH hex and ``repr`` form. The same marker
+    set is scanned across the captured log stream too, so the log and audit
+    surfaces are gated symmetrically. Scanning the NEW wrapped DEK matters because
+    re-wrap MUTATES the wrapper: a leak introduced by the rotation path itself would
+    surface only on the post-rotation value, which the pre-rotation-only scan
+    missed. Nothing secret may surface — this is the credential-rotation no-leak
+    gate asserted against the real database.
     """
     client = _FakeVaultTransitClient(current_version=1)
     v1 = _vault_provider(client)
@@ -254,19 +274,38 @@ async def test_rotation_emits_no_secret_or_key_bytes_under_pg(
     with structlog.testing.capture_logs() as captured:
         await rotation.re_wrap_keys(pg_session, v2, actor="system:kek_rotation")
 
-    log_blob = str(captured)
-    assert _SECRET not in log_blob
-    assert wrapped_dek.hex() not in log_blob
+    # Capture the NEW wrapped DEK the rotation produced (the wrapper changed) so the
+    # post-rotation key material is in the forbidden set too, not just the old one.
+    await pg_session.refresh(credential)
+    new_wrapped_dek = bytes(credential.wrapped_dek)
+    assert new_wrapped_dek != wrapped_dek, "re-wrap must have changed the wrapper"
 
-    # Scan EVERY persisted audit row's JSONB detail.
+    # Every forbidden token: the plaintext secret + all key material (old/new wrapped
+    # DEK + DEK nonce) in hex AND repr form. Asserted ABSENT only — no secret/key
+    # bytes are written as literals here; these are derived from values created in
+    # this test and checked for non-appearance.
+    forbidden = (
+        _SECRET,
+        wrapped_dek.hex(),
+        repr(wrapped_dek),
+        new_wrapped_dek.hex(),
+        repr(new_wrapped_dek),
+        dek_nonce.hex(),
+    )
+
+    log_blob = str(captured)
+    for token in forbidden:
+        assert token not in log_blob, "key/secret material leaked into the log stream"
+
+    # Scan EVERY persisted audit row's JSONB detail with the same marker set.
     all_rows = list((await pg_session.execute(select(AuditLog))).scalars())
     assert all_rows, "the pass must have written audit rows"
     for row in all_rows:
         detail_blob = str(row.detail)
-        assert _SECRET not in detail_blob
-        assert wrapped_dek.hex() not in detail_blob
-        assert dek_nonce.hex() not in detail_blob
-        assert repr(wrapped_dek) not in detail_blob
+        for token in forbidden:
+            assert token not in detail_blob, (
+                f"key/secret material leaked into a {row.action!r} audit row's detail"
+            )
 
 
 async def test_rotation_audit_carries_versions_and_counts_only_under_pg(

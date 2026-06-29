@@ -299,6 +299,32 @@ async def test_revoke_update_blocks_a_non_owner_role_on_audit_log(
             n = await member.fetchval("SELECT count(*) FROM audit_log")
             assert n >= 2
 
+            # INSERT works (role has INSERT) — prove the claimed positive privilege,
+            # not just the SELECT. A genesis-hash append-shaped row lands in the same
+            # partition as the seeded target (``created_at`` is the RANGE partition
+            # key), and the member can read it back, confirming the row committed.
+            # This is the "INSERT succeeds" half of the append-only posture: the
+            # REVOKE denies UPDATE/DELETE while INSERT (append) is permitted.
+            inserted_id = uuid.uuid4()
+            genesis = bytes(32)
+            await member.execute(
+                "INSERT INTO audit_log "
+                "(id, created_at, actor, action, target_type, target_id, prev_hash, entry_hash) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                inserted_id,
+                target.created_at,
+                "user:least_priv_insert",
+                "audit.insert_probe",
+                "audit",
+                str(inserted_id),
+                genesis,
+                genesis,
+            )
+            fetched = await member.fetchval(
+                "SELECT count(*) FROM audit_log WHERE id = $1", inserted_id
+            )
+            assert fetched == 1, "the member role's INSERT did not land / is not readable"
+
             # UPDATE is DENIED — the REVOKE bites for a non-owner.
             with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
                 await member.execute(
@@ -474,8 +500,13 @@ async def test_concurrent_appends_on_pg_do_not_fork_the_chain(
         prev_a, prev_b = bytes(rows[0].prev_hash), bytes(rows[1].prev_hash)
         assert prev_a != prev_b, "a fork would re-use the same head twice"
         assert bytes(rows[1].prev_hash) == bytes(rows[0].entry_hash)
-        # Distinct, dense seq — no duplicate under the lock.
-        assert {rows[0].seq, rows[1].seq} == {rows[0].seq, rows[1].seq}
+        # Distinct AND dense seq — no duplicate, no gap under the lock. The writer
+        # assigns ``MAX(seq)+1`` under the transaction-scoped advisory lock (there is
+        # no DB sequence that could skip values), so the two serialised appends carry
+        # strictly consecutive seqs. These two tagged rows are the only writers in
+        # this test, so dense +1 holds for them specifically.
+        assert rows[0].seq is not None
+        assert rows[1].seq == rows[0].seq + 1
         assert rows[0].seq != rows[1].seq
         # The full chain verifies clean.
         result = await verify_chain(verify_session)

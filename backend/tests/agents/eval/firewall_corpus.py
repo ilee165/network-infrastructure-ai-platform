@@ -139,10 +139,28 @@ class ExpectedFinding:
     the corpus must not couple to, so a severity-grading change never silently
     breaks the gate. Severity *floors* (a posture HIGH must stay HIGH) are checked
     separately by the engine unit suite, not scored here.
+
+    ``rule_position`` is an OPTIONAL ACE-precise discriminator. It defaults to
+    ``None``, in which case the scorer matches on ``(category, rule_name)`` alone —
+    every existing firewall-rule label keeps that behaviour. When it is SET, the
+    scorer additionally requires the produced finding's ``rule_position`` to equal
+    it, so a label can pin one specific entry among several sharing a ``rule_name``.
+    This matters where one ``acl_name``/``rule_name`` carries multiple entries (e.g.
+    an ``OUTSIDE_IN`` ACL with a permit-any-any ACE at sequence 10 and a clean
+    scoped ACE at sequence 20): without the position the gate would score a TP even
+    if a regression flagged the WRONG entry. The W3 ACL-posture engine populates
+    ``SecurityFinding.rule_position`` from the ACE ``sequence``
+    (``app.engines.security.firewall._posture_acls``), so the position is an engine
+    fact, not a fixture invention.
     """
 
     category: FindingCategory
     rule_name: str
+    #: Optional ACE-precise position (an ACL ``sequence`` / a firewall ``position``).
+    #: ``None`` -> match on ``(category, rule_name)`` only (the default for every
+    #: non-positional label); when set, the produced finding's ``rule_position``
+    #: MUST equal it for the label to score a true positive.
+    rule_position: int | None = None
 
 
 @dataclass(frozen=True)
@@ -407,8 +425,13 @@ CORPUS: tuple[LabelledCase, ...] = (
                 destination="10.1.0.0/24",
             ),
         ),
-        expected=frozenset({_E(FindingCategory.POSTURE, "OUTSIDE_IN")}),
-        note="explicit any->any ACE is posture HIGH; scoped ACE is a clean negative",
+        # ACE-precise label: the permit-any-any is at sequence 10, so the produced
+        # POSTURE finding MUST carry rule_position=10. The clean scoped ACE shares
+        # the acl_name OUTSIDE_IN at sequence 20 — pinning the position means a
+        # regression that flagged seq-20 instead of seq-10 scores an FP+FN (the
+        # label no longer matches the wrong ACE), so the gate drops below floor.
+        expected=frozenset({_E(FindingCategory.POSTURE, "OUTSIDE_IN", rule_position=10)}),
+        note="explicit any->any ACE (seq 10) is posture HIGH; scoped ACE (seq 20) is clean",
     ),
     # --- CLEAN NEGATIVES (precision guard) -----------------------------------
     LabelledCase(

@@ -109,13 +109,37 @@ def _run_service(case: LabelledCase) -> list[SecurityFinding]:
 
 
 def _produced_labels(findings: list[SecurityFinding]) -> set[ExpectedFinding]:
-    """Collapse produced findings to their ``(category, rule_name)`` identity set.
+    """Collapse produced findings to their ACE-precise ``(category, rule_name, position)`` set.
 
-    Two findings on the same rule+category (e.g. an entry-point overlap) collapse
-    to one label — the corpus scores *whether* a rule is correctly classified, not
-    how many narration rows it yields.
+    The produced identity carries ``rule_position`` (the engine populates it from a
+    firewall ``position`` or an ACL ``sequence``), so a produced finding pins WHICH
+    entry was flagged. Two findings on the same rule+category+position (e.g. an
+    entry-point overlap) collapse to one label — the corpus scores *whether* a rule
+    is correctly classified, not how many narration rows it yields.
+
+    Matching against the ground truth is position-aware but back-compatible: an
+    expected label with ``rule_position=None`` matches on ``(category, rule_name)``
+    alone (every existing firewall-rule label), while a positional expected label
+    requires the produced position to match (see :func:`_matches`).
     """
-    return {ExpectedFinding(f.category, f.rule_name) for f in findings}
+    return {
+        ExpectedFinding(f.category, f.rule_name, rule_position=f.rule_position) for f in findings
+    }
+
+
+def _matches(expected: ExpectedFinding, produced: ExpectedFinding) -> bool:
+    """True iff *produced* satisfies the *expected* label (position optional).
+
+    Category and rule name must always match. The position is an OPTIONAL
+    discriminator: an expected label with ``rule_position=None`` matches any
+    produced position (the legacy ``(category, rule_name)`` identity), while a
+    positional expected label requires the produced finding to carry exactly that
+    position — so flagging the wrong ACE among entries sharing a ``rule_name`` is
+    NOT a true positive.
+    """
+    if expected.category is not produced.category or expected.rule_name != produced.rule_name:
+        return False
+    return expected.rule_position is None or expected.rule_position == produced.rule_position
 
 
 @dataclass(frozen=True)
@@ -153,12 +177,21 @@ def score_corpus(corpus: tuple[LabelledCase, ...]) -> dict[FindingCategory, Clas
     for case in corpus:
         produced = _produced_labels(_run_service(case))
         expected = set(case.expected)
-        for label in produced & expected:
-            tp[label.category] += 1
-        for label in produced - expected:  # produced but not labelled -> FP
-            fp[label.category] += 1
-        for label in expected - produced:  # labelled but not produced -> FN
-            fn[label.category] += 1
+        # Position-aware matching (NOT raw set intersection): an expected label with
+        # rule_position=None matches on (category, rule_name); a positional one also
+        # pins the ACE. A produced finding is a TP iff it satisfies some expected
+        # label; else an FP. An expected label is recalled iff some produced finding
+        # satisfies it; else an FN. So flagging the wrong ACE is BOTH an FP (the
+        # produced label matches no expected) and an FN (the positional expected
+        # label is unsatisfied) — the gate drops below floor.
+        for p in produced:
+            if any(_matches(e, p) for e in expected):
+                tp[p.category] += 1
+            else:
+                fp[p.category] += 1
+        for e in expected:
+            if not any(_matches(e, p) for p in produced):
+                fn[e.category] += 1
 
     return {
         c: ClassScore(
@@ -336,11 +369,23 @@ class TestSecretFree:
                     )
 
     def test_corpus_fixtures_carry_no_secret_field(self) -> None:
-        """The corpus inputs themselves are secret-free config metadata."""
+        """The corpus inputs themselves are secret-free config metadata.
+
+        Scans BOTH ``case.rules`` AND ``case.acls`` — the ACL rows feed
+        ``analyze_security_posture`` (``_run_service``) and so are part of the
+        scored input; a secret leaking through an ACL fixture would be just as real
+        as one in a firewall rule, so both are asserted.
+        """
         for case in CORPUS:
             for rule in case.rules:
                 dumped = repr(rule.model_dump()).casefold()
                 for marker in self._SECRET_MARKERS:
                     assert marker not in dumped, (
                         f"corpus rule '{rule.name}' in '{case.name}' carries {marker!r}"
+                    )
+            for acl in case.acls:
+                dumped = repr(acl.model_dump()).casefold()
+                for marker in self._SECRET_MARKERS:
+                    assert marker not in dumped, (
+                        f"corpus ACL '{acl.acl_name}' in '{case.name}' carries {marker!r}"
                     )

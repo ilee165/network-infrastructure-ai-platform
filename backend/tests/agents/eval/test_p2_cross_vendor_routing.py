@@ -69,6 +69,7 @@ from __future__ import annotations
 from app.agents import build_default_registry
 from app.agents.framework.supervisor import SUPERVISOR_NAME
 from app.agents.framework.tools import ToolClassification
+from app.plugins.base import Capability, PluginCapability
 from app.plugins.registry import get_default_registry
 
 #: The two P2 Vendor-Wave-2 plugins whose intents W5-T2 re-runs routing for
@@ -123,13 +124,27 @@ def test_wave2_vendor_plugins_present_in_registry() -> None:
     "deterministic plugins-present-in-roster assertion green in CI" half of the
     cross-vendor re-run.
     """
-    registered = set(get_default_registry().vendor_ids())
+    registry = get_default_registry()
+    registered = set(registry.vendor_ids())
     missing = _WAVE2_VENDOR_PLUGINS - registered
     assert not missing, (
         f"P2 Vendor-Wave-2 plugin(s) {sorted(missing)} absent from the registry "
         f"(registered: {sorted(registered)}) — cross-vendor routing for them "
         f"cannot work; check app/plugins/vendors/__init__.iter_builtin_plugins()."
     )
+
+    # Presence is necessary but not sufficient: a plugin can register yet lose its
+    # FIREWALL_POLICY capability binding (a dropped capability entry) and still pass
+    # the id check above. The W5-T2 firewall-audit routing paths (PAN-OS / FortiOS
+    # policy audit -> security) depend on that capability RESOLVING, so assert the
+    # binding through the registry's own resolution API for both Wave-2 vendors. A
+    # missing binding raises PluginError from resolve(), failing this gate in CI.
+    for vendor_id in sorted(_WAVE2_VENDOR_PLUGINS):
+        resolved = registry.resolve(vendor_id, Capability.FIREWALL_POLICY)
+        assert isinstance(resolved, type) and issubclass(resolved, PluginCapability), (
+            f"{vendor_id!r} did not resolve a FIREWALL_POLICY capability class "
+            f"(got {resolved!r}) — the firewall-audit routing path for it is broken."
+        )
 
 
 def test_security_agent_is_registered_and_routable() -> None:
