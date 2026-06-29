@@ -331,6 +331,49 @@ spec:
         - protocol: TCP
           port: {{ .Values.networkPolicy.postgres.port }}
 {{- end }}
+{{- if and .Values.services.neo4j.enabled .Values.services.neo4j.autoRebuild.enabled .Values.services.postgres.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-neo4j-rebuild-egress (W1-T3) — the automated-rebuild reconciler pods
+# (component `neo4j-rebuild`) RE-PROJECT the topology: they READ the inventory from
+# postgres:5432 (the system of record) and WRITE the projected graph to neo4j:7687.
+# Same default-deny gap as the worker/audit jobs: without this allow the reconciler
+# cannot reach either store and every rebuild FAILS, leaving the topology stale after
+# a liveness-recreate. DNS is cluster-wide via allow-dns-egress; this adds the two §2
+# data-store edges (mirrors allow-worker-egress, scoped to PG+NEO). No empty-`to` rule.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-neo4j-rebuild-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: neo4j-rebuild
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "neo4j-rebuild") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # neo4j-rebuild → postgres:5432 (reads the normalized inventory to re-project).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+    # neo4j-rebuild → neo4j:7687 (writes the re-projected topology graph).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.neo4j.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.neo4j.port }}
+{{- end }}
 {{- if .Values.cloudNativePg.enabled }}
 ---
 # ---------------------------------------------------------------------------

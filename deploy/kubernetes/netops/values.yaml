@@ -281,6 +281,50 @@ services:
       limits:
         cpu: "2"
         memory: 2Gi
+    # -- AUTOMATED-REBUILD reconciler (W1-T3, ADR-0005 D5; PRODUCTION.md §3.2 —
+    #    single Neo4j + automated rebuild). Neo4j Community has no clustering, so a
+    #    re-projection from Postgres (the system of record) IS the HA/recovery story.
+    #    This renders a post-rollout Job (immediate projection on every apply) + a
+    #    steady-state reconciler CronJob that re-projects when the graph is empty/
+    #    stale — the state a liveness-fail -> container recreate leaves on the PVC —
+    #    so recovery is automatic with NO manual step, and records the rebuild
+    #    DURATION (`topology_rebuild_seconds`) as the topology-RTO the W4-T4 drill +
+    #    G-OBS freshness SLO read. Distinct from the W5-T3 quarterly rebuild-DRILL.
+    autoRebuild:
+      # ON by default (secure/resilient-by-default — ADR-0029 §0). Disabling renders
+      # NO reconciler and emits a NOTES warning: a liveness-fail would then leave the
+      # topology graph stale until a human re-projects (a conscious warned opt-out).
+      enabled: true
+      # Steady-state reconcile cadence. Every 5 min: a no-op when the graph is fresh,
+      # a re-projection when the post-recreate graph is empty/stale. Frequent enough
+      # that a liveness-fail self-heals quickly without busy-looping the rebuild.
+      schedule: "*/5 * * * *"
+      # Re-project only when the last projection is older than this many seconds (the
+      # post-recreate EMPTY graph reads as infinitely stale -> always rebuilds; a fresh
+      # graph is a no-op). 0 forces an unconditional rebuild each tick.
+      stalenessSeconds: 300
+      # The node_exporter textfile-collector dir the rebuild-duration .prom is written
+      # to (the no-pushgateway pattern — a Job pod is not scrapable; the file survives
+      # the pod for a node_exporter/agent to collect). Mirrors audit.chainVerify.
+      metricsDir: /var/lib/node_exporter/textfile
+      # Bound concurrency + history so a long re-projection never overlaps the next
+      # tick and finished Job pods are reaped.
+      concurrencyPolicy: Forbid
+      startingDeadlineSeconds: 300
+      backoffLimit: 1
+      successfulJobsHistoryLimit: 3
+      failedJobsHistoryLimit: 3
+      # Auto-reap the finished post-rollout hook Job pod.
+      ttlSecondsAfterFinished: 3600
+      # Resource requests + limits (never absent — ADR-0029 §3). The re-projection is
+      # CPU/IO-bound at scale; the steady-state no-op tick is light. Sized like the api.
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
 
   # redis: celery broker + result backend. Toggleable; P2 → Sentinel.
   redis:

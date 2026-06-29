@@ -32,6 +32,17 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "netops.componentLabels" (dict "ctx" . "component" "neo4j") | nindent 4 }}
+  {{- if .Values.services.neo4j.autoRebuild.enabled }}
+  annotations:
+    # W1-T3: liveness-fail -> kubelet recreates this container (StatefulSet pods are
+    # restartPolicy Always); the data PVC may come up empty/stale. The automated-
+    # rebuild reconciler (neo4j-auto-rebuild CronJob/Job) then re-projects from
+    # Postgres with NO manual step and records the topology-RTO. The recovery chain is
+    # liveness-probe (below) -> recreate -> reconciler re-projection -> readiness
+    # (ADR-0005 D5; PRODUCTION.md §3.2). Disable the reconciler only via the warned
+    # services.neo4j.autoRebuild.enabled=false opt-out.
+    netops.io/auto-rebuild: enabled
+  {{- end }}
 spec:
   replicas: {{ .Values.services.neo4j.replicas }}
   serviceName: {{ include "netops.fullname" . }}-neo4j

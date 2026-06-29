@@ -2963,3 +2963,197 @@ deny contains msg if {
 	object.get(input.spec, "type", "rw") != "rw"
 	msg := sprintf("CNPG Pooler %q must front the read-write endpoint (type rw) so the audit write path + failover re-point work through it (ADR-0042 §3/§4)", [input.metadata.name])
 }
+
+# ===========================================================================
+# W1-T3 — Neo4j AUTOMATED-REBUILD reconciler (ADR-0005 D5; ADR-0029 §1/§3;
+# PRODUCTION.md §3.2 — single Neo4j + automated rebuild)
+#
+# Distinct from the W5-T3 quarterly DRILL above (a suspended, P2-executed,
+# manual destroy-and-rebuild assertion harness). This is the PRODUCTION recovery
+# wiring: a frequent reconciler CronJob that, when the projected graph is empty
+# or stale (the state a liveness-fail → container recreate leaves on the data
+# PVC), RE-PROJECTS the whole topology from Postgres — the system of record —
+# with NO manual step, then records the rebuild DURATION (the topology-RTO the
+# W4-T4 drill compares against + the G-OBS freshness SLO reads). Neo4j Community
+# has no clustering; this reconciler IS the designed HA mitigation (ADR-0005 §3.2).
+#
+# The reconciler objects carry the `netops.io/rebuild-role: neo4j-auto-rebuild`
+# label; match on it to scope these rules (the W5-T3 drill carries
+# `netops.io/backup-type: neo4j-rebuild-drill` instead, so the two rule sets are
+# mutually exclusive by construction and never cross-fire).
+# ===========================================================================
+
+# A rendered automated-rebuild reconciler object (Job OR CronJob) by its role label.
+is_neo4j_auto_rebuild(obj) if {
+	obj.metadata.labels["netops.io/rebuild-role"] == "neo4j-auto-rebuild"
+}
+
+# The reconciler pod-template spec, normalized across Job and CronJob.
+neo4j_auto_rebuild_pod_spec(obj) := obj.spec.template.spec if {
+	obj.kind == "Job"
+}
+
+neo4j_auto_rebuild_pod_spec(obj) := obj.spec.jobTemplate.spec.template.spec if {
+	obj.kind == "CronJob"
+}
+
+# Flattened command+args text of a reconciler container (the sh -c script body).
+neo4j_auto_rebuild_argv(c) := array.concat(object.get(c, "command", []), object.get(c, "args", []))
+
+# --- L3: the reconciler exec MUST be wrapped in `sh -c` so the in-script $VAR
+# (the assembled DSN + the metric path) expand in the shell — a raw exec argv does
+# NOT do $(VAR) substitution and would re-project against a literal `$(VAR)` host,
+# silently mis-targeting (the spec's named L3 risk). ---
+neo4j_auto_rebuild_uses_sh_c(c) if {
+	cmd := object.get(c, "command", [])
+	cmd[0] == "sh"
+	cmd[1] == "-c"
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not neo4j_auto_rebuild_uses_sh_c(c)
+	msg := sprintf("neo4j auto-rebuild %q container %q must wrap its exec in `sh -c` (L3 — a raw argv would not expand the in-script $(VAR) DSN/metric-path and would re-project against a literal host; ADR-0005 D5)", [input.metadata.name, c.name])
+}
+
+# --- the reconciler MUST re-project from Postgres via the EXISTING metric-emitting
+# rebuild path: app.engines.topology.auto_rebuild is the thin operator CLI over
+# app.engines.topology.metrics.timed_rebuild (→ rebuild() → projector.full_rebuild).
+# A wipe with no Postgres re-projection is not a rebuild (Neo4j holds no
+# un-rebuildable state — ADR-0005 D5). Asserted on the rendered argv text. ---
+neo4j_auto_rebuild_runs_reprojection(c) if {
+	some arg in neo4j_auto_rebuild_argv(c)
+	contains(arg, "app.engines.topology.auto_rebuild")
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not neo4j_auto_rebuild_runs_reprojection(c)
+	msg := sprintf("neo4j auto-rebuild %q container %q must re-project from Postgres via the metric-emitting full-rebuild path (app.engines.topology.metrics.timed_rebuild) — a wipe with no re-projection is not a rebuild (ADR-0005 D5)", [input.metadata.name, c.name])
+}
+
+# --- the rebuild DURATION metric MUST be emitted as a node_exporter TEXTFILE
+# `.prom` (the established no-pushgateway pattern — a CronJob pod is not scrapable;
+# the file survives the pod for the agent to collect). This value is the
+# topology-RTO the W4-T4 drill compares against + the G-OBS freshness SLO reads;
+# without it the recovery is invisible. Asserted on the script text. ---
+neo4j_auto_rebuild_emits_metric(c) if {
+	some arg in neo4j_auto_rebuild_argv(c)
+	contains(arg, "topology_rebuild_seconds")
+	contains(arg, ".prom")
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not neo4j_auto_rebuild_emits_metric(c)
+	msg := sprintf("neo4j auto-rebuild %q container %q must emit the rebuild-DURATION metric as a node_exporter textfile (`topology_rebuild_seconds` in a `.prom` file) — it is the topology-RTO the W4-T4 drill + G-OBS freshness SLO read (PRODUCTION.md §3.2/§11)", [input.metadata.name, c.name])
+}
+
+# --- L5 belt-and-braces: the script MUST guard that the metric file was actually
+# written non-empty (`test -s`), so a silently-empty metric write FAILS the run
+# rather than passing with no topology-RTO recorded. ---
+neo4j_auto_rebuild_guards_metric(c) if {
+	some arg in neo4j_auto_rebuild_argv(c)
+	contains(arg, "test -s")
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not neo4j_auto_rebuild_guards_metric(c)
+	msg := sprintf("neo4j auto-rebuild %q container %q must assert the metric file is non-empty (`test -s`) so a silently-empty rebuild-duration write FAILS the run (L5)", [input.metadata.name, c.name])
+}
+
+# --- secret-surface: any reconciler env whose NAME signals a credential (the
+# Postgres password or the Neo4j auth) MUST be a secretKeyRef with NO inline
+# `value:` literal (ADR-0029 §6). Reuses the drill's credential-name predicate. ---
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	neo4j_drill_credential_env(e.name)
+	object.get(e, "value", null) != null
+	msg := sprintf("neo4j auto-rebuild %q env %q must NOT carry an inline `value:` literal — the Postgres password / Neo4j auth are external-secret refs only (ADR-0029 §6)", [input.metadata.name, e.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	neo4j_drill_credential_env(e.name)
+	not e.valueFrom.secretKeyRef
+	msg := sprintf("neo4j auto-rebuild %q env %q must be sourced from valueFrom.secretKeyRef (credentials are by-reference only; ADR-0029 §6)", [input.metadata.name, e.name])
+}
+
+# --- the reconciler rebuilds into the LIVE Neo4j from Postgres — it carries no
+# data PVC of its own (parity with the drill: the projection is re-derived, never
+# restored onto a mounted data volume). ---
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some v in object.get(neo4j_auto_rebuild_pod_spec(input), "volumes", [])
+	v.persistentVolumeClaim
+	msg := sprintf("neo4j auto-rebuild %q must mount NO persistentVolumeClaim — the graph is RE-PROJECTED from Postgres, never restored onto a data volume (ADR-0005 D5)", [input.metadata.name])
+}
+
+# --- the reconciler talks to Postgres + Neo4j, not the K8s API:
+# automountServiceAccountToken=false (parity with the backup/drill pods, ADR-0029 §5). ---
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	neo4j_auto_rebuild_pod_spec(input).automountServiceAccountToken != false
+	msg := sprintf("neo4j auto-rebuild %q pod must set automountServiceAccountToken=false — it talks to Postgres + Neo4j, not the K8s API (ADR-0029 §5)", [input.metadata.name])
+}
+
+# --- per-container hardening (the reconciler is a batch kind, separate from the
+# platform Deployment/StatefulSet rules; assert the same ADR-0029 §3 controls):
+# drop ALL caps, add none, non-root, RO-rootfs, no-privesc, requests AND limits. ---
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not drops_all(c)
+	msg := sprintf("neo4j auto-rebuild %q container %q must drop ALL capabilities (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	some cap in object.get(object.get(object.get(c, "securityContext", {}), "capabilities", {}), "add", [])
+	msg := sprintf("neo4j auto-rebuild %q container %q must add NO capabilities (found %q; ADR-0029 §3)", [input.metadata.name, c.name, cap])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	c.securityContext.runAsNonRoot != true
+	msg := sprintf("neo4j auto-rebuild %q container %q must set runAsNonRoot=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	c.securityContext.readOnlyRootFilesystem != true
+	msg := sprintf("neo4j auto-rebuild %q container %q must set readOnlyRootFilesystem=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	c.securityContext.allowPrivilegeEscalation != false
+	msg := sprintf("neo4j auto-rebuild %q container %q must set allowPrivilegeEscalation=false (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not c.resources.requests
+	msg := sprintf("neo4j auto-rebuild %q container %q must declare resource requests (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not c.resources.limits
+	msg := sprintf("neo4j auto-rebuild %q container %q must declare resource limits (ADR-0029 §3)", [input.metadata.name, c.name])
+}
