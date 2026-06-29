@@ -4,7 +4,7 @@ This is the **deterministic, CI-blocking** proof that the W3 Security-Agent
 analysis service (:mod:`app.engines.security.firewall`) detects shadowed /
 redundant / overly-permissive rules and posture violations *correctly* and
 *reproducibly*, scored against the held-out labelled corpus in
-:mod:`tests.evals.firewall_corpus`.
+:mod:`tests.agents.eval.firewall_corpus`.
 
 Which layer proves what
 -----------------------
@@ -21,7 +21,7 @@ M4/M5/P1); the corpus is the fixture-grounded proof of the analysis logic.
 
 What is scored
 --------------
-For each :class:`~tests.evals.firewall_corpus.LabelledCase` the suite runs BOTH
+For each :class:`~tests.agents.eval.firewall_corpus.LabelledCase` the suite runs BOTH
 deterministic entry points over the whole policy at once —
 ``analyze_firewall_rules`` (shadowed / redundant / overly-permissive) and
 ``analyze_security_posture`` (posture) — collapses the produced findings to their
@@ -70,7 +70,7 @@ from app.engines.security.firewall import (
     analyze_security_posture,
 )
 from app.schemas.security import FindingCategory, SecurityFinding
-from tests.evals.firewall_corpus import (
+from tests.agents.eval.firewall_corpus import (
     CORPUS,
     ExpectedFinding,
     LabelledCase,

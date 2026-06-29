@@ -1,7 +1,7 @@
 """Labelled firewall-policy-analysis corpus (P2 W5-T1, ADR-0037 / ADR-0033 §3).
 
 Ground-truth fixtures for the precision/recall scorer in
-:mod:`tests.evals.test_firewall_analysis_eval`. Each :class:`LabelledCase` is a
+:mod:`tests.agents.eval.test_firewall_analysis_eval`. Each :class:`LabelledCase` is a
 small policy (an ordered list of :class:`NormalizedFirewallRule`, plus optional
 :class:`NormalizedAclEntry` rows) carrying **ground-truth labels** — the
 :class:`ExpectedFinding` rows the W3 deterministic service
