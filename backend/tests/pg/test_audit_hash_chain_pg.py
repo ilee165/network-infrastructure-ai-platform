@@ -260,7 +260,10 @@ async def test_revoke_update_blocks_a_non_owner_role_on_audit_log(
     target = entries[0]
 
     # libpq URL + admin connection to provision a throwaway least-privilege role.
-    sa_url = str(pg_engine.url)
+    # NOTE: ``str(url)`` masks the password as ``***`` (SQLAlchemy security default),
+    # which fails real password auth under a CI ``services: postgres`` (passed only
+    # under local trust/socket auth). Render with the real password explicitly.
+    sa_url = pg_engine.url.render_as_string(hide_password=False)
     libpq = sa_url.replace("postgresql+asyncpg://", "postgresql://")
     role = f"netops_least_priv_{uuid.uuid4().hex[:8]}"
     pwd = uuid.uuid4().hex  # ephemeral, throwaway — not a real secret, never asserted.
