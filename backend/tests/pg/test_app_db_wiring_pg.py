@@ -213,22 +213,82 @@ async def test_set_local_does_not_leak_to_next_transaction_on_same_connection(
 # ---------------------------------------------------------------------------
 
 
-async def test_read_only_replica_session_serves_reads_without_breaking_writes(
+async def test_unset_reader_url_reuses_primary_engine_and_reads_committed_write(
+    pg_session: AsyncSession,
+) -> None:
+    """With NO reader URL, the reader path REUSES the primary pair (ADR-0042 §5 single-instance).
+
+    The single-instance fallback (fix for the double-pool regression): when
+    ``database_reader_url`` is UNSET, :func:`app.db.get_reader_engine` /
+    :func:`app.db.get_reader_sessionmaker` must return the *same* objects as the
+    primary :func:`app.db.get_engine` / :func:`app.db.get_sessionmaker` — never a
+    SECOND engine/pool to the same DSN (that would double app-side connection
+    pressure with no replica to offload). This test is the load-bearing pin for
+    that branch: it asserts object identity AND that a reader session built off the
+    fallback still reads a committed write. If a future change rebuilds a distinct
+    reader pool on the unset path, the identity assertions go red.
+    """
+    settings = get_settings()
+    original_reader = settings.database_reader_url
+    object.__setattr__(settings, "database_reader_url", None)
+    # Reset any cached reader so the unset->primary branch is exercised fresh.
+    db._reader_engine = None
+    db._reader_sessionmaker = None
+    try:
+        # Identity: the unset path returns the PRIMARY pair, not a second pool.
+        assert db.get_reader_engine() is db.get_engine(), (
+            "with no reader URL, get_reader_engine() must reuse the primary engine "
+            "(no second pool to the same DSN — ADR-0042 §5 connection budget)"
+        )
+        assert db.get_reader_sessionmaker() is db.get_sessionmaker(), (
+            "with no reader URL, get_reader_sessionmaker() must reuse the primary "
+            "sessionmaker (no second pool)"
+        )
+        # No distinct reader engine was ever cached (the second pool was not built).
+        assert db._reader_engine is None
+        assert db._reader_sessionmaker is None
+
+        # A reader session built off the fallback still reads a committed write.
+        marker = f"rw-fallback-{uuid.uuid4().hex}"
+        await audit_service.record(
+            pg_session,
+            actor=marker,
+            action=audit_service.DEVICE_UPDATED,
+            target_type="device",
+            target_id="d4",
+            detail=None,
+        )
+        await pg_session.commit()
+
+        async with db.get_reader_sessionmaker()() as reader:
+            count = (
+                await reader.execute(
+                    text("SELECT count(*) FROM audit_log WHERE actor = :a"),
+                    {"a": marker},
+                )
+            ).scalar_one()
+            assert count == 1, "the committed write must be visible to the fallback reader session"
+            assert (await reader.execute(text("SELECT 1"))).scalar_one() == 1
+    finally:
+        object.__setattr__(settings, "database_reader_url", original_reader)
+        db._reader_engine = None
+        db._reader_sessionmaker = None
+
+
+async def test_configured_reader_url_serves_reads_without_breaking_writes(
     pg_session: AsyncSession, _migrated_pg: str
 ) -> None:
     """A read-only reader session serves queries while a write session commits (ADR-0042 §5).
 
     ADR-0042 §5 routes read-only queries to a replica (the ``database_reader_url``
-    endpoint); writes stay on the primary. With no reader URL the reader engine falls
-    back to the primary DSN, so the read/write split is exercised here against the
-    migrated DB: a write session appends + COMMITS an audit row, and an independent
-    READER session (built exactly as :func:`app.db.get_read_session` does) reads it
-    back — proving a read-only session can target its endpoint without breaking the
-    write path. We point the reader at the SAME migrated test DB so the assertion is
-    self-contained on one Postgres.
+    endpoint); writes stay on the primary. With a reader URL CONFIGURED, a distinct
+    reader engine is built: a write session appends + COMMITS an audit row, and an
+    independent READER session (built exactly as :func:`app.db.get_read_session`
+    does) reads it back — proving a read-only session can target its endpoint
+    without breaking the write path. We point the reader at the SAME migrated test
+    DB so the assertion is self-contained on one Postgres.
     """
-    # Build a reader engine the way app.db does, pinned at the migrated test DB so the
-    # fallback-to-primary path is what we exercise (no second DB needed).
+    # Configure a reader URL so the DISTINCT reader-engine branch is exercised.
     settings = get_settings()
     original_reader = settings.database_reader_url
     object.__setattr__(settings, "database_reader_url", _migrated_pg)
@@ -237,6 +297,10 @@ async def test_read_only_replica_session_serves_reads_without_breaking_writes(
     db._reader_sessionmaker = None
     try:
         reader_engine = db.get_reader_engine()
+        # A real reader URL builds a DISTINCT engine, not the primary pair.
+        assert reader_engine is not db.get_engine(), (
+            "a configured reader URL must build a distinct reader engine"
+        )
         reader_maker = async_sessionmaker(reader_engine, expire_on_commit=False)
 
         # WRITE on the primary session: append an audit row and COMMIT it.

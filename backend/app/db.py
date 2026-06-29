@@ -163,16 +163,31 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
 
 
 def get_reader_engine() -> AsyncEngine:
-    """Return the process-wide lazily created read-only (replica) engine (ADR-0042 §5)."""
+    """Return the process-wide read-only (replica) engine (ADR-0042 §5).
+
+    When :attr:`Settings.database_reader_url` is UNSET this returns the PRIMARY
+    engine (:func:`get_engine`) verbatim — a single-instance deployment must not
+    allocate a second pool to the same DSN (that would double app-side connection
+    pressure with no replica to offload). A distinct reader engine/pool is only
+    built when a real reader URL is configured.
+    """
     global _reader_engine
+    if not get_settings().database_reader_url:
+        return get_engine()
     if _reader_engine is None:
         _reader_engine = create_reader_engine(get_settings())
     return _reader_engine
 
 
 def get_reader_sessionmaker() -> async_sessionmaker[AsyncSession]:
-    """Return the process-wide sessionmaker bound to :func:`get_reader_engine`."""
+    """Return the process-wide sessionmaker bound to :func:`get_reader_engine`.
+
+    Mirrors :func:`get_reader_engine`: with no reader URL configured this returns
+    the PRIMARY sessionmaker (:func:`get_sessionmaker`) so no second pool is built.
+    """
     global _reader_sessionmaker
+    if not get_settings().database_reader_url:
+        return get_sessionmaker()
     if _reader_sessionmaker is None:
         _reader_sessionmaker = create_sessionmaker(get_reader_engine())
     return _reader_sessionmaker
