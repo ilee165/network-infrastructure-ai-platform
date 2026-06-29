@@ -716,13 +716,15 @@ jobs:
   # NOT YET A BLOCKING GATE — deliberately ABSENT from the `all-gates` aggregator
   # `needs` list below. P1-W4-LESSONS L1: a new gating CI tool must be validated
   # LOCALLY before it is pushed as a required gate; the kind/CNI live path could
-  # not be run on the W4-T3 authoring host (Windows, no Docker/Linux kind). Until
-  # the live run is exercised and the local-validation lesson is satisfied (named
-  # for the W5 release auditor — see docs/runbooks/kind-harness.md), this job runs
-  # for SIGNAL only so a kind/CNI bring-up quirk that only manifests in CI cannot
-  # mask the rest of the suite by flipping the required aggregator red. The STATIC
-  # validator step (validate-harness.sh) needs no cluster and always runs; the
-  # live `kind-harness.sh` step is `continue-on-error` until promoted in W5.
+  # not be run on the W4-T3 authoring host (Windows, no Docker/Linux kind). The W5
+  # release auditor reviewed this and re-deferred promotion to P3-Platform — gating
+  # an enforcing-CNI kind cluster as a required check needs a certified cluster to
+  # run reliably (see P2-RELEASE-READINESS.md G-SEC + docs/runbooks/kind-harness.md).
+  # Until then this job runs for SIGNAL only so a kind/CNI bring-up quirk that only
+  # manifests in CI cannot mask the rest of the suite by flipping the required
+  # aggregator red. The STATIC validator step (validate-harness.sh) needs no cluster
+  # and always runs; the live `kind-harness.sh` step is `continue-on-error` until
+  # promoted in P3-Platform.
   kind-harness:
     name: kind-harness (enforcing-CNI self-test + assertions — non-blocking)
     runs-on: ubuntu-latest
@@ -772,15 +774,16 @@ jobs:
           version: v0.24.0
 
       # The live enforcement run. continue-on-error until the live path is
-      # locally validated and promoted to a blocking gate in W5 (L1). Teardown is
-      # inside the harness trap, so a failure here still deletes the cluster.
+      # validated on a certified enforcing-CNI cluster and promoted to a blocking
+      # gate in P3-Platform (L1; re-deferred from W5 — see P2-RELEASE-READINESS.md).
+      # Teardown is inside the harness trap, so a failure here still deletes the cluster.
       - name: Run kind harness (create → CNI self-test → apply → assert → teardown)
         id: harness
         continue-on-error: true
         run: bash ci/kind/kind-harness.sh
 
       # Surface the live-run result in the job summary without flipping the
-      # required aggregator. When the live path is promoted (W5), drop
+      # required aggregator. When the live path is promoted (P3-Platform), drop
       # continue-on-error above and add this job to the all-gates `needs` list.
       - name: Report kind harness outcome
         if: always()
@@ -908,6 +911,89 @@ jobs:
         if: always()
         run: docker compose -f deploy/docker/docker-compose.kms-emulators.yml down -v
 
+  # Postgres-backed test layer (P2 W5-T0). The offline backend job runs the unit
+  # suite on in-memory aiosqlite, which silently passes code that is wrong under
+  # PostgreSQL (the four documented W4 false-PASSes — NULLS FIRST ordering, a
+  # unique index on a partitioned table, REVOKE UPDATE append-only, and the
+  # prev_hash chain walk). THIS job re-asserts the W4 audit-hash-chain + credential
+  # rotation controls against a REAL Postgres so the W5-T3 gate flip does not rest
+  # on a backend that hides the bug it gates.
+  #
+  #   - `services: postgres` uses the pgvector/pgvector image (migration 0006 needs
+  #     the `vector` extension); a stock postgres image would fail `alembic upgrade
+  #     head`. The CI-native service is health-gated before the tests run (no
+  #     Docker-in-test, L1).
+  #   - The harness skips CLEANLY off-CI (no reachable Postgres) and BITES here on a
+  #     regressed W4 control. `tests/pg/` is the marker-`integration` PG layer; it is
+  #     NOT in the default SQLite smoke (separate job, additive).
+  #   - `set -o pipefail` + `test -s` on the piped step (L5) so a broken PG step
+  #     cannot mask its exit code as green.
+  pg-integration:
+    name: pg-integration (real PostgreSQL — W4 controls under PG)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [backend]
+    services:
+      postgres:
+        # pgvector image: the migration chain's `CREATE EXTENSION vector`
+        # (migration 0006) requires it; a stock postgres would fail upgrade head.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: netops
+          POSTGRES_PASSWORD: netops
+          POSTGRES_DB: netops_test
+        ports:
+          - 5432:5432
+        # Health-gate the service so the tests never race the boot (L1): the job
+        # does not start steps until pg_isready reports healthy.
+        options: >-
+          --health-cmd "pg_isready -U netops -d netops_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install backend (editable, dev extras)
+        run: pip install -e "./backend[dev]"
+
+      # The PG layer re-asserts the W4 controls against the real service. pipefail
+      # + `test -s` (L5) so a broken PG step cannot read as green through the tee
+      # pipe; an EMPTY pytest output (the binary never ran) also fails the gate.
+      # NETOPS_TEST_DATABASE_URL points the harness's connection probe + alembic
+      # upgrade head at the service; `-m integration` selects exactly this layer.
+      - name: PG test layer (alembic upgrade head + W4 controls) — RED gate
+        working-directory: backend
+        shell: bash
+        env:
+          NETOPS_TEST_DATABASE_URL: postgresql+asyncpg://netops:netops@127.0.0.1:5432/netops_test
+          NETOPS_ADMIN_PASSWORD: pg-ci-throwaway
+        run: |
+          set -o pipefail
+          pytest tests/pg/ -m integration -v | tee pg-pytest-output.txt
+          # Guard against a silent no-collection green (the harness skips off-CI;
+          # here Postgres IS reachable, so the tests MUST actually run, not skip).
+          test -s pg-pytest-output.txt
+          if grep -qE '([1-9][0-9]* skipped)|no tests ran' pg-pytest-output.txt; then
+            echo "::error::PG layer skipped or collected nothing — the service was not reachable; this gate must RUN and BITE."
+            exit 1
+          fi
+          {
+            echo "## PG-backed W4-control tests (real PostgreSQL)"
+            echo ""
+            echo '```text'
+            tail -n 30 pg-pytest-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Single required-check aggregator (P1 W6-T4). Branch protection should require
   # ONLY this job; it transitively depends on every gate, so a failure or skip of
   # ANY upstream job (dependency audits, secret scan, image/Trivy, chart/policy)
@@ -929,7 +1015,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration]
     steps:
       - name: Assert every gate succeeded
         env:

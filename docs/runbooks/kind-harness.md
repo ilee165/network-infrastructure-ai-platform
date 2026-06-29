@@ -1,6 +1,6 @@
 # Runbook — Ephemeral in-CI kind cluster harness (W4-T3)
 
-> Operator/developer procedure for the ADR-0041 §2/§3 + ADR-0039 §6 kind harness: how it brings up a throwaway cluster with an **enforcing CNI**, proves the CNI actually enforces NetworkPolicy (the **CNI self-test bite**), applies the chart, and runs the assertion-runner that **W4-T4 (mTLS handshake)** and **W4-T5 (collector egress deny)** plug their assertions into. Also records why the live kind job is **not yet a blocking gate** and what W5 must do to promote it. Cheap-scope only — handshake + deny; HA/scale/soak are P3-Platform.
+> Operator/developer procedure for the ADR-0041 §2/§3 + ADR-0039 §6 kind harness: how it brings up a throwaway cluster with an **enforcing CNI**, proves the CNI actually enforces NetworkPolicy (the **CNI self-test bite**), applies the chart, and runs the assertion-runner that **W4-T4 (mTLS handshake)** and **W4-T5 (collector egress deny)** plug their assertions into. Also records why the live kind job is **not yet a blocking gate** and what P3-Platform must do to promote it (re-deferred from W5-T3). Cheap-scope only — handshake + deny; HA/scale/soak are P3-Platform.
 
 ## Objective
 
@@ -56,11 +56,11 @@ The live kind path (steps 1-6) is **deliberately not a blocking gate**:
 - **Why:** the live kind/CNI path could **not be validated locally on the W4-T3 authoring host** (Windows, no Docker / no Linux kind cluster). P1-W4-LESSONS **L1** is explicit: validate a new gating CI tool LOCALLY before pushing it as required — the local gate set is not the CI gate set, and CNI install / shell quoting often break differently in CI. Making this a required gate now would let a CI-only kind/CNI bring-up quirk mask the entire suite by flipping the required aggregator red on a path nobody has run green.
 - **What IS enforced now:** the static `validate-harness.sh` step runs on every push and is **blocking within the job** (it needs no cluster and reliably bites a silently weakened harness). The static manifest gates (helm lint / kubeconform / kube-linter / conftest) on the chart remain green via the `infra` job.
 
-**Promotion (W5 release auditor, named-deferred):** once the live run has been exercised on a Linux/Docker host or a green CI run is observed and the L1 local-validation lesson is satisfied,
+**Promotion (re-deferred → P3-Platform):** the W5-T3 release auditor reviewed this and **re-deferred promotion to P3-Platform** — gating an enforcing-CNI kind cluster as a required check needs a certified cluster to run reliably, which this phase's no-hardware host does not have (`P2-RELEASE-READINESS.md` G-SEC). Once the live run is exercised on a Linux/Docker or certified-CNI cluster and the L1 local-validation lesson is satisfied,
 1. drop `continue-on-error: true` from the "Run kind harness" step, and
 2. add `kind-harness` to the `all-gates` `needs` list (`.github/workflows/ci.yml`).
 
-This is the W5-T3 readiness item; until then the live kind validation is recorded as **CI-only / deferred-accepted** alongside the project's prior live-lab deferrals (e.g. SpatiumDDI live-lab, M5 live-lab acceptance).
+This is now a **P3-Platform** readiness item (re-deferred from W5-T3); until then the live kind validation is recorded as **CI-only / deferred-accepted** alongside the project's prior live-lab deferrals (e.g. SpatiumDDI live-lab, M5 live-lab acceptance).
 
 ## Failure modes
 

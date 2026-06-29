@@ -1,6 +1,6 @@
 # ADR-0038: Audit-Log Hash Chaining + Daily Verification
 
-**Status:** Proposed | **Date:** 2026-06-25 | **Milestone:** P2 W0
+**Status:** Accepted | **Date:** 2026-06-25 (Accepted 2026-06-29) | **Milestone:** P2 W0 (Accepted P2 W5)
 
 ## Context
 

@@ -1,11 +1,41 @@
-"""Real-LLM supervisor routing eval (manual gate) — EIGHT-way roster (M5 T14).
+"""Real-LLM supervisor routing eval (manual gate) — NINE-way roster (P2 W5-T2).
 
 Validates that the Master Architect routes each intent to the correct specialist
-across the FULL M4 roster — troubleshooting (fault diagnosis), discovery
-(inventory enumeration), **configuration** (drift / compliance narration), and
-**documentation** (inventory / diagram / runbook generation) — using a REAL
-local model (not the ``ScriptedChatModel`` the deterministic suite uses, which
-replays a fixed ``RoutingDecision`` and so cannot test routing quality).
+across the FULL roster — troubleshooting (fault diagnosis), discovery
+(inventory enumeration), **configuration** (drift / compliance narration),
+**documentation** (inventory / diagram / runbook generation), ddi, packet
+analysis, automation, consultant, and **security** (firewall-policy / posture
+audit, P2 W3) — using a REAL local model (not the ``ScriptedChatModel`` the
+deterministic suite uses, which replays a fixed ``RoutingDecision`` and so cannot
+test routing quality).
+
+P2 W5-T2 cross-vendor + Security-Agent routing re-run
+-----------------------------------------------------
+This module is the **real-LLM half** of W5-T2 (PRODUCTION.md §2.6 — no
+cross-vendor eval regression). It is the same harness the M4 5-way / M5 8-way /
+P1 W7-T3 routing re-runs used (requirement 4: same harness => apples-to-apples
+comparison). W5-T2 extends it for P2's two new pieces:
+
+* **Security Agent (P2 W3, ADR-0037):** held-out cases that must route to the new
+  ``security`` specialist — firewall-policy hygiene audits (shadowed /
+  overly-permissive rule review) and posture checks. The no-regression guard is
+  that adding this ninth specialist did NOT steal routing from troubleshooting /
+  configuration / ddi (W5-T2 risk: a broad security description pulls
+  diagnosis/config prompts). Every prior case below is unchanged in wording and
+  expected label, so any drift in the prior matrix bites here.
+* **panos / fortios (P2 W2, ADR-0035/0036):** like the P1 Wave-1 plugins, these
+  are vendor DRIVERS, not routing targets — their intents route to the EXISTING
+  specialist that owns the capability (PAN-OS firewall-policy audit -> security;
+  FortiOS routing fault -> troubleshooting; FortiOS config drift -> configuration).
+  Held-out cases name each new vendor's hardware explicitly so a pass reflects the
+  audit-vs-diagnose-vs-narrate boundary holding under vendor-specific phrasing.
+
+The deterministic, CI-collected guardrail for W5-T2 (panos/fortios present in the
+vendor registry, the security specialist registered + routable, the prior 8
+specialists not lost, and the ADR-0033 read-only allow-list confined to the
+security agent's own tools) lives in the sibling ``test_p2_cross_vendor_routing.py``
+(runs without a local model); the live re-run here is **deferred-accepted** when
+no local model is available (no hardware, same posture as the prior matrices).
 
 M4 widens the supervisor's decision from three routable specialists to five
 (M4 risk #2: the wider disambiguation surface is exactly the failure the M3
@@ -236,12 +266,61 @@ _CASES = [
         "currently resolve to?",
         "ddi",
     ),
+    # ------------------------------------------------------------------ #
+    # P2 W5-T2 — Security Agent (ADR-0037) + Vendor Wave 2 (panos/fortios,
+    # ADR-0035/0036) cross-vendor re-run. The Security Agent is the ninth routable
+    # specialist; panos/fortios are vendor DRIVERS (not routing targets) whose
+    # intents route to the existing owning specialist. Every case below is HELD
+    # OUT — fresh device names, vendors, and wording distinct from the routing
+    # prompt's few-shot examples — so a pass reflects the audit-vs-diagnose-vs-
+    # narrate-vs-DDI boundary holding, not echoing a demonstration. The two
+    # security cases also guard W5-T2's no-regression contract from the OTHER
+    # direction: a vendor-neutral firewall-hygiene audit must reach security, never
+    # be stolen by troubleshooting or configuration.
+    #
+    # security: firewall-policy hygiene audit (policy-as-data review) -> security.
+    # Worded apart from a live single-flow fault ("why is THIS flow blocked now?"
+    # would be troubleshooting) and apart from config drift ("compare to baseline"
+    # would be configuration): these ask "which rules are shadowed / too broad?".
+    (
+        "Audit the firewall policy on dc-fw-09 — which rules are shadowed or "
+        "overly permissive, and what's the security posture?",
+        "security",
+    ),
+    (
+        "Review our perimeter ruleset and tell me which permit rules are redundant "
+        "or expose management access from any source.",
+        "security",
+    ),
+    # panos (PAN-OS, ADR-0035): firewall-policy hygiene audit -> security. Names
+    # the PAN-OS device explicitly; the intent is policy-hygiene review, which the
+    # Security Agent owns regardless of vendor.
+    (
+        "On the Palo Alto pan-edge-02, which security policy rules are shadowed by "
+        "an earlier broader rule? Audit the policy.",
+        "security",
+    ),
+    # fortios (FortiOS, ADR-0036): a LIVE routing fault on a FortiGate ->
+    # troubleshooting (diagnose a single broken flow, not audit policy hygiene).
+    (
+        "Our FortiGate fgt-wan-01 stopped advertising 203.0.113.0/24 to its BGP "
+        "peer this morning — read its route table and tell me why.",
+        "troubleshooting",
+    ),
+    # fortios (FortiOS, ADR-0036): config drift / compliance narration ->
+    # configuration (what diverged from baseline, not why a flow is broken, not a
+    # policy-hygiene audit).
+    (
+        "How does fgt-branch-14's running config compare to the FortiOS hardening "
+        "baseline we signed off last quarter?",
+        "configuration",
+    ),
 ]
 
-#: The eight specialists the supervisor routes over in M5 (every routable agent
-#: in the production registry except the supervisor itself). Each expected label
-#: below must be one of these — a guard so a typo in a case can never silently
-#: pass.
+#: The nine specialists the supervisor routes over after P2 W3 (every routable
+#: agent in the production registry except the supervisor itself; ``security``
+#: added in W3-T2). Each expected label below must be one of these — a guard so a
+#: typo in a case can never silently pass.
 _ROUTABLE_SPECIALISTS = {
     "troubleshooting",
     "discovery",
@@ -251,6 +330,7 @@ _ROUTABLE_SPECIALISTS = {
     "packet_analysis",
     "automation",
     "consultant",
+    "security",
 }
 
 
@@ -267,17 +347,19 @@ def _routable_roster() -> str:
     return "\n".join(f"- {agent.name}: {agent.description}" for agent in agents)
 
 
-def test_roster_exposes_the_full_eight_way_set() -> None:
-    """Sanity: the production roster the eval routes over holds all eight M5 specialists.
+def test_roster_exposes_the_full_nine_way_set() -> None:
+    """Sanity: the production roster the eval routes over holds all nine P2 specialists.
 
     A guard so the eval can never silently shrink: if a specialist were dropped
-    from the composition root, its held-out cases would have no valid target.
-    Also pins every expected label in ``_CASES`` to a real routable specialist.
+    from the composition root, its held-out cases would have no valid target. This
+    is also the W5-T2 no-regression anchor for the roster itself — the eight prior
+    specialists plus ``security`` must all remain routable. Also pins every
+    expected label in ``_CASES`` to a real routable specialist.
     """
     registry = build_default_registry()
     routable = {agent.name for agent in registry.list() if agent.name != SUPERVISOR_NAME}
     assert routable >= _ROUTABLE_SPECIALISTS, (
-        f"roster {routable} is missing one of the M5 specialists"
+        f"roster {routable} is missing one of the nine P2 specialists"
     )
     expected_labels = {expected for _, expected in _CASES}
     assert expected_labels <= _ROUTABLE_SPECIALISTS, (
@@ -289,7 +371,7 @@ def test_roster_exposes_the_full_eight_way_set() -> None:
 async def test_routing_picks_expected_specialist(intent: str, expected: str) -> None:
     settings = Settings()  # reads NETOPS_LLM_LOCAL_MODEL / profile from env
     llm = get_chat_model("local", settings)
-    prompt = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)  # latest registered (v5, eight-way)
+    prompt = get_prompt(SUPERVISOR_ROUTING_PROMPT_ID)  # latest registered (P2 nine-way)
     system = SystemMessage(content=prompt.text.format(specialists=_routable_roster()))
     router = llm.with_structured_output(RoutingDecision)
     decision = await router.ainvoke([system, HumanMessage(content=intent)])
