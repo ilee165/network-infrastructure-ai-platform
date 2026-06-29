@@ -113,18 +113,6 @@ _SECURITY_READ_ONLY_TOOLS = frozenset({"analyze_firewall_policy", "assess_securi
 _SECURITY_STATE_CHANGING_TOOLS = frozenset({"propose_firewall_remediation"})
 _SECURITY_ALLOW_LIST = _SECURITY_READ_ONLY_TOOLS | _SECURITY_STATE_CHANGING_TOOLS
 
-#: Foreign / device-executing tool names that must NOT be nameable from the
-#: Security Agent — a scope-hop injection naming one of these cannot summon it
-#: because it is simply not in the security allow-list.
-_FOREIGN_OR_DEVICE_TOOLS = frozenset(
-    {
-        "add_dns_record",  # ddi's mutator
-        "deploy_config",  # device-executing config write
-        "execute_change_request",  # automation's execute path
-        "summarize_change_request",  # automation's narration tool
-    }
-)
-
 
 def test_wave2_vendor_plugins_present_in_registry() -> None:
     """The 2 P2 Vendor-Wave-2 plugins are registered in the vendor plugin roster.
@@ -220,11 +208,12 @@ def test_security_agent_allow_list_confined_to_read_only_set() -> None:
     fully prompt-injected model.
 
     The assertions below are exactly the property a scope-hop injection cannot
-    break — driving the model with carrier text naming ``deploy_config`` /
-    ``execute_change_request`` / ``add_dns_record`` cannot summon them because they
-    are simply not in the security allow-list. (The behavioural proof that an
-    *injected* ``propose_firewall_remediation`` only drafts a four-eyes CR and
-    never executes lives in
+    break — a prompt coercing the model to name a tool from another agent cannot
+    summon it because it is simply not in the security allow-list. Cross-agent
+    tool exclusion is further validated dynamically (against the live registry) by
+    ``test_security_agent_does_not_share_tools_with_other_agents``. (The
+    behavioural proof that an *injected* ``propose_firewall_remediation`` only
+    drafts a four-eyes CR and never executes lives in
     ``test_p1_prompt_injection.py::TestSecurityRemediationModelToolBoundary``; this
     is the registry-level invariant W5-T2 re-asserts after the agent was wired into
     the routing roster.)
@@ -237,13 +226,6 @@ def test_security_agent_allow_list_confined_to_read_only_set() -> None:
     assert tool_names == _SECURITY_ALLOW_LIST, (
         f"security allow-list {sorted(tool_names)} != the declared read-only set "
         f"{sorted(_SECURITY_ALLOW_LIST)} — the ADR-0033 boundary drifted."
-    )
-
-    # No foreign agent's tool and no device-executing tool is nameable from it.
-    nameable_foreign = tool_names & _FOREIGN_OR_DEVICE_TOOLS
-    assert not nameable_foreign, (
-        f"security agent can name foreign/device tool(s) {sorted(nameable_foreign)} "
-        f"— a scope-hop injection could escape the read-only allow-list."
     )
 
     # The only STATE_CHANGING surface is the gate-routed remediation drafter; every
