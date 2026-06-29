@@ -105,13 +105,26 @@ equal `created_at` can never be exported in an ambiguous order.
   payload) — exactly-once *effect* on an at-least-once *channel*.
 - **Monotonic ordering.** Rows are always selected and delivered `ORDER BY seq`, the
   same key the ADR-0038 verifier uses, so SIEM-side order matches DB append order.
-- **Pre-chain / NULL-`seq` rows.** ADR-0038 leaves `seq` NULLABLE only for pre-W4
-  old-writer rows (which also carry the genesis `entry_hash` and are treated as
-  untrusted pre-chain history). The cursor model operates over the chained,
-  non-NULL-`seq` rows; the handling of any residual NULL-`seq` pre-chain history at
-  first-export bootstrap is fixed in the W3-T1 notes (export-from-genesis-once,
-  ordered NULLS-FIRST as untrusted history, then the `seq` cursor) — consistent with
-  the ADR-0038 verifier treating those rows as pre-chain.
+- **Pre-chain / NULL-`seq` rows — excluded from the `seq`-cursor export, mirroring the
+  verifier.** ADR-0038 leaves `seq` NULLABLE only for pre-W4 old-writer rows (which
+  also carry the genesis `entry_hash` and are treated as untrusted pre-chain history).
+  The cursor model operates **only** over the chained, non-NULL-`seq` rows: the
+  exporter's read carries the same `seq IS NOT NULL` filter the ADR-0038 verifier
+  applies (`backend/app/services/audit/verify.py`, `_entries_after`), so it selects and
+  delivers exactly the rows the chain walks and **never streams a NULL-`seq` pre-chain
+  row into the SIEM**. This is the corrected decision: NULL-`seq` rows are **not**
+  ordered NULLS-FIRST into the export stream. Doing so would contradict the audit-integrity
+  control — the verifier deliberately EXCLUDES NULL-`seq` rows (PostgreSQL sorts NULLs
+  FIRST, which would otherwise FALSE-break the chain) and `count_pre_chain_rows()`
+  surfaces them separately and treats a non-genesis-hash NULL-`seq` row as a LOUD FAILURE
+  (suspicious / likely tampered). Exporting those rows would stream into the SIEM exactly
+  the rows the integrity control keeps out of the chain and flags as suspicious. Residual
+  pre-chain rows are a bounded, transitional pre-W4 set (the verify job already counts and
+  fails loud on suspicious ones); their off-platform disposition is **not** part of the
+  `seq`-cursor export and is left to the audit-integrity report (PRODUCTION.md §7), not the
+  SIEM stream. The export contract is therefore consistent with the ADR-0038 verifier:
+  both walk the non-NULL-`seq` chain in `seq` order and both exclude NULL-`seq` pre-chain
+  history.
 
 ### 3. Backpressure — never lose audit, never block the audit write path
 
