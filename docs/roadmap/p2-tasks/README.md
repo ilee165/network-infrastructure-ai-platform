@@ -99,14 +99,18 @@ NetworkPolicy deny only; expensive HA/scale/soak drills are P3-Platform.
 
 ## W5 — Evals + phase-exit gate (PRODUCTION.md §2.6/§11, gates G-SEC/G-MNT/G-OBS)
 
-Owner: **`wf-eval-designer`** (suites) + **`wf-release-auditor`** (gate evidence).
-The LAST P2 wave and the phase-exit gate. Builds the *proof*, not new controls.
+Owner: **`wf-eval-designer`** (suites) + **`wf-release-auditor`** (gate evidence) +
+**`wf-implementer`** (PG test harness). The LAST P2 wave and the phase-exit gate.
+Builds the *proof*, not new controls. **W5-T0 added 2026-06-28** (build decision):
+fold the Postgres-backed test layer in so the gate flip rests on PG-accurate tests,
+not the SQLite-only suite that hid every W4 review major.
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
+| [W5-T0](W5-T0-postgres-testcontainers.md) | Postgres-backed test harness — re-assert W4 audit hash-chain + credential rotation under real PG (closes the SQLite-hides-PG-semantics class) | `wf-implementer` (strong) | **strong** spec + quality | W4 |
 | [W5-T1](W5-T1-firewall-analysis-eval-corpus.md) | Firewall-policy-analysis eval corpus + deterministic suite (precision/recall thresholds; `NullPool` SQLite) | `wf-eval-designer` (strong) | **strong** spec + quality | W3 |
 | [W5-T2](W5-T2-cross-vendor-routing-rerun.md) | Cross-vendor + Security-Agent routing re-run (panos/fortios + new agent; no regression vs prior matrix) | `wf-eval-designer` (strong) | sonnet spec + quality | W2, W3 |
-| [W5-T3](W5-T3-gate-evidence-readiness.md) | G-* gate evidence doc + P2-Security readiness; flip ADRs 0034–0041 → Accepted; record G-SCA/G-REL-live deferred → P3-Platform | `wf-release-auditor` (strong) | **strong** quality | W5-T1, W5-T2, W4 |
+| [W5-T3](W5-T3-gate-evidence-readiness.md) | G-* gate evidence doc + P2-Security readiness; flip ADRs 0034–0041 → Accepted; record G-SCA/G-REL-live deferred → P3-Platform | `wf-release-auditor` (strong) | **strong** quality | W5-T0, W5-T1, W5-T2, W4 |
 
 ---
 
@@ -117,7 +121,7 @@ The LAST P2 wave and the phase-exit gate. Builds the *proof*, not new controls.
 - **W2:** T1 ‖ T2 (disjoint plugin dirs). Can run **concurrent with W4** (disjoint files).
 - **W3:** after W1-T1 + at least one W2 plugin; T1 → T2 (routing imports the agent).
 - **W4 streams concurrent:** audit (T1) ‖ credential (T2) ‖ network (T3 → T4, T5). T3 (kind harness) lands before the two enforcement tasks that assert against it.
-- **W5** last (needs both plugins + Security Agent + hardening). T1 ‖ T2 (disjoint suites); T3 last (cites T1/T2 + W4, flips ADRs + roadmap on green). **Rebase the W5 branch onto `origin/main` first.**
+- **W5** last (needs both plugins + Security Agent + hardening). T0 ‖ T1 ‖ T2 (disjoint: PG test layer / firewall corpus / routing cases); T3 last (cites T0/T1/T2 + W4, flips ADRs + roadmap on green). **Rebase the W5 branch onto `origin/main` first.** Executed sequentially as atomic-commit-per-task within the build workflow even where files are disjoint.
 
 ## Spec template
 
