@@ -19,6 +19,40 @@ so a hardened default cannot drift per-service.
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{/*
+The effective in-cluster Postgres HOST the api/worker/cronjobs dial (W1-T2,
+ADR-0042 §3/§4). When the CloudNativePG HA tier is enabled the single-instance
+`config.postgres.host` Service (`netops-postgres`) is NOT rendered; every
+connection MUST go through the PgBouncer Pooler read-write Service
+(`<fullname>-pg-pooler-rw`) so the connection budget holds and PgBouncer re-points
+to the new primary on failover. When CNPG is OFF this is just
+`config.postgres.host` — the GA single-instance render is byte-for-byte unchanged.
+Usage: {{ include "netops.postgresHost" . }}
+*/}}
+{{- define "netops.postgresHost" -}}
+{{- if .Values.cloudNativePg.enabled -}}
+{{- printf "%s-pg-pooler-rw" (include "netops.fullname" .) -}}
+{{- else -}}
+{{- .Values.config.postgres.host -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether THIS CHART renders the in-chart api/worker↔Postgres mTLS (W1-T2 / ADR-0039).
+True ("true") only when mtls.postgres.enabled AND the CNPG HA tier is OFF: the
+chart's mtls.postgres machinery (server cert + pg_hba + verify-full client config)
+targets the in-chart `netops-postgres` StatefulSet. Under cloudNativePg.enabled
+that StatefulSet is not rendered and the CloudNativePG OPERATOR owns the cluster's
+TLS, so the in-chart mTLS is N/A and rendering it would (a) fail (external-PG
+guard) or (b) point clients at a server this chart never wired. Empty string =
+false. Usage: {{- if include "netops.pgMtlsEnabled" . }} ... {{- end }}
+*/}}
+{{- define "netops.pgMtlsEnabled" -}}
+{{- if and .Values.mtls.postgres.enabled (not .Values.cloudNativePg.enabled) -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{/* Common labels applied to every object. */}}
 {{- define "netops.labels" -}}
 helm.sh/chart: {{ include "netops.chart" . }}
@@ -308,24 +342,33 @@ spec:
 {{- end -}}
 
 {{/*
-netops.dbClientTlsEnv — the api/worker -> Postgres mTLS CLIENT env (W4-T4,
-ADR-0039 §4). Authored ONCE so the api + worker cannot drift. Renders the
+netops.dbClientTlsEnv — the api/worker in-cluster DB env (W4-T4 ADR-0039 §4 /
+W1-T2 ADR-0042 §4). Authored ONCE so the api + worker cannot drift. Sets
+NETOPS_DATABASE_URL to the in-cluster DSN (the app default DSN points at the
+compose host, not the chart Service) and — when in-chart mTLS applies — the
 NETOPS_DB_SSL_* settings (sslmode + the mounted cert/key/CA FILE paths) the
-backend reads in app.db.build_ssl_connect_args. NO key material — only file
-paths into the read-only Secret mount (ADR-0039 §5). Also sets NETOPS_DATABASE_URL
-to the in-cluster DSN so the client dials the postgres Service over the verified
-link (the app default DSN points at the compose host, not the chart Service).
+backend reads in app.db.build_ssl_connect_args. NO key material — only file paths
+into the read-only Secret mount (ADR-0039 §5).
+
+The DSN host is netops.postgresHost (the PgBouncer Pooler rw Service under the
+CNPG HA tier, else the single-instance Service). The DSN is emitted whenever the
+in-cluster DSN must override the compose default — i.e. when in-chart mTLS is on
+OR when the CNPG tier is enabled (its Service name differs from the app default).
+The SSL env is emitted ONLY when in-chart mTLS applies (netops.pgMtlsEnabled =
+mtls on AND CNPG off): under CNPG the operator owns the cluster TLS and the app
+reaches it through the Pooler, so no in-chart verify-full client config is wired
+here (live CNPG↔app mTLS is W4-T1).
 Usage: {{- include "netops.dbClientTlsEnv" . | nindent 12 }}
-Renders nothing when mtls.postgres.enabled is false.
+Renders nothing when mtls is off AND CNPG is off (the unchanged GA default).
 */}}
 {{- define "netops.dbClientTlsEnv" -}}
-{{- $m := .Values.mtls.postgres -}}
-{{- if $m.enabled }}
-# api/worker -> Postgres mTLS (ADR-0039 §4). The DSN targets the in-cluster
-# postgres Service; the SSL mode + mounted client cert/key/CA drive the asyncpg
-# verify-full SSLContext (app.db). The password stays a separate secretKeyRef env.
+{{- if or (include "netops.pgMtlsEnabled" .) .Values.cloudNativePg.enabled }}
+# api/worker -> Postgres (ADR-0039 §4 / ADR-0042 §4). The DSN targets the
+# in-cluster postgres host (the PgBouncer Pooler rw Service when the CNPG HA tier
+# is enabled, else the single-instance Service). The password stays a separate
+# secretKeyRef env.
 - name: NETOPS_DATABASE_URL
-  value: postgresql+asyncpg://{{ .Values.config.postgres.user }}:$(NETOPS_POSTGRES_PASSWORD)@{{ .Values.config.postgres.host }}:{{ .Values.config.postgres.port }}/{{ .Values.config.postgres.database }}
+  value: postgresql+asyncpg://{{ .Values.config.postgres.user }}:$(NETOPS_POSTGRES_PASSWORD)@{{ include "netops.postgresHost" . }}:{{ .Values.config.postgres.port }}/{{ .Values.config.postgres.database }}
 {{- include "netops.dbClientTlsSslEnv" . }}
 {{- end -}}
 {{- end -}}
@@ -336,12 +379,13 @@ cert/key/CA FILE paths), WITHOUT NETOPS_DATABASE_URL. The api/worker deployments
 get the URL from netops.dbClientTlsEnv (K8s $(VAR) expansion); the audit /
 credential CronJobs assemble their own DSN inside a `sh -c` script (L3) and only
 need the SSL settings here so app.db.build_ssl_connect_args mounts the verify-full
-SSLContext. Renders nothing when mtls.postgres.enabled is false.
+SSLContext. Renders nothing when in-chart mTLS does not apply (mtls off, OR the
+CNPG HA tier is enabled — the operator owns the cluster TLS then; ADR-0042 §4).
 Usage: {{- include "netops.dbClientTlsSslEnv" . | nindent 16 }}
 */}}
 {{- define "netops.dbClientTlsSslEnv" -}}
 {{- $m := .Values.mtls.postgres -}}
-{{- if $m.enabled }}
+{{- if include "netops.pgMtlsEnabled" . }}
 - name: NETOPS_DB_SSL_MODE
   value: {{ $m.sslMode | quote }}
 - name: NETOPS_DB_SSL_ROOT_CERT
@@ -363,9 +407,11 @@ mounted at mtls.postgres.mountPath. Usage:
   {{- include "netops.dbClientTlsVolumeMount" . | nindent 12 }}
 */}}
 {{- define "netops.dbClientTlsVolumeMount" -}}
-{{- if .Values.mtls.postgres.enabled }}
+{{- if include "netops.pgMtlsEnabled" . }}
 # api/worker -> Postgres mTLS client cert/key + CA, mounted read-only from the
 # Secret (cert-manager-issued or dev-fallback). Never image-baked (ADR-0039 §5).
+# Gated on netops.pgMtlsEnabled: under the CNPG HA tier the operator owns the
+# cluster TLS and this in-chart client Secret is not rendered, so no dangling mount.
 - name: db-tls-client
   mountPath: {{ .Values.mtls.postgres.mountPath }}
   readOnly: true
@@ -384,7 +430,7 @@ Usage:
   {{- include "netops.dbClientTlsVolume" . | nindent 8 }}
 */}}
 {{- define "netops.dbClientTlsVolume" -}}
-{{- if .Values.mtls.postgres.enabled }}
+{{- if include "netops.pgMtlsEnabled" . }}
 - name: db-tls-client
   secret:
     secretName: {{ .Values.mtls.postgres.clientSecretName }}

@@ -2841,8 +2841,11 @@ deny contains msg if {
 # a streaming replica that lacks pgvector breaks RAG reads routed to it. ---
 cluster_creates_vector(c) if {
 	some stmt in object.get(object.get(object.get(c.spec, "bootstrap", {}), "initdb", {}), "postInitSQL", [])
-	contains(lower(stmt), "extension")
-	contains(lower(stmt), "vector")
+	# Require the actual CREATE EXTENSION … vector shape, not merely the words
+	# "extension" + "vector" — `DROP EXTENSION vector` or a comment must NOT satisfy
+	# this. `(?i)` = case-insensitive; allow an optional `IF NOT EXISTS` and an
+	# optional quote around the extension name (ADR-0042 §5).
+	regex.match(`(?i)\bcreate\s+extension\s+(if\s+not\s+exists\s+)?"?vector"?`, stmt)
 }
 
 deny contains msg if {
@@ -2860,13 +2863,26 @@ deny contains msg if {
 	msg := sprintf("CNPG Cluster %q imageName must not use the `latest` tag (ADR-0029 §5)", [input.metadata.name])
 }
 
+# A reference is PINNED iff it carries an explicit tag in the image-NAME segment
+# (a `:` AFTER the last `/`, so a registry host:port does NOT count) OR an
+# `@sha256:` digest. `registry.internal:5000/cloudnative-pg/postgresql` is tagless
+# even though it contains a `:` (the host port) — it must NOT pass. ---
+cnpg_image_pinned(img) if {
+	contains(img, "@sha256:")
+}
+
+cnpg_image_pinned(img) if {
+	# The image-name segment is everything after the last `/`; a `:` there is a tag.
+	parts := split(img, "/")
+	contains(parts[count(parts) - 1], ":")
+}
+
 deny contains msg if {
 	is_cnpg_cluster(input)
 	img := object.get(input.spec, "imageName", "")
 	img != ""
-	not contains(img, ":")
-	not contains(img, "@sha256:")
-	msg := sprintf("CNPG Cluster %q imageName %q must carry an explicit tag or digest (ADR-0029 §5)", [input.metadata.name, img])
+	not cnpg_image_pinned(img)
+	msg := sprintf("CNPG Cluster %q imageName %q must carry an explicit tag or digest in the image name (a registry host:port is NOT a tag) (ADR-0029 §5)", [input.metadata.name, img])
 }
 
 # --- secure-by-default: the cluster MUST run non-root. CNPG defaults to non-root,
@@ -2874,8 +2890,11 @@ deny contains msg if {
 # silently relax it (postgresql.runAsNonRoot must not be false). ---
 deny contains msg if {
 	is_cnpg_cluster(input)
-	object.get(object.get(input.spec, "postgresql", {}), "runAsNonRoot", true) == false
-	msg := sprintf("CNPG Cluster %q must run non-root (postgresql.runAsNonRoot must not be false) (ADR-0042 §4 / ADR-0029 §3)", [input.metadata.name])
+	# Fail closed: deny unless postgresql.runAsNonRoot is EXPLICITLY `true`. A missing
+	# field (default null) or any non-true value is rejected so omission cannot
+	# silently relax the control (ADR-0042 §4 "must be EXPLICIT").
+	object.get(object.get(input.spec, "postgresql", {}), "runAsNonRoot", null) != true
+	msg := sprintf("CNPG Cluster %q must run non-root (postgresql.runAsNonRoot must be explicitly true) (ADR-0042 §4 / ADR-0029 §3)", [input.metadata.name])
 }
 
 # --- resource requests AND limits present on the Cluster (never absent, ADR-0029 §3). ---

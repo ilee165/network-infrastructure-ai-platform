@@ -742,6 +742,25 @@ jobs:
           exit-code: "1"
           format: table
 
+      # The opt-in CloudNativePG HA-tier render (rendered-cnpg.yaml) is its OWN set
+      # of objects (Cluster/Pooler/PriorityClass/Pooler-NetworkPolicies/smoke Job)
+      # absent from rendered.yaml — kubeconform/kube-linter/conftest gate it above,
+      # but the Trivy IaC misconfig gate must ALSO cover it, else a HIGH/CRITICAL
+      # misconfig isolated to the HA tier would not fail CI. Same posture as the
+      # rendered.yaml scan (fixable HIGH/CRIT, ignore-unfixed, sanctioned-deviation
+      # ignorefile).
+      - name: Trivy config scan (rendered CloudNativePG HA tier)
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
+        with:
+          scan-type: config
+          scan-ref: rendered-cnpg.yaml
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
       - name: Trivy config scan (docker compose + Dockerfiles)
         uses: aquasecurity/trivy-action@v0.36.0
         with:

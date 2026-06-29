@@ -331,6 +331,102 @@ spec:
         - protocol: TCP
           port: {{ .Values.networkPolicy.postgres.port }}
 {{- end }}
+{{- if .Values.cloudNativePg.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-cnpg-pooler-ingress (W1-T1, ADR-0042 §3/§4) — under default-deny the
+# PgBouncer Pooler (and the CNPG Cluster + the pgvector-replica smoke Job — ALL
+# carry component=postgres) get NO ingress, so api/worker → pooler:5432 would be
+# blocked and the HA tier could not serve a single connection. This allow lets the
+# postgres-component pods ACCEPT ingress on 5432 from: api + worker (the app DB
+# path through the Pooler), the audit/credential CronJobs, and OTHER
+# postgres-component pods (pooler → cluster, smoke → cluster `-ro`, and intra-
+# cluster streaming replication). Renders ONLY with the CNPG tier; allow-list
+# minimal (one port, specific selectors — never an empty `from`).
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-cnpg-pooler-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- if .Values.services.api.enabled }}
+        # api → pooler:5432 (the app DB path through PgBouncer).
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 14 }}
+        {{- end }}
+        {{- if .Values.services.worker.enabled }}
+        # worker → pooler:5432.
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "worker") | nindent 14 }}
+        {{- end }}
+        {{- if .Values.audit.chainVerify.enabled }}
+        # audit-chain-verify → pooler:5432.
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "audit") | nindent 14 }}
+        {{- end }}
+        {{- if .Values.credentials.rotation.enabled }}
+        # credential-rotation → pooler:5432.
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "credentials") | nindent 14 }}
+        {{- end }}
+        # postgres → postgres:5432 (pooler → cluster, smoke → cluster `-ro`, and
+        # intra-cluster streaming replication — all component=postgres).
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+---
+# ---------------------------------------------------------------------------
+# allow-cnpg-postgres-egress (W1-T1, ADR-0042 §3/§4) — the postgres-component pods
+# (Pooler, Cluster, smoke Job) are selected by the default-deny floor, so their
+# EGRESS is denied too. The Pooler must reach the Cluster primary, the smoke Job
+# must reach the `-ro` replica Service, and the Cluster instances must reach each
+# other for streaming replication — every hop is postgres → postgres:5432. This
+# allows EXACTLY that intra-component edge (plus cluster-wide DNS via
+# allow-dns-egress). No blanket egress — one port, the postgres selector only.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-cnpg-postgres-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # postgres → postgres:5432 (pooler → cluster, smoke → cluster `-ro`,
+    # intra-cluster replication). DNS egress is granted cluster-wide separately.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+{{- end }}
 {{- if .Values.services.ollama.enabled }}
 {{- if or .Values.services.api.enabled .Values.services.worker.enabled }}
 ---

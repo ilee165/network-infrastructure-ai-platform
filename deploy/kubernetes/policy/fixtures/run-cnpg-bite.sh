@@ -21,6 +21,8 @@
 #     audit `SET LOCAL` scoping                                       (§4)
 #   - PgBouncer transaction mode but NO default_pool_size -> unbounded
 #     server-side pool, no connection budget                  (§4 / G-SCA §330)
+#   - PgBouncer fronting the READ-ONLY endpoint (type ro) -> the app + audit write
+#     path cannot reach the primary / fail-over re-point through it (§3/§4)
 #
 # Run:  bash deploy/kubernetes/policy/fixtures/run-cnpg-bite.sh
 # CI:   the `infra` job runs this after the conftest gate (needs only conftest).
@@ -35,6 +37,7 @@ NEG_SYNCALL="${HERE}/cnpg_sync_on_all_writes_DENY.yaml"
 NEG_SYNCUNSET="${HERE}/cnpg_sync_commit_unset_DENY.yaml"
 NEG_POOL_SESSION="${HERE}/cnpg_pooler_session_DENY.yaml"
 NEG_POOL_UNBOUNDED="${HERE}/cnpg_pooler_unbounded_DENY.yaml"
+NEG_POOL_RO="${HERE}/cnpg_pooler_ro_DENY.yaml"
 POS_CLUSTER="${HERE}/cnpg_cluster_quorum_PASS.yaml"
 POS_POOLER="${HERE}/cnpg_pooler_transaction_PASS.yaml"
 
@@ -105,6 +108,9 @@ expect_deny "cnpg pooler session-mode" "${NEG_POOL_SESSION}"
 
 echo "-- negative (PgBouncer NO default_pool_size budget) MUST be DENIED --"
 expect_deny "cnpg pooler unbounded" "${NEG_POOL_UNBOUNDED}"
+
+echo "-- negative (PgBouncer fronts the READ-ONLY endpoint, type ro) MUST be DENIED --"
+expect_deny "cnpg pooler type-ro" "${NEG_POOL_RO}"
 
 echo "-- positive (compliant ANY 1 quorum Cluster) MUST PASS --"
 expect_pass "cnpg compliant cluster" "${POS_CLUSTER}"

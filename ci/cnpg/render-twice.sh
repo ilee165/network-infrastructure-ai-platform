@@ -64,10 +64,18 @@ if grep -Eq 'randAlphaNum' "${TEMPLATE}"; then
 else
   bad "CNPG secret template must generate the password (randAlphaNum) when no prior Secret exists"
 fi
-if grep -Eq 'hasKey \$superData|hasKey \$appData|index \$superData|index \$appData' "${TEMPLATE}"; then
-  ok "CNPG secret template REUSES the installed password (index/hasKey on the prior Secret data, L4)"
+# Require ALL FOUR reuse tokens INDEPENDENTLY (hasKey+index on BOTH $superData and
+# $appData) — a single alternation passes if ANY one branch survives, so deleting
+# the app (or superuser) reuse path would slip through while one password
+# regenerates on upgrade. The single-quoted patterns match the LITERAL template
+# text `$superData`/`$appData` (NOT a shell expansion) — SC2016 is intentional here.
+if grep -Eq 'hasKey \$superData' "${TEMPLATE}" \
+  && grep -Eq 'index \$superData' "${TEMPLATE}" \
+  && grep -Eq 'hasKey \$appData' "${TEMPLATE}" \
+  && grep -Eq 'index \$appData' "${TEMPLATE}"; then
+  ok "CNPG secret template REUSES BOTH the superuser AND app password (index+hasKey on each prior Secret data, L4)"
 else
-  bad "CNPG secret template must reuse the installed Secret's password on upgrade (L4)"
+  bad "CNPG secret template must reuse BOTH the superuser AND app installed Secret passwords on upgrade (hasKey+index on \$superData AND \$appData) (L4)"
 fi
 
 # --- 2. two FRESH renders generate DISTINCT passwords --------------------------
@@ -89,10 +97,14 @@ super_b="$(extract "${WORK}/b.yaml" netops-cnpg-superuser password)"
 app_a="$(extract "${WORK}/a.yaml" netops-cnpg-app password)"
 app_b="$(extract "${WORK}/b.yaml" netops-cnpg-app password)"
 
-if [ -n "${super_a}" ] && [ -n "${app_a}" ]; then
-  ok "fresh render produced non-empty superuser + app passwords"
+# Assert BOTH renders produced non-empty superuser+app passwords before comparing
+# them: checking only super_a/app_a lets a second render that emits an EMPTY
+# password slip through (super_a != "" while super_b == "" still satisfies the
+# distinct-password check below, falsely reporting success on a broken render).
+if [ -n "${super_a}" ] && [ -n "${super_b}" ] && [ -n "${app_a}" ] && [ -n "${app_b}" ]; then
+  ok "both fresh renders produced non-empty superuser + app passwords"
 else
-  bad "fresh render produced an EMPTY superuser/app password (generation broken)"
+  bad "a fresh render produced an EMPTY superuser/app password (generation broken)"
 fi
 if [ "${super_a}" != "${super_b}" ] && [ "${app_a}" != "${app_b}" ]; then
   ok "two fresh renders generate DISTINCT passwords (so the lookup-reuse branch is the load-bearing upgrade-stability guard, L4)"

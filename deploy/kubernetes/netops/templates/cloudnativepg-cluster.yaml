@@ -24,14 +24,17 @@ be pre-installed; the chart ships the Cluster CR, not the operator.
 {{- $cnpg := .Values.cloudNativePg -}}
 {{- $fullname := include "netops.fullname" . -}}
 {{- $clusterName := printf "%s-pg" $fullname -}}
-{{- /* Credential Secret object names (the dev path renders them in
-       cloudnativepg-secret.yaml; production supplies via existingSecret). */ -}}
-{{- $superSecretName := printf "%s-cnpg-superuser" $fullname -}}
-{{- $appSecretName := printf "%s-cnpg-app" $fullname -}}
-{{- if .Values.secrets.existingSecret -}}
-  {{- $superSecretName = .Values.secrets.existingSecret -}}
-  {{- $appSecretName = .Values.secrets.existingSecret -}}
-{{- end -}}
+{{- /* Credential Secret object names. CNPG requires TWO DISTINCT basic-auth
+       Secrets: the SUPERUSER Secret carries username=postgres, the app/initdb
+       Secret carries username=<owner> — one Secret cannot satisfy both roles, and
+       the platform `secrets.existingSecret` is NOT a basic-auth user/pass Secret,
+       so it must NEVER be collapsed onto both CNPG roles. Production supplies a
+       DISTINCT existingSecret per role via cloudNativePg.superuserSecret /
+       cloudNativePg.appSecret (each a kubernetes.io/basic-auth Secret with the
+       correct username); when unset the dev path generates the two correct
+       Secrets (cloudnativepg-secret.yaml). (ADR-0042 §1) */ -}}
+{{- $superSecretName := $cnpg.superuserSecret | default (printf "%s-cnpg-superuser" $fullname) -}}
+{{- $appSecretName := $cnpg.appSecret | default (printf "%s-cnpg-app" $fullname) -}}
 {{- $backupOn := and $cnpg.backup.enabled .Values.backup.postgres.enabled -}}
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
@@ -47,9 +50,12 @@ spec:
   imageName: {{ $cnpg.imageName }}
   # PriorityClass so Postgres outranks the unpriorited batch workers (§1).
   priorityClassName: {{ $cnpg.priorityClass.name }}
-  # SECURE BY DEFAULT (ADR-0042 §4 / ADR-0029 §3): explicit non-root. The operator
+  # SECURE BY DEFAULT (ADR-0042 §4 / ADR-0029 §3): EXPLICIT non-root. The operator
   # renders the pods with dropped-ALL caps + RuntimeDefault seccomp + RO-rootfs.
+  # The flag is set explicitly (not left to the CNPG default) so the hardening
+  # gate can require it and a future edit cannot silently relax it.
   postgresql:
+    runAsNonRoot: true
     # QUORUM synchronous replication (ADR-0042 §2). CNPG generates
     # synchronous_standby_names = `ANY 1 (<replicas>)` from this stanza — DO NOT
     # set synchronous_standby_names directly. This is the CLUSTER-level quorum SET
@@ -120,11 +126,22 @@ spec:
           key: {{ .Values.secrets.keys.backupRepoS3KeySecret }}
       wal:
         compression: gzip
+        {{- if .Values.backup.postgres.encryption.enabled }}
+        # Object-store SERVER-SIDE encryption (SSE-S3, AES256). CNPG honours
+        # `encryption` ONLY under wal.* and data.* — at barmanObjectStore root it
+        # is INERT. This instructs the object store to encrypt the uploaded WAL/
+        # base-backup objects at rest (Barman does NOT client-side encrypt). It is
+        # NOT a passphrase/by-reference key. The INDEPENDENT repo encryption ADR-0030
+        # §1 mandates (`repo-cipher-type=aes-256-cbc`, by-reference passphrase,
+        # independent of object-store SSE) is provided by the OUT-OF-CLUSTER
+        # pgBackRest DR tier; THIS CNPG barman layer is the in-cluster continuous-
+        # archiving tier ABOVE it (ADR-0042 §3) and adds SSE on top.
+        encryption: AES256
+        {{- end }}
       {{- if .Values.backup.postgres.encryption.enabled }}
-      # Repo-side encryption: the WAL/base-backup data is encrypted at rest in the
-      # object store. The passphrase/key is a by-reference Secret key, never a
-      # literal (ADR-0030 §1 / Alt #3); object-store SSE may layer WITH this.
-      encryption: AES256
+      # Base-backup objects: same object-store SSE as the WAL stream above.
+      data:
+        encryption: AES256
       {{- end }}
     # Keep enough base backups to cover the operational restore window (mirrors
     # the pgBackRest full retention; ADR-0030 §1 table).

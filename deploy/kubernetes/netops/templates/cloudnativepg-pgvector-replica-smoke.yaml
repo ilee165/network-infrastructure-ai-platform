@@ -25,8 +25,11 @@ hook `post-install,post-upgrade` so it runs after the cluster is bootstrapped.
 {{- $cnpg := .Values.cloudNativePg -}}
 {{- $fullname := include "netops.fullname" . -}}
 {{- $clusterName := printf "%s-pg" $fullname -}}
-{{- $appSecretName := printf "%s-cnpg-app" $fullname -}}
-{{- if .Values.secrets.existingSecret -}}{{- $appSecretName = .Values.secrets.existingSecret -}}{{- end -}}
+{{- /* App/initdb role basic-auth Secret (ADR-0042 §1): the DISTINCT external
+       cloudNativePg.appSecret in production, else the dev-generated -cnpg-app
+       Secret. NEVER the platform secrets.existingSecret (not a basic-auth Secret;
+       would collapse the two CNPG roles). Mirrors the cluster template. */ -}}
+{{- $appSecretName := $cnpg.appSecret | default (printf "%s-cnpg-app" $fullname) -}}
 {{- $k := .Values.secrets.keys -}}
 apiVersion: batch/v1
 kind: Job
@@ -90,13 +93,16 @@ spec:
               value: /home/scratch
             # Assert we are actually on a REPLICA (in_recovery = t), then prove the
             # pgvector extension is present AND queryable with a real similarity
-            # operation. L5: `set -euo pipefail` + explicit non-empty assertions so
-            # a missing extension / a primary mis-route fails the Job LOUD.
+            # operation. L5: `set -eu` + explicit non-empty assertions so a missing
+            # extension / a primary mis-route fails the Job LOUD. NOTE: the operand
+            # image's /bin/sh is dash, which has NO `pipefail` (a bash/zsh option) —
+            # `set -o pipefail` under dash exits immediately, killing the Job before
+            # the replica check. There are no pipelines here, so `set -eu` is enough.
           command:
             - sh
             - -c
             - |
-              set -euo pipefail
+              set -eu
               echo "checking we are on a replica (pg_is_in_recovery)..."
               REC="$(psql -At -c 'SELECT pg_is_in_recovery();')"
               test "$REC" = "t"

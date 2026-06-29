@@ -15,7 +15,9 @@ metadata:
 data:
   NETOPS_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   # Postgres (D11) — password is by-reference (secrets.keys.postgresPassword).
-  NETOPS_POSTGRES_HOST: {{ .Values.config.postgres.host | quote }}
+  # When the CloudNativePG HA tier is enabled this resolves to the PgBouncer
+  # Pooler rw Service (the single-instance Service is not rendered) — ADR-0042 §4.
+  NETOPS_POSTGRES_HOST: {{ include "netops.postgresHost" . | quote }}
   NETOPS_POSTGRES_PORT: {{ .Values.config.postgres.port | quote }}
   NETOPS_POSTGRES_DB: {{ .Values.config.postgres.database | quote }}
   NETOPS_POSTGRES_USER: {{ .Values.config.postgres.user | quote }}

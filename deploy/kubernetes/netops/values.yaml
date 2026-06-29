@@ -438,12 +438,22 @@ cloudNativePg:
     postInitSQL:
       - CREATE EXTENSION IF NOT EXISTS vector
   # Superuser + app credential secrets (ADR-0042 §1, L4). CNPG reads a
-  # kubernetes.io/basic-auth Secret (username+password). REFERENCE ONLY: in
-  # production supply secrets.existingSecret-style external secrets; in dev the
+  # kubernetes.io/basic-auth Secret (username+password). REFERENCE ONLY: in dev the
   # chart generates them via `lookup` reuse-or-generate (NEVER regenerated on
   # upgrade — a regen severs every connection, ADR-0042 §1 / P1-W4 L4). The key
   # NAMES live under secrets.keys.cnpg*; the rendered dev Secrets are
-  # cloudnativepg-secrets.yaml.
+  # cloudnativepg-secret.yaml.
+  #
+  # PRODUCTION: CNPG requires TWO DISTINCT basic-auth Secrets — the SUPERUSER
+  # Secret MUST carry username=postgres and the app/initdb Secret MUST carry
+  # username=<bootstrap.owner>. One Secret cannot satisfy both roles, and the
+  # platform `secrets.existingSecret` is NOT a basic-auth user/pass Secret — so it
+  # is NEVER reused for CNPG. Supply each role's external Secret by NAME here (each
+  # a kubernetes.io/basic-auth Secret with the correct username + password keys per
+  # secrets.keys.cnpg*). Set BOTH or NEITHER (a half-supplied pair fails the render
+  # — see cloudnativepg-secret.yaml). Empty (default) = dev-generated.
+  superuserSecret: ""
+  appSecret: ""
   # pgvector-on-replica smoke (ADR-0042 §5). Rendered as a Job manifest that runs
   # an embedding/similarity query against a REPLICA (read-only service). On a real
   # cluster (W4-T1 kind) it asserts the extension is queryable on a replica; with
