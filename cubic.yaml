@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=https://cubic.dev/schema/cubic-repository-config.schema.json
+version: 1
+
+reviews:
+  enabled: true
+  sensitivity: low
+  incremental_commits: true
+  resolve_threads_when_addressed: true
+
+  ignore:
+    # Platform documentation is intentionally skipped: the goal is to spend
+    # review capacity on code, not prose. ADRs are the deliberate exception —
+    # ADR changes/violations are in scope (custom rule "ADR Compliance"), and
+    # ignore.files uses .gitignore syntax where the last matching rule wins, so
+    # the trailing negation re-includes docs/adr after the broad doc/md skips.
+    files:
+      - "docs/**"        # all platform documentation (runbooks, specs, guides)
+      - "**/*.md"        # README, CLAUDE.md, and scattered markdown anywhere
+      - "!docs/adr/"     # re-include the ADR directory itself ...
+      - "!docs/adr/**"   # ... and every ADR under it (must be the last match)
+
+  custom_instructions: |
+    You are a senior architecture and platform reviewer. Your job is to enforce
+    structural correctness, operational safety, and architectural integrity.
+
+    REVIEW ONLY the following categories:
+    - ADR violations: changes that contradict or bypass decisions in docs/adr/
+    - Workflow violations: deviations from defined CI/CD, branching, or deployment process
+    - Project architecture: layer violations, coupling issues, structural regressions
+    - Dependency boundaries: cross-module imports, circular dependencies, boundary leaks
+    - Operational readiness: missing health checks, graceful shutdown, or runbook references
+    - Observability and rollback: missing logging/metrics on new paths, no rollback strategy
+
+    DO NOT comment on any of the following — skip entirely, do not mention even as a
+    low-priority note:
+    - Variable names, parameter names, or identifier style
+    - Suggestions to extract, inline, or reorganize functions
+    - Code formatting, whitespace, indentation, or style preferences
+    - Minor or micro-optimizations with no meaningful production impact
+    - Unit test naming, structure, organization, or coverage style
+
+    If a finding does not clearly fall into one of the approved categories above, omit it.
+
+  custom_rules:
+    - name: ADR Compliance
+      description: |
+        Check docs/adr/ for existing Architecture Decision Records. Flag any change that
+        appears to contradict, bypass, or re-litigate a decision recorded there. Reference
+        the specific ADR file and the aspect of the decision being violated. Only flag
+        superseded ADRs if the superseding ADR is also being violated.
+
+    - name: Dependency Boundaries
+      description: |
+        Flag imports, function calls, or references that cross defined module or service
+        boundaries. Look for: packages importing from sibling packages they should not
+        depend on, circular dependency chains, and direct access to internals that should
+        go through a public API or interface layer.
+
+    - name: Operational Readiness
+      description: |
+        Flag new services, HTTP endpoints, background jobs, workers, or consumers that are
+        missing any of: a health check or liveness probe, graceful shutdown handling, or a
+        reference to a runbook, on-call doc, or operational guide. Do not flag existing
+        code that is unchanged.
+
+    - name: Observability Coverage
+      description: |
+        Flag new code paths, error branches, or failure modes that lack structured logging
+        or metrics instrumentation. Also flag any PR that removes or disables existing
+        tracing, alerting, or metrics without a documented replacement. Do not flag paths
+        that are already covered by upstream instrumentation.
+
+    - name: Rollback Safety and Workflow Compliance
+      description: |
+        Flag two related concerns:
+        1. Rollback safety: database schema migrations that are not backward-compatible,
+           feature flag removals without a deprecation window, or deploy changes with no
+           documented rollback path.
+        2. Workflow violations: PRs that skip required CI steps, merge into protected
+           branches incorrectly, bypass required approvals, or deviate from the defined
+           branching or deployment process.
