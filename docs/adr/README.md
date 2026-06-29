@@ -50,5 +50,6 @@
 | [0043](0043-api-hpa-keda-autoscaling.md) | api Horizontal Pod Autoscaler + KEDA Per-Queue Worker Autoscaling | Proposed | P3 W0 |
 | [0044](0044-redis-sentinel-websocket-fanout.md) | Redis Sentinel + Stateless WebSocket Fan-Out via Redis Pub/Sub | Proposed | P3 W0 |
 | [0045](0045-audit-siem-export.md) | Audit→SIEM Export (RFC5424 syslog + CEF over TLS + HTTPS/JSON push, at-least-once, export-lag SLO) | Proposed | P3 W0 |
+| [0046](0046-observability-slo-enforcement.md) | Observability-SLO Enforcement (recording rules, multi-window burn-rate alerts, golden-signal dashboards, fault-injection MTTD) | Proposed | P3 W0 |
 
 **Conventions:** every binding decision D1–D16 has a current ADR; any deviation requires a superseding ADR (no silent drift — see `PRODUCTION.md` gate G-MNT). New capabilities, normalized models, agents, or vendors beyond the CLAUDE.md lists require an ADR *before* implementation (`REPO-STRUCTURE.md` §6–§7).
