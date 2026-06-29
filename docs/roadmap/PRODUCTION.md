@@ -31,7 +31,7 @@ gantt
 | Phase | Vendor wave | Platform track |
 |---|---|---|
 | **P1** | Wave 1: Cisco NX-OS, Juniper JunOS, BlueCat | Kubernetes/Helm GA, OIDC/SSO, backup/DR baseline, K8s hardening round 1 |
-| **P2-Security** | Wave 2: Palo Alto PAN-OS, Fortinet FortiOS; **Security Agent** ships here | Security-hardening subset (all code or kind-validatable, K8s hardening round 2): audit-log hash-chaining, device-credential rotation + per-credential scoping, mTLS (api/worker↔postgres), collector network segmentation |
+| **P2-Security** ✅ **EXIT 2026-06-29** | Wave 2: Palo Alto PAN-OS, Fortinet FortiOS; **Security Agent** ships here | Security-hardening subset (all code or kind-validatable, K8s hardening round 2): audit-log hash-chaining, device-credential rotation + per-credential scoping, mTLS (api/worker↔postgres), collector network segmentation |
 | **P3-Platform** | — (platform-only; no vendor wave) | HA + scale-out (api HPA, KEDA workers, CloudNativePG, Redis Sentinel, PgBouncer); audit→SIEM export; observability-SLO enforcement (recording rules, burn-rate alerts, dashboards, fault-injection MTTD); live failover/soak/scale DR drills; N-2 upgrade rehearsal |
 | **P4** | Wave 3: F5 BIG-IP, VMware; **application-dependency topology** ships here | Compliance & audit reporting suite |
 | **P5** | Wave 4: AWS (incl. **Route53**), Azure | Hybrid on-prem/cloud topology stitching, scale certification |
@@ -51,6 +51,24 @@ gantt
 > **G-SCA** in full, and the **G-REL** live failover/soak/scale drills (the P1 G-REL
 > baseline holds for P2-Security). No binding decision D1–D16 is overturned, so no
 > superseding ADR is created.
+
+> **P2-Security EXIT 2026-06-29 (W5-T3 phase-exit gate).** All P2-scoped §11 gates
+> (**G-SEC / G-MNT / G-OBS PASS**) pass simultaneously on release HEAD `6acac91`
+> (CI run 28349836098, all checks SUCCESS); **G-SCA** in full and the **G-REL**
+> live failover/soak/scale drills are **deferred-accepted → P3-Platform**; the two
+> kind-cluster **live-enforcement** sub-items (mTLS handshake, collector egress-deny)
+> are **PARTIAL / deferred-accepted** (their render/static/harness-invariant layers
+> bite and are blocking; the live `kind-harness.sh` run is `continue-on-error` until
+> promoted — `docs/runbooks/kind-harness.md`). ADRs **0034–0041** flipped Proposed →
+> Accepted on their green implementing evidence. Full evidence:
+> `docs/roadmap/P2-RELEASE-READINESS.md`.
+>
+> **P3-Platform inheritance (recorded so nothing is silently dropped):** HA +
+> scale-out (api HPA, KEDA workers, CloudNativePG, Redis Sentinel, PgBouncer);
+> **audit→SIEM export**; **observability-SLO enforcement** (recording rules,
+> burn-rate alerts, dashboards, fault-injection MTTD); **live failover/soak/scale DR
+> drills**; N-2 upgrade rehearsal; and promotion of the kind-harness
+> live-enforcement run to a blocking gate.
 
 ---
 

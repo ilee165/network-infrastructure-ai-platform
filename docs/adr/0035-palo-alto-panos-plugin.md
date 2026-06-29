@@ -1,6 +1,6 @@
 # ADR-0035: Palo Alto PAN-OS Vendor Plugin (XML API)
 
-**Status:** Proposed | **Date:** 2026-06-25 | **Milestone:** P2 W0
+**Status:** Accepted | **Date:** 2026-06-25 (Accepted 2026-06-29) | **Milestone:** P2 W0 (Accepted P2 W5)
 
 ## Context
 

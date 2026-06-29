@@ -38,13 +38,13 @@
 | [0031](0031-packet-sandbox-os-isolation.md) | Packet Capture Sandbox OS-Level Isolation | Accepted | P1 W0 |
 | [0032](0032-kms-backed-master-key-and-rotation.md) | KMS-Backed Master Key and Rotation | Accepted | P1 W0 |
 | [0033](0033-prompt-injection-eval-suite.md) | Prompt-Injection Eval Suite | Proposed | P1 W7 |
-| [0034](0034-firewall-policy-capability-and-normalized-models.md) | `FIREWALL_POLICY` Capability + `NormalizedFirewallRule` / `NormalizedNatRule` | Proposed | P2 W0 |
-| [0035](0035-palo-alto-panos-plugin.md) | Palo Alto PAN-OS Vendor Plugin (XML API) | Proposed | P2 W0 |
-| [0036](0036-fortinet-fortios-plugin.md) | Fortinet FortiOS Vendor Plugin (REST + SSH fallback) | Proposed | P2 W0 |
-| [0037](0037-security-agent.md) | Security Agent (Read-Only Analysis, Findings, Remediation→CR) | Proposed | P2 W0 |
-| [0038](0038-audit-log-hash-chaining.md) | Audit-Log Hash Chaining + Daily Verification | Proposed | P2 W0 |
-| [0039](0039-mtls-between-containers.md) | mTLS Between Containers (cert-manager) | Proposed | P2 W0 |
-| [0040](0040-device-credential-rotation.md) | Device Credential Rotation + Per-Credential Scoping | Proposed | P2 W0 |
-| [0041](0041-collector-network-segmentation.md) | Collector Network Segmentation (NetworkPolicy Egress) | Proposed | P2 W0 |
+| [0034](0034-firewall-policy-capability-and-normalized-models.md) | `FIREWALL_POLICY` Capability + `NormalizedFirewallRule` / `NormalizedNatRule` | Accepted | P2 W0 |
+| [0035](0035-palo-alto-panos-plugin.md) | Palo Alto PAN-OS Vendor Plugin (XML API) | Accepted | P2 W0 |
+| [0036](0036-fortinet-fortios-plugin.md) | Fortinet FortiOS Vendor Plugin (REST + SSH fallback) | Accepted | P2 W0 |
+| [0037](0037-security-agent.md) | Security Agent (Read-Only Analysis, Findings, Remediation→CR) | Accepted | P2 W0 |
+| [0038](0038-audit-log-hash-chaining.md) | Audit-Log Hash Chaining + Daily Verification | Accepted | P2 W0 |
+| [0039](0039-mtls-between-containers.md) | mTLS Between Containers (cert-manager) | Accepted | P2 W0 |
+| [0040](0040-device-credential-rotation.md) | Device Credential Rotation + Per-Credential Scoping | Accepted | P2 W0 |
+| [0041](0041-collector-network-segmentation.md) | Collector Network Segmentation (NetworkPolicy Egress) | Accepted | P2 W0 |
 
 **Conventions:** every binding decision D1–D16 has a current ADR; any deviation requires a superseding ADR (no silent drift — see `PRODUCTION.md` gate G-MNT). New capabilities, normalized models, agents, or vendors beyond the CLAUDE.md lists require an ADR *before* implementation (`REPO-STRUCTURE.md` §6–§7).

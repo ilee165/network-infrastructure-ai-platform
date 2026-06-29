@@ -1,6 +1,6 @@
 # ADR-0040: Device Credential Rotation + Per-Credential Scoping
 
-**Status:** Proposed | **Date:** 2026-06-25 | **Milestone:** P2 W0
+**Status:** Accepted | **Date:** 2026-06-25 (Accepted 2026-06-29) | **Milestone:** P2 W0 (Accepted P2 W5)
 
 ## Context
 
