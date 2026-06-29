@@ -42,7 +42,7 @@ import uuid
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app import db
 from app.core.config import get_settings
@@ -301,7 +301,12 @@ async def test_configured_reader_url_serves_reads_without_breaking_writes(
         assert reader_engine is not db.get_engine(), (
             "a configured reader URL must build a distinct reader engine"
         )
-        reader_maker = async_sessionmaker(reader_engine, expire_on_commit=False)
+        # Exercise the PRODUCTION reader sessionmaker (not a hand-built one) so a
+        # regression of get_reader_sessionmaker() to the primary pair is caught here.
+        reader_maker = db.get_reader_sessionmaker()
+        assert reader_maker is not db.get_sessionmaker(), (
+            "a configured reader URL must build a distinct reader sessionmaker"
+        )
 
         # WRITE on the primary session: append an audit row and COMMIT it.
         marker = f"rw-split-{uuid.uuid4().hex}"
