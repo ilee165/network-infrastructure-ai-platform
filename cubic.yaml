@@ -2,7 +2,11 @@
 version: 1
 
 reviews:
-  enabled: true
+  # Disabled 2026-06-29: cubic review quota exhausted for the billing period.
+  # CodeRabbit remains the active advisory PR reviewer (.coderabbit.yaml). Flip
+  # back to true to re-enable once review uses reset; all rule config below is
+  # retained intact so re-enabling is a one-line change.
+  enabled: false
   sensitivity: low
   incremental_commits: true
   resolve_threads_when_addressed: true
