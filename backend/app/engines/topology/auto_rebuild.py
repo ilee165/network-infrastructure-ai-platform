@@ -154,6 +154,9 @@ async def reconcile(*, metrics_textfile: str, staleness_seconds: float) -> dict[
             nodes = int(summary.get("nodes", 0))
             edges = int(summary.get("edges", 0))
             rebuilt = True
+            # The graph was just re-projected, so its freshness is now 0 — emit the
+            # POST-rebuild age, not the stale pre-rebuild value computed above.
+            age_seconds = 0.0
         else:
             # Healthy steady-state: no re-projection. Record a 0s "rebuild" so the
             # series stays continuous (and the graph age reflects freshness).

@@ -112,6 +112,36 @@ async def test_reconcile_rebuilds_on_empty_graph(
 
 
 @pytest.mark.asyncio
+async def test_reconcile_rebuilds_stale_populated_graph_resets_age(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # nodes > 0 but the newest projection is older than the budget: a stale-but-
+    # POPULATED graph. reconcile() must re-project AND emit the POST-rebuild age
+    # (0), not the stale pre-rebuild age — this is the regression #1 fixes.
+    newest = utcnow() - timedelta(seconds=600)
+    client = _FakeClient((5, newest))  # populated but expired -> must rebuild.
+    monkeypatch.setattr(auto_rebuild, "create_client", lambda settings: client)
+
+    called: dict[str, bool] = {"timed_rebuild": False}
+
+    async def _fake_timed_rebuild() -> dict[str, Any]:
+        called["timed_rebuild"] = True
+        return {"ok": True, "seconds": 2.0, "nodes": 5, "edges": 8}
+
+    monkeypatch.setattr(auto_rebuild, "timed_rebuild", _fake_timed_rebuild)
+
+    target = tmp_path / "topology_rebuild_seconds.prom"
+    summary = await auto_rebuild.reconcile(metrics_textfile=str(target), staleness_seconds=300)
+
+    assert called["timed_rebuild"] is True
+    assert summary["rebuilt"] is True
+    # The freshly re-projected graph is age 0 — NOT the stale ~600s pre-rebuild age.
+    assert summary["graph_age_seconds"] == 0.0
+    text = target.read_text(encoding="utf-8")
+    assert "topology_graph_age_seconds 0.000000" in text
+
+
+@pytest.mark.asyncio
 async def test_reconcile_noop_when_graph_fresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
