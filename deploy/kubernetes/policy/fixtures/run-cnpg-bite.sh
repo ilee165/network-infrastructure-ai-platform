@@ -14,6 +14,9 @@
 #     row (G-REL §316 zero-audit-loss failure)                       (§2)
 #   - synchronous_commit forced cluster-wide -> sync on ALL writes,
 #     throughput collapse (over-scoping)                       (§2 / Alt #3)
+#   - synchronous stanza present but synchronous_commit UNSET -> inherits the PG
+#     default `on`, so the quorum round-trip is forced onto every write (the
+#     SAME throughput collapse, reached implicitly)            (§2 / Alt #3)
 #   - PgBouncer SESSION mode -> breaks the connection budget + the per-txn
 #     audit `SET LOCAL` scoping                                       (§4)
 #   - PgBouncer transaction mode but NO default_pool_size -> unbounded
@@ -29,6 +32,7 @@ POLICY="${REPO}/deploy/kubernetes/policy/rego"
 
 NEG_ASYNC="${HERE}/cnpg_async_no_sync_DENY.yaml"
 NEG_SYNCALL="${HERE}/cnpg_sync_on_all_writes_DENY.yaml"
+NEG_SYNCUNSET="${HERE}/cnpg_sync_commit_unset_DENY.yaml"
 NEG_POOL_SESSION="${HERE}/cnpg_pooler_session_DENY.yaml"
 NEG_POOL_UNBOUNDED="${HERE}/cnpg_pooler_unbounded_DENY.yaml"
 POS_CLUSTER="${HERE}/cnpg_cluster_quorum_PASS.yaml"
@@ -92,6 +96,9 @@ expect_deny "cnpg async-no-sync" "${NEG_ASYNC}"
 
 echo "-- negative (synchronous_commit forced cluster-wide) MUST be DENIED --"
 expect_deny "cnpg sync-on-all-writes" "${NEG_SYNCALL}"
+
+echo "-- negative (synchronous set but synchronous_commit UNSET — implicit PG default \`on\`) MUST be DENIED --"
+expect_deny "cnpg sync-commit-unset" "${NEG_SYNCUNSET}"
 
 echo "-- negative (PgBouncer SESSION mode) MUST be DENIED --"
 expect_deny "cnpg pooler session-mode" "${NEG_POOL_SESSION}"

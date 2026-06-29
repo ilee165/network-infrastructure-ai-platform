@@ -3,6 +3,14 @@
 # PriorityClass, credentials by-reference. MUST PASS conftest (no false-reject of
 # the compliant shape). Pairs with the DENY fixtures so a too-strict regression
 # (that false-rejects the compliant cluster) also fails the bite.
+#
+# Audit-path scoping (ADR-0042 §2): the quorum `synchronous` stanza populates
+# synchronous_standby_names, but the cluster DEFAULT synchronous_commit is set
+# EXPLICITLY to `local` so non-audit writes ack locally (async to the quorum) —
+# W1-T2's per-txn `SET LOCAL synchronous_commit=remote_apply` raises it back for
+# audit transactions only. An UNSET synchronous_commit would inherit the PG
+# default `on` and force the quorum round-trip onto every write (the implicit
+# over-scoping the cnpg rule now DENYs), so the explicit `local` is REQUIRED.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -18,6 +26,10 @@ spec:
       method: any
       number: 1
       failoverQuorum: true
+    parameters:
+      # Cluster DEFAULT lowered to `local` (audit-path scoping, ADR-0042 §2): the
+      # quorum round-trip is paid per-transaction by W1-T2, NOT cluster-wide.
+      synchronous_commit: local
   superuserSecret:
     name: netops-cnpg-superuser
   bootstrap:

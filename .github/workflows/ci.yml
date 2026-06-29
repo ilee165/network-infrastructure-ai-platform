@@ -672,9 +672,11 @@ jobs:
       # W1-T1 — CloudNativePG sync-quorum + pooler-budget policy BITE (ADR-0042).
       # The conftest gate above proves the COMPLIANT HA render PASSES; this proves
       # the cnpg.* rules actually BITE: NEGATIVE fixtures (async/no-sync,
-      # synchronous_commit forced cluster-wide, PgBouncer session-mode, an
-      # unbounded pooler) are each DENIED, while POSITIVE fixtures (the compliant
-      # ANY 1 Cluster + transaction-mode Pooler) still PASS. RED gate.
+      # synchronous_commit forced cluster-wide, synchronous_commit UNSET so it
+      # inherits the PG default `on`, PgBouncer session-mode, an unbounded pooler)
+      # are each DENIED, while POSITIVE fixtures (the compliant ANY 1 Cluster with
+      # an explicit `synchronous_commit: local` + transaction-mode Pooler) still
+      # PASS. RED gate.
       - name: conftest CloudNativePG HA-tier bite (sync-quorum + pooler budget)
         run: bash deploy/kubernetes/policy/fixtures/run-cnpg-bite.sh
 

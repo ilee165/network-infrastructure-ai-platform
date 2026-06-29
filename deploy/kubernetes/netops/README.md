@@ -182,8 +182,11 @@ REFUSES to render both Postgres tiers) with a CloudNativePG `Cluster` of 1 prima
 + 2 streaming replicas, a PgBouncer `Pooler` (transaction mode), a PriorityClass so
 Postgres outranks batch workers, and **quorum synchronous replication scoped to the
 audit write path** (`synchronous: {method: any, number: 1, failoverQuorum: true}` =
-`ANY 1 (replicas)`). It does NOT force synchronous commit on all writes — W1-T2 sets
-`SET LOCAL synchronous_commit` per-transaction on the audit-writing transaction.
+`ANY 1 (replicas)`). It does NOT force synchronous commit on all writes: the cluster
+default `synchronous_commit` is set EXPLICITLY to `local` (ADR-0042 §2) so non-audit
+writes ack locally — leaving it unset would inherit the PG default `on` and force the
+quorum round-trip onto every write — and W1-T2 raises it back per-transaction via
+`SET LOCAL synchronous_commit=remote_apply` on the audit-writing transaction.
 pgvector is installed at bootstrap (inherited by replicas) and verified queryable on
 a replica by the smoke Job. Requires the CloudNativePG operator (CRDs + controller)
 pre-installed. mTLS to the CNPG cluster + app-side read/write routing are W1-T2; the

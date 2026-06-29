@@ -2788,17 +2788,44 @@ deny contains msg if {
 	msg := sprintf("CNPG Cluster %q synchronous.number must be 1 (ANY 1 — one healthy replica suffices), got %v — requiring >1 standby stalls audit commits on a single replica loss (ADR-0042 §2 / Alt #4)", [input.metadata.name, input.spec.postgresql.synchronous.number])
 }
 
-# --- the cluster MUST NOT force `synchronous_commit` ON for ALL writes. ADR-0042
-# §2 scopes sync to the audit-writing transaction (W1-T2 `SET LOCAL`); a cluster-
-# level `synchronous_commit: on/remote_apply` parameter forces it onto every
-# discovery/config/telemetry write — the throughput-collapse Alt #3 rejects. ---
+# --- audit-path scoping REQUIRES an EXPLICIT async cluster default for
+# `synchronous_commit` (ADR-0042 §2 / Alt #3). Once the `synchronous` stanza is
+# present, CNPG populates `synchronous_standby_names`, so a transaction waits for
+# the quorum iff ITS synchronous_commit resolves to on/remote_write/remote_apply.
+# PostgreSQL's built-in default is `on`, and CNPG leaves an UNSET parameter at
+# that default — so omitting synchronous_commit (or setting it to a forced value)
+# forces the quorum round-trip onto EVERY discovery/config/telemetry write: the
+# throughput collapse Alt #3 rejects. Scoping holds ONLY when the cluster DEFAULT
+# is lowered to `local`/`off` (so non-audit writes ack locally) and W1-T2's per-
+# txn `SET LOCAL synchronous_commit=remote_apply` raises it back for audit txns.
+# The gate therefore demands the explicit async default; it does NOT accept the
+# implicit PG default. (`forced_sync_commit_values` is retained for the explicit-
+# forced message path so operators get the precise over-scoping diagnostic.) ---
+async_sync_commit_values := {"local", "off"}
+
 forced_sync_commit_values := {"on", "remote_apply", "remote_write"}
 
+# DENY the explicit forced cluster default — the precise over-scoping diagnostic.
 deny contains msg if {
 	is_cnpg_cluster(input)
 	sc := object.get(object.get(object.get(input.spec, "postgresql", {}), "parameters", {}), "synchronous_commit", "")
 	forced_sync_commit_values[sc]
 	msg := sprintf("CNPG Cluster %q must NOT set synchronous_commit=%q cluster-wide — that forces sync on ALL writes (throughput collapse); sync is scoped per-transaction to the audit path via W1-T2 `SET LOCAL` (ADR-0042 §2 / Alt #3)", [input.metadata.name, sc])
+}
+
+# DENY when the quorum `synchronous` stanza is configured but the cluster default
+# `synchronous_commit` is NOT an explicit async value (`local`/`off`). This bites
+# the IMPLICIT over-scoping: an unset synchronous_commit inherits the PG default
+# `on`, forcing the quorum round-trip onto every write while the chart claims
+# audit-path scoping. Audit-path scoping is real ONLY with an explicit async
+# default + W1-T2's per-txn `SET LOCAL` (ADR-0042 §2 / Alt #3). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	input.spec.postgresql.synchronous
+	sc := object.get(object.get(object.get(input.spec, "postgresql", {}), "parameters", {}), "synchronous_commit", "")
+	not async_sync_commit_values[sc]
+	not forced_sync_commit_values[sc]
+	msg := sprintf("CNPG Cluster %q declares quorum `synchronous` but does NOT set an explicit async cluster default synchronous_commit (`local`/`off`) in spec.postgresql.parameters — an unset value inherits the PG default `on`, forcing the quorum round-trip onto EVERY write (throughput collapse). Set synchronous_commit=local so non-audit writes ack locally; W1-T2's per-txn `SET LOCAL synchronous_commit=remote_apply` scopes sync to the audit path (ADR-0042 §2 / Alt #3)", [input.metadata.name])
 }
 
 # --- failoverQuorum ON (ADR-0042 §2): a promoted replica is checked to hold the

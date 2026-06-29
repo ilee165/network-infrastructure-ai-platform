@@ -380,11 +380,20 @@ cloudNativePg:
   # QUORUM synchronous replication (ADR-0042 §2). `any`+`1` == `ANY 1 (replicas)`:
   # acknowledge a commit once >=1 replica is durable. CNPG generates
   # synchronous_standby_names from this stanza — DO NOT set it directly. This is
-  # the cluster-level quorum SET; the per-transaction scoping to the audit path is
-  # W1-T2's `SET LOCAL synchronous_commit` (this does NOT force sync on all writes).
+  # the cluster-level quorum SET. Audit-path scoping is achieved by the EXPLICIT
+  # async `commit` default below (NOT by leaving synchronous_commit unset, which
+  # would inherit the PG default `on` and force sync on every write).
   synchronous:
     method: any
     number: 1
+    # EXPLICIT cluster-default synchronous_commit (ADR-0042 §2 / Alt #3). `local`
+    # acks non-audit writes locally (async to the quorum) so they do NOT pay the
+    # replica round-trip; W1-T2's per-transaction `SET LOCAL
+    # synchronous_commit=remote_apply` raises it back for AUDIT writes only. This
+    # MUST stay `local`/`off` — `on`/`remote_write`/`remote_apply` here would
+    # force sync on ALL writes (throughput collapse), and an unset value inherits
+    # the PG default `on` (the same collapse). The cnpg conftest rule REFUSES both.
+    commit: local
     # failoverQuorum: a promoted replica is checked to hold the quorum-acked WAL
     # before it serves writes — the data-safety guarantee the W4-T3 drill asserts
     # (zero committed-audit-row loss). Requires >=3 instances + synchronous (above).

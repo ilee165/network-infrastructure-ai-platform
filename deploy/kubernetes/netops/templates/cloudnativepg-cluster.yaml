@@ -53,19 +53,27 @@ spec:
     # QUORUM synchronous replication (ADR-0042 §2). CNPG generates
     # synchronous_standby_names = `ANY 1 (<replicas>)` from this stanza — DO NOT
     # set synchronous_standby_names directly. This is the CLUSTER-level quorum SET
-    # only; it does NOT force synchronous_commit on every write. W1-T2 scopes the
-    # synchronous round-trip to the audit-writing transaction via `SET LOCAL
-    # synchronous_commit=remote_apply`, so non-audit writes keep the default async
-    # commit (§2 — the load-bearing audit-path scoping).
+    # only. With standby_names populated, a transaction waits for the quorum IFF
+    # its synchronous_commit resolves to on/remote_write/remote_apply. W1-T2 scopes
+    # the synchronous round-trip to the audit-writing transaction via `SET LOCAL
+    # synchronous_commit=remote_apply` (§2 — the load-bearing audit-path scoping).
     synchronous:
       method: {{ $cnpg.synchronous.method }}
       number: {{ $cnpg.synchronous.number }}
       # A promotion verifies the new primary holds the quorum-acked WAL before it
       # serves writes — the zero-committed-audit-loss guarantee W4-T3 asserts.
       failoverQuorum: {{ $cnpg.synchronous.failoverQuorum }}
-    # NO cluster-wide synchronous_commit override here (see §2 above) — forcing it
-    # on would tax every non-audit write (throughput collapse, Alt #3). The audit
-    # scoping is per-transaction (W1-T2), not a cluster parameter.
+    parameters:
+      # EXPLICIT async cluster default for synchronous_commit (ADR-0042 §2 / Alt
+      # #3 — load-bearing). With synchronous_standby_names populated (above),
+      # PostgreSQL's built-in default `synchronous_commit=on` would make EVERY
+      # commit (discovery/config/telemetry) wait for the quorum replica —
+      # throughput collapse. CNPG leaves an UNSET parameter at the PG default, so
+      # the scoping holds ONLY if the cluster default is lowered HERE: `local`
+      # acks non-audit writes locally (async to the quorum), and W1-T2's per-txn
+      # `SET LOCAL synchronous_commit=remote_apply` raises it back for audit
+      # transactions only. Omitting this re-introduces sync-on-all-writes.
+      synchronous_commit: {{ $cnpg.synchronous.commit | default "local" | quote }}
   # Per-instance persistent storage (the PGDATA PVC, ReadWriteOnce).
   storage:
     size: {{ $cnpg.storage.size }}

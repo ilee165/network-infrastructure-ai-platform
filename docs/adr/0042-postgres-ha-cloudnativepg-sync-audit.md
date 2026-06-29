@@ -82,13 +82,17 @@ crash in that window loses the just-committed row — unacceptable for the audit
 
 **Quorum synchronous replication on the audit commit only:**
 
-- The cluster sets quorum-based synchronous standbys — `synchronous_commit =
-  remote_apply` (or `on`) with **`ANY 1 (<2 replicas>)`** quorum
-  (`synchronous_standby_names`), so a commit is acknowledged only once **at least one
-  replica** has the WAL durably (the W1-T1 CNPG `synchronous` config; CloudNativePG
-  expresses this via its synchronous-replication settings). On a primary kill the
-  operator promotes a replica that, by the quorum guarantee, already holds every
-  acknowledged audit row.
+- The cluster sets quorum-based synchronous standbys — **`ANY 1 (<2 replicas>)`**
+  quorum (`synchronous_standby_names`, the W1-T1 CNPG `synchronous` config) — so that
+  a transaction whose `synchronous_commit` is `remote_apply`/`remote_write`/`on` is
+  acknowledged only once **at least one replica** has the WAL durably. Critically, the
+  cluster **DEFAULT** `synchronous_commit` is set EXPLICITLY to `local` (W1-T1 chart,
+  `spec.postgresql.parameters`): once `synchronous_standby_names` is populated,
+  leaving `synchronous_commit` unset would inherit PostgreSQL's built-in default `on`
+  and force the quorum round-trip onto **every** write (throughput collapse, Alt #3) —
+  the explicit `local` default keeps non-audit writes async, and W1-T2 raises it back
+  per-transaction (next bullet). On a primary kill the operator promotes a replica
+  that, by the quorum guarantee, already holds every acknowledged audit row.
 - **Scoped to the audit-writing transaction, not all writes — and the existing
   session model is what makes this scoping real.** There is **no dedicated
   audit-write session and no single audit-writer process**: `audit_service.record()`
