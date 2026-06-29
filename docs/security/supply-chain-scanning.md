@@ -135,6 +135,49 @@ mask a *real* planted secret).
   self-hosted fork, point pip-audit at an internal index (`--index-url` / `PIP_*`),
   set `npm config set registry <mirror>`, and gitleaks needs no network.
 
+## Dependency lockfiles + drift gate (P3 W0-T8)
+
+Closes the P1 systemic TODO ("add a dep lockfile — drift bit twice"). The
+`fastapi 0.137 include_router` break (P1) had root cause **no lockfile**: the
+manifest declared a range, so a fresh resolve silently floated past the
+route-flattening boundary. The resolved set is now pinned and CI fails on drift.
+
+- **Backend — `backend/requirements.lock.txt`.** Hash-pinned, fully-resolved
+  (121 packages) lockfile compiled from `pyproject.toml` (base + `dev` extra)
+  with `uv pip compile --universal --generate-hashes`. `--universal` emits
+  platform-marker lines (e.g. `colorama … ; sys_platform == 'win32'`) so the lock
+  is **host-independent** — it recompiles byte-identically on the linux CI runner
+  from the Windows authoring host. Pinned to **Python 3.12** to match the CI
+  install. Determinism additionally requires a pinned **uv** (`UV_VERSION` in the
+  `lockfile` CI job — currently `0.11.19`); bump uv and re-lock together. The lock
+  is LF-pinned (`backend/.gitattributes`) so a Windows re-lock under
+  `core.autocrlf=true` can't false-RED the gate on line-ending churn.
+- **Frontend — `frontend/package-lock.json`.** npm's native lockfile; `npm ci`
+  refuses to install when it is out of sync with `package.json` (it errors rather
+  than mutate the lock), so an unlocked dependency change is already red.
+- **CI gate — `lockfile` job** (required via `all-gates`). Re-resolves the backend
+  manifest and asserts `git diff --exit-code requirements.lock.txt` is clean;
+  runs `npm ci` + a lock-unchanged diff for the frontend. A manifest edit without
+  a re-lock (or a hand-edited lock) is **RED**. The job carries an in-CI
+  **negative control** that plants out-of-lock drift in a scratch copy and fails
+  the job if the recompile+diff does *not* catch it — the gate is proven to bite
+  on every run, not just at authoring time (L1).
+
+**Re-lock procedure** (run in the same change as any dependency edit):
+
+```bash
+# backend (Python 3.12; uv pinned to the lockfile job's UV_VERSION):
+cd backend && uv pip compile pyproject.toml --extra dev --universal \
+  --generate-hashes --python-version 3.12 --output-file requirements.lock.txt
+# frontend:
+cd frontend && npm install            # rewrites package-lock.json
+```
+
+Scope note: W0-T8 locks the **current resolved set** — no version bumps. The
+`fastapi>=0.136,<0.137` cap (route-introspection trap) stays in effect; lifting
+it is a separate follow-up once the wiring tests traverse the nested router
+structure (re-review 2026-09-23, see `backend/pyproject.toml`).
+
 ## Local validation (how these were proven to bite)
 
 Each gate is validated two ways: (a) it PASSES on the current tree (clean, modulo the
@@ -147,6 +190,8 @@ step consumes them) make this repeatable on any host:
 | **npm audit** | `frontend/scripts/__fixtures__/npm-audit-planted-vuln.json` (high GHSA not allowlisted) and `…/npm-audit-failed-run.json` (failed-audit error envelope) | `node frontend/scripts/npm-audit-gate.negative.mjs` |
 | **pip-audit** | `backend/tests/fixtures/requirements-vuln-test.txt` (`jinja2==2.11.3`, known-vulnerable) | `pip-audit --strict -r backend/tests/fixtures/requirements-vuln-test.txt` |
 | **gitleaks** | a realistic AWS key committed under a non-allowlisted path (throwaway commit) | `gitleaks detect --source . --config .gitleaks.toml --redact --exit-code 1` |
+| **lockfile (backend)** | a tampered lock pin (`fastapi==0.0.0-PLANTED`) in a scratch copy | re-`uv pip compile` + `git diff --exit-code` → non-zero (in-CI negative-control step) |
+| **lockfile (frontend)** | a dep added to `package.json` not present in the lock (scratch copy) | `npm ci` → `EUSAGE … not in sync` exit 1 |
 
 **What was run on the authoring host (Windows + node v24, npm 11):**
 
@@ -165,6 +210,27 @@ node scripts/npm-audit-gate.negative.mjs                                 # exit 
 The npm-audit gate hardening (reject an error envelope / a report missing
 `auditReportVersion`+`vulnerabilities`) closes the false-green where a failed audit —
 masked by CI's `npm audit --json … || true` — would otherwise PASS with zero advisories.
+
+```bash
+# lockfile drift gate (backend) — proven on the authoring host (uv 0.11.19, Python 3.12):
+#  POSITIVE: in-place `uv pip compile … --output-file requirements.lock.txt` on a clean
+#            scratch copy leaves NO `git diff` (recompile is byte-identical to committed) -> green.
+#  NEGATIVE: planting `fastapi==0.0.0-PLANTED` in the lock then recompiling makes the diff
+#            non-zero -> gate BITES. (This is exactly the in-CI negative-control step.)
+#  Verified universal markers (colorama ; sys_platform == 'win32') + a Python-3.12 lock
+#  install with --require-hashes succeeds and the include_router route-introspection tests
+#  (tests/api/test_agents_rate_limit_wiring.py) pass against fastapi==0.136.3.
+# lockfile drift gate (frontend) — `npm ci` on a scratch package.json with an extra dep
+#  not in the lock exits 1 (EUSAGE "not in sync"); `npm ci` on the real tree is clean.
+```
+
+**Host caveat (L1):** the authoring host is Windows + Git-Bash with **uv 0.11.19**
+and a uv-managed **Python 3.12.13**; CI runs the identical `uv pip compile` argv on
+ubuntu with the same pinned uv/Python, and `--universal` makes the resolution
+host-independent — so the locally-proven byte-identical recompile is the CI
+behaviour. `pip`/`pip-compile` are not on the authoring host (uv is used instead);
+the committed lock is pip-installable (`pip install --require-hashes -r
+requirements.lock.txt`) and was install-verified via `uv pip install --require-hashes`.
 
 **pip-audit and gitleaks are NOT installed on the authoring host** (no `pip` in the
 local interpreter; no `gitleaks` binary), so their negatives are validated by the
@@ -199,3 +265,5 @@ echo "<wrong-sha256>  /tmp/gitleaks.tar.gz" | sha256sum -c -            # exit 1
   allowlists mirror.
 - `docs/security/2026-06-14-trivy-baseimage-cves.md` — image-CVE gate precedent.
 - W6-T5 — image SBOM (syft) + cosign signing + admission verification (sibling task).
+- `backend/requirements.lock.txt`, `frontend/package-lock.json`, `backend/.gitattributes`
+  — the dependency lockfiles + LF pin asserted by the `lockfile` CI job (P3 W0-T8).

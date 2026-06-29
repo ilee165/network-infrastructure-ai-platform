@@ -258,4 +258,30 @@
 
 ---
 
+## Phase kickoff re-checks
+
+Per `PRODUCTION.md` §12 ("Phase kickoffs re-check `docs/consultant/QUESTIONS.md`")
+and the G-MNT §348 per-phase requirement ("Open Consultant questions reviewed each
+phase; answered items converted to ADR updates, defaults re-confirmed for the
+rest"). Each entry records the review verdict — it does **not** answer for the
+owner (the owner remains offline; only the owner answers a question).
+
+### P3-Platform kickoff — 2026-06-29
+
+The P3-Platform phase (HA / scale-out + audit→SIEM export + observability-SLO
+enforcement) opened at W0. The four open items that materially shape this phase
+(`PRODUCTION.md` §12 rows: *Scale targets*, *HA/DR expectations*, *GPU
+availability*, *Data retention*) were reviewed. **No owner answer has arrived
+since 2026-06-09; all four PROPOSED defaults are re-confirmed unchanged as the
+confirmed working defaults for P3** — no answered item to convert, no new numbers
+invented, no silent carry. Mirror marker: `PRODUCTION.md` §1 "P3-Platform IN
+PROGRESS 2026-06-29".
+
+| Question | Default re-confirmed | Where it binds in P3 | Verdict |
+|---|---|---|---|
+| **Q1 — Scale targets** | (b) Design point 2,000 devices / 50 sites / 25 concurrent users; ceiling 10,000 devices | The §11 **G-SCA** reference numbers (500-device discovery / 100 concurrent users / 5,000-device projection) stay **tied to this item** so a future answer re-bases them cleanly; named deferred-accepted → GA per `P3-PLATFORM-PLAN.md` §0 | **Re-confirmed (default holds)** |
+| **Q2 — HA/DR expectations** | (b) Tiered active/passive; production/K8s RPO ≤ 5 min / RTO ≤ 1 h; Neo4j excluded from backup (rebuildable projection, D5) | §8 RPO/RTO targets; §3.2 Postgres CloudNativePG sync-audit + **Neo4j-Enterprise causal-cluster opt-in stays PROPOSED** pending this answer (single-instance + automated rebuild is the designed path) | **Re-confirmed (default holds)** |
+| **Q9 — LLM hosting (GPU)** | (b) One 24 GB GPU (L4 / RTX 4090 class) running an 8–14B instruct model; CPU = degraded mode; redaction + no-egress-by-default security requirements | §3.2 optional Ollama GPU node pool (request queueing + per-model concurrency); §6 agent first-token SLO **p95 < 5 s (local, reference GPU)** / < 3 s (external) | **Re-confirmed (default holds)** |
+| **Q13 — Data retention** | (b) Per-class: pcaps 30 d + 50 GB cap; `raw_artifacts` 90 d; `reasoning_traces` 365 d; `config_snapshots` indefinite; `audit_log` never auto-purged (7-yr guidance); `discovery_runs` 180 d | §6 **log retention 90 d hot / 1 yr archived** (incl. the audit→SIEM export stream); §7 **audit retention 7 yr**; §8 pcap retention | **Re-confirmed (default holds)** |
+
 *Register of the working assumptions these defaults create: `docs/consultant/ASSUMPTIONS.md` (A1–A19).*

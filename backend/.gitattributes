@@ -1,0 +1,11 @@
+# Pin the dependency lockfile to LF line endings (P3 W0-T8).
+#
+# `uv pip compile` writes LF. The CI drift gate (.github/workflows/ci.yml job
+# `lockfile`) re-resolves the lock and asserts `git diff --exit-code` is clean.
+# Under core.autocrlf=true a Windows clone would materialize CRLF in the working
+# tree; a re-lock + commit would then stage CRLF and the gate would FALSE-RED on
+# pure line-ending churn (the same CRLF trap that produced a false-green policy
+# gate in deploy/kubernetes/.gitattributes, ADR-0029 §5, and is pinned in
+# ci/.gitattributes). Pinning eol=lf keeps the lock LF regardless of the cloner's
+# autocrlf setting, so the gate compares CONTENT, not line endings.
+requirements.lock.txt text eol=lf

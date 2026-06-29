@@ -46,5 +46,12 @@
 | [0039](0039-mtls-between-containers.md) | mTLS Between Containers (cert-manager) | Accepted | P2 W0 |
 | [0040](0040-device-credential-rotation.md) | Device Credential Rotation + Per-Credential Scoping | Accepted | P2 W0 |
 | [0041](0041-collector-network-segmentation.md) | Collector Network Segmentation (NetworkPolicy Egress) | Accepted | P2 W0 |
+| [0042](0042-postgres-ha-cloudnativepg-sync-audit.md) | Postgres HA — CloudNativePG (1 primary + 2 replicas) + PgBouncer + Synchronous Audit Write Path | Proposed | P3 W0 |
+| [0043](0043-api-hpa-keda-autoscaling.md) | api Horizontal Pod Autoscaler + KEDA Per-Queue Worker Autoscaling | Proposed | P3 W0 |
+| [0044](0044-redis-sentinel-websocket-fanout.md) | Redis Sentinel + Stateless WebSocket Fan-Out via Redis Pub/Sub | Proposed | P3 W0 |
+| [0045](0045-audit-siem-export.md) | Audit→SIEM Export (RFC5424 syslog + CEF over TLS + HTTPS/JSON push, at-least-once, export-lag SLO) | Proposed | P3 W0 |
+| [0046](0046-observability-slo-enforcement.md) | Observability-SLO Enforcement (recording rules, multi-window burn-rate alerts, golden-signal dashboards, fault-injection MTTD) | Proposed | P3 W0 |
+| [0047](0047-reliability-scale-drill-harness.md) | Reliability/Scale Drill Harness + N-2 Upgrade Rehearsal (reduced-scale mechanism proof + named certified-scale ceiling) | Proposed | P3 W0 |
+| [0048](0048-kind-harness-gate-promotion.md) | kind-harness Gate Promotion — mTLS-handshake + collector-egress-deny live assertions → blocking in `all-gates` | Proposed | P3 W0 |
 
 **Conventions:** every binding decision D1–D16 has a current ADR; any deviation requires a superseding ADR (no silent drift — see `PRODUCTION.md` gate G-MNT). New capabilities, normalized models, agents, or vendors beyond the CLAUDE.md lists require an ADR *before* implementation (`REPO-STRUCTURE.md` §6–§7).
