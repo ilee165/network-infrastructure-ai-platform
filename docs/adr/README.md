@@ -47,5 +47,6 @@
 | [0040](0040-device-credential-rotation.md) | Device Credential Rotation + Per-Credential Scoping | Accepted | P2 W0 |
 | [0041](0041-collector-network-segmentation.md) | Collector Network Segmentation (NetworkPolicy Egress) | Accepted | P2 W0 |
 | [0042](0042-postgres-ha-cloudnativepg-sync-audit.md) | Postgres HA — CloudNativePG (1 primary + 2 replicas) + PgBouncer + Synchronous Audit Write Path | Proposed | P3 W0 |
+| [0043](0043-api-hpa-keda-autoscaling.md) | api Horizontal Pod Autoscaler + KEDA Per-Queue Worker Autoscaling | Proposed | P3 W0 |
 
 **Conventions:** every binding decision D1–D16 has a current ADR; any deviation requires a superseding ADR (no silent drift — see `PRODUCTION.md` gate G-MNT). New capabilities, normalized models, agents, or vendors beyond the CLAUDE.md lists require an ADR *before* implementation (`REPO-STRUCTURE.md` §6–§7).
