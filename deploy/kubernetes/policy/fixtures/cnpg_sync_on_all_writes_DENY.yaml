@@ -1,0 +1,38 @@
+# NEGATIVE fixture (ADR-0042 §2 / Alt #3) — a CNPG Cluster that forces
+# synchronous_commit=on CLUSTER-WIDE makes EVERY write (discovery/config/
+# telemetry) pay the WAL round-trip — throughput collapse for no audit-spine
+# benefit. Sync must be scoped per-transaction to the audit path (W1-T2 SET
+# LOCAL), NOT forced cluster-wide. The cnpg rule MUST DENY this over-scoping.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: netops-pg-syncall-negative
+  labels:
+    app.kubernetes.io/component: postgres
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4-1-pgvector
+  priorityClassName: netops-postgres-ha
+  postgresql:
+    synchronous:
+      method: any
+      number: 1
+      failoverQuorum: true
+    parameters:
+      # THE DEFECT: forces sync on ALL writes, not just the audit transaction.
+      synchronous_commit: "on"
+  bootstrap:
+    initdb:
+      database: netops
+      owner: netops
+      postInitSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector
+  storage:
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi

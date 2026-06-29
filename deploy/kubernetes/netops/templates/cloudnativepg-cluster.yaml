@@ -1,0 +1,125 @@
+{{- /*
+CloudNativePG `Cluster` — the Postgres HA data tier (W1-T1, ADR-0042).
+
+1 primary + 2 streaming replicas under the CloudNativePG operator, with:
+  - QUORUM synchronous replication (ANY 1) for the audit write path (§2),
+  - pgvector installed at bootstrap (inherited by replicas, §5),
+  - a PriorityClass so PG outranks batch workers (§1),
+  - WAL archiving + base backups to the SAME object store as the pgBackRest tier
+    (ADR-0030), repo-encrypted, credentials by-reference only,
+  - secure-by-default (non-root; the operator-managed pods drop ALL caps, run a
+    RuntimeDefault seccomp profile and a read-only rootfs).
+
+OPT-IN: rendered only when cloudNativePg.enabled. MUTUALLY EXCLUSIVE with the
+single-instance services.postgres StatefulSet — rendering both would run two
+Postgres tiers fighting over the same Service name / data. The chart REFUSES
+that combination (fail-fast below), matching the external-Postgres + mTLS guard
+precedent (ADR-0039 / mtls-postgres.yaml). The operator (CRDs + controller) MUST
+be pre-installed; the chart ships the Cluster CR, not the operator.
+*/ -}}
+{{- if .Values.cloudNativePg.enabled }}
+{{- if .Values.services.postgres.enabled }}
+{{- fail "cloudNativePg.enabled=true AND services.postgres.enabled=true — these are TWO Postgres tiers for the SAME platform (the in-chart StatefulSet and the CloudNativePG HA Cluster) and would collide on the data/Service. Choose ONE: set services.postgres.enabled=false to run the CloudNativePG HA tier (ADR-0042), or set cloudNativePg.enabled=false to keep the single-instance StatefulSet (ADR-0042 §1, the GA default)." -}}
+{{- end }}
+{{- $cnpg := .Values.cloudNativePg -}}
+{{- $fullname := include "netops.fullname" . -}}
+{{- $clusterName := printf "%s-pg" $fullname -}}
+{{- /* Credential Secret object names (the dev path renders them in
+       cloudnativepg-secret.yaml; production supplies via existingSecret). */ -}}
+{{- $superSecretName := printf "%s-cnpg-superuser" $fullname -}}
+{{- $appSecretName := printf "%s-cnpg-app" $fullname -}}
+{{- if .Values.secrets.existingSecret -}}
+  {{- $superSecretName = .Values.secrets.existingSecret -}}
+  {{- $appSecretName = .Values.secrets.existingSecret -}}
+{{- end -}}
+{{- $backupOn := and $cnpg.backup.enabled .Values.backup.postgres.enabled -}}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ $clusterName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+spec:
+  # 1 primary + 2 streaming replicas (ADR-0042 §1). 3 is the quorum minimum.
+  instances: {{ $cnpg.instances }}
+  # pgvector-bearing operand image, explicit immutable tag (NEVER latest).
+  imageName: {{ $cnpg.imageName }}
+  # PriorityClass so Postgres outranks the unpriorited batch workers (§1).
+  priorityClassName: {{ $cnpg.priorityClass.name }}
+  # SECURE BY DEFAULT (ADR-0042 §4 / ADR-0029 §3): explicit non-root. The operator
+  # renders the pods with dropped-ALL caps + RuntimeDefault seccomp + RO-rootfs.
+  postgresql:
+    # QUORUM synchronous replication (ADR-0042 §2). CNPG generates
+    # synchronous_standby_names = `ANY 1 (<replicas>)` from this stanza — DO NOT
+    # set synchronous_standby_names directly. This is the CLUSTER-level quorum SET
+    # only; it does NOT force synchronous_commit on every write. W1-T2 scopes the
+    # synchronous round-trip to the audit-writing transaction via `SET LOCAL
+    # synchronous_commit=remote_apply`, so non-audit writes keep the default async
+    # commit (§2 — the load-bearing audit-path scoping).
+    synchronous:
+      method: {{ $cnpg.synchronous.method }}
+      number: {{ $cnpg.synchronous.number }}
+      # A promotion verifies the new primary holds the quorum-acked WAL before it
+      # serves writes — the zero-committed-audit-loss guarantee W4-T3 asserts.
+      failoverQuorum: {{ $cnpg.synchronous.failoverQuorum }}
+    # NO cluster-wide synchronous_commit override here (see §2 above) — forcing it
+    # on would tax every non-audit write (throughput collapse, Alt #3). The audit
+    # scoping is per-transaction (W1-T2), not a cluster parameter.
+  # Per-instance persistent storage (the PGDATA PVC, ReadWriteOnce).
+  storage:
+    size: {{ $cnpg.storage.size }}
+  # Resource requests + limits (never absent — ADR-0029 §3).
+  resources:
+    {{- toYaml $cnpg.resources | nindent 4 }}
+  # SUPERUSER credential by-reference (ADR-0042 §1 / ADR-0029 §6). NEVER a literal.
+  enableSuperuserAccess: true
+  superuserSecret:
+    name: {{ $superSecretName }}
+  bootstrap:
+    initdb:
+      database: {{ $cnpg.bootstrap.database }}
+      owner: {{ $cnpg.bootstrap.owner }}
+      # App/replication role credential by-reference (NEVER a literal).
+      secret:
+        name: {{ $appSecretName }}
+      dataChecksums: true
+      # pgvector at bootstrap (ADR-0042 §5). Runs on the PRIMARY; streaming
+      # replicas INHERIT installed extensions, so pgvector is present on replicas
+      # too — but that is VERIFIED by the pgvector-on-replica smoke (ADR-0042 §5),
+      # not assumed. IF NOT EXISTS keeps re-bootstrap idempotent.
+      postInitSQL:
+        {{- range $cnpg.bootstrap.postInitSQL }}
+        - {{ . | quote }}
+        {{- end }}
+  {{- if $backupOn }}
+  # Backup integration (ADR-0042 §1 / ADR-0030). The CNPG Cluster archives WAL +
+  # takes base backups to the SAME object store as the pgBackRest tier, repo-
+  # encrypted, with the credentials supplied BY-REFERENCE from the platform Secret
+  # (barman-cloud reads them from the named keys; NEVER inlined — ADR-0030 §1 /
+  # ADR-0011 §4). This is the in-cluster HA tier's own continuous archiving; it
+  # sits ABOVE the out-of-cluster pgBackRest DR tier (complementary, ADR-0042 §3).
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://{{ .Values.backup.postgres.repo.bucket }}{{ .Values.backup.postgres.repo.prefix }}/cnpg
+      endpointURL: https://{{ .Values.backup.postgres.repo.endpoint }}:{{ .Values.backup.postgres.repo.port }}
+      s3Credentials:
+        accessKeyId:
+          name: {{ include "netops.platformSecretName" . }}
+          key: {{ .Values.secrets.keys.backupRepoS3Key }}
+        secretAccessKey:
+          name: {{ include "netops.platformSecretName" . }}
+          key: {{ .Values.secrets.keys.backupRepoS3KeySecret }}
+      wal:
+        compression: gzip
+      {{- if .Values.backup.postgres.encryption.enabled }}
+      # Repo-side encryption: the WAL/base-backup data is encrypted at rest in the
+      # object store. The passphrase/key is a by-reference Secret key, never a
+      # literal (ADR-0030 §1 / Alt #3); object-store SSE may layer WITH this.
+      encryption: AES256
+      {{- end }}
+    # Keep enough base backups to cover the operational restore window (mirrors
+    # the pgBackRest full retention; ADR-0030 §1 table).
+    retentionPolicy: "{{ mul .Values.backup.postgres.retention.full 7 }}d"
+  {{- end }}
+{{- end }}

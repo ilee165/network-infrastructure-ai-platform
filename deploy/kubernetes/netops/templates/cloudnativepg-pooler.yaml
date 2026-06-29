@@ -1,0 +1,60 @@
+{{- /*
+PgBouncer `Pooler` — transaction-mode pooling for the CNPG HA tier
+(W1-T1, ADR-0042 §4).
+
+A PgBouncer pooler fronts every connection to the read-write endpoint. TRANSACTION
+mode multiplexes the many short client connections from the scaled-out api
+(>=2 HPA replicas) + KEDA workers onto a SMALL server-side pool — the connection-
+budget rationale W4-T6 asserts (G-SCA §330: no connection-exhaustion errors).
+
+Transaction mode is also REQUIRED for correctness: the audit write path sets
+`SET LOCAL synchronous_commit` per-transaction (W1-T2). `SET LOCAL` survives
+transaction-mode pooling and scopes to exactly the audit-writing transaction; a
+session `SET` would be dropped by pooling. So `transaction` is mandatory, not
+incidental (ADR-0042 §4) — the cnpg conftest rule REFUSES session/statement mode.
+
+On failover, PgBouncer re-points to the new primary via the operator-managed
+read-write service endpoint, so applications reconnect through the pooler with no
+config change (ADR-0042 §3).
+
+OPT-IN with the CNPG tier (cloudNativePg.enabled).
+*/ -}}
+{{- if .Values.cloudNativePg.enabled }}
+{{- $cnpg := .Values.cloudNativePg -}}
+{{- $fullname := include "netops.fullname" . -}}
+{{- $clusterName := printf "%s-pg" $fullname -}}
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: {{ $fullname }}-pg-pooler-rw
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+spec:
+  cluster:
+    name: {{ $clusterName }}
+  # Front the READ-WRITE endpoint (the audit write path + app writes go here; the
+  # pooler re-points to the new primary on failover, ADR-0042 §3/§4).
+  type: rw
+  # Pooler (PgBouncer) instances — HA-fronted for availability.
+  instances: {{ $cnpg.pgbouncer.instances }}
+  pgbouncer:
+    # TRANSACTION mode — the connection-budget + audit `SET LOCAL` correctness
+    # depend on it (ADR-0042 §4). session/statement are refused by the policy gate.
+    poolMode: {{ $cnpg.pgbouncer.poolMode }}
+    # Connection budget (ADR-0042 §4 / G-SCA §330). max_client_conn is the large
+    # client-facing ceiling; default_pool_size is the SMALL server-side pool that
+    # must stay well under Postgres max_connections so the backend is never
+    # exhausted. PgBouncer parameters are STRINGS.
+    parameters:
+      max_client_conn: {{ $cnpg.pgbouncer.maxClientConn | quote }}
+      default_pool_size: {{ $cnpg.pgbouncer.defaultPoolSize | quote }}
+  # Pooler pod resources (never absent — ADR-0029 §3). The operator renders the
+  # PgBouncer pods hardened (non-root, dropped caps, RuntimeDefault seccomp).
+  template:
+    spec:
+      containers:
+        - name: pgbouncer
+          resources:
+            {{- toYaml $cnpg.pgbouncer.resources | nindent 12 }}
+{{- end }}

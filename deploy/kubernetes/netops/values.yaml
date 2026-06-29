@@ -156,6 +156,17 @@ secrets:
     backupTlsServerKey: backup-tls-server-key
     backupTlsClientCert: backup-tls-client-crt
     backupTlsClientKey: backup-tls-client-key
+    # CloudNativePG HA tier (W1-T1, ADR-0042 §1). CNPG reads kubernetes.io/basic-
+    # auth Secrets (username + password) for the SUPERUSER and the app/replication
+    # role. REFERENCE key NAMES only — the dev path generates the passwords via
+    # `lookup` reuse-or-generate (idempotent; NEVER regenerated on upgrade — a
+    # regen severs every DB connection, L4). Production supplies them via
+    # secrets.existingSecret-style external secrets. The Secret OBJECT names are
+    # derived (<fullname>-cnpg-superuser / -cnpg-app); these are the in-Secret keys.
+    cnpgSuperuserUsername: username
+    cnpgSuperuserPassword: password
+    cnpgAppUsername: username
+    cnpgAppPassword: password
   # KMS master-key REFERENCE (ADR-0032 / D11). The pod receives a KMS HANDLE or
   # a mounted secret PATH — never the KEK itself. This is the indirect handle the
   # envelope-encryption layer resolves at runtime against the customer KMS/Vault.
@@ -302,6 +313,145 @@ services:
       limits:
         cpu: "4"
         memory: 8Gi
+
+# -- CloudNativePG HA data tier (W1-T1, ADR-0042). The HA replacement for the
+#    single-instance services.postgres StatefulSet above: a CloudNativePG
+#    `Cluster` of 1 primary + 2 streaming replicas with automated failover, a
+#    PgBouncer `Pooler` (transaction mode) fronting every connection, and
+#    QUORUM synchronous replication SCOPED to the audit write path (ADR-0042 §2).
+#
+#    OPT-IN, default OFF. This wave (W1-T1) ships the manifests + policy gates;
+#    the live failover/zero-audit-loss drill is W4-T3 and the app-side per-
+#    transaction `SET LOCAL synchronous_commit` is W1-T2. Enabling REQUIRES the
+#    CloudNativePG operator (CRDs + controller) pre-installed in the cluster and
+#    is MUTUALLY EXCLUSIVE with services.postgres.enabled (the chart REFUSES to
+#    render both — one Postgres tier, never two; see _validation.tpl). The
+#    single-instance StatefulSet stays the default so the GA render is unchanged.
+#
+#    SECURE BY DEFAULT: every CNPG pod runs non-root with a dropped-ALL,
+#    RuntimeDefault-seccomp, RO-rootfs container context (operator-managed +
+#    asserted by the cnpg.* conftest rules). A PriorityClass ranks Postgres
+#    ABOVE the batch workers so the data tier is never evicted for a worker.
+#
+#    SYNC-AUDIT (the load-bearing decision, ADR-0042 §2): `synchronous.method:
+#    any` + `number: 1` is CNPG's `ANY 1 (<replicas>)` quorum — a commit is
+#    acknowledged once AT LEAST ONE replica holds the WAL. It is NOT forced onto
+#    every write: `synchronous_commit` stays at the cluster default (local/off
+#    for non-audit txns); W1-T2 sets `SET LOCAL synchronous_commit=remote_apply`
+#    ONLY on the caller transaction that appends an `audit_log` row, so only
+#    audited state changes pay the round-trip. `ANY 1` (not `ANY 2`/`FIRST`)
+#    keeps audit commits succeeding while one replica is healthy (§2 availability
+#    trade-off). All credentials are external-secret REFERENCES (never inlined).
+cloudNativePg:
+  # OPT-IN HA tier — default OFF (the services.postgres StatefulSet is the GA
+  # default). Set true (and services.postgres.enabled=false) to run Postgres
+  # under the CloudNativePG operator. Enabling both is a REFUSED render.
+  enabled: false
+  # 1 primary + 2 streaming replicas (ADR-0042 §1). 3 is the minimum for a
+  # quorum (ANY 1 over 2 standbys) AND for CNPG failover quorum — do not lower.
+  instances: 3
+  # pgvector image (the system of record carries documents/embeddings — ADR-0004;
+  # pgvector MUST be present on every instance, replicas included — ADR-0042 §5).
+  # CNPG ships operand images; we pin the pgvector-bearing PostgreSQL 16 build to
+  # an explicit immutable tag (NEVER `latest` — admission rejects it, ADR-0029 §5).
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4-1-pgvector
+  # Per-instance persistent storage (the PGDATA PVC, ReadWriteOnce).
+  storage:
+    size: 20Gi
+  # Per-instance resource requests + limits (never absent — ADR-0029 §3). Sized
+  # at/above the single-instance StatefulSet so an HA primary is not under-provisioned.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  # PriorityClass so Postgres outranks the batch workers (ADR-0042 scope / §1).
+  # Rendered by priorityclass.yaml; the worker Deployment is unpriorited (default
+  # 0), so under node pressure the scheduler evicts a worker before a PG instance.
+  priorityClass:
+    # Create the PriorityClass with the chart (set false to reference one the
+    # operator pre-created cluster-wide). The CNPG Cluster references it by name.
+    create: true
+    name: netops-postgres-ha
+    # Well above the 0 default of unpriorited batch workers, below system-critical.
+    value: 1000000
+  # QUORUM synchronous replication (ADR-0042 §2). `any`+`1` == `ANY 1 (replicas)`:
+  # acknowledge a commit once >=1 replica is durable. CNPG generates
+  # synchronous_standby_names from this stanza — DO NOT set it directly. This is
+  # the cluster-level quorum SET; the per-transaction scoping to the audit path is
+  # W1-T2's `SET LOCAL synchronous_commit` (this does NOT force sync on all writes).
+  synchronous:
+    method: any
+    number: 1
+    # failoverQuorum: a promoted replica is checked to hold the quorum-acked WAL
+    # before it serves writes — the data-safety guarantee the W4-T3 drill asserts
+    # (zero committed-audit-row loss). Requires >=3 instances + synchronous (above).
+    failoverQuorum: true
+  # PgBouncer pooler (ADR-0042 §4). TRANSACTION mode multiplexes the scaled-out
+  # api (>=2 HPA replicas) + KEDA workers onto a small server-side pool — the
+  # connection-budget rationale W4-T6 asserts (G-SCA §330, no exhaustion). The
+  # audit `SET LOCAL` (W1-T2) is transaction-mode-safe; a session `SET` would be
+  # dropped by pooling, so transaction mode is REQUIRED here, not incidental.
+  pgbouncer:
+    # `transaction` is mandatory for the connection budget + the audit SET LOCAL
+    # to be correct (ADR-0042 §4). `session`/`statement` are REFUSED by the cnpg
+    # conftest rule — they break the budget rationale and the per-txn sync scoping.
+    poolMode: transaction
+    # Pooler instances (the PgBouncer pods, HA-fronted). 2 for availability.
+    instances: 2
+    # Connection budget (ADR-0042 §4 / G-SCA §330). maxClientConn is the large
+    # client-facing ceiling (many short app connections); defaultPoolSize is the
+    # SMALL per-user/db server-side pool PgBouncer multiplexes them onto — this is
+    # the number that must stay well under Postgres max_connections so the backend
+    # is never exhausted. Operators tune to their api/worker fan-out.
+    maxClientConn: 1000
+    defaultPoolSize: 25
+    # Pooler pod resources (never absent — ADR-0029 §3).
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  # Bootstrap: initdb creates the platform database + owner, then post-init SQL
+  # installs pgvector. CNPG runs postInitSQL on the PRIMARY; a streaming replica
+  # INHERITS installed extensions, so pgvector is present on replicas too — but
+  # ADR-0042 §5 requires this be VERIFIED, not assumed (the pgvector-on-replica
+  # smoke). DB/owner mirror config.postgres so the app connection is unchanged.
+  bootstrap:
+    database: netops
+    owner: netops
+    # `CREATE EXTENSION IF NOT EXISTS vector` — pgvector on the cluster (inherited
+    # by replicas). IF NOT EXISTS keeps re-bootstrap idempotent.
+    postInitSQL:
+      - CREATE EXTENSION IF NOT EXISTS vector
+  # Superuser + app credential secrets (ADR-0042 §1, L4). CNPG reads a
+  # kubernetes.io/basic-auth Secret (username+password). REFERENCE ONLY: in
+  # production supply secrets.existingSecret-style external secrets; in dev the
+  # chart generates them via `lookup` reuse-or-generate (NEVER regenerated on
+  # upgrade — a regen severs every connection, ADR-0042 §1 / P1-W4 L4). The key
+  # NAMES live under secrets.keys.cnpg*; the rendered dev Secrets are
+  # cloudnativepg-secrets.yaml.
+  # pgvector-on-replica smoke (ADR-0042 §5). Rendered as a Job manifest that runs
+  # an embedding/similarity query against a REPLICA (read-only service). On a real
+  # cluster (W4-T1 kind) it asserts the extension is queryable on a replica; with
+  # kind absent locally it is a RENDERED EMULATION (the Job manifest + its policy
+  # assertions render and validate; the live query is the W4 drill). Default ON
+  # with the tier so the guard ships; the real assertion is W4-T1.
+  pgvectorReplicaSmoke:
+    enabled: true
+  # Backup integration (ADR-0042 §1 / ADR-0030). When the backup tier is enabled
+  # the CNPG Cluster archives WAL + takes base backups to the SAME object store as
+  # the pgBackRest tier (Barman Cloud plugin / built-in barman-cloud), repo-
+  # encrypted, credentials by-reference only. This wires the CNPG `backup` stanza
+  # to the existing backup.postgres.repo/encryption config — no new object store.
+  backup:
+    # Follow backup.postgres.enabled by default (resilient-by-default). The CNPG
+    # Cluster's barman-cloud destinationPath/credentials reuse the existing repo.
+    enabled: true
 
 # -- Backup / DR tier (W5-T1, ADR-0030 §1/§4). pgBackRest continuous WAL
 #    archiving + weekly-full / daily-incr backups of the Postgres system of

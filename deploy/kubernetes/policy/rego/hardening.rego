@@ -2726,3 +2726,194 @@ deny contains msg if {
 	some k, _ in object.get(input, "stringData", {})
 	msg := sprintf("db mTLS Secret %q must carry cert material under `data:` (base64 PEM), not stringData key %q (ADR-0039 §5)", [input.metadata.name, k])
 }
+
+# ===========================================================================
+# W1-T1 — CloudNativePG HA data tier (ADR-0042). The CNPG `Cluster` + PgBouncer
+# `Pooler` + PriorityClass are CRDs; conftest still feeds each rendered document
+# as `input`, so these rules assert the ADR-0042 contract SHAPE directly on the
+# rendered manifests (helm template … | conftest test). They run ONLY when the
+# opt-in tier is enabled (the manifests are absent on the default render, so the
+# rules are vacuously satisfied then). NEVER weaken a rule to make it green — the
+# manifest must satisfy the contract.
+#
+# What is asserted here vs elsewhere:
+#   - sync-QUORUM shape (ANY 1, audit-path scoping) ........... here (render)
+#   - PgBouncer transaction mode + connection budget ......... here (render)
+#   - 1+2 instances, non-root, pgvector, PriorityClass ....... here (render)
+#   - the per-transaction `SET LOCAL synchronous_commit` ..... W1-T2 (real PG)
+#   - the live zero-audit-loss failover drill ................ W4-T3 (kind)
+# ===========================================================================
+
+is_cnpg_cluster(obj) if {
+	obj.apiVersion == "postgresql.cnpg.io/v1"
+	obj.kind == "Cluster"
+}
+
+is_cnpg_pooler(obj) if {
+	obj.apiVersion == "postgresql.cnpg.io/v1"
+	obj.kind == "Pooler"
+}
+
+# --- 1 primary + 2 streaming replicas (ADR-0042 §1). Exactly 3 instances: fewer
+# than 3 cannot form the ANY-1-over-2 quorum nor CNPG failover quorum. ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	input.spec.instances != 3
+	msg := sprintf("CNPG Cluster %q must run exactly 3 instances (1 primary + 2 streaming replicas), got %v — ANY 1 quorum + failover quorum need 3 (ADR-0042 §1)", [input.metadata.name, input.spec.instances])
+}
+
+# --- QUORUM synchronous replication present (ADR-0042 §2). The cluster MUST
+# declare a `synchronous` stanza so CNPG generates `synchronous_standby_names` —
+# its ABSENCE means async-everywhere, the exact failure G-REL §316 forbids. ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	not input.spec.postgresql.synchronous
+	msg := sprintf("CNPG Cluster %q must declare spec.postgresql.synchronous (quorum sync for the audit write path) — its absence is async-everywhere, losing a committed audit row on a primary kill (ADR-0042 §2 / G-REL §316)", [input.metadata.name])
+}
+
+# --- the quorum method MUST be `any` (= `ANY q (...)`), NOT `first` (priority-
+# based, which would require specific standbys and stall on one replica loss). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	input.spec.postgresql.synchronous.method != "any"
+	msg := sprintf("CNPG Cluster %q synchronous.method must be `any` (ANY-q quorum, tolerates one replica loss), got %q — `first` turns a single replica outage into an audit-write stall (ADR-0042 §2 / Alt #4)", [input.metadata.name, input.spec.postgresql.synchronous.method])
+}
+
+# --- the quorum number MUST be 1 (= `ANY 1`): acknowledge once >=1 replica holds
+# the WAL. `ANY 2`/higher converts a single replica loss into an audit-write
+# outage (ADR-0042 §2 availability trade-off / Alt #4 rejected). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	input.spec.postgresql.synchronous.number != 1
+	msg := sprintf("CNPG Cluster %q synchronous.number must be 1 (ANY 1 — one healthy replica suffices), got %v — requiring >1 standby stalls audit commits on a single replica loss (ADR-0042 §2 / Alt #4)", [input.metadata.name, input.spec.postgresql.synchronous.number])
+}
+
+# --- the cluster MUST NOT force `synchronous_commit` ON for ALL writes. ADR-0042
+# §2 scopes sync to the audit-writing transaction (W1-T2 `SET LOCAL`); a cluster-
+# level `synchronous_commit: on/remote_apply` parameter forces it onto every
+# discovery/config/telemetry write — the throughput-collapse Alt #3 rejects. ---
+forced_sync_commit_values := {"on", "remote_apply", "remote_write"}
+
+deny contains msg if {
+	is_cnpg_cluster(input)
+	sc := object.get(object.get(object.get(input.spec, "postgresql", {}), "parameters", {}), "synchronous_commit", "")
+	forced_sync_commit_values[sc]
+	msg := sprintf("CNPG Cluster %q must NOT set synchronous_commit=%q cluster-wide — that forces sync on ALL writes (throughput collapse); sync is scoped per-transaction to the audit path via W1-T2 `SET LOCAL` (ADR-0042 §2 / Alt #3)", [input.metadata.name, sc])
+}
+
+# --- failoverQuorum ON (ADR-0042 §2): a promoted replica is checked to hold the
+# quorum-acked WAL before serving writes — the data-safety guarantee W4-T3 asserts. ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	input.spec.postgresql.synchronous.failoverQuorum != true
+	msg := sprintf("CNPG Cluster %q synchronous.failoverQuorum must be true — a promotion must verify the new primary holds every quorum-acked audit row (ADR-0042 §2, the W4-T3 zero-loss guarantee)", [input.metadata.name])
+}
+
+# --- pgvector present on the cluster (ADR-0042 §5). The post-init SQL must
+# `CREATE EXTENSION … vector` so every instance (replicas inherit) carries it —
+# a streaming replica that lacks pgvector breaks RAG reads routed to it. ---
+cluster_creates_vector(c) if {
+	some stmt in object.get(object.get(object.get(c.spec, "bootstrap", {}), "initdb", {}), "postInitSQL", [])
+	contains(lower(stmt), "extension")
+	contains(lower(stmt), "vector")
+}
+
+deny contains msg if {
+	is_cnpg_cluster(input)
+	not cluster_creates_vector(input)
+	msg := sprintf("CNPG Cluster %q must install pgvector via bootstrap.initdb.postInitSQL (`CREATE EXTENSION … vector`) so replicas inherit it — a replica without pgvector breaks RAG reads routed to it (ADR-0042 §5)", [input.metadata.name])
+}
+
+# --- pgvector image, never `latest`/tagless (ADR-0029 §5 parity for the operand
+# image the Cluster pins). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	img := object.get(input.spec, "imageName", "")
+	endswith(img, ":latest")
+	msg := sprintf("CNPG Cluster %q imageName must not use the `latest` tag (ADR-0029 §5)", [input.metadata.name])
+}
+
+deny contains msg if {
+	is_cnpg_cluster(input)
+	img := object.get(input.spec, "imageName", "")
+	img != ""
+	not contains(img, ":")
+	not contains(img, "@sha256:")
+	msg := sprintf("CNPG Cluster %q imageName %q must carry an explicit tag or digest (ADR-0029 §5)", [input.metadata.name, img])
+}
+
+# --- secure-by-default: the cluster MUST run non-root. CNPG defaults to non-root,
+# but ADR-0042 §4 requires it be EXPLICIT in the chart so a future edit cannot
+# silently relax it (postgresql.runAsNonRoot must not be false). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	object.get(object.get(input.spec, "postgresql", {}), "runAsNonRoot", true) == false
+	msg := sprintf("CNPG Cluster %q must run non-root (postgresql.runAsNonRoot must not be false) (ADR-0042 §4 / ADR-0029 §3)", [input.metadata.name])
+}
+
+# --- resource requests AND limits present on the Cluster (never absent, ADR-0029 §3). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	not input.spec.resources.requests
+	msg := sprintf("CNPG Cluster %q must declare resource requests (ADR-0029 §3 — never absent)", [input.metadata.name])
+}
+
+deny contains msg if {
+	is_cnpg_cluster(input)
+	not input.spec.resources.limits
+	msg := sprintf("CNPG Cluster %q must declare resource limits (ADR-0029 §3 — never absent)", [input.metadata.name])
+}
+
+# --- PriorityClass so Postgres outranks batch workers (ADR-0042 scope/§1). The
+# Cluster MUST reference a non-empty priorityClassName. ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	object.get(input.spec, "priorityClassName", "") == ""
+	msg := sprintf("CNPG Cluster %q must set priorityClassName so Postgres outranks the unpriorited batch workers under node pressure (ADR-0042 §1)", [input.metadata.name])
+}
+
+# --- credentials by-reference: the Cluster must NOT inline a superuser password.
+# CNPG references credentials via superuserSecret/bootstrap secret NAMES, never
+# literal values — a literal here is a secret-in-manifest regression (ADR-0042 §1). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	object.get(object.get(input.spec, "superuserSecret", {}), "password", "") != ""
+	msg := sprintf("CNPG Cluster %q must reference the superuser credential by Secret NAME, never inline a password (ADR-0042 §1 / ADR-0029 §6)", [input.metadata.name])
+}
+
+# ---------------------------------------------------------------------------
+# PgBouncer Pooler — transaction mode + connection budget (ADR-0042 §4)
+# ---------------------------------------------------------------------------
+
+# --- transaction mode is MANDATORY (ADR-0042 §4): it is the connection-budget
+# rationale AND the only mode under which the audit `SET LOCAL` (W1-T2) is
+# correct. `session`/`statement` are REFUSED. ---
+deny contains msg if {
+	is_cnpg_pooler(input)
+	object.get(object.get(input.spec, "pgbouncer", {}), "poolMode", "") != "transaction"
+	msg := sprintf("CNPG Pooler %q must use poolMode `transaction` (the connection-budget + audit `SET LOCAL` correctness depend on it), got %q (ADR-0042 §4)", [input.metadata.name, object.get(object.get(input.spec, "pgbouncer", {}), "poolMode", "")])
+}
+
+# --- connection budget present (ADR-0042 §4 / G-SCA §330): the Pooler MUST set a
+# bounded default_pool_size — an unbounded server-side pool defeats the whole
+# point (Postgres connection exhaustion under the scaled-out api/worker tiers). ---
+deny contains msg if {
+	is_cnpg_pooler(input)
+	not object.get(object.get(input.spec, "pgbouncer", {}), "parameters", {}).default_pool_size
+	msg := sprintf("CNPG Pooler %q must set pgbouncer.parameters.default_pool_size (the bounded server-side pool — the connection budget that prevents Postgres exhaustion; ADR-0042 §4 / G-SCA §330)", [input.metadata.name])
+}
+
+deny contains msg if {
+	is_cnpg_pooler(input)
+	not object.get(object.get(input.spec, "pgbouncer", {}), "parameters", {}).max_client_conn
+	msg := sprintf("CNPG Pooler %q must set pgbouncer.parameters.max_client_conn (the client-facing ceiling of the connection budget; ADR-0042 §4)", [input.metadata.name])
+}
+
+# --- the Pooler must front the read-write endpoint (type rw — the endpoint the
+# app + the audit write path reach; PgBouncer re-points to the new primary on
+# failover, ADR-0042 §3/§4). ---
+deny contains msg if {
+	is_cnpg_pooler(input)
+	object.get(input.spec, "type", "rw") != "rw"
+	msg := sprintf("CNPG Pooler %q must front the read-write endpoint (type rw) so the audit write path + failover re-point work through it (ADR-0042 §3/§4)", [input.metadata.name])
+}

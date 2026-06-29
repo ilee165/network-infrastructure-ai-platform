@@ -1,0 +1,32 @@
+# NEGATIVE fixture (ADR-0042 §2) — a CNPG Cluster with NO synchronous stanza is
+# async-everywhere: a primary kill loses the just-committed audit row. The
+# cnpg sync-quorum rules MUST DENY this. Proves the gate BITES on the exact
+# G-REL §316 failure (zero-audit-loss) the audit-spine quorum exists to prevent.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: netops-pg-async-negative
+  labels:
+    app.kubernetes.io/component: postgres
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4-1-pgvector
+  priorityClassName: netops-postgres-ha
+  # NO spec.postgresql.synchronous — async streaming replication only. THIS is
+  # the defect: a commit is acked before the WAL reaches any replica.
+  postgresql: {}
+  bootstrap:
+    initdb:
+      database: netops
+      owner: netops
+      postInitSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector
+  storage:
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi

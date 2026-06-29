@@ -1,0 +1,128 @@
+{{- /*
+pgvector-on-replica smoke (W1-T1, ADR-0042 §5).
+
+A streaming replica INHERITS the pgvector extension installed at bootstrap — but
+ADR-0042 §5 requires this be VERIFIED, not assumed: if pgvector were missing on a
+replica, RAG reads routed there would fail. This Job runs an embedding/similarity
+query against the CLUSTER's READ-ONLY service (the `-ro` endpoint CNPG creates,
+which serves the replicas), so a green run proves the extension is queryable on a
+replica.
+
+RENDERED EMULATION when kind is absent locally (P1-W4 L1): on the W4-T1 kind
+bring-up this Job runs against the live replica service and its success is the
+assertion. Where kind is unavailable (the local infra posture this wave was built
+under), the Job MANIFEST renders + validates (kubeconform/kube-linter/conftest)
+and the conftest rules assert its shape; the live query is the W4-T1 drill. The
+distinction is stated in the task's emulationNotes — this is NOT a live assertion
+in this wave.
+
+SECURE BY DEFAULT (this is a `postgres`-component workload, so the generic
+ADR-0029 §3 conftest rules apply): non-root, dropped-ALL caps, RuntimeDefault
+seccomp, read-only rootfs, resource requests+limits, explicit image tag. Helm
+hook `post-install,post-upgrade` so it runs after the cluster is bootstrapped.
+*/ -}}
+{{- if and .Values.cloudNativePg.enabled .Values.cloudNativePg.pgvectorReplicaSmoke.enabled }}
+{{- $cnpg := .Values.cloudNativePg -}}
+{{- $fullname := include "netops.fullname" . -}}
+{{- $clusterName := printf "%s-pg" $fullname -}}
+{{- $appSecretName := printf "%s-cnpg-app" $fullname -}}
+{{- if .Values.secrets.existingSecret -}}{{- $appSecretName = .Values.secrets.existingSecret -}}{{- end -}}
+{{- $k := .Values.secrets.keys -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-pgvector-replica-smoke
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+  annotations:
+    # Run after the cluster is bootstrapped; do not block the release on its
+    # result in CI (the live assertion is W4-T1). hook-delete keeps no stale pods.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  # Bound the run so a hung query (e.g. a replica that lacks pgvector) fails the
+  # Job instead of hanging forever — the guard must FAIL LOUD, never silently.
+  activeDeadlineSeconds: 120
+  # Reap the finished Job pod automatically (kube-linter job-ttl-seconds-after-
+  # finished). The Helm hook-delete-policy also cleans it, but the explicit TTL is
+  # the belt-and-suspenders the linter requires for a standalone Job.
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "postgres") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: pgvector-replica-smoke
+          image: {{ $cnpg.imageName }}
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          env:
+            # Connect to the READ-ONLY service (the replicas) — ADR-0042 §5: the
+            # check must hit a REPLICA, not the primary, to prove read scale-out
+            # does not break embedding reads.
+            - name: PGHOST
+              value: {{ $clusterName }}-ro
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: {{ $cnpg.bootstrap.database }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $appSecretName }}
+                  key: {{ $k.cnpgAppUsername }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $appSecretName }}
+                  key: {{ $k.cnpgAppPassword }}
+            # HOME on the writable scratch so psql's temp/history works under a
+            # read-only rootfs (the only writable path).
+            - name: HOME
+              value: /home/scratch
+            # Assert we are actually on a REPLICA (in_recovery = t), then prove the
+            # pgvector extension is present AND queryable with a real similarity
+            # operation. L5: `set -euo pipefail` + explicit non-empty assertions so
+            # a missing extension / a primary mis-route fails the Job LOUD.
+          command:
+            - sh
+            - -c
+            - |
+              set -euo pipefail
+              echo "checking we are on a replica (pg_is_in_recovery)..."
+              REC="$(psql -At -c 'SELECT pg_is_in_recovery();')"
+              test "$REC" = "t"
+              echo "asserting pgvector extension present on the replica..."
+              EXT="$(psql -At -c "SELECT extname FROM pg_extension WHERE extname='vector';")"
+              test "$EXT" = "vector"
+              echo "running a real pgvector similarity query on the replica..."
+              DIST="$(psql -At -c "SELECT ('[1,2,3]'::vector <-> '[4,5,6]'::vector);")"
+              test -n "$DIST"
+              echo "pgvector-on-replica smoke OK (in_recovery=t, extension=vector, distance=$DIST)"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            # readOnlyRootFilesystem:true — psql writes a temp/history under $HOME;
+            # give it a writable emptyDir scratch HOME (the only writable mount).
+            - name: scratch
+              mountPath: /home/scratch
+          # Keep HOME on the writable scratch so RO-rootfs holds.
+          # (PGHOST/PG* above drive the connection; HOME just needs to be writable.)
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 16Mi
+{{- end }}

@@ -1,0 +1,37 @@
+# POSITIVE fixture (ADR-0042) — a correctly-shaped CNPG Cluster: 1+2 instances,
+# ANY 1 quorum + failoverQuorum, pgvector post-init, non-root default, resources,
+# PriorityClass, credentials by-reference. MUST PASS conftest (no false-reject of
+# the compliant shape). Pairs with the DENY fixtures so a too-strict regression
+# (that false-rejects the compliant cluster) also fails the bite.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: netops-pg-positive
+  labels:
+    app.kubernetes.io/component: postgres
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4-1-pgvector
+  priorityClassName: netops-postgres-ha
+  postgresql:
+    synchronous:
+      method: any
+      number: 1
+      failoverQuorum: true
+  superuserSecret:
+    name: netops-cnpg-superuser
+  bootstrap:
+    initdb:
+      database: netops
+      owner: netops
+      postInitSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector
+  storage:
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
