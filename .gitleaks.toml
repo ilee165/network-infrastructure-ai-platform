@@ -40,9 +40,12 @@ description = "Reviewed false-positive allowlist (test fixtures + lockfile). Pat
 paths = [
   '''(^|/)backend/tests/''',
   '''(^|/)frontend/src/__tests__/''',
-  # Generated dependency lockfile: integrity hashes (sha512-...) trip the
-  # high-entropy detector but are not secrets.
+  # Generated dependency lockfiles: integrity hashes (sha512-.../sha256-...) trip
+  # the high-entropy detector but are not secrets.
   '''(^|/)frontend/package-lock\.json$''',
+  # Backend pip-tools/uv lockfile (P3 W0-T8): every dep carries --hash=sha256
+  # integrity hashes that trip the high-entropy/generic-secret detector.
+  '''(^|/)backend/requirements\.lock\.txt$''',
   # This config file itself documents the allowed-path regexes above; do not let
   # gitleaks scan its own example strings.
   '''(^|/)\.gitleaks\.toml$''',

@@ -60,6 +60,21 @@ uvicorn app.main:create_app --factory --reload
 > installed by debian` — leaving the environment half-installed. The venv has no
 > such conflict.
 
+> **Dependency lockfiles (drift-gated in CI).** `pyproject.toml` /
+> `package.json` declare ranges; the *resolved* set is pinned in
+> `backend/requirements.lock.txt` (uv/pip-tools, hash-pinned) and
+> `frontend/package-lock.json` (npm). The CI `lockfile` job re-resolves and fails
+> on drift, so a dependency change is not complete until the lock is regenerated
+> and committed in the **same** change. Re-lock with:
+> ```bash
+> # backend (Python 3.12, matches CI; uv pinned to the CI UV_VERSION):
+> cd backend && uv pip compile pyproject.toml --extra dev --universal \
+>   --generate-hashes --python-version 3.12 --output-file requirements.lock.txt
+> # frontend:
+> cd frontend && npm install   # updates package-lock.json
+> ```
+> Full procedure + the drift gate's negative-control: `docs/security/supply-chain-scanning.md`.
+
 **Frontend** (Node 20):
 
 ```bash

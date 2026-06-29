@@ -994,6 +994,126 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Dependency-lockfile drift gate (P3 W0-T8, closes the P1 systemic TODO "add a
+  # dep lockfile — drift bit twice", PRODUCTION.md §10 deps-pinned-per-release /
+  # §11 G-MNT no-silent-drift). The P1 `fastapi 0.137 include_router` break had
+  # root cause "no lockfile": the manifest declared a range, so a fresh resolve
+  # silently floated past the flattening boundary. This job asserts the COMMITTED
+  # lockfiles equal a fresh deterministic resolve of the manifests, so a manifest
+  # edit without a re-lock (or a hand-edited lock) is RED.
+  #
+  #   - Backend: backend/requirements.lock.txt is `uv pip compile pyproject.toml
+  #     --extra dev --universal --generate-hashes --python-version 3.12`. uv is
+  #     PINNED to the exact version the lock was generated with (UV_VERSION); a
+  #     different uv version can reorder/re-resolve, so determinism requires the
+  #     pin (L1: a new gating tool is pinned and proven). `--universal` emits
+  #     platform-marker lines so the lock is host-independent — it recompiles
+  #     byte-identically on linux-CI from the Windows authoring host (verified
+  #     locally, see docs/security/supply-chain-scanning.md "Dependency lockfiles").
+  #   - Frontend: `npm ci` already FAILS when package.json and package-lock.json
+  #     are out of sync (it refuses to mutate the lock); the explicit
+  #     `git diff --exit-code` after it is belt-and-braces against any in-place
+  #     lock rewrite. RED on any drift.
+  #   - Negative control (L1, "the gate must RUN and BITE"): the self-test step
+  #     plants an out-of-lock edit in a SCRATCH COPY, runs the same recompile/diff
+  #     logic, and FAILS THE JOB if that planted drift is NOT detected. It never
+  #     touches the committed tree. This proves the gate bites without leaving a
+  #     planted negative in the repo.
+  lockfile:
+    name: lockfile (backend + frontend dependency drift)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Pin uv to the exact version the committed lock was generated with. Bump
+      # this AND re-lock together (docs/security/supply-chain-scanning.md).
+      UV_VERSION: "0.11.19"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv (pinned)
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # Re-resolve the backend manifest and assert it equals the committed lock.
+      # Drift (a dep added/changed in pyproject.toml without re-locking, or a
+      # hand-edited lock) makes `git diff --exit-code` non-zero — RED gate.
+      - name: Backend lockfile in sync with pyproject.toml — RED gate
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          uv pip compile pyproject.toml --extra dev --universal --generate-hashes \
+            --python-version 3.12 --output-file requirements.lock.txt
+          if ! git diff --exit-code -- requirements.lock.txt; then
+            echo "::error::backend/requirements.lock.txt is out of sync with pyproject.toml." \
+                 "Re-lock: cd backend && uv pip compile pyproject.toml --extra dev --universal" \
+                 "--generate-hashes --python-version 3.12 --output-file requirements.lock.txt" \
+                 "(then commit the lock). See docs/security/supply-chain-scanning.md."
+            exit 1
+          fi
+          echo "backend lockfile: in sync."
+
+      # Negative control: prove the recompile+diff logic actually BITES on drift.
+      # Plant an out-of-lock edit in a throwaway copy of the repo, run the SAME
+      # check there, and require it to FAIL. If the planted drift is NOT caught,
+      # the real gate above is a false-green and THIS step fails the job. The
+      # committed tree is never modified.
+      - name: Prove backend drift gate bites (planted negative, scratch copy)
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          scratch="$(mktemp -d)"
+          cp pyproject.toml requirements.lock.txt "$scratch/"
+          git -C "$scratch" init -q
+          git -C "$scratch" add -A
+          git -C "$scratch" -c user.email=ci@local -c user.name=ci commit -qm baseline
+          # Plant drift: tamper the committed lock so a fresh resolve disagrees.
+          # (Equivalent to a hand-edit or a stale lock after a manifest bump.)
+          sed -i 's/^fastapi==0\.136\.3/fastapi==0.0.0-PLANTED-DRIFT/' "$scratch/requirements.lock.txt"
+          (
+            cd "$scratch"
+            uv pip compile pyproject.toml --extra dev --universal --generate-hashes \
+              --python-version 3.12 --output-file requirements.lock.txt
+            if git diff --exit-code -- requirements.lock.txt; then
+              echo "::error::NEGATIVE CONTROL FAILED — planted lock drift was NOT detected;" \
+                   "the drift gate is a false-green. Fix the gate before relying on it."
+              exit 1
+            fi
+          )
+          echo "negative control: planted drift correctly detected (gate bites)."
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci` itself refuses to run when package.json and package-lock.json are
+      # out of sync (it errors instead of mutating the lock), so an unlocked
+      # dependency change is already RED here. The `git diff --exit-code` after it
+      # is defence-in-depth against any in-place lock rewrite.
+      - name: Frontend lockfile in sync with package.json — RED gate
+        working-directory: frontend
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci
+          if ! git diff --exit-code -- package-lock.json; then
+            echo "::error::frontend/package-lock.json drifted during npm ci." \
+                 "Re-lock: cd frontend && npm install (then commit package-lock.json)."
+            exit 1
+          fi
+          echo "frontend lockfile: in sync."
+
   # Single required-check aggregator (P1 W6-T4). Branch protection should require
   # ONLY this job; it transitively depends on every gate, so a failure or skip of
   # ANY upstream job (dependency audits, secret scan, image/Trivy, chart/policy)
@@ -1015,7 +1135,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile]
     steps:
       - name: Assert every gate succeeded
         env:
