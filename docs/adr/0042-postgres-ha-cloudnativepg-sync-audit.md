@@ -15,7 +15,8 @@ forbids.
 
 This ADR is the **design gate**. It ratifies the Postgres HA design the build
 implements in **W1-T1** (CloudNativePG `Cluster` + PgBouncer + quorum config, render
-/ policy gates), **W1-T2** (app-side sync-commit on the audit session, real PG), and
+/ policy gates), **W1-T2** (app-side per-transaction sync-commit on the
+audit-writing transaction, real PG), and
 the live **W4-T3** failover drill (primary kill → promote ≤ 60 s, zero committed-audit
 loss). It does **not** implement those controls. The audit log is the integrity root
 (ADR-0011 §2, ADR-0038), so the synchronous audit write path is a **secret-surface /
@@ -43,7 +44,13 @@ connection; the `audit_log` write path commits with quorum-based synchronous
 replication so a promoted replica holds every committed audit row; pgvector is
 available and queryable on replicas. Patroni is the named no-operator fallback;
 certified-scale sizing is named deferred-accepted. Synchronous commit is scoped to
-the audit path only — all other writes stay asynchronous to preserve throughput.**
+the audit path: it is set per-transaction on the transaction that appends an
+`audit_log` row, so only transactions that write audit (state-changing audited
+actions) pay the synchronous round-trip; transactions with no audit write keep the
+default async commit. Because an audit append rides in the caller's action
+transaction (atomic with the action — ADR-0011/0038), making that transaction
+synchronous makes the whole action+audit commit synchronous; that is deliberate, not
+a defect, and is the price of preserving action↔audit atomicity.**
 
 ### 1. Operator: CloudNativePG (primary); Patroni (named fallback)
 
@@ -82,16 +89,39 @@ crash in that window loses the just-committed row — unacceptable for the audit
   expresses this via its synchronous-replication settings). On a primary kill the
   operator promotes a replica that, by the quorum guarantee, already holds every
   acknowledged audit row.
-- **Scoped to the audit path, not all writes.** The application (W1-T2) sets
-  `synchronous_commit` on the **dedicated audit-write session** through which every
-  `audit_log` append is already serialized (the single audit writer behind
-  `backend/app/services/audit/`, on top of the engine/sessionmaker in
-  `backend/app/db.py`). Non-audit sessions keep the default async commit. Scoping
-  this way buys durability where it is mandatory without paying the synchronous
-  round-trip on the high-volume discovery/config/telemetry writes.
-- **It composes with the ADR-0038 hash chain.** The hash-chain append runs **on the
-  same sync-commit audit session**, so a row that is acknowledged is both
-  chain-linked and replicated. The W4-T3 survival check is exactly: every audit row
+- **Scoped to the audit-writing transaction, not all writes — and the existing
+  session model is what makes this scoping real.** There is **no dedicated
+  audit-write session and no single audit-writer process**: `audit_service.record()`
+  (`backend/app/services/audit/service.py`) takes the **caller's** `AsyncSession`,
+  appends a single `audit_log` INSERT and **flushes but never commits — the caller
+  owns the transaction**, so the audit row commits or rolls back atomically with the
+  action it describes (ADR-0011 §2, ADR-0038; ~25 call sites — `auth.py:193`,
+  `workers/tasks/discovery.py:702`, `engines/config_mgmt/capture.py:234`,
+  `agents/automation/agent.py:316`, etc. — each pass their own action session and
+  commit it). The only serialization on the append is a **transaction-scoped advisory
+  lock on the hash-chain head** (`_current_chain_head`), not a single writer session.
+  Because the audit append therefore rides inside the caller's action transaction,
+  W1-T2 sets `synchronous_commit` **per-transaction** (`SET LOCAL`, §4) at the point
+  `record()` participates, which makes **the enclosing action transaction**
+  synchronous — the audit INSERT cannot be made synchronous in isolation without
+  splitting it onto a separate session/transaction, which would break the
+  action↔audit atomicity ADR-0011/0038 require. This is the intended coupling: the
+  synchronous round-trip lands on transactions that contain an audited state change
+  (already gated by the ChangeRequest lifecycle), while the high-volume
+  discovery/config/telemetry writes that emit no audit row keep the default async
+  commit.
+
+  *Implementation note / W1-T2 boundary:* the scoping unit is **"transactions that
+  write audit," not "the audit row alone."** A transaction that writes an audit row
+  alongside a large bulk mutation will make that whole mutation synchronous too; if a
+  future caller needs a bulk write to stay async while still auditing, it must emit
+  the audit append on a **separate** committed transaction and explicitly accept the
+  loss of action↔audit atomicity — a superseding decision, not the default. W1-T2
+  owns this trade-off and documents it where it sets `SET LOCAL`.
+- **It composes with the ADR-0038 hash chain.** The hash-chain append runs **inside
+  the same caller transaction that carries the `SET LOCAL synchronous_commit`**, so a
+  row that is acknowledged is both chain-linked and replicated. The W4-T3 survival
+  check is exactly: every audit row
   committed before the kill is present and **hash-chain-valid with no `seq` gap** on
   the promoted primary.
 
@@ -133,9 +163,14 @@ Transaction mode constrains the app (W1-T2): **no session-pinned features that
 PgBouncer cannot carry across a pooled transaction** — no reliance on session-level
 `SET` that must persist beyond a transaction, and a documented prepared-statement
 caveat (use protocol-level handling compatible with transaction pooling). The
-`synchronous_commit` setting for the audit session must be applied in a
-transaction-mode-safe way (per-transaction `SET LOCAL` on the audit transaction, not
-a session `SET` that pooling would drop) — W1-T2 owns this and tests it on real PG.
+`synchronous_commit` setting for the audit write **must** be applied in a
+transaction-mode-safe way — per-transaction `SET LOCAL` on the caller transaction
+that appends the audit row (§2), **not** a session `SET` that pooling would drop.
+`SET LOCAL` is in fact the only correct mechanism here for two reasons: it survives
+transaction-mode pooling, and (because the audit row commits in the caller's action
+transaction, §2) it correctly scopes the synchronous round-trip to exactly the
+audit-writing transaction without leaking onto subsequent pooled transactions that
+share the same backend. W1-T2 owns this and tests it on real PG.
 
 ### 5. pgvector on replicas — read scale-out must not break embedding reads
 
@@ -171,11 +206,17 @@ proof):
   -strict`, kube-linter, conftest); **render-twice stable** (no secret regen, **L4**);
   quorum sync config present on the audit write path; pgvector-on-replica smoke
   passes.
-- **W1-T2** (`wf-implementer`, escalated): the audit-write session uses
-  `synchronous_commit` per this ADR, **asserted on real PG** (`tests/pg/`,
-  `pg-integration` job — never SQLite, P2 lesson); the app routes through PgBouncer
-  with no pooling-incompatible feature; read/write routing per §4/§5; redaction +
-  hash-chain unchanged.
+- **W1-T2** (`wf-implementer`, escalated): the **caller transaction that appends an
+  `audit_log` row** issues `SET LOCAL synchronous_commit` (= `remote_apply`/`on`) per
+  this ADR — applied at the point `audit_service.record()` participates, **not** on a
+  separate "audit session" (none exists; §2), and **asserted on real PG**
+  (`tests/pg/`, `pg-integration` job — never SQLite, P2 lesson). The test must prove
+  (a) a transaction that appends audit commits synchronously (the durability
+  guarantee) and (b) a transaction with **no** audit write keeps the default async
+  commit (the scoping guarantee), and must document that the synchronous mode covers
+  the **whole** audit-writing transaction, preserving the action↔audit atomicity of
+  ADR-0011/0038. The app routes through PgBouncer with no pooling-incompatible
+  feature; read/write routing per §4/§5; redaction + hash-chain unchanged.
 - **W4-T3** (`wf-reliability`, escalated): live on the W4-T1 kind cluster — primary
   kill → **automated promotion, write service ≤ 60 s**; **every committed audit row
   survives on the promoted primary, hash-chain-valid, no `seq` gap**; a **negative
@@ -203,15 +244,28 @@ cloud-managed Postgres (self-hosted only, D-series / ADR-0004), and Neo4j/Redis 
   tier stops being a single point of failure.
 - PgBouncer transaction-mode pooling holds the connection budget under the scaled-out
   api/worker tiers (G-SCA §330), keeping Postgres from connection exhaustion.
-- Scoping sync to the audit path alone keeps durability where mandatory without taxing
-  the high-volume discovery/config/telemetry write paths.
+- Scoping sync per-transaction (set on the transaction that appends an audit row, §2)
+  keeps durability where mandatory without taxing the high-volume
+  discovery/config/telemetry transactions that emit no audit row, which keep the
+  default async commit.
 - Read scale-out (replica reads, pgvector verified) offloads the primary without
   breaking RAG reads.
 
 **Negative**
 - Synchronous commit adds a primary↔replica WAL round-trip to every audit append
-  (§2) — bounded by scoping it to the audit path and quorum `ANY 1` (one healthy
-  replica suffices).
+  (§2) — bounded by scoping it to the audit-writing transaction and quorum `ANY 1`
+  (one healthy replica suffices).
+- **The synchronous round-trip lands on the whole audit-writing transaction, not the
+  audit INSERT alone (stated coupling, §2).** Because the audit row commits inside the
+  caller's action transaction (atomic with the action — ADR-0011/0038), `SET LOCAL
+  synchronous_commit` on that transaction makes the **entire** login/config/discovery
+  transaction synchronous, not just its audit INSERT. The audit row cannot be made
+  synchronous in isolation without splitting it onto its own session/transaction,
+  which would break the existing action↔audit atomicity. This is accepted, not
+  hidden: the cost is bounded because audited state changes are already gated by the
+  ChangeRequest lifecycle and are low-volume relative to bulk ingest; a future caller
+  that needs a bulk audited write to stay async must explicitly trade away atomicity
+  on a separate transaction (§2 implementation note) — a superseding decision.
 - The CloudNativePG operator is an operational dependency (CRDs, controller upgrades);
   the Patroni fallback (§1) is heavier still — recorded so the choice is explicit.
 - A misconfigured quorum (sync on all writes, or `ANY 2`/`FIRST` requiring every
@@ -233,7 +287,8 @@ cloud-managed Postgres (self-hosted only, D-series / ADR-0004), and Neo4j/Redis 
    for **non-audit** writes only.
 3. **Synchronous commit on ALL writes.** Rejected (spec risk + §2): a WAL round-trip
    on every discovery/config/telemetry write collapses throughput for no audit-spine
-   benefit. Sync is scoped to the audit session.
+   benefit. Sync is scoped per-transaction to the transactions that append an audit
+   row (§2), which keeps it off transactions that emit no audit row.
 4. **`ANY 2` / `FIRST 2` (all standbys must ack).** Rejected: turns a single replica
    outage into an audit-write stall. `ANY 1` keeps the durability guarantee (the
    survivor holds the row) while tolerating one replica loss.
