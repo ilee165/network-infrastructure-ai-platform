@@ -35,6 +35,7 @@ NEG_AOF_OFF="${HERE}/redis_aof_off_DENY.yaml"
 NEG_CFG_SECRET="${HERE}/redis_config_inline_secret_DENY.yaml"
 NEG_PW_INLINE="${HERE}/redis_password_inline_DENY.yaml"
 NEG_FEW_REDIS="${HERE}/redis_too_few_replicas_DENY.yaml"
+NEG_OMIT_REDIS="${HERE}/redis_replicas_omitted_DENY.yaml"
 NEG_FEW_SENT="${HERE}/sentinel_too_few_DENY.yaml"
 NEG_NO_MON="${HERE}/sentinel_no_monitor_DENY.yaml"
 POS_CONFIG="${HERE}/redis_aof_config_PASS.yaml"
@@ -59,8 +60,8 @@ _run_conftest() {  # prints output; sets global RC
 
 _indent() { printf '%s\n' "${CONFTEST_OUT}" | sed 's/^/    /' >&2; }
 
-expect_deny() {  # label, fixture
-  local label="$1" fixture="$2"
+expect_deny() {  # label, fixture, expected-message-substring
+  local label="$1" fixture="$2" expected="$3"
   _run_conftest "${fixture}"
   if [ "${RC}" -eq 0 ]; then
     echo "FAIL: ${label} PASSED conftest — fixture was NOT denied" >&2
@@ -70,12 +71,19 @@ expect_deny() {  # label, fixture
     echo "FAIL: ${label} raised a conftest EXCEPTION (policy runtime error) — not a real deny (harness error, not pass-open)" >&2
     _indent
     fail=1
-  elif printf '%s' "${CONFTEST_OUT}" | grep -qE '[1-9][0-9]* failure'; then
-    echo "PASS: ${label} was DENIED (>=1 conftest failure)"
-  else
+  elif ! printf '%s' "${CONFTEST_OUT}" | grep -qE '[1-9][0-9]* failure'; then
     echo "FAIL: ${label} exited ${RC} but reported NO failures — conftest exec error, not a deny (harness error, not pass-open)" >&2
     _indent
     fail=1
+  elif ! printf '%s' "${CONFTEST_OUT}" | grep -qF -- "${expected}"; then
+    # A deny fired, but NOT the intended redis-sentinel rule: an UNRELATED hardening
+    # rule could trip while the rule under test silently regressed. Require the
+    # SPECIFIC message so the bite proves the INTENDED rule bit (not just any deny).
+    echo "FAIL: ${label} was denied, but NOT by the intended rule — expected message substring not found: ${expected}" >&2
+    _indent
+    fail=1
+  else
+    echo "PASS: ${label} was DENIED by the intended rule (matched: ${expected})"
   fi
 }
 
@@ -94,22 +102,25 @@ expect_pass() {  # label, fixture
 echo "== Redis Sentinel HA-tier policy bite (ADR-0044 §1) =="
 
 echo "-- negative (AOF disabled) MUST be DENIED --"
-expect_deny "redis AOF-off" "${NEG_AOF_OFF}"
+expect_deny "redis AOF-off" "${NEG_AOF_OFF}" "must set \`appendonly yes\`"
 
 echo "-- negative (requirepass INLINED in the config ConfigMap) MUST be DENIED --"
-expect_deny "redis config inline-secret" "${NEG_CFG_SECRET}"
+expect_deny "redis config inline-secret" "${NEG_CFG_SECRET}" "must NOT inline requirepass/masterauth/auth-pass"
 
 echo "-- negative (REDIS_PASSWORD inlined as a value: literal) MUST be DENIED --"
-expect_deny "redis password inline" "${NEG_PW_INLINE}"
+expect_deny "redis password inline" "${NEG_PW_INLINE}" "REDIS_PASSWORD must NOT carry an inline \`value:\` literal"
 
 echo "-- negative (Sentinel-tier Redis with 1 replica) MUST be DENIED --"
-expect_deny "redis too-few-replicas" "${NEG_FEW_REDIS}"
+expect_deny "redis too-few-replicas" "${NEG_FEW_REDIS}" "must run >= 3 replicas"
+
+echo "-- negative (Sentinel-tier Redis OMITS replicas — K8s defaults to 1) MUST be DENIED --"
+expect_deny "redis replicas-omitted" "${NEG_OMIT_REDIS}" "must run >= 3 replicas"
 
 echo "-- negative (1 Sentinel — no odd quorum) MUST be DENIED --"
-expect_deny "sentinel too-few" "${NEG_FEW_SENT}"
+expect_deny "sentinel too-few" "${NEG_FEW_SENT}" "must run >= 3 Sentinels"
 
 echo "-- negative (Sentinel runs plain redis-server, no monitor) MUST be DENIED --"
-expect_deny "sentinel no-monitor" "${NEG_NO_MON}"
+expect_deny "sentinel no-monitor" "${NEG_NO_MON}" "must run Sentinel"
 
 echo "-- positive (compliant AOF config) MUST PASS --"
 expect_pass "redis compliant config" "${POS_CONFIG}"

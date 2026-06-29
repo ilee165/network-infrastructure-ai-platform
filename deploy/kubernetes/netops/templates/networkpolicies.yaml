@@ -331,7 +331,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.networkPolicy.postgres.port }}
 {{- end }}
-{{- if and .Values.services.neo4j.enabled .Values.services.neo4j.autoRebuild.enabled .Values.services.postgres.enabled }}
+{{- if and .Values.services.neo4j.enabled .Values.services.neo4j.autoRebuild.enabled (or .Values.services.postgres.enabled .Values.cloudNativePg.enabled) }}
 ---
 # ---------------------------------------------------------------------------
 # allow-neo4j-rebuild-egress (W1-T3) — the automated-rebuild reconciler pods

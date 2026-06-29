@@ -60,8 +60,8 @@ _run_conftest() {  # prints output; sets global RC
 
 _indent() { printf '%s\n' "${CONFTEST_OUT}" | sed 's/^/    /' >&2; }
 
-expect_deny() {  # label, fixture
-  local label="$1" fixture="$2"
+expect_deny() {  # label, fixture, expected-message-substring
+  local label="$1" fixture="$2" expected="$3"
   _run_conftest "${fixture}"
   if [ "${RC}" -eq 0 ]; then
     echo "FAIL: ${label} PASSED conftest — fixture was NOT denied" >&2
@@ -71,12 +71,19 @@ expect_deny() {  # label, fixture
     echo "FAIL: ${label} raised a conftest EXCEPTION (policy runtime error) — not a real deny (harness error, not pass-open)" >&2
     _indent
     fail=1
-  elif printf '%s' "${CONFTEST_OUT}" | grep -qE '[1-9][0-9]* failure'; then
-    echo "PASS: ${label} was DENIED (>=1 conftest failure)"
-  else
+  elif ! printf '%s' "${CONFTEST_OUT}" | grep -qE '[1-9][0-9]* failure'; then
     echo "FAIL: ${label} exited ${RC} but reported NO failures — conftest exec error, not a deny (harness error, not pass-open)" >&2
     _indent
     fail=1
+  elif ! printf '%s' "${CONFTEST_OUT}" | grep -qF -- "${expected}"; then
+    # A deny fired, but NOT the intended cnpg rule: an UNRELATED hardening rule could
+    # trip while the rule under test silently regressed. Require the SPECIFIC message
+    # so the bite proves the INTENDED rule bit (not just any deny).
+    echo "FAIL: ${label} was denied, but NOT by the intended rule — expected message substring not found: ${expected}" >&2
+    _indent
+    fail=1
+  else
+    echo "PASS: ${label} was DENIED by the intended rule (matched: ${expected})"
   fi
 }
 
@@ -95,22 +102,22 @@ expect_pass() {  # label, fixture
 echo "== CloudNativePG HA-tier policy bite (ADR-0042) =="
 
 echo "-- negative (async / NO synchronous stanza) MUST be DENIED --"
-expect_deny "cnpg async-no-sync" "${NEG_ASYNC}"
+expect_deny "cnpg async-no-sync" "${NEG_ASYNC}" "must declare spec.postgresql.synchronous"
 
 echo "-- negative (synchronous_commit forced cluster-wide) MUST be DENIED --"
-expect_deny "cnpg sync-on-all-writes" "${NEG_SYNCALL}"
+expect_deny "cnpg sync-on-all-writes" "${NEG_SYNCALL}" "must NOT set synchronous_commit"
 
 echo "-- negative (synchronous set but synchronous_commit UNSET — implicit PG default \`on\`) MUST be DENIED --"
-expect_deny "cnpg sync-commit-unset" "${NEG_SYNCUNSET}"
+expect_deny "cnpg sync-commit-unset" "${NEG_SYNCUNSET}" "does NOT set an explicit async cluster default synchronous_commit"
 
 echo "-- negative (PgBouncer SESSION mode) MUST be DENIED --"
-expect_deny "cnpg pooler session-mode" "${NEG_POOL_SESSION}"
+expect_deny "cnpg pooler session-mode" "${NEG_POOL_SESSION}" "must use poolMode \`transaction\`"
 
 echo "-- negative (PgBouncer NO default_pool_size budget) MUST be DENIED --"
-expect_deny "cnpg pooler unbounded" "${NEG_POOL_UNBOUNDED}"
+expect_deny "cnpg pooler unbounded" "${NEG_POOL_UNBOUNDED}" "must set pgbouncer.parameters.default_pool_size"
 
 echo "-- negative (PgBouncer fronts the READ-ONLY endpoint, type ro) MUST be DENIED --"
-expect_deny "cnpg pooler type-ro" "${NEG_POOL_RO}"
+expect_deny "cnpg pooler type-ro" "${NEG_POOL_RO}" "must front the read-write endpoint (type rw)"
 
 echo "-- positive (compliant ANY 1 quorum Cluster) MUST PASS --"
 expect_pass "cnpg compliant cluster" "${POS_CLUSTER}"

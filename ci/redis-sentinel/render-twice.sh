@@ -129,13 +129,42 @@ else
 fi
 
 # --- 4. the Sentinel/Redis pods consume REDIS_PASSWORD BY-REFERENCE -------------
-# A grep on the rendered Sentinel-tier manifest: REDIS_PASSWORD must be sourced from
-# secretKeyRef and must NEVER appear as an inline `value:` literal (ADR-0029 §6).
-if grep -Eq 'name: REDIS_PASSWORD' "${WORK}/a.yaml" \
-  && grep -Eq 'secretKeyRef' "${WORK}/a.yaml"; then
-  ok "Sentinel-tier render sources REDIS_PASSWORD from a secretKeyRef (by-reference, ADR-0044 §1)"
+# Inspect the REDIS_PASSWORD env entry's OWN source (not a whole-file grep): a
+# generic `name: REDIS_PASSWORD` + `secretKeyRef` anywhere check would PASS even if
+# REDIS_PASSWORD flipped to an inline `value:` while some OTHER env var still used a
+# Secret. Parse every manifest and require EACH REDIS_PASSWORD env to carry
+# valueFrom.secretKeyRef and NO inline `value:` (ADR-0029 §6 / ADR-0044 §1).
+if "${PY}" - "${WORK}/a.yaml" <<'PYEOF'
+import sys, yaml
+path = sys.argv[1]
+seen = 0
+with open(path, encoding="utf-8") as fh:
+    docs = list(yaml.safe_load_all(fh))
+for doc in docs:
+    if not isinstance(doc, dict):
+        continue
+    spec = (((doc.get("spec") or {}).get("template") or {}).get("spec")) or {}
+    for c in spec.get("containers", []) or []:
+        for e in c.get("env", []) or []:
+            if e.get("name") != "REDIS_PASSWORD":
+                continue
+            seen += 1
+            vf = e.get("valueFrom") or {}
+            if "value" in e or not (vf.get("secretKeyRef")):
+                print(
+                    f"REDIS_PASSWORD env in container {c.get('name')!r} is not a "
+                    "bare valueFrom.secretKeyRef", file=sys.stderr,
+                )
+                sys.exit(1)
+if seen == 0:
+    print("no REDIS_PASSWORD env found in the Sentinel-tier render", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PYEOF
+then
+  ok "every REDIS_PASSWORD env sources its OWN valueFrom.secretKeyRef with no inline value (by-reference, ADR-0044 §1)"
 else
-  bad "Sentinel-tier render must source REDIS_PASSWORD from valueFrom.secretKeyRef (auth required + by-reference)"
+  bad "a REDIS_PASSWORD env is not a bare valueFrom.secretKeyRef (an inline value: would defeat by-reference auth, ADR-0029 §6)"
 fi
 # The redis password literal must NOT leak into the rendered manifest as a value:
 # (the by-reference env carries only the key NAME, never the secret value).

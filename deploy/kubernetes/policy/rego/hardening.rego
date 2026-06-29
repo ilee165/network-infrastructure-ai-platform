@@ -3199,7 +3199,9 @@ deny contains msg if {
 	is_redis_sentinel_configmap(input)
 	some k, v in object.get(input, "data", {})
 	k == "redis.conf"
-	not contains(v, "appendonly yes")
+	# Match an ACTIVE `appendonly yes` line, not a commented `# appendonly yes`
+	# (which `contains` would be fooled by even with `appendonly no` set).
+	not regex.match(`(?m)^\s*appendonly\s+yes\s*(#.*)?$`, v)
 	msg := sprintf("Redis Sentinel config %q must set `appendonly yes` — AOF persistence is required so a full-shard restart recovers durable state (ADR-0044 §1)", [input.metadata.name])
 }
 
@@ -3297,8 +3299,11 @@ deny contains msg if {
 # ADR-0044 §1 — 3 is the minimum for a meaningful replica set). ---
 deny contains msg if {
 	is_redis_data_statefulset(input)
-	input.spec.replicas < 3
-	msg := sprintf("Redis Sentinel data StatefulSet %q must run >= 3 replicas (1 primary + 2 replicas; ADR-0044 §1), got %v", [input.metadata.name, input.spec.replicas])
+	# Omitted spec.replicas defaults to 1 in K8s; `input.spec.replicas < 3` would be
+	# UNDEFINED (fail-open) on omission, so default to 1 before comparing.
+	replicas := object.get(input.spec, "replicas", 1)
+	replicas < 3
+	msg := sprintf("Redis Sentinel data StatefulSet %q must run >= 3 replicas (1 primary + 2 replicas; ADR-0044 §1), got %v", [input.metadata.name, replicas])
 }
 
 # --- there MUST be 3 Sentinels (ADR-0044 §1 — an odd quorum so a single Sentinel
@@ -3306,8 +3311,11 @@ deny contains msg if {
 # majority the design requires. ---
 deny contains msg if {
 	is_redis_sentinel_statefulset(input)
-	input.spec.replicas < 3
-	msg := sprintf("Redis Sentinel StatefulSet %q must run >= 3 Sentinels (odd quorum, single-loss-tolerant; ADR-0044 §1), got %v", [input.metadata.name, input.spec.replicas])
+	# Omitted spec.replicas defaults to 1 in K8s; default to 1 before comparing so an
+	# omitted count is treated as non-compliant rather than failing open.
+	replicas := object.get(input.spec, "replicas", 1)
+	replicas < 3
+	msg := sprintf("Redis Sentinel StatefulSet %q must run >= 3 Sentinels (odd quorum, single-loss-tolerant; ADR-0044 §1), got %v", [input.metadata.name, replicas])
 }
 
 # --- the Sentinel container MUST actually run sentinel (a `--sentinel` flag or a
@@ -3323,7 +3331,10 @@ deny contains msg if {
 
 sentinel_runs_sentinel(c) if {
 	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
-	contains(arg, "sentinel")
+	# Require the actual `--sentinel` execution flag, not any "sentinel" substring (a
+	# script that merely echoes `sentinel monitor ...` but runs `redis-server $CONF`
+	# without `--sentinel` would otherwise pass while NOT starting Sentinel mode).
+	regex.match(`(^|\s)--sentinel(\s|$)`, arg)
 }
 
 # --- the Sentinel startup MUST monitor the shard (a `sentinel monitor <name> ...

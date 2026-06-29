@@ -203,7 +203,7 @@ spec:
         sizeLimit: 128Mi
     {{- include "netops.dbClientTlsVolume" $ctx | nindent 4 }}
 {{- end -}}
-{{- if and .Values.services.neo4j.enabled .Values.services.neo4j.autoRebuild.enabled .Values.services.postgres.enabled }}
+{{- if and .Values.services.neo4j.enabled .Values.services.neo4j.autoRebuild.enabled (or .Values.services.postgres.enabled .Values.cloudNativePg.enabled) }}
 {{- $a := .Values.services.neo4j.autoRebuild -}}
 {{- $fullname := include "netops.fullname" . -}}
 ---

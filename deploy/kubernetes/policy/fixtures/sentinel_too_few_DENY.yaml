@@ -49,6 +49,12 @@ spec:
                 - ALL
             seccompProfile:
               type: RuntimeDefault
+          # readOnlyRootFilesystem:true — the startup script writes /data/sentinel.conf,
+          # so /data MUST be a writable mount or the pod cannot start (fixture realism
+          # for the W4 kind drills; conftest tests the manifest statically).
+          volumeMounts:
+            - name: data
+              mountPath: /data
           env:
             - name: REDIS_PASSWORD
               valueFrom:
@@ -62,3 +68,6 @@ spec:
             limits:
               cpu: 200m
               memory: 128Mi
+      volumes:
+        - name: data
+          emptyDir: {}
