@@ -1060,9 +1060,11 @@ jobs:
           fi
           echo "backend lockfile: in sync."
 
-      # Negative control: prove the recompile+diff logic actually BITES on drift.
-      # Plant an out-of-lock edit in a throwaway copy of the repo, run the SAME
-      # check there, and require it to FAIL. If the planted drift is NOT caught,
+      # Negative control: prove the recompile-and-compare logic actually BITES on
+      # drift. Compile a fresh canonical lock from pyproject ONLY (uv reads no
+      # tampered file as preferences, so it is the true canonical resolution),
+      # plant a valid-but-wrong pin into a copy of the committed lock, and require
+      # the comparison to find them DIFFERENT. If the planted drift is NOT caught,
       # the real gate above is a false-green and THIS step fails the job. The
       # committed tree is never modified.
       - name: Prove backend drift gate bites (planted negative, scratch copy)
@@ -1071,23 +1073,18 @@ jobs:
         run: |
           set -o pipefail
           scratch="$(mktemp -d)"
-          cp pyproject.toml requirements.lock.txt "$scratch/"
-          git -C "$scratch" init -q
-          git -C "$scratch" add -A
-          git -C "$scratch" -c user.email=ci@local -c user.name=ci commit -qm baseline
-          # Plant drift: tamper the committed lock so a fresh resolve disagrees.
-          # (Equivalent to a hand-edit or a stale lock after a manifest bump.)
-          sed -i 's/^fastapi==0\.136\.3/fastapi==0.0.0-PLANTED-DRIFT/' "$scratch/requirements.lock.txt"
-          (
-            cd "$scratch"
-            uv pip compile pyproject.toml --extra dev --universal --generate-hashes \
-              --python-version 3.12 --output-file requirements.lock.txt
-            if git diff --exit-code -- requirements.lock.txt; then
-              echo "::error::NEGATIVE CONTROL FAILED — planted lock drift was NOT detected;" \
-                   "the drift gate is a false-green. Fix the gate before relying on it."
-              exit 1
-            fi
-          )
+          cp requirements.lock.txt "$scratch/committed.lock"
+          uv pip compile pyproject.toml --extra dev --universal --generate-hashes \
+            --python-version 3.12 --output-file "$scratch/fresh.lock"
+          # Plant drift: a valid-but-wrong pin (a stale lock after a manifest bump,
+          # or a hand-edit). A VALID version avoids a uv parse error; it differs
+          # from the canonical resolution, so the gate's diff must catch it.
+          sed -i 's/^fastapi==0\.136\.3/fastapi==0.136.2/' "$scratch/committed.lock"
+          if diff -q "$scratch/fresh.lock" "$scratch/committed.lock" >/dev/null; then
+            echo "::error::NEGATIVE CONTROL FAILED — planted lock drift was NOT detected;" \
+                 "the drift gate is a false-green. Fix the gate before relying on it."
+            exit 1
+          fi
           echo "negative control: planted drift correctly detected (gate bites)."
 
       - name: Set up Node 20
