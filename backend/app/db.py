@@ -24,6 +24,13 @@ from app.core.config import Settings, get_settings
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
+#: The read-only (replica) engine/sessionmaker (ADR-0042 §5). Lazily created and
+#: cached per process like the primary pair; only built when a replica endpoint is
+#: actually configured (:attr:`Settings.database_reader_url`), otherwise read
+#: sessions fall back to the PRIMARY pair so a single-instance deployment is
+#: unchanged.
+_reader_engine: AsyncEngine | None = None
+_reader_sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 
 def build_ssl_connect_args(settings: Settings) -> dict[str, Any]:
@@ -116,6 +123,24 @@ def create_engine(settings: Settings) -> AsyncEngine:
     return create_async_engine(settings.database_url, pool_pre_ping=True, connect_args=connect_args)
 
 
+def create_reader_engine(settings: Settings) -> AsyncEngine:
+    """Build the read-only (replica) async engine from *settings* (does not connect).
+
+    ADR-0042 §5 read scale-out: when :attr:`Settings.database_reader_url` is set it
+    points at the CloudNativePG read-only service / a PgBouncer read pool fronting
+    the streaming replicas, so read-only queries (including pgvector similarity
+    reads) offload the primary. When it is UNSET the reader URL falls back to
+    :attr:`Settings.database_url` — i.e. reads stay on the primary — so a
+    single-instance deployment is byte-for-byte unchanged.
+
+    The same mTLS connect-args (ADR-0039 §4) are threaded in: the replica link is
+    secured exactly like the primary link, never silently downgraded.
+    """
+    connect_args = build_ssl_connect_args(settings)
+    reader_url = settings.database_reader_url or settings.database_url
+    return create_async_engine(reader_url, pool_pre_ping=True, connect_args=connect_args)
+
+
 def create_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     """Build an :class:`async_sessionmaker` bound to *engine*."""
     return async_sessionmaker(engine, expire_on_commit=False)
@@ -137,6 +162,22 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     return _sessionmaker
 
 
+def get_reader_engine() -> AsyncEngine:
+    """Return the process-wide lazily created read-only (replica) engine (ADR-0042 §5)."""
+    global _reader_engine
+    if _reader_engine is None:
+        _reader_engine = create_reader_engine(get_settings())
+    return _reader_engine
+
+
+def get_reader_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """Return the process-wide sessionmaker bound to :func:`get_reader_engine`."""
+    global _reader_sessionmaker
+    if _reader_sessionmaker is None:
+        _reader_sessionmaker = create_sessionmaker(get_reader_engine())
+    return _reader_sessionmaker
+
+
 async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency: one :class:`AsyncSession` per request.
 
@@ -147,10 +188,32 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+async def get_read_session() -> AsyncIterator[AsyncSession]:
+    """FastAPI dependency: one READ-ONLY :class:`AsyncSession` per request (ADR-0042 §5).
+
+    Bound to the replica engine (:func:`get_reader_engine`) so read-only routes —
+    inventory listings, RAG/pgvector similarity reads — offload the primary when a
+    :attr:`Settings.database_reader_url` is configured. With no reader URL the
+    replica engine falls back to the primary DSN, so this is identical to
+    :func:`get_session` on a single-instance deployment.
+
+    Use this ONLY for read-only request handlers: a streaming replica is read-only,
+    so a write through this session would fail. WRITES (and any transaction that
+    appends an ``audit_log`` row — that synchronous-commit path runs on the PRIMARY)
+    must use :func:`get_session`.
+    """
+    async with get_reader_sessionmaker()() as session:
+        yield session
+
+
 async def dispose_engine() -> None:
-    """Dispose the cached engine (lifespan shutdown hook); safe when unused."""
-    global _engine, _sessionmaker
+    """Dispose the cached engine(s) (lifespan shutdown hook); safe when unused."""
+    global _engine, _sessionmaker, _reader_engine, _reader_sessionmaker
     if _engine is not None:
         await _engine.dispose()
+    if _reader_engine is not None:
+        await _reader_engine.dispose()
     _engine = None
     _sessionmaker = None
+    _reader_engine = None
+    _reader_sessionmaker = None

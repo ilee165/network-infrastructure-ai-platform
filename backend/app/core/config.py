@@ -65,6 +65,38 @@ class Settings(BaseSettings):
     #: A mounted file only — never logged, serialized, or inlined (ADR-0039 §5).
     db_ssl_key: Path | None = None
 
+    # -- Postgres HA: replica reads + synchronous audit commit (W1-T2, ADR-0042) --
+    # The single-instance default keeps both knobs neutral: the reader URL falls
+    # back to :attr:`database_url` (no second engine, no behaviour change), and the
+    # audit sync-commit value is the ADR-0042 §2 ``remote_apply`` that only bites on
+    # a real HA cluster with ``synchronous_standby_names`` populated (on a single
+    # instance with no standbys, ``synchronous_commit`` degrades to local-durable —
+    # no replica wait — so setting it is harmless there too).
+    # --------------------------------------------------------------------------
+
+    #: Async SQLAlchemy DSN for **read-only** queries routed to a streaming replica
+    #: (ADR-0042 §5: replica read scale-out, pgvector verified on replicas). Points
+    #: at the CloudNativePG read-only ``-ro`` service / a PgBouncer read pool in an
+    #: HA deployment; ``None`` (default) routes reads at the PRIMARY via
+    #: :attr:`database_url`, so a single-instance deployment is unchanged. WRITES
+    #: always use :attr:`database_url` (the primary) — only explicitly read-only
+    #: sessions may use this endpoint.
+    database_reader_url: str | None = None
+
+    #: ``synchronous_commit`` level the audit-writing transaction raises itself to
+    #: via ``SET LOCAL`` (ADR-0042 §2/§4) so a committed ``audit_log`` row is durable
+    #: on a quorum replica before ack. ``remote_apply`` (the ADR default) waits until
+    #: the standby has REPLAYED the WAL; ``on``/``remote_write`` are the lighter
+    #: durability levels. ``local``/``off`` would DISABLE the guarantee and are
+    #: deliberately NOT offered here — this knob only ever raises durability for the
+    #: audit path. The value is from a fixed ``Literal`` allowlist (never free text),
+    #: so it can be interpolated into ``SET LOCAL synchronous_commit`` with no
+    #: injection surface. Applied per-transaction (transaction-mode pooling safe),
+    #: PostgreSQL-only; on SQLite the writer skips it. See ADR-0042 §2 for why this
+    #: raises the WHOLE audit-writing (caller) transaction, preserving action↔audit
+    #: atomicity.
+    audit_synchronous_commit: Literal["remote_apply", "on", "remote_write"] = "remote_apply"
+
     #: Celery broker/result backend + cache (ADR-0008).
     redis_url: str = "redis://redis:6379/0"
 
