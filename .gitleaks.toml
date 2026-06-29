@@ -24,8 +24,8 @@ useDefault = true
 # Reviewed allowlist — scoped to known false-positive surfaces ONLY.
 # Re-review: 2026-12-31. An entry that outlives a removed fixture should be pruned.
 # ---------------------------------------------------------------------------
-[[allowlists]]
-description = "Reviewed false-positive allowlist (test fixtures + frontend lockfile). Path-scoped, not regex-scoped, so real secrets in app/config/CI code still fail."
+[allowlist]
+description = "Reviewed false-positive allowlist (test fixtures + frontend lockfile). Path-scoped, not regex-scoped, so real secrets in app/config/CI code still fail. The generated backend lockfile is deliberately NOT listed: gitleaks does not flag its --hash=sha256 integrity lines, so it is scanned normally and a real token/URL committed there still fails the gate."
 
 # PATH-SCOPED (not content-scoped): the unit-test suites intentionally contain
 # OBVIOUSLY-FAKE credential sentinels (e.g. "hunter2-super-secret",
@@ -47,15 +47,3 @@ paths = [
   # gitleaks scan its own example strings.
   '''(^|/)\.gitleaks\.toml$''',
 ]
-
-# Backend pip-tools/uv lockfile (P3 W0-T8): exempt ONLY the per-dependency
-# --hash=sha256 integrity lines (which trip the high-entropy detector), NOT the
-# whole file — a credentialed private-index URL or token added to the lockfile
-# still fails the gate. condition=AND requires BOTH the lockfile path AND the
-# hash-line pattern; regexTarget=line matches against the whole source line.
-[[allowlists]]
-description = "Backend uv/pip-tools lockfile --hash=sha256 integrity lines only (P3 W0-T8)."
-condition = "AND"
-paths = ['''(^|/)backend/requirements\.lock\.txt$''']
-regexTarget = "line"
-regexes = ['''--hash=sha256:[0-9a-f]{64}''']
