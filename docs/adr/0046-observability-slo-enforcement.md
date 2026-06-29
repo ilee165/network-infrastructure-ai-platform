@@ -151,7 +151,7 @@ not silently the dashboard).
   bundle a Prometheus/Grafana stack into the default install — the platform exposes
   the series and provides the dashboards as opt-in artifacts; running the monitoring
   stack stays the operator's choice.
-- **Coverage gate.** The W3-T4 gate asserts a dashboard exists for each of the seven
+- **Coverage gate.** The W3-T4 gate asserts a dashboard exists for each of the nine
   subjects (api, the four queues, PG, Neo4j, Redis, LLM) with the four golden-signal
   panels — a missing subject or signal is an incomplete dashboard set (§335).
 
@@ -212,7 +212,7 @@ proof) — owner `wf-observability`, `promtool`/lint gates (not Python-TDD):
   freshness ≤ 90 days (§3); a *should-fire* `promtool test rules` case per alert that
   is **proven to bite** (§6).
 - **W3-T4** (dashboards-as-code): linted in-repo golden-signal dashboards for api,
-  each queue, PG, Neo4j, Redis, LLM (§4); coverage gate on the seven subjects × four
+  each queue, PG, Neo4j, Redis, LLM (§4); coverage gate on the nine subjects × four
   signals.
 - **W3-T5** (fault-injection MTTD): the DB-down / queue-stall / LLM-failure harness
   proving each alert fires within MTTD < 5 min over synthetic series (§5), blocking
@@ -265,7 +265,7 @@ ADR-0015 §6). This ADR does not re-decide any §6 SLI/SLO target or any other P
 - The synthetic-series `promtool` MTTD is a *simulated* budget, not a live-cluster
   observation; the live MTTD (and 30-day soak) is named-deferred to W4/W5 and each
   result states its basis so a synthetic proof is never silently claimed as live.
-- Recording rules + alerts + dashboards across nine SLIs and seven dashboard subjects
+- Recording rules + alerts + dashboards across nine SLIs and nine dashboard subjects
   is genuine ongoing maintenance, and a renamed `netops_*` base metric breaks the
   rules/dashboard lint — surfaced (by design) rather than silent.
 - The §6 SLO **targets** remain PROPOSED pending Consultant scale/GPU/retention
