@@ -1030,6 +1030,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # This job runs `npm ci`, which can execute repo-controlled package
+          # lifecycle scripts; don't leave the Actions token in local git config
+          # where they could read it (zizmor artipacked / supply-chain hardening).
+          persist-credentials: false
 
       - name: Install uv (pinned)
         uses: astral-sh/setup-uv@v6
@@ -1076,10 +1081,17 @@ jobs:
           cp requirements.lock.txt "$scratch/committed.lock"
           uv pip compile pyproject.toml --extra dev --universal --generate-hashes \
             --python-version 3.12 --output-file "$scratch/fresh.lock"
-          # Plant drift: a valid-but-wrong pin (a stale lock after a manifest bump,
-          # or a hand-edit). A VALID version avoids a uv parse error; it differs
-          # from the canonical resolution, so the gate's diff must catch it.
-          sed -i 's/^fastapi==0\.136\.3/fastapi==0.136.2/' "$scratch/committed.lock"
+          # Plant drift: rewrite the fastapi pin to an obvious sentinel (models a
+          # stale lock after a manifest bump, or a hand-edit). The match is
+          # VERSION-AGNOSTIC (`^fastapi==.*`) so it keeps working across legitimate
+          # fastapi pin updates; committed.lock is only diffed here, never re-parsed
+          # by uv, so the sentinel need not be a valid version — it only has to
+          # differ from the canonical resolution.
+          sed -i -E 's/^fastapi==.*/fastapi==0.0.0-PLANTED-DRIFT/' "$scratch/committed.lock"
+          # Self-check: if the pin wasn't found the tamper is a no-op and the
+          # control would false-green — fail loudly instead.
+          grep -q '^fastapi==0.0.0-PLANTED-DRIFT' "$scratch/committed.lock" || {
+            echo "::error::negative control could not plant drift (no fastapi== line in lock)"; exit 1; }
           if diff -q "$scratch/fresh.lock" "$scratch/committed.lock" >/dev/null; then
             echo "::error::NEGATIVE CONTROL FAILED — planted lock drift was NOT detected;" \
                  "the drift gate is a false-green. Fix the gate before relying on it."

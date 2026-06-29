@@ -23,7 +23,7 @@ self-tests + `extract_secret.py` tests), but the **live** `kind-harness.sh`
 enforcement run is `continue-on-error: true` (`.github/workflows/ci.yml` step
 `harness`, ~ln 782) and the `kind-harness` job is **deliberately absent** from the
 `all-gates` required aggregator's `needs` list (`.github/workflows/ci.yml` job
-`all-gates`, `needs:` ~ln 1018; the DELIBERATE OMISSION comment ~ln 1005). So a
+`all-gates`, `needs:` ~ln 1135; the DELIBERATE OMISSION comment ~ln 1122). So a
 **live**-enforcement regression — async plaintext silently admitted, NetworkPolicy
 removed — does **not** currently turn any required check red.
 
