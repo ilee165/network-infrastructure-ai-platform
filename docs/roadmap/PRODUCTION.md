@@ -70,6 +70,55 @@ gantt
 > drills**; N-2 upgrade rehearsal; and promotion of the kind-harness
 > live-enforcement run to a blocking gate.
 
+> **P3-Platform IN PROGRESS 2026-06-29 (W0 design gate).** The P3-Platform phase
+> is open. Its design contract is the seven W0 ADRs (**Proposed** until W5-T3 flips
+> them Accepted on green) and the build plan; this marker is the roadmap mirror of
+> `P3-PLATFORM-PLAN.md` §0/§1/§5 — **the two must agree** (the P2 "the two must
+> agree" rule). The **green phase-exit marker is deferred to W5-T3**; this is the
+> entry marker, not an exit claim.
+>
+> - **Build plan:** `docs/roadmap/P3-PLATFORM-PLAN.md`; per-task specs
+>   `docs/roadmap/p3-tasks/README.md`.
+> - **ADRs (Proposed → Accepted on W5-T3 green):**
+>   [ADR-0042](../adr/0042-postgres-ha-cloudnativepg-sync-audit.md) Postgres HA
+>   (CloudNativePG 1+2) + PgBouncer + synchronous audit write path ·
+>   [ADR-0043](../adr/0043-api-hpa-keda-autoscaling.md) api HPA + KEDA per-queue
+>   worker autoscaling ·
+>   [ADR-0044](../adr/0044-redis-sentinel-websocket-fanout.md) Redis Sentinel +
+>   stateless WebSocket fan-out via Redis pub/sub ·
+>   [ADR-0045](../adr/0045-audit-siem-export.md) Audit→SIEM export (RFC5424
+>   syslog + CEF over TLS + HTTPS/JSON, at-least-once, export-lag SLO) ·
+>   [ADR-0046](../adr/0046-observability-slo-enforcement.md) Observability-SLO
+>   enforcement (recording rules, burn-rate alerts, dashboards, fault-injection
+>   MTTD) ·
+>   [ADR-0047](../adr/0047-reliability-scale-drill-harness.md) Reliability/scale
+>   drill harness + N-2 upgrade rehearsal (records the reduced-scale +
+>   named-ceiling stance) ·
+>   [ADR-0048](../adr/0048-kind-harness-gate-promotion.md) kind-harness gate
+>   promotion (mTLS-handshake + collector-egress-deny → blocking).
+> - **Scale/DR posture (P3-PLATFORM-PLAN.md §0):** the drills prove the
+>   *mechanism* bites at reduced scale on an ephemeral HA kind cluster; the
+>   certified-scale numbers — **500-device discovery / 100 concurrent users /
+>   5,000-device projection / 30-day calendar soak** — stay **named
+>   deferred-accepted → GA / customer cluster** (G-SCA in full and the G-REL live
+>   soak/scale numbers), never silently claimed. G-OBS is targeted as a full
+>   CI-enforceable PASS.
+> - **Consultant §12 re-check (G-MNT §348, recorded 2026-06-29):** the four
+>   P3-relevant open items were reviewed at this kickoff —
+>   **scale targets** (Q1 → §12 "Scale targets"; rebases the G-SCA ceiling
+>   500/100/5,000),
+>   **HA/DR expectations** (Q2 → §12 "HA/DR expectations"; RPO ≤5 min / RTO ≤1 h
+>   active/passive, §8; Neo4j-Enterprise opt-in, §3.2),
+>   **GPU availability** (Q9 → §12 "GPU availability"; §3.2 Ollama pool + §6
+>   first-token SLO p95 < 5 s local), and
+>   **data retention** (Q13 → §12 "Data retention"; §6 log 90 d hot / 1 yr
+>   archived, §7 audit 7-yr). The owner remains offline; **all four PROPOSED
+>   defaults are re-confirmed as the confirmed working defaults for P3** — no new
+>   numbers invented, no answered item converted, no silent carry. Recorded with
+>   the re-check note in `docs/consultant/QUESTIONS.md` ("P3-Platform kickoff
+>   re-check"). The G-SCA ceiling numbers stay tied to the Q1 "scale targets"
+>   item so a future owner answer re-bases them cleanly.
+
 ---
 
 ## 2. Vendor rollout — all 13 vendor families
