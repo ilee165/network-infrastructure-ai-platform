@@ -384,12 +384,15 @@ spec:
                   key: {{ .Values.secrets.keys.redisPassword }}
           resources:
             {{- toYaml $rs.sentinel.resources | nindent 12 }}
+          # exec-probe argv is run directly (no shell) and does NOT undergo $(VAR)
+          # substitution; wrap in `sh -c` so REDIS_PASSWORD expands at probe time.
+          # --no-auth-warning keeps the secret off stderr (ADR-0029 §7).
           startupProbe:
             exec:
               command:
                 - sh
                 - -c
-                - redis-cli -p {{ $rs.sentinel.port }} ping
+                - redis-cli -p {{ $rs.sentinel.port }} -a "$REDIS_PASSWORD" --no-auth-warning ping
             failureThreshold: 30
             periodSeconds: 5
           livenessProbe:
@@ -397,7 +400,7 @@ spec:
               command:
                 - sh
                 - -c
-                - redis-cli -p {{ $rs.sentinel.port }} ping
+                - redis-cli -p {{ $rs.sentinel.port }} -a "$REDIS_PASSWORD" --no-auth-warning ping
             initialDelaySeconds: 0
             periodSeconds: 15
             failureThreshold: 3
@@ -406,7 +409,7 @@ spec:
               command:
                 - sh
                 - -c
-                - redis-cli -p {{ $rs.sentinel.port }} ping
+                - redis-cli -p {{ $rs.sentinel.port }} -a "$REDIS_PASSWORD" --no-auth-warning ping
             initialDelaySeconds: 0
             periodSeconds: 10
             failureThreshold: 3

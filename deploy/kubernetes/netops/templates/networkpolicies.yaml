@@ -480,8 +480,11 @@ spec:
 # edges (allow-api-egress / allow-worker-egress above) already permit the DATA
 # port; this adds the ONE missing Sentinel-DISCOVERY edge (api/worker →
 # sentinel:26379). Renders only with the Sentinel tier; allow-list minimal (one
-# port, the sentinel selector — never an empty `to`).
+# port, the sentinel selector — never an empty `to`). Skipped when both api and
+# worker are disabled: operator: In with an empty values list is rejected by the
+# Kubernetes API server as an invalid LabelSelectorRequirement.
 # ---------------------------------------------------------------------------
+{{- if or .Values.services.api.enabled .Values.services.worker.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -517,6 +520,7 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.sentinel.port }}
+{{- end }}
 ---
 # ---------------------------------------------------------------------------
 # allow-redis-sentinel-ingress (W1-T4, ADR-0044 §1) — the Sentinel pods accept
