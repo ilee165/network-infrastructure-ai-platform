@@ -716,13 +716,15 @@ jobs:
   # NOT YET A BLOCKING GATE — deliberately ABSENT from the `all-gates` aggregator
   # `needs` list below. P1-W4-LESSONS L1: a new gating CI tool must be validated
   # LOCALLY before it is pushed as a required gate; the kind/CNI live path could
-  # not be run on the W4-T3 authoring host (Windows, no Docker/Linux kind). Until
-  # the live run is exercised and the local-validation lesson is satisfied (named
-  # for the W5 release auditor — see docs/runbooks/kind-harness.md), this job runs
-  # for SIGNAL only so a kind/CNI bring-up quirk that only manifests in CI cannot
-  # mask the rest of the suite by flipping the required aggregator red. The STATIC
-  # validator step (validate-harness.sh) needs no cluster and always runs; the
-  # live `kind-harness.sh` step is `continue-on-error` until promoted in W5.
+  # not be run on the W4-T3 authoring host (Windows, no Docker/Linux kind). The W5
+  # release auditor reviewed this and re-deferred promotion to P3-Platform — gating
+  # an enforcing-CNI kind cluster as a required check needs a certified cluster to
+  # run reliably (see P2-RELEASE-READINESS.md G-SEC + docs/runbooks/kind-harness.md).
+  # Until then this job runs for SIGNAL only so a kind/CNI bring-up quirk that only
+  # manifests in CI cannot mask the rest of the suite by flipping the required
+  # aggregator red. The STATIC validator step (validate-harness.sh) needs no cluster
+  # and always runs; the live `kind-harness.sh` step is `continue-on-error` until
+  # promoted in P3-Platform.
   kind-harness:
     name: kind-harness (enforcing-CNI self-test + assertions — non-blocking)
     runs-on: ubuntu-latest
@@ -772,15 +774,16 @@ jobs:
           version: v0.24.0
 
       # The live enforcement run. continue-on-error until the live path is
-      # locally validated and promoted to a blocking gate in W5 (L1). Teardown is
-      # inside the harness trap, so a failure here still deletes the cluster.
+      # validated on a certified enforcing-CNI cluster and promoted to a blocking
+      # gate in P3-Platform (L1; re-deferred from W5 — see P2-RELEASE-READINESS.md).
+      # Teardown is inside the harness trap, so a failure here still deletes the cluster.
       - name: Run kind harness (create → CNI self-test → apply → assert → teardown)
         id: harness
         continue-on-error: true
         run: bash ci/kind/kind-harness.sh
 
       # Surface the live-run result in the job summary without flipping the
-      # required aggregator. When the live path is promoted (W5), drop
+      # required aggregator. When the live path is promoted (P3-Platform), drop
       # continue-on-error above and add this job to the all-gates `needs` list.
       - name: Report kind harness outcome
         if: always()
