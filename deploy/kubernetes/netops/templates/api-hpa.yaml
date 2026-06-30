@@ -110,5 +110,8 @@ spec:
         - type: Pods
           value: {{ $a.behavior.scaleDown.podsPerPeriod }}
           periodSeconds: {{ $a.behavior.scaleDown.periodSeconds }}
-      selectPolicy: Max
+      # Min = remove the fewest pods the policies allow — the conservative,
+      # anti-flap scale-in this block is designed for (load-bearing once a
+      # second scaleDown policy is added).
+      selectPolicy: Min
 {{- end }}
