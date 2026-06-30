@@ -82,6 +82,7 @@ contract every later wave implements; numbered from **0042**. Secret-surface ADR
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
+| [W3-T0](W3-T0-metrics-instrumentation.md) | Metrics instrumentation — back the §6 SLIs: HTTP middleware + `netops_*` domain series + served `/metrics` (gap closure, user-approved 2026-06-30) | `wf-implementer` | sonnet | W0-T5, W2 |
 | [W3-T1](W3-T1-audit-siem-export-pipeline.md) | Audit→SIEM export pipeline — RFC5424 syslog + CEF + HTTPS/JSON; at-least-once + ordering + backpressure; export-lag metric | `wf-implementer` | **strong** (audit spine) | W0-T4 |
 | [W3-T2](W3-T2-slo-recording-rules.md) | Prometheus recording rules for every §6 SLI | `wf-observability` | sonnet | W0-T5 |
 | [W3-T3](W3-T3-burn-rate-alerts.md) | Multi-window burn-rate alert rules + runbook links + `promtool` firing tests | `wf-observability` | sonnet | W3-T2 |
