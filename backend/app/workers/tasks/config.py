@@ -54,7 +54,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 import structlog
@@ -396,18 +396,38 @@ def _slot_uuid(slot: str) -> UUID:
     return UUID(bytes=digest[:16])
 
 
-async def _claim_backup_run(run_uuid: UUID, scheduled_slot: str) -> bool:
+#: Terminal lifecycle statuses of a ``config_backup_runs`` row — a run that
+#: reached one of these finished (cleanly or not). A redelivery that finds the
+#: row in one of these states is a genuine duplicate and is skipped.
+_TERMINAL_BACKUP_STATUSES: Final[frozenset[str]] = frozenset(
+    {"succeeded", "partial", "empty", "failed"}
+)
+
+
+async def _claim_backup_run(run_uuid: UUID, scheduled_slot: str) -> str:
     """INSERT a ``config_backup_runs`` row with ON CONFLICT DO NOTHING.
 
-    Returns ``True`` if the row was **newly inserted** (this is the first —
-    or only — delivery), ``False`` if it already existed (redelivery).
+    Returns a 3-state claim outcome:
+
+    - ``"claimed"`` — the row was **newly inserted** (first/only delivery); the
+      caller proceeds with the fan-out AND emits the ``backup_run_started``
+      audit (the started pair is tied to this fresh claim).
+    - ``"skipped"`` — the row already existed in a **terminal** status (the run
+      genuinely finished); the caller returns a skip sentinel without touching
+      the audit log or dispatching captures (the duplicate-prevention proof).
+    - ``"resumed"`` — the row already existed but is still ``"running"``: a prior
+      delivery committed the claim then died (``task_reject_on_worker_lost``)
+      before finishing, leaving the run stuck. The caller proceeds with the
+      fan-out but SKIPS the ``backup_run_started`` audit (the started audit
+      belongs to the original claim) so the scheduled backup is recovered rather
+      than lost — without double-emitting the started/finished pair.
 
     The DB-level uniqueness of ``run_uuid`` (the PK) is the enforcement
     mechanism: PostgreSQL's ``ON CONFLICT DO NOTHING`` skips the INSERT when
     the PK row exists and sets ``cursor.rowcount == 0``; SQLite's
-    ``INSERT OR IGNORE`` does the same. The caller treats ``rowcount == 0`` as
-    a redelivery signal and returns a skip sentinel without touching the audit
-    log or dispatching captures.
+    ``INSERT OR IGNORE`` does the same. On a ``rowcount == 0`` conflict the
+    existing row's ``status`` is re-read in the SAME transaction to classify the
+    redelivery as a terminal duplicate (skip) or a stale claim (resume).
 
     Implementation uses the dialect-specific ``insert`` (PostgreSQL or SQLite)
     because SQLAlchemy's generic ``Insert`` does not expose ``.on_conflict_*``
@@ -433,10 +453,21 @@ async def _claim_backup_run(run_uuid: UUID, scheduled_slot: str) -> bool:
             # aiosqlite unit-test backend: INSERT OR IGNORE on PK conflict.
             stmt = sqlite_insert(ConfigBackupRun).values(**values).on_conflict_do_nothing()
         cursor = await session.execute(stmt)
+        if cursor.rowcount == 1:  # type: ignore[attr-defined]
+            await session.commit()
+            return "claimed"
+        # rowcount == 0 → PK conflict (redelivery). Classify by the existing
+        # row's status: a terminal run is a real duplicate (skip); a still
+        # ``running`` row is a stale claim from a dead worker (resume).
+        existing_status = (
+            await session.execute(
+                select(ConfigBackupRun.status).where(ConfigBackupRun.run_uuid == run_uuid)
+            )
+        ).scalar_one_or_none()
         await session.commit()
-        # rowcount == 1 → newly inserted (first delivery);
-        # rowcount == 0 → conflict skipped (redelivery).
-        return cursor.rowcount == 1  # type: ignore[attr-defined]
+        if existing_status in _TERMINAL_BACKUP_STATUSES:
+            return "skipped"
+        return "resumed"
 
 
 async def _finish_backup_run(run_uuid: UUID, status: str) -> None:
@@ -498,25 +529,40 @@ def _dispatch_captures(run_id: str, device_ids: list[str]) -> list[dict[str, Any
     return results
 
 
-@celery_app.task(name="config.nightly_backup")
-def nightly_backup(run_id: str | None = None) -> dict[str, Any]:
-    """Scheduled nightly backup of every reachable device (Celery beat).
+async def _nightly_backup_core(run_id: str | None = None) -> dict[str, Any]:
+    """Async body of :func:`nightly_backup` (the sync Celery task wraps this).
+
+    Extracting the body as an ``async def`` lets the async DB phases be awaited
+    directly on a caller-owned event loop. The sync Celery task owns its own loop
+    via a single ``asyncio.run`` at the top; the PG idempotency tests await this
+    core on the running pytest loop (matching the other ``tests/pg`` cases that
+    await async helpers directly) instead of calling the sync task from inside a
+    running loop — which would raise ``RuntimeError: asyncio.run() cannot be
+    called from a running event loop``. ``_dispatch_captures`` stays a plain sync
+    call: it drives Celery's group result, not the DB, and is owned by whichever
+    loop runs this core.
 
     Fans one ``config.capture_device`` task out per reachable device, gathers
     the summaries, and audits the run start and finish. The terminal status is
     ``succeeded`` (all captured), ``partial`` (some failed), ``empty`` (no
     reachable devices), ``failed`` (every device failed), or ``skipped`` (a
-    redelivered task whose ``run_id`` was already claimed — the idempotency
-    guard fired).
+    redelivered task whose ``run_id`` already finished — the idempotency guard
+    fired).
 
     Idempotency (W2-T4 finding, ADR-0043 §6): ``run_id`` is an optional
     parameter so the beat caller (or a test) can supply a stable UUID. When
     absent, a deterministic UUID is derived from the UTC date slot so that
     every redelivery of the same beat tick carries the same token. The task
-    INSERTs a ``config_backup_runs`` row with ``ON CONFLICT DO NOTHING``
-    before any audit emit or fan-out; if the INSERT is a no-op (row already
-    existed), the task returns ``{"status": "skipped"}`` without emitting a
-    second audit pair or dispatching a second wave of captures.
+    INSERTs a ``config_backup_runs`` row with ``ON CONFLICT DO NOTHING`` before
+    any audit emit or fan-out. The 3-state claim (:func:`_claim_backup_run`)
+    decides what happens on a PK conflict:
+
+    - ``"claimed"`` (fresh insert) → run the fan-out AND emit the started audit.
+    - ``"skipped"`` (existing row is terminal) → return ``{"status":"skipped"}``
+      without a second audit pair or a second fan-out wave (the dedup proof).
+    - ``"resumed"`` (existing row stuck ``"running"`` from a dead worker) → run
+      the fan-out but SKIP the started audit (it belongs to the original claim),
+      so a backup whose worker died mid-run is recovered, not lost forever.
     """
     # Resolve the scheduled slot (UTC date) and the stable run UUID.
     scheduled_slot = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -524,33 +570,47 @@ def nightly_backup(run_id: str | None = None) -> dict[str, Any]:
     run_id_str = str(run_uuid)
 
     # --- Idempotency guard (W2-T4 fix) ---
-    # INSERT the run record; if it already exists (redelivery), skip everything.
-    claimed = asyncio.run(_claim_backup_run(run_uuid, scheduled_slot))
-    if not claimed:
+    # INSERT the run record; classify a PK conflict as a terminal duplicate
+    # (skip) or a stale ``running`` claim from a dead worker (resume).
+    claim = await _claim_backup_run(run_uuid, scheduled_slot)
+    if claim == "skipped":
         logger.info(
             "config.backup_skipped_redelivery",
             run_id=run_id_str,
             scheduled_slot=scheduled_slot,
         )
         return {"run_id": run_id_str, "status": "skipped"}
+    resumed = claim == "resumed"
+    if resumed:
+        logger.info(
+            "config.backup_resumed_stale_claim",
+            run_id=run_id_str,
+            scheduled_slot=scheduled_slot,
+        )
 
-    device_uuids = asyncio.run(_reachable_device_ids())
+    device_uuids = await _reachable_device_ids()
     device_ids = [str(d) for d in device_uuids]
 
-    asyncio.run(_audit_run(_BACKUP_RUN_STARTED, run_uuid, {"device_count": len(device_ids)}))
+    # The ``backup_run_started`` audit is tied to the original claim, so a resumed
+    # run does NOT re-emit it (no double started/finished pair).
+    if not resumed:
+        await _audit_run(_BACKUP_RUN_STARTED, run_uuid, {"device_count": len(device_ids)})
     logger.info("config.backup_started", run_id=run_id_str, device_count=len(device_ids))
 
     if not device_ids:
-        asyncio.run(
-            _audit_run(
-                _BACKUP_RUN_FINISHED, run_uuid, {"status": "empty", "succeeded": 0, "failed": 0}
-            )
+        await _audit_run(
+            _BACKUP_RUN_FINISHED, run_uuid, {"status": "empty", "succeeded": 0, "failed": 0}
         )
-        asyncio.run(_finish_backup_run(run_uuid, "empty"))
+        await _finish_backup_run(run_uuid, "empty")
         logger.info("config.backup_finished", run_id=run_id_str, status="empty")
         return {"run_id": run_id_str, "status": "empty", "succeeded": 0, "failed": 0}
 
-    results = _dispatch_captures(run_id_str, device_ids)
+    # Offload the fan-out to a worker thread: ``_dispatch_captures`` drives the
+    # Celery group result, and each child ``capture_device`` task runs its own
+    # ``asyncio.run`` (inline under eager mode). Running it on a SEPARATE thread
+    # keeps it off this core's event loop so a child's ``asyncio.run`` never
+    # nests inside a running loop (the same hazard the core extraction fixed).
+    results = await asyncio.to_thread(_dispatch_captures, run_id_str, device_ids)
     succeeded = [r for r in results if r.get("ok")]
     failed = [r for r in results if not r.get("ok")]
 
@@ -561,14 +621,12 @@ def nightly_backup(run_id: str | None = None) -> dict[str, Any]:
     else:
         status = "succeeded"
 
-    asyncio.run(
-        _audit_run(
-            _BACKUP_RUN_FINISHED,
-            run_uuid,
-            {"status": status, "succeeded": len(succeeded), "failed": len(failed)},
-        )
+    await _audit_run(
+        _BACKUP_RUN_FINISHED,
+        run_uuid,
+        {"status": status, "succeeded": len(succeeded), "failed": len(failed)},
     )
-    asyncio.run(_finish_backup_run(run_uuid, status))
+    await _finish_backup_run(run_uuid, status)
     logger.info(
         "config.backup_finished",
         run_id=run_id_str,
@@ -583,3 +641,15 @@ def nightly_backup(run_id: str | None = None) -> dict[str, Any]:
         "failed": len(failed),
         "devices": results,
     }
+
+
+@celery_app.task(name="config.nightly_backup")
+def nightly_backup(run_id: str | None = None) -> dict[str, Any]:
+    """Scheduled nightly backup of every reachable device (Celery beat).
+
+    Thin sync wrapper that owns the event loop: the real body lives in
+    :func:`_nightly_backup_core` so it can be awaited directly by callers that
+    already run inside an event loop (the PG idempotency tests). See that
+    function for the fan-out + 3-state idempotency contract.
+    """
+    return asyncio.run(_nightly_backup_core(run_id))

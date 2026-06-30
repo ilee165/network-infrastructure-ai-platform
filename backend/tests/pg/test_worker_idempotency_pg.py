@@ -306,12 +306,14 @@ async def test_nightly_backup_double_delivery_yields_one_audit_pair(
     # A stable run_id supplied by the "beat scheduler" — both deliveries carry it.
     stable_run_id = str(uuid.uuid4())
 
-    # First delivery.
-    result1 = config_tasks.nightly_backup(run_id=stable_run_id)
+    # First delivery. Await the async CORE on the running pytest loop (the sync
+    # Celery task wraps this with ``asyncio.run`` and cannot be called from inside
+    # a running loop — that is the CI bug this matches to the other pg tests).
+    result1 = await config_tasks._nightly_backup_core(run_id=stable_run_id)
     assert result1["status"] == "succeeded"
 
     # Second delivery (the redelivery) — same run_id, same task.
-    result2 = config_tasks.nightly_backup(run_id=stable_run_id)
+    result2 = await config_tasks._nightly_backup_core(run_id=stable_run_id)
 
     # The redelivery returns a skip sentinel — no second fan-out, no second audit.
     assert result2["status"] == "skipped", (
