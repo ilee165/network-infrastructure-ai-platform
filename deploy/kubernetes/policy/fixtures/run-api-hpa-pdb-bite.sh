@@ -38,8 +38,10 @@ POLICY="${REPO}/deploy/kubernetes/policy/rego"
 NEG_FLOOR_ONE="${HERE}/api_hpa_floor_one_DENY.yaml"
 NEG_CPU_ONLY="${HERE}/api_hpa_cpu_only_DENY.yaml"
 NEG_NO_CPU="${HERE}/api_hpa_no_cpu_DENY.yaml"
+NEG_HUSK_PODS="${HERE}/api_hpa_husk_pods_metric_DENY.yaml"
 NEG_PDB_ZERO="${HERE}/api_pdb_zero_DENY.yaml"
 NEG_PDB_MAXUNAVAIL="${HERE}/api_pdb_maxunavailable_DENY.yaml"
+NEG_PDB_WRONGSELECTOR="${HERE}/api_pdb_wrong_selector_DENY.yaml"
 POS_HPA="${HERE}/api_hpa_compliant_PASS.yaml"
 POS_HPA_OPTOUT="${HERE}/api_hpa_cpu_only_optout_PASS.yaml"
 POS_PDB="${HERE}/api_pdb_compliant_PASS.yaml"
@@ -112,11 +114,17 @@ expect_deny "hpa cpu-only" "${NEG_CPU_ONLY}" "must include a request-rate signal
 echo "-- negative (HPA no CPU metric) MUST be DENIED --"
 expect_deny "hpa no-cpu" "${NEG_NO_CPU}" "must include a CPU Resource (Utilization) metric"
 
+echo "-- negative (HPA CPU + empty HUSK Pods metric — silent CPU-only regression) MUST be DENIED --"
+expect_deny "hpa husk-pods" "${NEG_HUSK_PODS}" "must include a request-rate signal IN ADDITION to CPU"
+
 echo "-- negative (PDB minAvailable 0) MUST be DENIED --"
 expect_deny "pdb min-0" "${NEG_PDB_ZERO}" "must set an integer minAvailable >= 1"
 
 echo "-- negative (PDB maxUnavailable-only) MUST be DENIED --"
 expect_deny "pdb maxunavailable-only" "${NEG_PDB_MAXUNAVAIL}" "must set an integer minAvailable >= 1"
+
+echo "-- negative (api PDB selector targets the WRONG tier — api left unprotected) MUST be DENIED --"
+expect_deny "pdb wrong-selector" "${NEG_PDB_WRONGSELECTOR}" "selector must target app.kubernetes.io/component=api"
 
 echo "-- positive (compliant api HPA) MUST PASS --"
 expect_pass "hpa compliant" "${POS_HPA}"

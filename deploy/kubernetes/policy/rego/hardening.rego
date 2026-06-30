@@ -3434,14 +3434,24 @@ deny contains msg if {
 # A request-rate metric is any Pods or External metric (the Prometheus-adapter
 # custom-metric shapes the request-rate signal renders as). A bare second
 # Resource/cpu would not count — it must be a non-resource demand signal.
+#
+# It must also be a REAL custom-metric shape, not an empty husk (F-rego-3455 fix):
+# a render that silently drops the live request-rate signal but leaves an empty
+# Pods/External entry (no metric.name, no target.type) would otherwise satisfy the
+# dual-signal rule while actually regressing to CPU-only — the exact regression
+# this rule exists to catch. Require a non-empty metric name AND a target type.
 api_hpa_has_request_rate_metric(hpa) if {
 	some m in object.get(hpa.spec, "metrics", [])
 	m.type == "Pods"
+	object.get(m.pods.metric, "name", "") != ""
+	object.get(m.pods.target, "type", "") != ""
 }
 
 api_hpa_has_request_rate_metric(hpa) if {
 	some m in object.get(hpa.spec, "metrics", [])
 	m.type == "External"
+	object.get(m.external.metric, "name", "") != ""
+	object.get(m.external.target, "type", "") != ""
 }
 
 # Explicit opt-out: the template emits netops.ai/requestrate-disabled="true" when
@@ -3470,6 +3480,20 @@ api_pdb_guarantees_one(pdb) if {
 	ma := object.get(pdb.spec, "minAvailable", null)
 	is_number(ma)
 	ma >= 1
+}
+
+# --- api PDB: its selector MUST target the api tier (F-rego-3473 fix). The
+# minAvailable rule above only checks the floor VALUE; it never inspects the
+# selector. An api-labelled PDB (is_api_object matches on its own labels) whose
+# spec.selector.matchLabels points at a DIFFERENT component (e.g. worker) would
+# leave the api tier entirely UNPROTECTED while the policy reports compliant. The
+# api PDB template renders the selector via netops.serviceSelector with
+# component=api, so the correct value is app.kubernetes.io/component: api. ---
+deny contains msg if {
+	input.kind == "PodDisruptionBudget"
+	is_api_object(input)
+	object.get(input.spec.selector.matchLabels, "app.kubernetes.io/component", "") != "api"
+	msg := sprintf("api PodDisruptionBudget %q selector must target app.kubernetes.io/component=api — a PDB labelled api whose selector points at another tier leaves the api pods unprotected while reporting compliant (PRODUCTION.md §3.2 / ADR-0043 §1)", [input.metadata.name])
 }
 
 # ===========================================================================

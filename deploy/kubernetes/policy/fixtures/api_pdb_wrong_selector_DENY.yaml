@@ -1,0 +1,19 @@
+# NEGATIVE — an api-labelled PDB (is_api_object matches its OWN metadata labels)
+# whose spec.selector.matchLabels targets app.kubernetes.io/component=worker instead
+# of =api. minAvailable:1 is satisfied, but the selector points at the WRONG tier —
+# the api pods are left entirely unprotected while the policy would otherwise report
+# compliant. MUST be DENIED by the api-PDB selector rule (F-rego-3473, ADR-0043 §1).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: netops-api
+  namespace: netops
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: worker

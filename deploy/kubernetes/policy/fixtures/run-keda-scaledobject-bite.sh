@@ -32,6 +32,7 @@ REPO="$(cd "${HERE}/../../../.." && pwd)"
 POLICY="${REPO}/deploy/kubernetes/policy/rego"
 
 NEG_PACKET_GENERAL="${HERE}/keda_so_packet_general_target_DENY.yaml"
+NEG_PACKET_EMPTY="${HERE}/keda_so_packet_empty_target_DENY.yaml"
 NEG_STATIC_REDIS="${HERE}/keda_so_static_redis_DENY.yaml"
 NEG_INLINE_PW="${HERE}/keda_so_inline_password_DENY.yaml"
 NEG_NO_MAX="${HERE}/keda_so_no_max_DENY.yaml"
@@ -98,6 +99,9 @@ echo "== KEDA per-queue ScaledObject policy bite (ADR-0043 §2/§3/§4) =="
 
 echo "-- negative (packet SO targeting a GENERAL Deployment) MUST be DENIED --"
 expect_deny "packet general-target" "${NEG_PACKET_GENERAL}" "must target a sandbox-pinned Deployment"
+
+echo "-- negative (packet SO with EMPTY scaleTargetRef.name — scales nothing) MUST be DENIED --"
+expect_deny "packet empty-target" "${NEG_PACKET_EMPTY}" "must target a sandbox-pinned Deployment"
 
 echo "-- negative (plain redis scaler, static host pin) MUST be DENIED --"
 expect_deny "static redis host pin" "${NEG_STATIC_REDIS}" "must use a redis-sentinel trigger"
