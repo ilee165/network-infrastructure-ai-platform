@@ -1,0 +1,32 @@
+# NEGATIVE — an api HPA that LOOKS dual-signal (CPU + a Pods metric) but the Pods
+# metric is an empty HUSK: no metric.name and no target.type. A render that silently
+# drops the live request-rate signal but leaves an empty Pods entry would otherwise
+# satisfy the dual-signal rule while actually regressing to CPU-only — exactly the
+# regression the rule exists to catch. MUST be DENIED (F-rego-3455, ADR-0043 §1).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: netops-api
+  namespace: netops
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: netops-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # Empty husk: no metric.name, no target.type — not a real request-rate signal.
+    - type: Pods
+      pods:
+        metric:
+          name: ""

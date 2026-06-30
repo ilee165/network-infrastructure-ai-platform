@@ -1,0 +1,173 @@
+{{- /*
+KEDA per-queue worker ScaledObjects (W2-T3, ADR-0043 §2/§3/§4).
+
+OPT-IN: rendered only when workerScaling.enabled. ONE KEDA ScaledObject PER Celery
+work queue, each scaling its OWN worker Deployment on that queue's Redis LIST
+LENGTH (`LLEN <queue>`). The W2-T3 "four" logical queues are discovery, config,
+docs, and packet — where PACKET is physically the two separately-hardened
+ADR-0031 Deployments (packet-capture + packet-analysis), so it maps to TWO
+ScaledObjects (one ScaledObject ⇄ one Deployment ⇄ one queue, always).
+
+PER-QUEUE ISOLATION (ADR-0043 §3, G-SCA §329): independent ScaledObjects with
+INDEPENDENT min/max + cooldown are the STRUCTURAL isolation guarantee. A
+`discovery` burst reads only `LLEN discovery` and scales only the discovery
+Deployment — it can never consume config/docs/packet replica budget (separate
+Deployments, separate ScaledObjects, separate per-queue ceilings). W4-T6 asserts
+this; a negative control (a shared scaler) makes the assertion go red.
+
+SENTINEL-AWARE TRIGGER (ADR-0043 §2, cross-ref ADR-0044 / W1-T4): the KEDA
+`redis-sentinel` scaler DISCOVERS the current primary via the Sentinel quorum
+(netops.workerScalingSentinelAddresses / ...Master), so a Redis failover does NOT
+break scaling — no static primary host pin, the same failover-aware-client
+decision the api/worker dial via netops.redisUrl.
+
+PACKET-POOL EXCEPTION (ADR-0043 §4, MANDATORY SECURITY CONTROL): the packet
+ScaledObjects target the EXISTING ADR-0031 packet-capture / packet-analysis
+Deployments, which carry the tainted-pool toleration + nodeSelector
+(packetNodePool). A ScaledObject scales REPLICAS only — it adds no scheduling
+freedom — so every scaled packet pod stays on the sandbox pool: a NET_RAW or
+untrusted-parser pod can NEVER burst onto a general node. `sandboxPinned: true`
+on the queue values records + asserts that binding (the conftest workerscale.*
+rule denies a packet ScaledObject whose target Deployment is not sandbox-pinned).
+
+CREDENTIAL BY REFERENCE (secure-by-default): the Redis password is supplied to the
+scaler via a KEDA TriggerAuthentication referencing the platform Secret's
+redisPassword key — NEVER inlined into a ScaledObject or values file. The auth
+object is rendered ONCE PER DISTINCT NAMESPACE a ScaledObject lands in (KEDA
+requires the TriggerAuthentication to be namespace-local to the ScaledObject).
+*/ -}}
+{{- if .Values.workerScaling.enabled }}
+{{- /*
+SENTINEL-AWARE REQUIREMENT (ADR-0043 §2): the trigger discovers the Redis primary
+via Sentinel so a failover does not break scaling. That requires a Sentinel to
+discover — either the in-chart redisSentinel HA tier (W1-T4) OR an operator-
+supplied EXTERNAL Sentinel address list. Refuse to render an autoscaler that would
+point the redis-sentinel scaler at non-existent Sentinel DNS (a silent
+mis-scale). This mirrors the redisSentinel/services.redis mutual-exclusion guard.
+*/ -}}
+{{- if and (not .Values.redisSentinel.enabled) (not .Values.workerScaling.redis.sentinelAddresses) -}}
+{{- fail "workerScaling.enabled=true requires a Sentinel-managed Redis for the failover-aware KEDA trigger (ADR-0043 §2): either enable the in-chart Redis Sentinel HA tier (redisSentinel.enabled=true AND services.redis.enabled=false, ADR-0044 / W1-T4), or point at an EXTERNAL Sentinel by setting workerScaling.redis.sentinelAddresses (and workerScaling.redis.sentinelMasterName). The redis-sentinel scaler must discover the primary via Sentinel — it cannot scale on a single-instance Redis without a static host pin the failover design forbids." -}}
+{{- end }}
+{{- $root := . -}}
+{{- $ws := .Values.workerScaling -}}
+{{- $secretName := include "netops.platformSecretName" . -}}
+{{- $redisKey := .Values.secrets.keys.redisPassword -}}
+{{- $sentinelAddresses := include "netops.workerScalingSentinelAddresses" . -}}
+{{- $sentinelMaster := include "netops.workerScalingSentinelMaster" . -}}
+{{- $releaseNs := .Release.Namespace -}}
+{{- $captureNs := include "netops.captureNamespace" . -}}
+{{- /*
+Resolve each queue's target Deployment NAMESPACE so the ScaledObject is co-located
+with its target (KEDA requires same-namespace target + TriggerAuthentication):
+- general per-queue worker Deployments -> release namespace.
+- packet-capture                       -> captureNamespace (its own namespace).
+- packet-analysis                      -> release namespace.
+Collect the distinct namespaces so the TriggerAuthentication renders once each.
+*/ -}}
+{{- $authNamespaces := dict -}}
+{{- range $qname, $q := $ws.queues -}}
+{{- $ns := $releaseNs -}}
+{{- if eq $q.target "packet-capture" -}}{{- $ns = $captureNs -}}{{- end -}}
+{{- $_ := set $authNamespaces $ns true -}}
+{{- end }}
+{{- if $ws.triggerAuth.enabled }}
+{{- range $ns, $_ := $authNamespaces }}
+---
+# KEDA TriggerAuthentication — supplies the Redis password to the redis-sentinel
+# scaler BY REFERENCE from the platform Secret (NEVER inlined). One per namespace
+# a ScaledObject lands in. Requires the platform Secret to exist in that namespace.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "netops.fullname" $root }}-redis-auth
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" $root "component" "worker-scaling") | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: {{ $secretName }}
+      key: {{ $redisKey }}
+{{- end }}
+{{- end }}
+{{- range $qname, $q := $ws.queues }}
+{{- $ns := $releaseNs -}}
+{{- if eq $q.target "packet-capture" }}{{- $ns = $captureNs -}}{{- end }}
+{{- $isPacket := $q.sandboxPinned | default false }}
+{{- /*
+RENDER GUARD (W2-T3 review fix, F-keda-notarget): a GENERAL (non-packet)
+ScaledObject targets the per-queue worker Deployment (worker-queue-deployments.yaml),
+which is gated on (services.worker.enabled AND workerScaling.enabled). This outer
+block is gated on workerScaling.enabled ONLY, so with services.worker.enabled=false
+the general SOs would render with NO target Deployment — orphan SOs that KEDA
+reports ScaledObjectCheckFailed on and never scales. Render a general SO IFF its
+target Deployment renders (i.e. services.worker.enabled). PACKET SOs are exempt:
+they target the always-present ADR-0031 packet-capture/packet-analysis Deployments,
+which do not depend on the base worker.
+*/ -}}
+{{- if or $isPacket $root.Values.services.worker.enabled }}
+{{- /*
+Resolve the scale-target Deployment NAME. Packet queues target the EXISTING
+ADR-0031 Deployment by its literal name (packet-capture / packet-analysis), which
+is sandbox-pinned. General queues target the per-queue worker Deployment rendered
+under workerScaling (worker-queue-deployments.yaml), named <fullname>-worker-<q>.
+*/ -}}
+{{- $targetName := $q.target -}}
+{{- if not $isPacket -}}{{- $targetName = printf "%s-worker-%s" (include "netops.fullname" $root) $qname -}}{{- end }}
+---
+# ScaledObject for the `{{ $qname }}` queue -> Deployment/{{ $targetName }}.
+# Trigger: redis-sentinel scaler on LLEN {{ $q.listName }} (Sentinel-discovered
+# primary). Independent min/max + cooldown = per-queue isolation (ADR-0043 §3).
+{{- if $isPacket }}
+# PACKET (ADR-0043 §4): target is the sandbox-pinned ADR-0031 Deployment, so
+# scaled pods STAY on the tainted node pool (no NET_RAW / parser pod on a general
+# node). Scaling adds replicas only — it never relaxes the §2 isolation profile.
+{{- end }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "netops.fullname" $root }}-worker-{{ $qname | replace "_" "-" }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" $root "component" "worker-scaling") | nindent 4 }}
+    netops.io/celery-queue: {{ $qname | quote }}
+    {{- if $isPacket }}
+    # Records the ADR-0043 §4 packet-pool binding for the conftest workerscale.*
+    # sandbox-pinning rule (a packet SO whose target is not pinned is DENIED).
+    netops.io/packet-sandbox: "true"
+    {{- end }}
+spec:
+  scaleTargetRef:
+    # KEDA manages an HPA under the hood targeting this Deployment by name.
+    name: {{ $targetName }}
+  # Per-queue, INDEPENDENT bounds (isolation, ADR-0043 §3). KEDA scale-from-zero
+  # for the bursty queues (minReplicaCount 0) — a capability the celery-exporter
+  # HPA fallback (§5) lacks.
+  minReplicaCount: {{ $q.minReplicaCount }}
+  maxReplicaCount: {{ $q.maxReplicaCount }}
+  # Burst-drain realism the W4-T6 SLO measures against (ADR-0043 §2). Independent
+  # per queue so one queue's cooldown never gates another's.
+  pollingInterval: {{ $q.pollingInterval | default $ws.defaults.pollingInterval }}
+  cooldownPeriod: {{ $q.cooldownPeriod | default $ws.defaults.cooldownPeriod }}
+  triggers:
+    # redis-sentinel scaler: discovers the primary via Sentinel (failover-safe,
+    # ADR-0043 §2) and scales on the queue's Redis list length (LLEN). The
+    # password is injected by the TriggerAuthentication above (by reference).
+    - type: redis-sentinel
+      metadata:
+        # Sentinel discovery coordinates (NO static primary host pin).
+        sentinelAddresses: {{ $sentinelAddresses | quote }}
+        sentinelMaster: {{ $sentinelMaster | quote }}
+        # The Redis list KEY is the Celery queue name; the scaler reads LLEN of it.
+        listName: {{ $q.listName | quote }}
+        # Pending tasks per replica before scaling out (the demand-per-pod target).
+        listLength: {{ $q.listLength | quote }}
+        databaseIndex: {{ $ws.redis.databaseIndex | quote }}
+        enableTLS: {{ $ws.redis.enableTLS | quote }}
+      {{- if $ws.triggerAuth.enabled }}
+      authenticationRef:
+        name: {{ include "netops.fullname" $root }}-redis-auth
+      {{- end }}
+{{- end }}
+{{ end }}
+{{- end }}

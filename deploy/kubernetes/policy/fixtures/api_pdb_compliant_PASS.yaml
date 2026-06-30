@@ -1,0 +1,15 @@
+# POSITIVE — the compliant api PDB (minAvailable 1, PRODUCTION.md §3.2). MUST PASS.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: netops-api
+  namespace: netops
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: api

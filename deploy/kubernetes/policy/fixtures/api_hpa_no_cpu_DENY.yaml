@@ -1,0 +1,26 @@
+# NEGATIVE — api HPA with NO CPU metric (only the request-rate signal). ADR-0043
+# §1: CPU utilization is the compute-bound basis the dual signal requires. MUST
+# be DENIED (missing CPU Resource/Utilization metric).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: netops-api
+  namespace: netops
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: netops-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "50"

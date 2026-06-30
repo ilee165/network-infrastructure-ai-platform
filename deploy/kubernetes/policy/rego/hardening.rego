@@ -3350,3 +3350,246 @@ sentinel_has_monitor(c) if {
 	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
 	contains(arg, "sentinel monitor")
 }
+
+# ===========================================================================
+# W2-T1 — api HorizontalPodAutoscaler + PodDisruptionBudget (ADR-0043 §1 /
+# PRODUCTION.md §3.2 / §11 G-SCA §327). The api half of the P3 compute scale-out.
+#
+# These rules assert the api-scale CONTRACT on the rendered HPA/PDB so a
+# regression (a floor dropped below 2, a CPU-only HPA, a PDB that allows zero, a
+# missing CPU basis) fails the gate. They select the api objects by the stable
+# `app.kubernetes.io/component: api` label so they are robust to the release-name
+# prefix (the rendered object is `<release>-api`). conftest feeds each rendered
+# document as a separate `input`; cross-document "object X must exist" is not
+# expressible here — the per-object contract below is what the gate enforces, and
+# the bite fixtures + the always-on default render are the existence proof.
+# NEVER weaken a rule to make it green — fix the manifest.
+# ===========================================================================
+
+is_api_object(obj) if {
+	obj.metadata.labels["app.kubernetes.io/component"] == "api"
+}
+
+# --- api HPA: FLOOR minReplicas >= 2 (PRODUCTION.md §3.2 / ADR-0043 §1, Alt #6).
+# A floor of 1 cannot survive a single node loss and defeats the PDB. An omitted
+# minReplicas defaults to 1 in K8s, so default to 1 before comparing (fail-closed
+# on omission rather than UNDEFINED / fail-open). ---
+deny contains msg if {
+	input.kind == "HorizontalPodAutoscaler"
+	is_api_object(input)
+	min := object.get(input.spec, "minReplicas", 1)
+	min < 2
+	msg := sprintf("api HorizontalPodAutoscaler %q must set minReplicas >= 2 (the api tier runs >=2 replicas ALWAYS to survive a single node loss and is the substrate the PDB protects; a floor of 1 defeats the PDB — PRODUCTION.md §3.2 / ADR-0043 §1, Alt #6), got %v", [input.metadata.name, min])
+}
+
+# --- api HPA: maxReplicas must be >= minReplicas (a coherent ceiling). ---
+deny contains msg if {
+	input.kind == "HorizontalPodAutoscaler"
+	is_api_object(input)
+	min := object.get(input.spec, "minReplicas", 1)
+	max := object.get(input.spec, "maxReplicas", 0)
+	max < min
+	msg := sprintf("api HorizontalPodAutoscaler %q maxReplicas (%v) must be >= minReplicas (%v)", [input.metadata.name, max, min])
+}
+
+# --- api HPA: scaleTargetRef must point at a Deployment (the api Deployment). ---
+deny contains msg if {
+	input.kind == "HorizontalPodAutoscaler"
+	is_api_object(input)
+	object.get(input.spec.scaleTargetRef, "kind", "") != "Deployment"
+	msg := sprintf("api HorizontalPodAutoscaler %q scaleTargetRef.kind must be Deployment (it autoscales the api Deployment; ADR-0043 §1)", [input.metadata.name])
+}
+
+# --- api HPA: must carry a CPU Resource-utilization metric. CPU% is the
+# compute-bound basis (and is meaningless without the container CPU request the
+# api Deployment sets) — ADR-0043 §1. ---
+deny contains msg if {
+	input.kind == "HorizontalPodAutoscaler"
+	is_api_object(input)
+	not api_hpa_has_cpu_metric(input)
+	msg := sprintf("api HorizontalPodAutoscaler %q must include a CPU Resource (Utilization) metric — the compute-bound signal (ADR-0043 §1)", [input.metadata.name])
+}
+
+api_hpa_has_cpu_metric(hpa) if {
+	some m in object.get(hpa.spec, "metrics", [])
+	m.type == "Resource"
+	m.resource.name == "cpu"
+	m.resource.target.type == "Utilization"
+}
+
+# --- api HPA: must NOT be CPU-only — it MUST carry a second, request-rate signal
+# (ADR-0043 §1 / Alt #1: a request flood that blocks on I/O drives p95 past the
+# §327 budget while CPU stays low, so CPU-only would not scale). The request-rate
+# signal is a Pods (or External) custom metric published by the W3 Prometheus
+# adapter. We require >= 2 metrics AND at least one non-CPU-resource metric, so a
+# render that silently drops the request-rate signal (regressing to CPU-only)
+# fails the gate. ---
+deny contains msg if {
+	input.kind == "HorizontalPodAutoscaler"
+	is_api_object(input)
+	not api_hpa_has_request_rate_metric(input)
+	msg := sprintf("api HorizontalPodAutoscaler %q must include a request-rate signal IN ADDITION to CPU (a Pods/External custom metric) — CPU-only was rejected (ADR-0043 §1 / Alt #1: an I/O-bound flood drives p95 past the §327 budget while CPU stays low)", [input.metadata.name])
+}
+
+# A request-rate metric is any Pods or External metric (the Prometheus-adapter
+# custom-metric shapes the request-rate signal renders as). A bare second
+# Resource/cpu would not count — it must be a non-resource demand signal.
+#
+# It must also be a REAL custom-metric shape, not an empty husk (F-rego-3455 fix):
+# a render that silently drops the live request-rate signal but leaves an empty
+# Pods/External entry (no metric.name, no target.type) would otherwise satisfy the
+# dual-signal rule while actually regressing to CPU-only — the exact regression
+# this rule exists to catch. Require a non-empty metric name AND a target type.
+api_hpa_has_request_rate_metric(hpa) if {
+	some m in object.get(hpa.spec, "metrics", [])
+	m.type == "Pods"
+	object.get(m.pods.metric, "name", "") != ""
+	object.get(m.pods.target, "type", "") != ""
+}
+
+api_hpa_has_request_rate_metric(hpa) if {
+	some m in object.get(hpa.spec, "metrics", [])
+	m.type == "External"
+	object.get(m.external.metric, "name", "") != ""
+	object.get(m.external.target, "type", "") != ""
+}
+
+# Explicit opt-out: the template emits netops.ai/requestrate-disabled="true" when
+# requestRate.enabled=false (cluster has no Prometheus adapter). A CPU-only HPA
+# carrying that annotation is an INTENTIONAL choice, not a silent regression —
+# the deny rule is suppressed. A CPU-only HPA WITHOUT the annotation (i.e. a
+# chart render where the request-rate block was silently dropped) is still DENIED.
+# See api-hpa.yaml and values.yaml services.api.autoscaling.requestRate.enabled.
+api_hpa_has_request_rate_metric(hpa) if {
+	object.get(hpa.metadata.annotations, "netops.ai/requestrate-disabled", "") == "true"
+}
+
+# --- api PDB: minAvailable must guarantee >= 1 ready replica (PRODUCTION.md §3.2:
+# "a node drain must never take api to zero"). An integer minAvailable must be
+# >= 1; a PDB that omits minAvailable (relying on maxUnavailable, which over a
+# small tier can allow zero) is rejected for the api tier — minAvailable is the
+# floor the §3.2 requirement names. ---
+deny contains msg if {
+	input.kind == "PodDisruptionBudget"
+	is_api_object(input)
+	not api_pdb_guarantees_one(input)
+	msg := sprintf("api PodDisruptionBudget %q must set an integer minAvailable >= 1 (a voluntary disruption must never take the api tier to zero — PRODUCTION.md §3.2 / ADR-0043 §1; a maxUnavailable-only PDB can drain a small tier to zero)", [input.metadata.name])
+}
+
+api_pdb_guarantees_one(pdb) if {
+	ma := object.get(pdb.spec, "minAvailable", null)
+	is_number(ma)
+	ma >= 1
+}
+
+# --- api PDB: its selector MUST target the api tier (F-rego-3473 fix). The
+# minAvailable rule above only checks the floor VALUE; it never inspects the
+# selector. An api-labelled PDB (is_api_object matches on its own labels) whose
+# spec.selector.matchLabels points at a DIFFERENT component (e.g. worker) would
+# leave the api tier entirely UNPROTECTED while the policy reports compliant. The
+# api PDB template renders the selector via netops.serviceSelector with
+# component=api, so the correct value is app.kubernetes.io/component: api. ---
+deny contains msg if {
+	input.kind == "PodDisruptionBudget"
+	is_api_object(input)
+	object.get(input.spec.selector.matchLabels, "app.kubernetes.io/component", "") != "api"
+	msg := sprintf("api PodDisruptionBudget %q selector must target app.kubernetes.io/component=api — a PDB labelled api whose selector points at another tier leaves the api pods unprotected while reporting compliant (PRODUCTION.md §3.2 / ADR-0043 §1)", [input.metadata.name])
+}
+
+# ===========================================================================
+# W2-T3 (ADR-0043 §2/§3/§4) — KEDA per-queue worker ScaledObject controls.
+# The ScaledObject is a KEDA CRD with no built-in schema, so it is on the
+# kubeconform -skip list; these rules keep it POLICY-covered so the skip cannot
+# hide a regression. Each rule expresses one ADR-0043 requirement and fails the
+# gate if a rendered ScaledObject violates it. NEVER weaken a rule to go green.
+# ===========================================================================
+
+# The known SANDBOX-pinned packet Deployments (ADR-0031 §5): a packet ScaledObject
+# may target ONLY one of these, so a scaled packet pod stays on the tainted pool.
+workerscale_sandbox_targets := {"packet-capture", "packet-analysis"}
+
+# A ScaledObject is a PACKET one if it carries the packet-sandbox label (the
+# template stamps it from queues.<q>.sandboxPinned).
+workerscale_is_packet(so) if {
+	so.metadata.labels["netops.io/packet-sandbox"] == "true"
+}
+
+# --- PACKET-POOL EXCEPTION (ADR-0043 §4, MANDATORY SECURITY CONTROL): a packet
+# ScaledObject MUST target a sandbox-pinned Deployment (packet-capture /
+# packet-analysis). Scaling adds replicas only; if the target were a general
+# Deployment a scaled NET_RAW / untrusted-parser pod could land on a general
+# node — the exact co-scheduling the tainted pool exists to prevent. ---
+deny contains msg if {
+	input.kind == "ScaledObject"
+	workerscale_is_packet(input)
+	target := object.get(input.spec.scaleTargetRef, "name", "")
+	not workerscale_sandbox_targets[target]
+	msg := sprintf("packet KEDA ScaledObject %q must target a sandbox-pinned Deployment (%v) so scaled pods stay on the ADR-0031 tainted node pool — a NET_RAW/untrusted-parser pod must never scale onto a general node (ADR-0043 §4); got target %q", [input.metadata.name, workerscale_sandbox_targets, target])
+}
+
+# --- A packet ScaledObject's target must not be EMPTY (a missing scaleTargetRef
+# name would scale nothing AND defeat the sandbox-target check above). ---
+deny contains msg if {
+	input.kind == "ScaledObject"
+	workerscale_is_packet(input)
+	object.get(input.spec.scaleTargetRef, "name", "") == ""
+	msg := sprintf("packet KEDA ScaledObject %q must set spec.scaleTargetRef.name to a sandbox-pinned packet Deployment (ADR-0043 §4)", [input.metadata.name])
+}
+
+# --- SENTINEL-AWARE TRIGGER (ADR-0043 §2): every WORKER ScaledObject must scale
+# on a redis-sentinel trigger that discovers the primary via Sentinel — NOT a
+# plain `redis` scaler with a static `address`/`host` (a static primary pin
+# breaks on failover, the failover-aware-client decision ADR-0044 forbids).
+#
+# SCOPE: scoped to ScaledObjects stamped with the worker-scaling component label
+# (app.kubernetes.io/component == "worker-scaling") — the label netops.componentLabels
+# stamps on all W2-T3 ScaledObjects (keda-scaledobjects.yaml). A ScaledObject for a
+# non-sentinel use-case (CPU metric, cron, HTTP, etc.) that is NOT a Redis-backed
+# worker scaler is NOT subject to this architectural constraint. The sentinel-trigger
+# rule is a Redis-specific structural mandate, not a universal KEDA invariant. ---
+deny contains msg if {
+	input.kind == "ScaledObject"
+	input.metadata.labels["app.kubernetes.io/component"] == "worker-scaling"
+	not workerscale_has_sentinel_trigger(input)
+	msg := sprintf("KEDA ScaledObject %q must use a redis-sentinel trigger with sentinelAddresses + sentinelMaster (the primary is discovered via Sentinel so a Redis failover does not break scaling — ADR-0043 §2 / ADR-0044); a plain redis scaler with a static host pin is rejected", [input.metadata.name])
+}
+
+workerscale_has_sentinel_trigger(so) if {
+	some t in object.get(so.spec, "triggers", [])
+	t.type == "redis-sentinel"
+	object.get(t.metadata, "sentinelAddresses", "") != ""
+	object.get(t.metadata, "sentinelMaster", "") != ""
+}
+
+# --- CREDENTIAL BY REFERENCE (secure-by-default): a ScaledObject trigger must
+# NOT inline a Redis password into its metadata — the credential is supplied via
+# a KEDA TriggerAuthentication (authenticationRef). An inlined `password` (or a
+# `passwordFromEnv` pointing at a literal) is a secret-surface leak in the
+# rendered manifest. ---
+deny contains msg if {
+	input.kind == "ScaledObject"
+	some t in object.get(input.spec, "triggers", [])
+	object.get(t.metadata, "password", "") != ""
+	msg := sprintf("KEDA ScaledObject %q trigger inlines a Redis password in metadata — the credential MUST be by-reference via a TriggerAuthentication authenticationRef, never inlined (secure-by-default)", [input.metadata.name])
+}
+
+# --- COHERENT PER-QUEUE BOUNDS (ADR-0043 §3): maxReplicaCount must be >=
+# minReplicaCount, and a missing maxReplicaCount (KEDA default 100) over an
+# isolated queue would let one queue consume the whole node budget and starve the
+# others — the §329 failure. Require an explicit maxReplicaCount and a coherent
+# floor<=ceiling so isolation ceilings are real, not the KEDA default. ---
+deny contains msg if {
+	input.kind == "ScaledObject"
+	not is_number(object.get(input.spec, "maxReplicaCount", null))
+	msg := sprintf("KEDA ScaledObject %q must set an explicit maxReplicaCount — a per-queue isolation ceiling (a missing ceiling inherits the KEDA default and lets one queue consume the whole budget, starving the others; ADR-0043 §3 / G-SCA §329)", [input.metadata.name])
+}
+
+deny contains msg if {
+	input.kind == "ScaledObject"
+	min := object.get(input.spec, "minReplicaCount", 0)
+	max := object.get(input.spec, "maxReplicaCount", 0)
+	is_number(max)
+	max < min
+	msg := sprintf("KEDA ScaledObject %q maxReplicaCount (%v) must be >= minReplicaCount (%v)", [input.metadata.name, max, min])
+}
+

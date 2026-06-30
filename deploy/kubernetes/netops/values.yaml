@@ -195,6 +195,9 @@ services:
   # frontend nginx reverse proxy (ADR-0012 §2), never directly from ingress.
   api:
     enabled: true
+    # `replicas` is the STATIC count used ONLY when autoscaling.enabled=false (the
+    # P1 GA single-replica seam). When the HPA is on (the P3 default below) the
+    # Deployment OMITS `replicas` and the HPA owns the count from minReplicas up.
     replicas: 1
     port: 8000
     # Service type. ClusterIP is the secure default (ADR-0029 §4 "all platform
@@ -202,6 +205,9 @@ services:
     # SINGLE front door). NodePort/LoadBalancer open a Service-level side door
     # that bypasses the Ingress TLS termination — a WARNED opt-out (NOTES.txt).
     type: ClusterIP
+    # Resource requests + limits (never absent — ADR-0029 §3). The CPU REQUEST is
+    # also the BASIS the HPA CPU-utilization target is a percentage OF — an HPA on
+    # CPU% is meaningless without it (ADR-0043 risk "HPA on CPU with no requests").
     resources:
       requests:
         cpu: 250m
@@ -209,6 +215,96 @@ services:
       limits:
         cpu: "2"
         memory: 1Gi
+    # -- api HorizontalPodAutoscaler (W2-T1, ADR-0043 §1; PRODUCTION.md §3.2 / §11
+    #    G-SCA §327). HA/resilient-by-DEFAULT for P3 (ADR-0029 §0): the api tier
+    #    runs >=2 replicas always, autoscaled on CPU + request rate, behind the PDB
+    #    below. Renders an autoscaling/v2 HPA targeting the api Deployment.
+    #
+    #    SEQUENCING (ADR-0043 §1, cross-ref ADR-0044 / W2-T2): the api is only
+    #    correctly horizontally scalable once WebSocket session state is
+    #    externalized via Redis pub/sub fan-out (ADR-0044, W2-T2). W2 sequencing
+    #    keeps W2-T2 before/with this scale-out; if WS fan-out has NOT landed in a
+    #    given cluster, a WS session opened on one replica may not be served by
+    #    another. JWT auth (ADR-0010) is already stateless, so REST is safe at >=2.
+    #
+    #    Disabling autoscaling reverts the api to the static single-replica seam
+    #    (`replicas` above) and emits a NOTES warning (NOT highly available).
+    autoscaling:
+      enabled: true
+      # FLOOR — >=2 ALWAYS (PRODUCTION.md §3.2 / ADR-0043 §1). The chart REFUSES to
+      # render an HPA with minReplicas < 2 (a floor of 1 cannot survive a single
+      # node loss and defeats the PDB — ADR-0043 Alt #6). This is the substrate the
+      # PDB protects; it is the firm requirement, not an autoscaler artifact.
+      minReplicas: 2
+      # CEILING — PROPOSED reference bound (ADR-0043 §1). The §327 "linear
+      # improvement at 4 replicas" criterion sets the practical lower bound; the
+      # certified-scale target is the Consultant answer (named deferred → GA).
+      maxReplicas: 10
+      # Signal 1 — CPU utilization (compute-bound load). Percentage of the CPU
+      # REQUEST above; 70% leaves burst headroom before the limit (ADR-0043 §1).
+      cpu:
+        targetUtilizationPercent: 70
+      # Signal 2 — request rate per pod (the I/O-bound load CPU misses, ADR-0043
+      # §1). OPT-OUT (default ON): the metric is published by the api /metrics
+      # (ADR-0015) and surfaced to the HPA by a Prometheus adapter / KEDA
+      # Prometheus scaler — that instrumentation + adapter is W3 (observability)
+      # scope, NOT added here. This chart REFERENCES the metric by its CANONICAL
+      # name only (coordinate, don't duplicate — W2-T1 spec). Until W3 wires the
+      # adapter the CPU signal carries autoscaling and this target is inert (the
+      # adapter publishes no series). Set enabled:false on a cluster with no
+      # adapter to avoid an HPA reporting ScalingActive=False on a missing metric.
+      requestRate:
+        enabled: true
+        # Canonical per-pod request-rate metric (requests/sec/pod). W3 publishes
+        # this series via the Prometheus adapter from rate(http_requests_total).
+        # DEPENDENCY: W3 must expose a series of this exact name for the signal to
+        # take effect (documented in the PR notes — no new instrumentation here).
+        metricName: http_requests_per_second
+        # Target requests/sec PER POD; the HPA scales out when the per-pod average
+        # exceeds this. PROPOSED — tuned against the §327 p95 budget in the W4-T6
+        # load drill (reduced scale). A plain quantity string (no unit suffix).
+        targetAverageValue: "50"
+      # Scale-up/scale-down BEHAVIOUR — stabilization windows (ADR-0043 §1/§2).
+      # Short up-window reacts to a spike fast; long down-window prevents flapping
+      # on bursty load (and protects in-flight WS sessions from premature eviction).
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 30
+          periodSeconds: 60
+          # Add up to N pods OR P% of current replicas per period, whichever is
+          # MORE (selectPolicy Max) — fast scale-out under a burst.
+          podsPerPeriod: 4
+          percentPerPeriod: 100
+        scaleDown:
+          # 5-min window before scaling in (matches the worker-tier cooldown
+          # intent, ADR-0043 §2) so a transient dip does not thrash the tier.
+          stabilizationWindowSeconds: 300
+          periodSeconds: 60
+          # Remove at most N pods per period — gentle scale-in.
+          podsPerPeriod: 1
+    # -- api PodDisruptionBudget (W2-T1, ADR-0043 §1; PRODUCTION.md §3.2). A node
+    #    drain / rolling upgrade can never take the api tier below `minAvailable`
+    #    ready replicas. minAvailable:1 + the HPA floor of 2 means a single-node
+    #    voluntary disruption always leaves >=1 api replica serving. ON by default
+    #    (resilient-by-default); disabling emits a NOTES warning. Only correct
+    #    ALONGSIDE a >=2 replica floor — a PDB minAvailable:1 over a single replica
+    #    would BLOCK a drain (cannot evict the only pod). GATING (F-pdb-autoscaleoff
+    #    review fix): the PDB renders ONLY when that floor exists — autoscaling.enabled
+    #    (HPA minReplicas guarded >=2) OR services.api.replicas >= 2. On the
+    #    single-replica seam (autoscaling off and replicas<2) NO PDB is emitted, so
+    #    the drain-deadlock cannot occur; the api-pdb.yaml guard enforces this.
+    podDisruptionBudget:
+      enabled: true
+      # FLOOR of ready replicas a voluntary disruption must leave (PRODUCTION.md
+      # §3.2 "minAvailable 1"). An absolute integer (not a %) so the floor holds
+      # regardless of how the HPA has scaled the tier.
+      minAvailable: 1
+      # AlwaysAllow (K8s 1.27+ GA): a Running-but-not-Ready api pod can still be
+      # evicted during a drain, so a stuck/crash-looping replica does NOT deadlock
+      # a node drain — correct for a STATELESS tier (minAvailable still protects
+      # the HEALTHY count). The K8s default IfHealthyBudget would block eviction of
+      # an unready pod at the budget. Keep AlwaysAllow for drain-safety.
+      unhealthyPodEvictionPolicy: AlwaysAllow
 
   # worker: celery over the five restricted-compliant queues. `packet` is the
   # SINGLE deliberate omission — it is its own ADR-0031 workload (W3-owned), NOT
@@ -605,6 +701,154 @@ redisSentinel:
       limits:
         cpu: 200m
         memory: 128Mi
+
+# -- KEDA per-queue worker autoscaling (W2-T3, ADR-0043 §2/§3/§4). One KEDA
+#    ScaledObject PER Celery work queue, scaling that queue's OWN worker
+#    Deployment on the queue's Redis LIST LENGTH. Independent per-queue min/max +
+#    cooldown is the STRUCTURAL per-queue-isolation guarantee (G-SCA §329): a
+#    `discovery` burst scales ONLY the discovery Deployment and can never consume
+#    `config`/`docs`/`packet` replica budget (separate Deployments, separate
+#    ScaledObjects, separate ceilings). W4-T6 asserts this isolation under a 10x
+#    `discovery` depth and a negative control (a shared scaler) makes it go red.
+#
+#    OPT-IN, default OFF — KEDA is an extra operator + CRDs (ScaledObject) NOT in
+#    the GA baseline (ADR-0043 §5: the named fallback is an HPA on celery-exporter
+#    metrics, a chart-values decision, NOT a silent default). Mirrors the
+#    redisSentinel / cloudNativePg opt-in-HA-tier precedent. When enabled the
+#    chart renders per-queue worker Deployments (discovery/config/docs) + their
+#    ScaledObjects, and ScaledObjects for the existing ADR-0031 packet Deployments
+#    (packet-capture/packet-analysis). The base shared `services.worker`
+#    Deployment then serves ONLY the residual topology+system queues (the scaled
+#    general queues move to their own Deployments — see the mutual-exclusion note
+#    on services.worker.queues). Enabling requires a KEDA operator in the cluster.
+workerScaling:
+  enabled: false
+
+  # SENTINEL-AWARE Redis trigger (ADR-0043 §2, cross-ref ADR-0044 / W1-T4). The
+  # KEDA `redis-sentinel` scaler discovers the CURRENT primary via the Sentinel
+  # quorum, so a failover does NOT break scaling (no static primary host pin —
+  # the same failover-aware-client decision the api/worker dial via netops.redisUrl).
+  # These coordinates are derived from the redisSentinel tier so they cannot drift;
+  # surfaced here only so an operator can override the discovery target. The
+  # trigger reads `LLEN <queue>` (the Celery broker stores each queue as a Redis
+  # list keyed by the queue name) and a per-queue listLength target below.
+  redis:
+    # Sentinel master_name the scaler resolves the primary by. Defaults to the
+    # redisSentinel master name (a single source of truth) — override only to
+    # point at an EXTERNAL Sentinel-managed Redis.
+    sentinelMasterName: ""
+    # `;`-joined Sentinel host:port discovery list. Empty -> derived from the
+    # in-chart redisSentinel headless Service (netops.redisSentinelHosts) so it
+    # tracks the Sentinel replica count. Override for an external Sentinel.
+    sentinelAddresses: ""
+    # Redis logical DB the Celery broker uses (matches config.redis.db).
+    databaseIndex: 0
+    # Whether the scaler authenticates to Redis. The password is supplied to KEDA
+    # by-reference via a TriggerAuthentication referencing the platform Secret
+    # (secrets.keys.redisPassword) — NEVER inlined into the ScaledObject.
+    enableTLS: false
+
+  # KEDA TriggerAuthentication: how the scaler reads the Redis password BY
+  # REFERENCE from the platform Secret (NEVER inlined into a ScaledObject/values).
+  triggerAuth:
+    # Render a TriggerAuthentication wired to the platform Secret's redisPassword
+    # key. The packet-* ScaledObjects live in their own namespace(s), so the
+    # template renders the auth object once per distinct namespace it is used in.
+    enabled: true
+
+  # Per-queue scale + cooldown knobs. INDEPENDENT per queue (per-queue isolation,
+  # G-SCA §329). pollingInterval/cooldownPeriod set the burst-drain realism W4-T6
+  # measures against (ADR-0043 §2): too long a poll and a burst drains slowly; too
+  # short a cooldown and the tier flaps.
+  defaults:
+    # KEDA evaluates the trigger every pollingInterval seconds (ADR-0043 §2:
+    # PROPOSED 15-30s). 20s is responsive without hammering Sentinel/Redis.
+    pollingInterval: 20
+    # Seconds KEDA waits after the last active trigger before scaling a queue back
+    # toward its floor (ADR-0043 §2: PROPOSED 300s). Prevents flapping on a dip.
+    cooldownPeriod: 300
+
+  # One entry per SCALED Celery work queue. Each becomes ONE ScaledObject ⇄ ONE
+  # Deployment ⇄ ONE queue (the structural isolation, ADR-0043 §3). `listName` is
+  # the Redis list key (the Celery queue name) the scaler reads LLEN of.
+  #
+  # General queues (discovery/config/docs): a per-queue worker Deployment is
+  # rendered under workerScaling (worker-queue-deployments.yaml) as the scale
+  # target. `topology`/`system` are NOT scaled here (not in the W2-T3 four) and
+  # stay on the base shared worker.
+  #
+  # Packet queues (packet_capture/packet_analysis): the scale target is the
+  # EXISTING ADR-0031 Deployment, which is pinned to the tainted sandbox node pool
+  # (packetNodePool) — so scaled packet pods STAY on the sandbox pool and a
+  # NET_RAW / untrusted-parser pod can never burst onto a general node
+  # (ADR-0043 §4, a mandatory SECURITY control). `sandboxPinned: true` records and
+  # asserts that binding (the conftest workerscale.* rule denies a packet
+  # ScaledObject whose target is not sandbox-pinned).
+  queues:
+    discovery:
+      # The Redis list key (Celery queue name) — `LLEN discovery` is the backlog.
+      listName: discovery
+      # Scale target: the per-queue worker Deployment rendered for this queue.
+      target: discovery
+      # Floor: a warm 1 (discovery bursts often; cold-start latency hurts SLO).
+      minReplicaCount: 1
+      # Ceiling: per-queue, independent of the other queues (isolation). PROPOSED.
+      maxReplicaCount: 10
+      # Pending tasks per replica before scaling out (the demand-per-pod target).
+      listLength: 5
+    config:
+      listName: config
+      target: config
+      minReplicaCount: 1
+      maxReplicaCount: 6
+      listLength: 5
+    docs:
+      listName: docs
+      target: docs
+      # docs may idle to 0 between bursts (KEDA scale-from-zero, ADR-0043 §2 — a
+      # capability the celery-exporter-HPA fallback lacks).
+      minReplicaCount: 0
+      maxReplicaCount: 4
+      listLength: 5
+    packet_capture:
+      listName: packet_capture
+      # Scale target: the EXISTING ADR-0031 packet-capture Deployment (NET_RAW,
+      # on the sandbox pool). Scaling adds replicas ONLY within the tainted pool.
+      target: packet-capture
+      sandboxPinned: true
+      # Floor 0: capture is bursty (on-demand). Ceiling bounded by the SANDBOX
+      # pool capacity, NOT the general worker tier (ADR-0043 §4).
+      minReplicaCount: 0
+      maxReplicaCount: 4
+      listLength: 2
+    packet_analysis:
+      listName: packet_analysis
+      # Scale target: the EXISTING ADR-0031 packet-analysis Deployment (zero-cap,
+      # untrusted-pcap parser, on the sandbox pool).
+      target: packet-analysis
+      sandboxPinned: true
+      minReplicaCount: 0
+      maxReplicaCount: 4
+      listLength: 2
+
+  # -- Per-queue worker PodDisruptionBudgets (W2-T3 fix, ADR-0043 §2/§3). A node
+  #    drain / rolling upgrade can never evict all replicas of a queue-worker
+  #    simultaneously and silently drop in-flight Celery tasks. One PDB per
+  #    general queue (discovery, config, docs); packet queues target the ADR-0031
+  #    Deployments which are hardened separately. minAvailable:1 mirrors the api
+  #    PDB floor (api-pdb.yaml, W2-T1). AlwaysAllow lets a stuck/unready worker
+  #    pod be evicted during a drain without blocking it. ON by default alongside
+  #    workerScaling.enabled (resilient-by-default).
+  podDisruptionBudget:
+    enabled: true
+    # FLOOR of ready replicas a voluntary disruption must leave. An absolute 1
+    # ensures at least one healthy worker pod remains per queue during a drain,
+    # regardless of how KEDA has scaled the tier. Mirrors api minAvailable: 1.
+    minAvailable: 1
+    # AlwaysAllow (K8s 1.27+ GA): a Running-but-not-Ready worker pod can still
+    # be evicted during a drain — a stuck/crash-looping pod must NOT deadlock a
+    # node drain. minAvailable still protects the HEALTHY count.
+    unhealthyPodEvictionPolicy: AlwaysAllow
 
 # -- Backup / DR tier (W5-T1, ADR-0030 §1/§4). pgBackRest continuous WAL
 #    archiving + weekly-full / daily-incr backups of the Postgres system of

@@ -15,6 +15,38 @@ Hardening contract (same as api; worker talks to Postgres/Redis/Neo4j, not K8s A
 - own ServiceAccount worker-sa, automountServiceAccountToken:false.
 */ -}}
 {{- if .Values.services.worker.enabled }}
+{{- /*
+WORKER-SCALING MUTUAL EXCLUSION (W2-T3, ADR-0043 §3): when workerScaling.enabled,
+the general scaled queues (discovery/config/docs) move to their OWN per-queue
+Deployments (worker-queue-deployments.yaml) so KEDA can scale each in isolation.
+This base worker then serves ONLY the residual queues (topology/system) — the
+scaled queues are FILTERED OUT of its -Q list so a queue is never consumed by two
+Deployments at once (which would defeat the per-queue-isolation measurement). With
+workerScaling OFF (the GA default) the base worker serves the full queue list
+unchanged — the default render is byte-for-byte identical.
+*/ -}}
+{{- $scaledQueues := list -}}
+{{- if .Values.workerScaling.enabled -}}
+{{- $scaledQueues = list "discovery" "config" "docs" -}}
+{{- end -}}
+{{- $workerQueues := list -}}
+{{- range $q := .Values.services.worker.queues -}}
+{{- if not (has $q $scaledQueues) -}}
+{{- $workerQueues = append $workerQueues $q -}}
+{{- end -}}
+{{- end -}}
+{{- /*
+EMPTY-RESIDUAL GUARD (W2-T3 review fix, F-worker-emptyQ): when workerScaling is on,
+the scaled general queues (discovery/config/docs) are FILTERED OUT of the base
+worker's -Q list. If an operator scopes services.worker.queues to ONLY the scaled
+set, the residual $workerQueues is EMPTY — the base worker would then render
+`-Q ""`, a celery worker that consumes NO queues (a wasted, idle pod) AND drops the
+`system` default queue the readiness probe's broker round-trip depends on (header
+above). Render the base worker ONLY when at least one non-scaled queue remains; a
+fully-scaled queue set is a valid config that simply produces no base worker. The
+default (residual topology+system) is unaffected and byte-stable.
+*/ -}}
+{{- if gt (len $workerQueues) 0 }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -46,7 +78,7 @@ spec:
             - app.workers.celery_app
             - worker
             - -Q
-            - {{ .Values.services.worker.queues | join "," | quote }}
+            - {{ $workerQueues | join "," | quote }}
           securityContext:
             {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
           envFrom:
@@ -142,4 +174,5 @@ spec:
           emptyDir:
             sizeLimit: 256Mi
         {{- include "netops.dbClientTlsVolume" . | nindent 8 }}
+{{- end }}
 {{- end }}

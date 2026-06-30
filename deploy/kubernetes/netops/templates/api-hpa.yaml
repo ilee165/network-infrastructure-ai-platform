@@ -1,0 +1,117 @@
+{{- /*
+api HorizontalPodAutoscaler (W2-T1, ADR-0043 §1 — the api half of the P3
+compute scale-out). The stateless `api` Deployment (ADR-0029 §1, D10 JWT, no
+server sessions) is autoscaled on TWO signals so the HPA scales on whichever
+demands more replicas (HPA max-of-metrics semantics):
+
+  1. CPU utilization (metrics.resource) — catches compute-bound load. Meaningful
+     ONLY because the api container carries resource REQUESTS (ADR-0029 §3 /
+     ADR-0043 risk "HPA on CPU with no requests never scales").
+  2. Request rate per pod (metrics.pods) — catches the connection/throughput-
+     bound load CPU alone misses for an I/O-bound FastAPI tier (a flood that
+     blocks on Postgres/Neo4j/LLM I/O drives p95 past the §327 budget while CPU
+     stays low). CPU-only was REJECTED (ADR-0043 §Alternatives #1).
+
+FLOOR minReplicas: 2 (always) is a FIRM PRODUCTION.md §3.2 requirement — the api
+tier survives a single node loss and is the substrate the PDB (api-pdb.yaml)
+protects; it is NOT an autoscaler artifact (ADR-0043 §1 / Alt #6 rejects a floor
+of 1). CEILING maxReplicas is a PROPOSED reference bound (ADR-0043 §1, the §327
+"linear improvement at 4 replicas" sets the practical lower bound on it).
+
+REQUEST-RATE METRIC SOURCE — COORDINATION (ADR-0043 §1 / §Negative): the per-pod
+request-rate signal is published by the api `/metrics` (ADR-0015) and surfaced to
+the HPA as a custom metric by a Prometheus adapter (or a KEDA Prometheus scaler).
+That instrumentation + adapter is W3 (observability) scope — this chart REFERENCES
+the agreed metric by its canonical name (values: services.api.autoscaling.
+requestRate.metricName) and does NOT add new instrumentation here. Until W3 lands
+the adapter, the CPU metric carries autoscaling and the request-rate target is
+inert (the adapter returns no series → that metric simply does not contribute),
+so rendering it now is safe and the wiring is ready. The request-rate metric is
+OPT-OUT (requestRate.enabled) so a cluster without the adapter can run CPU-only
+without an HPA that reports `ScalingActive=False` on a missing metric.
+
+STATELESSNESS PRECONDITION (ADR-0043 §1, cross-ref ADR-0044 / W2-T2): an HPA across
+N replicas is only correct if any replica can serve any request. JWT auth (ADR-0010)
+is already stateless; WebSocket agent-session streaming becomes stateless only once
+its state is externalized via Redis pub/sub fan-out (ADR-0044, built in W2-T2).
+W2 sequencing keeps W2-T2 before/with this api scale-out — see the values comment.
+*/ -}}
+{{- if and .Values.services.api.enabled .Values.services.api.autoscaling.enabled }}
+{{- $a := .Values.services.api.autoscaling }}
+{{- if lt (int $a.minReplicas) 2 }}
+{{- fail (printf "services.api.autoscaling.minReplicas must be >= 2 (PRODUCTION.md §3.2 / ADR-0043 §1: the api tier runs >=2 replicas ALWAYS to survive a single node loss; a floor of 1 defeats the PDB). Got %v." $a.minReplicas) }}
+{{- end }}
+{{- if lt (int $a.maxReplicas) (int $a.minReplicas) }}
+{{- fail (printf "services.api.autoscaling.maxReplicas (%v) must be >= minReplicas (%v)." $a.maxReplicas $a.minReplicas) }}
+{{- end }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "netops.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "api") | nindent 4 }}
+  {{- if not $a.requestRate.enabled }}
+  annotations:
+    # The request-rate Pods metric is explicitly disabled (requestRate.enabled=false
+    # — cluster has no Prometheus adapter). This annotation tells the conftest
+    # apiscale deny rule that the CPU-only render is an INTENTIONAL opt-out, not
+    # a silent regression. A CPU-only HPA WITHOUT this annotation is still DENIED
+    # (accidental loss of the dual-signal). See hardening.rego api_hpa_has_request_rate_metric.
+    netops.ai/requestrate-disabled: "true"
+  {{- end }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "netops.fullname" . }}-api
+  minReplicas: {{ $a.minReplicas }}
+  maxReplicas: {{ $a.maxReplicas }}
+  metrics:
+    # CPU utilization — compute-bound signal (ADR-0043 §1). Percentage of the
+    # container's CPU REQUEST, so the api container MUST set requests (it does).
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $a.cpu.targetUtilizationPercent }}
+    {{- if $a.requestRate.enabled }}
+    # Request rate per pod — the I/O-bound signal CPU misses (ADR-0043 §1).
+    # The metric is published by the api /metrics (ADR-0015) and surfaced as a
+    # custom Pods metric by the W3 Prometheus adapter / KEDA Prometheus scaler.
+    # NOT instrumented here (W3 owns it) — referenced by canonical name only.
+    - type: Pods
+      pods:
+        metric:
+          name: {{ $a.requestRate.metricName | quote }}
+        target:
+          type: AverageValue
+          averageValue: {{ $a.requestRate.targetAverageValue | quote }}
+    {{- end }}
+  behavior:
+    # Stabilization windows tune the burst-drain realism (ADR-0043 §1/§2 intent):
+    # a SHORT scale-up window reacts to a load spike quickly; a LONG scale-down
+    # window prevents flapping when load is bursty (the api must not thrash
+    # replicas on a transient dip, esp. with WS sessions in flight — ADR-0044).
+    scaleUp:
+      stabilizationWindowSeconds: {{ $a.behavior.scaleUp.stabilizationWindowSeconds }}
+      policies:
+        - type: Pods
+          value: {{ $a.behavior.scaleUp.podsPerPeriod }}
+          periodSeconds: {{ $a.behavior.scaleUp.periodSeconds }}
+        - type: Percent
+          value: {{ $a.behavior.scaleUp.percentPerPeriod }}
+          periodSeconds: {{ $a.behavior.scaleUp.periodSeconds }}
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: {{ $a.behavior.scaleDown.stabilizationWindowSeconds }}
+      policies:
+        - type: Pods
+          value: {{ $a.behavior.scaleDown.podsPerPeriod }}
+          periodSeconds: {{ $a.behavior.scaleDown.periodSeconds }}
+      # Min = remove the fewest pods the policies allow — the conservative,
+      # anti-flap scale-in this block is designed for (load-bearing once a
+      # second scaleDown policy is added).
+      selectPolicy: Min
+{{- end }}

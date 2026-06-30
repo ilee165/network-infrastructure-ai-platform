@@ -1,0 +1,29 @@
+# NEGATIVE — a PACKET ScaledObject (netops.io/packet-sandbox: "true") that targets
+# a GENERAL worker Deployment instead of the sandbox-pinned packet-analysis /
+# packet-capture. Scaling adds replicas only, so a packet pod would burst onto a
+# general node — the ADR-0031 §5 co-scheduling regression the tainted pool exists
+# to prevent. MUST be DENIED by the workerscale sandbox-target rule (ADR-0043 §4).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: netops-worker-packet-analysis
+  namespace: netops
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: worker-scaling
+    netops.io/celery-queue: "packet_analysis"
+    netops.io/packet-sandbox: "true"
+spec:
+  scaleTargetRef:
+    name: netops-worker-discovery
+  minReplicaCount: 0
+  maxReplicaCount: 4
+  triggers:
+    - type: redis-sentinel
+      metadata:
+        sentinelAddresses: "netops-redis-sentinel-0.netops-redis-sentinel-headless:26379"
+        sentinelMaster: "netops-redis"
+        listName: "packet_analysis"
+        listLength: "2"
+      authenticationRef:
+        name: netops-redis-auth

@@ -1,0 +1,25 @@
+# NEGATIVE — CPU-ONLY api HPA (the request-rate signal dropped). ADR-0043 §1 /
+# Alt #1: an I/O-bound request flood drives p95 past the §327 budget while CPU
+# stays low, so CPU-only would not scale. MUST be DENIED (missing request-rate).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: netops-api
+  namespace: netops
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: netops-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

@@ -1,0 +1,30 @@
+# NEGATIVE — a PACKET ScaledObject (netops.io/packet-sandbox: "true") whose
+# spec.scaleTargetRef.name is EMPTY. A missing target name scales NOTHING and also
+# defeats the sandbox-target check (the empty string is not in the sandbox-pinned
+# set), so a NET_RAW/parser pool could be left with a broken, unscaled autoscaler.
+# This exercises the DISTINCT empty-name deny head (rego lines ~3508-3513), not the
+# wrong-target path the general-target fixture covers. MUST be DENIED (ADR-0043 §4).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: netops-worker-packet-capture
+  namespace: netops
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: worker-scaling
+    netops.io/celery-queue: "packet_capture"
+    netops.io/packet-sandbox: "true"
+spec:
+  scaleTargetRef:
+    name: ""
+  minReplicaCount: 0
+  maxReplicaCount: 4
+  triggers:
+    - type: redis-sentinel
+      metadata:
+        sentinelAddresses: "netops-redis-sentinel-0.netops-redis-sentinel-headless:26379"
+        sentinelMaster: "netops-redis"
+        listName: "packet_capture"
+        listLength: "2"
+      authenticationRef:
+        name: netops-redis-auth

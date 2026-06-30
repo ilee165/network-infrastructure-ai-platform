@@ -1,0 +1,155 @@
+{{- /*
+Per-queue Celery worker Deployments (W2-T3, ADR-0008 / ADR-0043 §2/§3).
+
+OPT-IN: rendered only when workerScaling.enabled. These are the SCALE TARGETS the
+per-queue KEDA ScaledObjects (keda-scaledobjects.yaml) drive. ADR-0043 §3 makes
+per-queue isolation STRUCTURAL — one ScaledObject ⇄ one Deployment ⇄ one queue —
+so a `discovery` burst scales ONLY the discovery Deployment and never consumes
+`config`/`docs`/`packet` replica budget (G-SCA §329). That requires one Deployment
+PER scaled general queue; the base shared services.worker Deployment (which serves
+several queues in one process) cannot give it.
+
+WHICH QUEUES: the general scaled queues only — discovery, config, docs (the W2-T3
+"four" minus packet, which scales the EXISTING ADR-0031 packet-capture /
+packet-analysis Deployments, see keda-scaledobjects.yaml). `topology` and `system`
+are NOT scaled here and remain on the base worker (worker-deployment.yaml drops
+the scaled general queues from its -Q list when workerScaling.enabled).
+
+HARDENING: identical to the base worker (worker-deployment.yaml) — same
+ServiceAccount, podSecurityContext, hardenedSecurityContext, db-mTLS env/volume,
+secret-by-reference env, probes. Each Deployment runs `celery ... worker -Q <queue>`
+for its SINGLE queue. replicas is OMITTED so KEDA owns the count from the
+ScaledObject's minReplicaCount up (the HPA/ScaledObject-owns-replicas seam, same as
+the api HPA). No replicas field => no fighting the ScaledObject for the count.
+*/ -}}
+{{- if and .Values.services.worker.enabled .Values.workerScaling.enabled }}
+{{- $root := . -}}
+{{- $generalQueues := list "discovery" "config" "docs" -}}
+{{- range $qname := $generalQueues }}
+{{- $q := index $root.Values.workerScaling.queues $qname }}
+{{- if $q }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "netops.fullname" $root }}-worker-{{ $qname }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" $root "component" (printf "worker-%s" $qname)) | nindent 4 }}
+    # The queue this Deployment serves — the conftest workerscale.* rule and the
+    # ScaledObject target match on this so a SO can never point at the wrong queue.
+    netops.io/celery-queue: {{ $qname | quote }}
+spec:
+  # NO replicas: KEDA's ScaledObject owns the count (minReplicaCount up). Setting a
+  # static replicas here would fight the autoscaler (same seam as the api HPA).
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" $root "component" (printf "worker-%s" $qname)) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" $root "component" (printf "worker-%s" $qname)) | nindent 8 }}
+        netops.io/celery-queue: {{ $qname | quote }}
+    spec:
+      serviceAccountName: worker-sa
+      automountServiceAccountToken: {{ $root.Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" $root | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "netops.backendImage" $root }}
+          imagePullPolicy: {{ $root.Values.images.backend.pullPolicy }}
+          # One queue per Deployment (ADR-0043 §3 — structural per-queue isolation).
+          command:
+            - celery
+            - -A
+            - app.workers.celery_app
+            - worker
+            - -Q
+            - {{ $q.listName | quote }}
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" $root | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "netops.fullname" $root }}-config
+          env:
+            {{- if $root.Values.secrets.existingSecret }}
+            - name: NETOPS_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.secrets.existingSecret }}
+                  key: {{ $root.Values.secrets.keys.postgresPassword }}
+            - name: NETOPS_NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.secrets.existingSecret }}
+                  key: {{ $root.Values.secrets.keys.neo4jAuth }}
+            - name: NETOPS_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.secrets.existingSecret }}
+                  key: {{ $root.Values.secrets.keys.redisPassword }}
+            {{- else }}
+            - name: NETOPS_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.fullname" $root }}-dev-secrets
+                  key: {{ $root.Values.secrets.keys.postgresPassword }}
+            - name: NETOPS_NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.fullname" $root }}-dev-secrets
+                  key: {{ $root.Values.secrets.keys.neo4jAuth }}
+            - name: NETOPS_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "netops.fullname" $root }}-dev-secrets
+                  key: {{ $root.Values.secrets.keys.redisPassword }}
+            {{- end }}
+            {{- include "netops.dbClientTlsEnv" $root | nindent 12 }}
+          resources:
+            {{- toYaml $root.Values.services.worker.resources | nindent 12 }}
+          startupProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - app.workers.celery_app
+                - inspect
+                - ping
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - app.workers.celery_app
+                - inspect
+                - ping
+            initialDelaySeconds: 0
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - app.workers.celery_app
+                - inspect
+                - ping
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- include "netops.dbClientTlsVolumeMount" $root | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        {{- include "netops.dbClientTlsVolume" $root | nindent 8 }}
+{{- end }}
+{{- end }}
+{{- end }}

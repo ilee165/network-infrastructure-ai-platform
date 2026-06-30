@@ -643,6 +643,43 @@ jobs:
       - name: conftest pg_hba weak-hostssl bite (negative + positive fixtures)
         run: bash deploy/kubernetes/policy/fixtures/run-pg-hba-bite.sh
 
+      # W2-T1 (ADR-0043 §1) — api HPA + PDB policy BITE. The api HPA + PDB are
+      # ON BY DEFAULT (resilient-by-default), so they ARE in the default
+      # `rendered.yaml` above and already schema/policy-gated by the conftest +
+      # kubeconform + kube-linter steps there (no separate render step needed).
+      # This step proves the apiscale.* rules actually BITE: NEGATIVE fixtures
+      # (HPA minReplicas 1, CPU-only HPA, no-CPU HPA, PDB minAvailable 0, PDB
+      # maxUnavailable-only) are each DENIED, while POSITIVE fixtures (the
+      # compliant minReplicas-2 + CPU+request-rate HPA, the minAvailable-1 PDB)
+      # still PASS. RED gate.
+      - name: conftest api HPA + PDB bite (floor>=2 + CPU+req-rate + PDB minAvailable>=1)
+        run: bash deploy/kubernetes/policy/fixtures/run-api-hpa-pdb-bite.sh
+
+      # W2-T1 (ADR-0043 §1) — api HPA requestRate opt-out render + policy validation.
+      # requestRate.enabled=false is a DOCUMENTED opt-out for clusters without a
+      # Prometheus adapter (values.yaml services.api.autoscaling.requestRate). The
+      # template emits netops.ai/requestrate-disabled=true on the HPA; the rego rule
+      # suppresses the deny for that annotation. This step renders with the flag OFF
+      # and runs conftest to prove the opt-out render is accepted (not vacuously — the
+      # HPA IS in the render and the policy runs over it). A CPU-only HPA WITHOUT the
+      # annotation (api_hpa_cpu_only_DENY.yaml) is still rejected by the bite above.
+      - name: Render + validate api HPA requestRate opt-out (requestRate.enabled=false)
+        run: |
+          set -o pipefail
+          helm template netops deploy/kubernetes/netops \
+            --namespace netops --kube-version 1.29.0 \
+            --set services.api.autoscaling.requestRate.enabled=false | tr -d '\r' > rendered-hpa-optout.yaml
+          test -s rendered-hpa-optout.yaml
+          kubeconform -strict -summary \
+            -kubernetes-version 1.29.0 \
+            -ignore-missing-schemas \
+            -skip ClusterPolicy,Cluster,Pooler \
+            rendered-hpa-optout.yaml
+          kube-linter lint rendered-hpa-optout.yaml --config deploy/kubernetes/.kube-linter.yaml
+          conftest test rendered-hpa-optout.yaml \
+            --policy deploy/kubernetes/policy/rego \
+            --all-namespaces
+
       # W1-T1 (ADR-0042) — CloudNativePG HA tier render + policy validation. The
       # CNPG Cluster/Pooler/PriorityClass are OPT-IN (default OFF), so the default
       # `rendered.yaml` above does NOT contain them and the cnpg.* conftest rules
@@ -735,6 +772,71 @@ jobs:
       # on the runner. RED gate (no continue-on-error).
       - name: Redis Sentinel render-twice L4 idempotency guard
         run: bash ci/redis-sentinel/render-twice.sh
+
+      # W2-T3 (ADR-0043 §2/§3/§4) — KEDA per-queue worker ScaledObjects render +
+      # policy validation. The ScaledObjects + per-queue worker Deployments +
+      # TriggerAuthentications are OPT-IN (workerScaling.enabled, default OFF —
+      # KEDA is an extra operator + CRDs NOT in the GA baseline), so the default
+      # `rendered.yaml` above does NOT contain them and the workerscale.* conftest
+      # rules pass vacuously there. This step renders the chart with the tier
+      # ENABLED — and because the Sentinel-aware trigger requires a Sentinel to
+      # discover (ADR-0043 §2), it enables the Redis Sentinel HA tier too
+      # (redisSentinel.enabled=true / services.redis.enabled=false, the chart's
+      # fail-fast guard) — then runs kubeconform + kube-linter + conftest on THAT
+      # render, so the ScaledObjects are actually schema/policy-gated in CI, not
+      # just locally. The ScaledObject + TriggerAuthentication are KEDA CRDs with
+      # no built-in schema, so they are ADDED to the kubeconform -skip list FOR
+      # THIS STEP ONLY (the workerscale.* conftest rules below keep them
+      # policy-covered so the skip cannot hide a structural regression).
+      - name: Render + validate KEDA per-queue worker ScaledObjects (ADR-0043)
+        run: |
+          set -o pipefail
+          helm template netops deploy/kubernetes/netops \
+            --namespace netops --kube-version 1.29.0 \
+            --set workerScaling.enabled=true \
+            --set redisSentinel.enabled=true \
+            --set services.redis.enabled=false | tr -d '\r' > rendered-keda.yaml
+          test -s rendered-keda.yaml
+          kubeconform -strict -summary \
+            -kubernetes-version 1.29.0 \
+            -ignore-missing-schemas \
+            -skip ClusterPolicy,Cluster,Pooler,ScaledObject,TriggerAuthentication \
+            rendered-keda.yaml
+          kube-linter lint rendered-keda.yaml --config deploy/kubernetes/.kube-linter.yaml
+          conftest test rendered-keda.yaml \
+            --policy deploy/kubernetes/policy/rego \
+            --all-namespaces
+
+      # W2-T3 — KEDA ScaledObject policy BITE (ADR-0043 §2/§3/§4). The conftest
+      # gate above proves the COMPLIANT render PASSES; this proves the
+      # workerscale.* rules actually BITE: NEGATIVE fixtures (a packet SO targeting
+      # a general Deployment — sandbox-pool escape; a plain redis scaler with a
+      # static host pin — not Sentinel-aware; an inlined Redis password; a missing
+      # maxReplicaCount ceiling — per-queue isolation hole) are each DENIED, while
+      # the POSITIVE fixture (the compliant sandbox-pinned packet ScaledObject)
+      # still PASSES. RED gate.
+      - name: conftest KEDA ScaledObject bite (sandbox-pin + Sentinel trigger + cred-by-ref + ceiling)
+        run: bash deploy/kubernetes/policy/fixtures/run-keda-scaledobject-bite.sh
+
+      # The opt-in KEDA per-queue worker-scaling tier (rendered-keda.yaml) is its OWN
+      # set of objects (per-queue worker Deployments + PDBs + ScaledObjects +
+      # TriggerAuthentications) absent from rendered.yaml — kubeconform/kube-linter/
+      # conftest gate it above, but the Trivy IaC misconfig gate must ALSO cover it,
+      # else a HIGH/CRITICAL misconfig isolated to the KEDA tier (e.g. a missing
+      # securityContext on a queue-worker pod, or a future chart addition) would not
+      # fail CI. Same posture as the rendered.yaml / CNPG / Redis-Sentinel scans
+      # (fixable HIGH/CRIT, ignore-unfixed, sanctioned-deviation ignorefile). F-ci-keda-trivy.
+      - name: Trivy config scan (rendered KEDA worker-scaling tier)
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
+        with:
+          scan-type: config
+          scan-ref: rendered-keda.yaml
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
 
       # W4-T4 L4 idempotency guard for the api/worker↔postgres mTLS cert material
       # (ADR-0039 §5 / P1-W4-LESSONS L4): a `helm upgrade` that REGENERATES the DB

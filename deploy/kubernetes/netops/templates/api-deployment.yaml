@@ -25,7 +25,13 @@ metadata:
   labels:
     {{- include "netops.componentLabels" (dict "ctx" . "component" "api") | nindent 4 }}
 spec:
+  {{- /* When the HPA owns the api replica count (W2-T1, ADR-0043 §1), OMIT
+  `replicas` so Helm does not reset it to the static value on every apply and
+  fight the autoscaler. The HPA's `minReplicas` (>=2) is the floor instead. With
+  autoscaling OFF this stays the static single-replica seam (P1 GA). */ -}}
+  {{- if not .Values.services.api.autoscaling.enabled }}
   replicas: {{ .Values.services.api.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 6 }}

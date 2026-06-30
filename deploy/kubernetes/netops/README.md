@@ -115,9 +115,17 @@ round-2 #25.)
 
 | Key | Default | Notes |
 |---|---|---|
-| `services.<svc>.replicas` | `1` | SINGLE-REPLICA; raising it is the P2 HA seam (warned) |
+| `services.<svc>.replicas` | `1` | SINGLE-REPLICA static seam; for `api` it is unused while the HPA is on (autoscaling owns the count). Raising it elsewhere is a warned HA seam |
 | `services.<svc>.enabled` | `true` (ollama `false`) | data stores toggleable to external/operator-managed |
 | `services.<svc>.type` | `ClusterIP` | NodePort/LoadBalancer is a warned opt-out (Ingress is the single front door) |
+| `services.api.autoscaling.enabled` | `true` | api HorizontalPodAutoscaler (W2-T1, ADR-0043 §1). ON by default (resilient-by-default); disabling reverts to the static `replicas` seam (warned, not HA) |
+| `services.api.autoscaling.minReplicas` | `2` | FLOOR >=2 ALWAYS (PRODUCTION.md §3.2); the render REFUSES `< 2` (a floor of 1 cannot survive a node loss and defeats the PDB) |
+| `services.api.autoscaling.maxReplicas` | `10` | PROPOSED ceiling (ADR-0043 §1; the §327 "linear at 4 replicas" sets the practical lower bound) |
+| `services.api.autoscaling.cpu.targetUtilizationPercent` | `70` | CPU-utilization signal (% of the api CPU request — meaningless without requests) |
+| `services.api.autoscaling.requestRate.enabled` / `.metricName` | `true` / `http_requests_per_second` | per-pod request-rate signal (ADR-0043 §1). Metric is published by the api `/metrics` via a Prometheus adapter — **W3 (observability) scope**, referenced by canonical name only here (no new instrumentation). Set `enabled:false` on a cluster with no adapter |
+| `services.api.autoscaling.requestRate.targetAverageValue` | `"50"` | target req/sec/pod (PROPOSED; tuned in the W4-T6 load drill) |
+| `services.api.autoscaling.behavior.{scaleUp,scaleDown}` | 30s up / 300s down windows | stabilization windows (fast scale-out, anti-flap scale-in; ADR-0043 §1/§2) |
+| `services.api.podDisruptionBudget.enabled` / `.minAvailable` | `true` / `1` | api PDB (W2-T1, ADR-0043 §1; PRODUCTION.md §3.2) — a node drain never takes api to zero. ON by default; disabling is warned |
 | `hardening.securityContext.*` | hardened | reusable per-container context (every workload consumes the `netops.hardenedSecurityContext` helper) |
 | `namespaceLabels.podSecurity.enforce` | `restricted` | weakening is a warned opt-out |
 | `ingress.enabled` / `ingress.host` | `true` / placeholder | set `host` to your real FQDN |
@@ -163,7 +171,11 @@ The chart is gated in CI (`.github/workflows/ci.yml` `infra` job) by:
 `helm lint` → `helm template` → `kubeconform -strict` → `kube-linter` →
 `conftest test --all-namespaces` (the Rego in `deploy/kubernetes/policy/rego/`
 asserts every control above on the rendered manifests) → **Trivy config scan
-(gating)** for IaC misconfig. The opt-in CloudNativePG HA tier (ADR-0042) is
+(gating)** for IaC misconfig. The api HPA + PDB (W2-T1, ADR-0043) render BY
+DEFAULT, so they are covered by the default-render conftest/kubeconform/kube-linter
+gates above and additionally by the **api HPA + PDB BITE**
+(`deploy/kubernetes/policy/fixtures/run-api-hpa-pdb-bite.sh` — floor>=2 + CPU+
+request-rate dual signal + PDB minAvailable>=1). The opt-in CloudNativePG HA tier (ADR-0042) is
 additionally rendered with `cloudNativePg.enabled=true` and gated by the same
 kubeconform/kube-linter/conftest set, the **cnpg sync-quorum + pooler-budget BITE**
 (`deploy/kubernetes/policy/fixtures/run-cnpg-bite.sh`) and the **CNPG render-twice

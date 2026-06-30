@@ -1,0 +1,71 @@
+{{- /*
+Per-queue worker PodDisruptionBudgets (W2-T3 fix, ADR-0043 §2/§3 — drain-safety).
+
+One PodDisruptionBudget per general KEDA-scaled queue (discovery, config, docs).
+Without a PDB a node drain can evict ALL replicas of a queue-worker simultaneously
+and silently drop every in-flight Celery task for that queue. KEDA's minReplicaCount
+floor controls the SCHEDULER's scale target; it does NOT protect pods from voluntary
+eviction during a drain. These PDBs close that gap.
+
+SCOPE: general queues only (discovery, config, docs). The packet queues
+(packet-capture, packet-analysis) target the ADR-0031 Deployments in their own
+namespace/hardening tier and are out of scope here.
+
+PATTERN: mirrors api-pdb.yaml (W2-T1, ADR-0043 §1) exactly —
+  minAvailable:1          — absolute floor, holds regardless of KEDA-scaled count.
+  AlwaysAllow             — a Running-but-NOT-Ready worker pod can still be evicted
+                            during a drain; a stuck replica must not deadlock a drain.
+  netops.serviceSelector  — matches the exact pod set the ScaledObject scales.
+
+GUARD: rendered only when workerScaling.enabled AND workerScaling.podDisruptionBudget.enabled
+(both default true when the tier is on), mirroring the worker-queue-deployments.yaml guard.
+*/ -}}
+{{- if and .Values.services.worker.enabled .Values.workerScaling.enabled }}
+{{- if .Values.workerScaling.podDisruptionBudget.enabled }}
+{{- $root := . -}}
+{{- $pdb := .Values.workerScaling.podDisruptionBudget -}}
+{{- $generalQueues := list "discovery" "config" "docs" -}}
+{{- range $qname := $generalQueues }}
+{{- $q := index $root.Values.workerScaling.queues $qname }}
+{{- /*
+SCALE-TO-ZERO GUARD (W2-T3 review fix, F-queuepdb-zero): render a minAvailable:1 PDB
+ONLY for a queue whose ScaledObject floor is >= 1 (discovery/config). A queue that
+KEDA may idle to 0 (docs: minReplicaCount 0, scale-from-zero) has NO floor to
+protect, and a minAvailable:1 PDB over 0 healthy pods is permanently unsatisfiable
+(disruptionsAllowed=0) — it would block kubectl drain / node cordon / rolling node
+upgrades indefinitely. A queue allowed to be 0 must never gate a drain, so it gets
+NO PDB. discovery/config (floor 1) keep minAvailable:1 unchanged and byte-stable.
+*/ -}}
+{{- if and $q (ge (int $q.minReplicaCount) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "netops.fullname" $root }}-worker-{{ $qname }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" $root "component" (printf "worker-%s" $qname)) | nindent 4 }}
+  annotations:
+    # kube-linter cannot resolve the effective replica floor from a KEDA ScaledObject
+    # (a CRD, not a native HPA). The ScaledObject's minReplicaCount provides the same
+    # guarantee as an HPA's minReplicas — the floor is >= 1 for discovery/config and
+    # the PDB minAvailable:1 is coherent at runtime. This is the same false-positive
+    # class that would fire if kube-linter evaluated an HPA-owned Deployment with no
+    # static replicas field. The finding is suppressed at the object level; the broader
+    # pdb-min-available check remains active for all other objects.
+    ignore-check.kube-linter.io/pdb-min-available: "KEDA ScaledObject (CRD) manages replicas for this queue worker — kube-linter cannot read the effective floor from a ScaledObject the way it can from a native HPA; the ScaledObject minReplicaCount >= 1 (discovery/config) ensures PDB minAvailable:1 is coherent at runtime (ADR-0043 §3)"
+spec:
+  minAvailable: {{ $pdb.minAvailable }}
+  # AlwaysAllow (K8s 1.27+ GA): a Running-but-not-Ready worker pod can still be
+  # evicted during a drain, so a stuck/crash-looping replica does NOT deadlock a
+  # node drain — correct for a stateless Celery worker (minAvailable still protects
+  # the HEALTHY count). The K8s default IfHealthyBudget would block eviction of an
+  # unready pod at the budget. Keep AlwaysAllow for drain-safety.
+  unhealthyPodEvictionPolicy: {{ $pdb.unhealthyPodEvictionPolicy }}
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" $root "component" (printf "worker-%s" $qname)) | nindent 6 }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

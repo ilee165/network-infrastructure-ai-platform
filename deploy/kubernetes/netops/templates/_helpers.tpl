@@ -92,6 +92,40 @@ config coordinate. Usage: {{ include "netops.redisSentinelMaster" . }}
 {{- end -}}
 
 {{/*
+netops.workerScalingSentinelAddresses — the `;`-joined Sentinel host:port list the
+KEDA redis-sentinel scaler uses to DISCOVER the current Redis primary (W2-T3,
+ADR-0043 §2). Empty workerScaling.redis.sentinelAddresses -> derived from the
+in-chart redisSentinel headless Service (netops.redisSentinelHosts), so the
+scaler tracks the SAME failover-aware coordinate the api/worker dial — a primary
+change is transparent and never breaks scaling (no static host pin). An explicit
+override targets an external Sentinel-managed Redis. Usage:
+{{ include "netops.workerScalingSentinelAddresses" . }}
+*/}}
+{{- define "netops.workerScalingSentinelAddresses" -}}
+{{- $override := .Values.workerScaling.redis.sentinelAddresses -}}
+{{- if $override -}}
+{{- $override -}}
+{{- else -}}
+{{- include "netops.redisSentinelHosts" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+netops.workerScalingSentinelMaster — the Sentinel master_name the KEDA scaler
+resolves the primary by (W2-T3, ADR-0043 §2). Empty override -> the redisSentinel
+master name (single source of truth so the coordinate cannot drift). Usage:
+{{ include "netops.workerScalingSentinelMaster" . }}
+*/}}
+{{- define "netops.workerScalingSentinelMaster" -}}
+{{- $override := .Values.workerScaling.redis.sentinelMasterName -}}
+{{- if $override -}}
+{{- $override -}}
+{{- else -}}
+{{- include "netops.redisSentinelMaster" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Whether THIS CHART renders the in-chart api/worker↔Postgres mTLS (W1-T2 / ADR-0039).
 True ("true") only when mtls.postgres.enabled AND the CNPG HA tier is OFF: the
 chart's mtls.postgres machinery (server cert + pg_hba + verify-full client config)
