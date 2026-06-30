@@ -818,6 +818,26 @@ jobs:
       - name: conftest KEDA ScaledObject bite (sandbox-pin + Sentinel trigger + cred-by-ref + ceiling)
         run: bash deploy/kubernetes/policy/fixtures/run-keda-scaledobject-bite.sh
 
+      # The opt-in KEDA per-queue worker-scaling tier (rendered-keda.yaml) is its OWN
+      # set of objects (per-queue worker Deployments + PDBs + ScaledObjects +
+      # TriggerAuthentications) absent from rendered.yaml — kubeconform/kube-linter/
+      # conftest gate it above, but the Trivy IaC misconfig gate must ALSO cover it,
+      # else a HIGH/CRITICAL misconfig isolated to the KEDA tier (e.g. a missing
+      # securityContext on a queue-worker pod, or a future chart addition) would not
+      # fail CI. Same posture as the rendered.yaml / CNPG / Redis-Sentinel scans
+      # (fixable HIGH/CRIT, ignore-unfixed, sanctioned-deviation ignorefile). F-ci-keda-trivy.
+      - name: Trivy config scan (rendered KEDA worker-scaling tier)
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
+        with:
+          scan-type: config
+          scan-ref: rendered-keda.yaml
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
       # W4-T4 L4 idempotency guard for the api/worker↔postgres mTLS cert material
       # (ADR-0039 §5 / P1-W4-LESSONS L4): a `helm upgrade` that REGENERATES the DB
       # certs would sever every connection. This proves the dev-fallback uses the
