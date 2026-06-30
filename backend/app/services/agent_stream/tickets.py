@@ -79,9 +79,17 @@ class RedisStreamTicketStore:
 
     async def issue(self, *, user_id: uuid.UUID, session_id: uuid.UUID, ttl_seconds: int) -> str:
         ticket = uuid.uuid4().hex + uuid.uuid4().hex  # 256 bits of opaque entropy
-        await self._redis.set(
+        # ``SET NX`` returns falsy (``None``) when the key already held a value: the
+        # write did NOT happen, so the key still binds a PRIOR (session, user) pair
+        # and this ticket would hand back a handle the caller can never validly
+        # redeem. Refuse rather than return an unredeemable / mis-bound ticket
+        # (F-tickets-114). A genuine 256-bit collision is astronomically improbable,
+        # so we fail closed rather than retry.
+        created = await self._redis.set(
             _redis_key(ticket), _encode(session_id, user_id), nx=True, ex=ttl_seconds
         )
+        if not created:
+            raise RuntimeError("stream-ticket id collision: SET NX did not write a new key")
         return ticket
 
     async def consume(self, *, ticket: str, session_id: uuid.UUID) -> uuid.UUID | None:

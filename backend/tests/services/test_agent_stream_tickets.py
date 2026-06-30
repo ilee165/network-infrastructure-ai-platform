@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 from app.services.agent_stream.tickets import (
     InMemoryStreamTicketStore,
     _redis_key,
@@ -112,3 +114,23 @@ class TestRedisStreamTicketStoreContract:
         assert fake.getdel_calls == [_redis_key(ticket)]
         # Single-use: GETDEL removed it.
         assert await store.consume(ticket=ticket, session_id=SESSION) is None
+
+    async def test_issue_raises_when_set_nx_did_not_write(self) -> None:
+        """A ``SET NX`` that finds the key already set must not return a stale ticket.
+
+        ``SET NX`` returns falsy when the key already held a value: the write did not
+        happen and the key still binds a PRIOR (session, user) pair, so returning the
+        ticket would hand the caller an unredeemable / mis-bound handle. The store
+        must fail closed instead (F-tickets-114). We force the fake's NX path to
+        report "not written" and assert ``issue`` raises rather than returning.
+        """
+        from app.services.agent_stream.tickets import RedisStreamTicketStore
+
+        class _CollidingRedis(_FakeRedis):
+            async def set(self, key: str, value: str, *, nx: bool, ex: int) -> bool:
+                self.set_calls.append((key, value, nx, ex))
+                return False  # NX found the key already set: no write happened.
+
+        store = RedisStreamTicketStore(_CollidingRedis())  # type: ignore[arg-type]
+        with pytest.raises(RuntimeError):
+            await store.issue(user_id=USER, session_id=SESSION, ttl_seconds=30)
