@@ -154,7 +154,7 @@ tests:
     promql_expr_test:
       # succeeded / total = 95 / (95+3+2) = 0.95 — below the 0.99 objective.
       # round() absorbs float-division noise (drops __name__ -> label set {}).
-      - expr: round(slo:netops_discovery_success:ratio_rate1h, 0.0001)
+      - expr: round(slo:netops_discovery_success:ratio_rate_run, 0.0001)
         eval_time: 65m
         exp_samples:
           - labels: '{}'
@@ -166,10 +166,10 @@ tests:
       - series: 'netops_discovery_runs_total{status="succeeded"}'
         values: '0+100x70'
     promql_expr_test:
-      - expr: slo:netops_discovery_success:ratio_rate1h
+      - expr: slo:netops_discovery_success:ratio_rate_run
         eval_time: 65m
         exp_samples:
-          - labels: 'slo:netops_discovery_success:ratio_rate1h'
+          - labels: 'slo:netops_discovery_success:ratio_rate_run'
             value: 1
 
   # ===========================================================================

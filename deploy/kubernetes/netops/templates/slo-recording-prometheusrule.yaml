@@ -85,7 +85,7 @@ spec:
     # §6 row 4 — Discovery job success rate, SLO >=99% per run. Global success ratio.
     - name: netops-slo-discovery-success
       rules:
-        - record: slo:netops_discovery_success:ratio_rate1h
+        - record: slo:netops_discovery_success:ratio_rate_run
           expr: |
             sum(rate(netops_discovery_runs_total{status="succeeded"}[1h]))
             /

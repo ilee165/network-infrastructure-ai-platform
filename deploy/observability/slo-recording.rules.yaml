@@ -124,7 +124,7 @@ groups:
   # ---------------------------------------------------------------------------
   - name: netops-slo-discovery-success
     rules:
-      - record: slo:netops_discovery_success:ratio_rate1h
+      - record: slo:netops_discovery_success:ratio_rate_run
         expr: |
           sum(rate(netops_discovery_runs_total{status="succeeded"}[1h]))
           /
