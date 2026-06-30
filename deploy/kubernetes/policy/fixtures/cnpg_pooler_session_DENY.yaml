@@ -1,0 +1,22 @@
+# NEGATIVE fixture (ADR-0042 §4) — a PgBouncer Pooler in SESSION mode. Session
+# mode pins a server backend for the whole client session, so it (a) defeats the
+# connection-budget multiplexing the scaled-out api/worker tiers need (G-SCA
+# §330) and (b) would let a session-level `SET` persist, breaking the per-
+# transaction audit-sync scoping W1-T2 relies on. The cnpg rule MUST DENY this.
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: netops-pg-pooler-session-negative
+  labels:
+    app.kubernetes.io/component: postgres
+spec:
+  cluster:
+    name: netops-pg
+  instances: 2
+  type: rw
+  pgbouncer:
+    # THE DEFECT: session mode (must be `transaction`).
+    poolMode: session
+    parameters:
+      max_client_conn: "1000"
+      default_pool_size: "25"

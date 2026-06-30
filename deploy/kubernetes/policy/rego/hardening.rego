@@ -524,7 +524,12 @@ deny contains msg if {
 # pgBackRest TLS-server edge: the backup CronJob → the in-postgres `pgbackrest
 # server` sidecar (mTLS), since the CronJob pod has no PGDATA volume of its own
 # and cannot read pg1-path directly (ADR-0030 §4).
-netpol_known_egress_ports := {5432, 7687, 6379, 11434, 9000, 8432, 443, 53}
+# Port 26379 is the W1-T4 Redis Sentinel control port (ADR-0044 §1): the
+# api/worker → sentinel discovery edge and the sentinel↔sentinel quorum-gossip
+# edge ride it under the default-deny floor. It renders ONLY on the opt-in
+# redisSentinel HA tier; on the default single-instance render no egress targets
+# it, so adding it to the known set does not loosen the GA default.
+netpol_known_egress_ports := {5432, 7687, 6379, 11434, 9000, 8432, 443, 53, 26379}
 
 # Names of the W3-owned packet NetworkPolicies — excluded from the W4 platform
 # assertions below (they carry their own ADR-0031 rules earlier in this file).
@@ -905,8 +910,11 @@ deny contains msg if {
 # ===========================================================================
 
 # The platform workload components every generic §3 control applies to. packet-*
-# is intentionally absent (governed by the named ADR-0031 rules above).
-platform_workload_components := {"api", "worker", "frontend", "postgres", "neo4j", "redis", "ollama"}
+# is intentionally absent (governed by the named ADR-0031 rules above). The W1-T4
+# Redis Sentinel pods (`redis-sentinel`) are INCLUDED so every ADR-0029 §3 control
+# (drop-ALL, non-root, RO-rootfs, no-privesc, RuntimeDefault seccomp, limits) is
+# asserted on them too — they render only on the opt-in redisSentinel HA tier.
+platform_workload_components := {"api", "worker", "frontend", "postgres", "neo4j", "redis", "ollama", "redis-sentinel"}
 
 # True for a rendered Deployment/StatefulSet that is one of the platform services.
 is_platform_workload(obj) if {
@@ -2725,4 +2733,620 @@ deny contains msg if {
 	is_db_tls_secret(input)
 	some k, _ in object.get(input, "stringData", {})
 	msg := sprintf("db mTLS Secret %q must carry cert material under `data:` (base64 PEM), not stringData key %q (ADR-0039 §5)", [input.metadata.name, k])
+}
+
+# ===========================================================================
+# W1-T1 — CloudNativePG HA data tier (ADR-0042). The CNPG `Cluster` + PgBouncer
+# `Pooler` + PriorityClass are CRDs; conftest still feeds each rendered document
+# as `input`, so these rules assert the ADR-0042 contract SHAPE directly on the
+# rendered manifests (helm template … | conftest test). They run ONLY when the
+# opt-in tier is enabled (the manifests are absent on the default render, so the
+# rules are vacuously satisfied then). NEVER weaken a rule to make it green — the
+# manifest must satisfy the contract.
+#
+# What is asserted here vs elsewhere:
+#   - sync-QUORUM shape (ANY 1, audit-path scoping) ........... here (render)
+#   - PgBouncer transaction mode + connection budget ......... here (render)
+#   - 1+2 instances, non-root, pgvector, PriorityClass ....... here (render)
+#   - the per-transaction `SET LOCAL synchronous_commit` ..... W1-T2 (real PG)
+#   - the live zero-audit-loss failover drill ................ W4-T3 (kind)
+# ===========================================================================
+
+is_cnpg_cluster(obj) if {
+	obj.apiVersion == "postgresql.cnpg.io/v1"
+	obj.kind == "Cluster"
+}
+
+is_cnpg_pooler(obj) if {
+	obj.apiVersion == "postgresql.cnpg.io/v1"
+	obj.kind == "Pooler"
+}
+
+# --- 1 primary + 2 streaming replicas (ADR-0042 §1). Exactly 3 instances: fewer
+# than 3 cannot form the ANY-1-over-2 quorum nor CNPG failover quorum. ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	input.spec.instances != 3
+	msg := sprintf("CNPG Cluster %q must run exactly 3 instances (1 primary + 2 streaming replicas), got %v — ANY 1 quorum + failover quorum need 3 (ADR-0042 §1)", [input.metadata.name, input.spec.instances])
+}
+
+# --- QUORUM synchronous replication present (ADR-0042 §2). The cluster MUST
+# declare a `synchronous` stanza so CNPG generates `synchronous_standby_names` —
+# its ABSENCE means async-everywhere, the exact failure G-REL §316 forbids. ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	not input.spec.postgresql.synchronous
+	msg := sprintf("CNPG Cluster %q must declare spec.postgresql.synchronous (quorum sync for the audit write path) — its absence is async-everywhere, losing a committed audit row on a primary kill (ADR-0042 §2 / G-REL §316)", [input.metadata.name])
+}
+
+# --- the quorum method MUST be `any` (= `ANY q (...)`), NOT `first` (priority-
+# based, which would require specific standbys and stall on one replica loss). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	input.spec.postgresql.synchronous.method != "any"
+	msg := sprintf("CNPG Cluster %q synchronous.method must be `any` (ANY-q quorum, tolerates one replica loss), got %q — `first` turns a single replica outage into an audit-write stall (ADR-0042 §2 / Alt #4)", [input.metadata.name, input.spec.postgresql.synchronous.method])
+}
+
+# --- the quorum number MUST be 1 (= `ANY 1`): acknowledge once >=1 replica holds
+# the WAL. `ANY 2`/higher converts a single replica loss into an audit-write
+# outage (ADR-0042 §2 availability trade-off / Alt #4 rejected). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	input.spec.postgresql.synchronous.number != 1
+	msg := sprintf("CNPG Cluster %q synchronous.number must be 1 (ANY 1 — one healthy replica suffices), got %v — requiring >1 standby stalls audit commits on a single replica loss (ADR-0042 §2 / Alt #4)", [input.metadata.name, input.spec.postgresql.synchronous.number])
+}
+
+# --- audit-path scoping REQUIRES an EXPLICIT async cluster default for
+# `synchronous_commit` (ADR-0042 §2 / Alt #3). Once the `synchronous` stanza is
+# present, CNPG populates `synchronous_standby_names`, so a transaction waits for
+# the quorum iff ITS synchronous_commit resolves to on/remote_write/remote_apply.
+# PostgreSQL's built-in default is `on`, and CNPG leaves an UNSET parameter at
+# that default — so omitting synchronous_commit (or setting it to a forced value)
+# forces the quorum round-trip onto EVERY discovery/config/telemetry write: the
+# throughput collapse Alt #3 rejects. Scoping holds ONLY when the cluster DEFAULT
+# is lowered to `local`/`off` (so non-audit writes ack locally) and W1-T2's per-
+# txn `SET LOCAL synchronous_commit=remote_apply` raises it back for audit txns.
+# The gate therefore demands the explicit async default; it does NOT accept the
+# implicit PG default. (`forced_sync_commit_values` is retained for the explicit-
+# forced message path so operators get the precise over-scoping diagnostic.) ---
+async_sync_commit_values := {"local", "off"}
+
+forced_sync_commit_values := {"on", "remote_apply", "remote_write"}
+
+# DENY the explicit forced cluster default — the precise over-scoping diagnostic.
+deny contains msg if {
+	is_cnpg_cluster(input)
+	sc := object.get(object.get(object.get(input.spec, "postgresql", {}), "parameters", {}), "synchronous_commit", "")
+	forced_sync_commit_values[sc]
+	msg := sprintf("CNPG Cluster %q must NOT set synchronous_commit=%q cluster-wide — that forces sync on ALL writes (throughput collapse); sync is scoped per-transaction to the audit path via W1-T2 `SET LOCAL` (ADR-0042 §2 / Alt #3)", [input.metadata.name, sc])
+}
+
+# DENY when the quorum `synchronous` stanza is configured but the cluster default
+# `synchronous_commit` is NOT an explicit async value (`local`/`off`). This bites
+# the IMPLICIT over-scoping: an unset synchronous_commit inherits the PG default
+# `on`, forcing the quorum round-trip onto every write while the chart claims
+# audit-path scoping. Audit-path scoping is real ONLY with an explicit async
+# default + W1-T2's per-txn `SET LOCAL` (ADR-0042 §2 / Alt #3). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	input.spec.postgresql.synchronous
+	sc := object.get(object.get(object.get(input.spec, "postgresql", {}), "parameters", {}), "synchronous_commit", "")
+	not async_sync_commit_values[sc]
+	not forced_sync_commit_values[sc]
+	msg := sprintf("CNPG Cluster %q declares quorum `synchronous` but does NOT set an explicit async cluster default synchronous_commit (`local`/`off`) in spec.postgresql.parameters — an unset value inherits the PG default `on`, forcing the quorum round-trip onto EVERY write (throughput collapse). Set synchronous_commit=local so non-audit writes ack locally; W1-T2's per-txn `SET LOCAL synchronous_commit=remote_apply` scopes sync to the audit path (ADR-0042 §2 / Alt #3)", [input.metadata.name])
+}
+
+# --- failoverQuorum ON (ADR-0042 §2): a promoted replica is checked to hold the
+# quorum-acked WAL before serving writes — the data-safety guarantee W4-T3 asserts. ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	input.spec.postgresql.synchronous.failoverQuorum != true
+	msg := sprintf("CNPG Cluster %q synchronous.failoverQuorum must be true — a promotion must verify the new primary holds every quorum-acked audit row (ADR-0042 §2, the W4-T3 zero-loss guarantee)", [input.metadata.name])
+}
+
+# --- pgvector present on the cluster (ADR-0042 §5). The post-init SQL must
+# `CREATE EXTENSION … vector` so every instance (replicas inherit) carries it —
+# a streaming replica that lacks pgvector breaks RAG reads routed to it. ---
+cluster_creates_vector(c) if {
+	some stmt in object.get(object.get(object.get(c.spec, "bootstrap", {}), "initdb", {}), "postInitSQL", [])
+	# Require the actual CREATE EXTENSION … vector shape, not merely the words
+	# "extension" + "vector" — `DROP EXTENSION vector` or a comment must NOT satisfy
+	# this. `(?i)` = case-insensitive; allow an optional `IF NOT EXISTS` and an
+	# optional quote around the extension name (ADR-0042 §5).
+	regex.match(`(?i)\bcreate\s+extension\s+(if\s+not\s+exists\s+)?"?vector"?`, stmt)
+}
+
+deny contains msg if {
+	is_cnpg_cluster(input)
+	not cluster_creates_vector(input)
+	msg := sprintf("CNPG Cluster %q must install pgvector via bootstrap.initdb.postInitSQL (`CREATE EXTENSION … vector`) so replicas inherit it — a replica without pgvector breaks RAG reads routed to it (ADR-0042 §5)", [input.metadata.name])
+}
+
+# --- pgvector image, never `latest`/tagless (ADR-0029 §5 parity for the operand
+# image the Cluster pins). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	img := object.get(input.spec, "imageName", "")
+	endswith(img, ":latest")
+	msg := sprintf("CNPG Cluster %q imageName must not use the `latest` tag (ADR-0029 §5)", [input.metadata.name])
+}
+
+# A reference is PINNED iff it carries an explicit tag in the image-NAME segment
+# (a `:` AFTER the last `/`, so a registry host:port does NOT count) OR an
+# `@sha256:` digest. `registry.internal:5000/cloudnative-pg/postgresql` is tagless
+# even though it contains a `:` (the host port) — it must NOT pass. ---
+cnpg_image_pinned(img) if {
+	contains(img, "@sha256:")
+}
+
+cnpg_image_pinned(img) if {
+	# The image-name segment is everything after the last `/`; a `:` there is a tag.
+	parts := split(img, "/")
+	contains(parts[count(parts) - 1], ":")
+}
+
+deny contains msg if {
+	is_cnpg_cluster(input)
+	img := object.get(input.spec, "imageName", "")
+	img != ""
+	not cnpg_image_pinned(img)
+	msg := sprintf("CNPG Cluster %q imageName %q must carry an explicit tag or digest in the image name (a registry host:port is NOT a tag) (ADR-0029 §5)", [input.metadata.name, img])
+}
+
+# --- secure-by-default: the cluster MUST run non-root. CNPG defaults to non-root,
+# but ADR-0042 §4 requires it be EXPLICIT in the chart so a future edit cannot
+# silently relax it (postgresql.runAsNonRoot must not be false). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	# Fail closed: deny unless postgresql.runAsNonRoot is EXPLICITLY `true`. A missing
+	# field (default null) or any non-true value is rejected so omission cannot
+	# silently relax the control (ADR-0042 §4 "must be EXPLICIT").
+	object.get(object.get(input.spec, "postgresql", {}), "runAsNonRoot", null) != true
+	msg := sprintf("CNPG Cluster %q must run non-root (postgresql.runAsNonRoot must be explicitly true) (ADR-0042 §4 / ADR-0029 §3)", [input.metadata.name])
+}
+
+# --- resource requests AND limits present on the Cluster (never absent, ADR-0029 §3). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	not input.spec.resources.requests
+	msg := sprintf("CNPG Cluster %q must declare resource requests (ADR-0029 §3 — never absent)", [input.metadata.name])
+}
+
+deny contains msg if {
+	is_cnpg_cluster(input)
+	not input.spec.resources.limits
+	msg := sprintf("CNPG Cluster %q must declare resource limits (ADR-0029 §3 — never absent)", [input.metadata.name])
+}
+
+# --- PriorityClass so Postgres outranks batch workers (ADR-0042 scope/§1). The
+# Cluster MUST reference a non-empty priorityClassName. ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	object.get(input.spec, "priorityClassName", "") == ""
+	msg := sprintf("CNPG Cluster %q must set priorityClassName so Postgres outranks the unpriorited batch workers under node pressure (ADR-0042 §1)", [input.metadata.name])
+}
+
+# --- credentials by-reference: the Cluster must NOT inline a superuser password.
+# CNPG references credentials via superuserSecret/bootstrap secret NAMES, never
+# literal values — a literal here is a secret-in-manifest regression (ADR-0042 §1). ---
+deny contains msg if {
+	is_cnpg_cluster(input)
+	object.get(object.get(input.spec, "superuserSecret", {}), "password", "") != ""
+	msg := sprintf("CNPG Cluster %q must reference the superuser credential by Secret NAME, never inline a password (ADR-0042 §1 / ADR-0029 §6)", [input.metadata.name])
+}
+
+# ---------------------------------------------------------------------------
+# PgBouncer Pooler — transaction mode + connection budget (ADR-0042 §4)
+# ---------------------------------------------------------------------------
+
+# --- transaction mode is MANDATORY (ADR-0042 §4): it is the connection-budget
+# rationale AND the only mode under which the audit `SET LOCAL` (W1-T2) is
+# correct. `session`/`statement` are REFUSED. ---
+deny contains msg if {
+	is_cnpg_pooler(input)
+	object.get(object.get(input.spec, "pgbouncer", {}), "poolMode", "") != "transaction"
+	msg := sprintf("CNPG Pooler %q must use poolMode `transaction` (the connection-budget + audit `SET LOCAL` correctness depend on it), got %q (ADR-0042 §4)", [input.metadata.name, object.get(object.get(input.spec, "pgbouncer", {}), "poolMode", "")])
+}
+
+# --- connection budget present (ADR-0042 §4 / G-SCA §330): the Pooler MUST set a
+# bounded default_pool_size — an unbounded server-side pool defeats the whole
+# point (Postgres connection exhaustion under the scaled-out api/worker tiers). ---
+deny contains msg if {
+	is_cnpg_pooler(input)
+	not object.get(object.get(input.spec, "pgbouncer", {}), "parameters", {}).default_pool_size
+	msg := sprintf("CNPG Pooler %q must set pgbouncer.parameters.default_pool_size (the bounded server-side pool — the connection budget that prevents Postgres exhaustion; ADR-0042 §4 / G-SCA §330)", [input.metadata.name])
+}
+
+deny contains msg if {
+	is_cnpg_pooler(input)
+	not object.get(object.get(input.spec, "pgbouncer", {}), "parameters", {}).max_client_conn
+	msg := sprintf("CNPG Pooler %q must set pgbouncer.parameters.max_client_conn (the client-facing ceiling of the connection budget; ADR-0042 §4)", [input.metadata.name])
+}
+
+# --- the Pooler must front the read-write endpoint (type rw — the endpoint the
+# app + the audit write path reach; PgBouncer re-points to the new primary on
+# failover, ADR-0042 §3/§4). ---
+deny contains msg if {
+	is_cnpg_pooler(input)
+	object.get(input.spec, "type", "rw") != "rw"
+	msg := sprintf("CNPG Pooler %q must front the read-write endpoint (type rw) so the audit write path + failover re-point work through it (ADR-0042 §3/§4)", [input.metadata.name])
+}
+
+# ===========================================================================
+# W1-T3 — Neo4j AUTOMATED-REBUILD reconciler (ADR-0005 D5; ADR-0029 §1/§3;
+# PRODUCTION.md §3.2 — single Neo4j + automated rebuild)
+#
+# Distinct from the W5-T3 quarterly DRILL above (a suspended, P2-executed,
+# manual destroy-and-rebuild assertion harness). This is the PRODUCTION recovery
+# wiring: a frequent reconciler CronJob that, when the projected graph is empty
+# or stale (the state a liveness-fail → container recreate leaves on the data
+# PVC), RE-PROJECTS the whole topology from Postgres — the system of record —
+# with NO manual step, then records the rebuild DURATION (the topology-RTO the
+# W4-T4 drill compares against + the G-OBS freshness SLO reads). Neo4j Community
+# has no clustering; this reconciler IS the designed HA mitigation (ADR-0005 §3.2).
+#
+# The reconciler objects carry the `netops.io/rebuild-role: neo4j-auto-rebuild`
+# label; match on it to scope these rules (the W5-T3 drill carries
+# `netops.io/backup-type: neo4j-rebuild-drill` instead, so the two rule sets are
+# mutually exclusive by construction and never cross-fire).
+# ===========================================================================
+
+# A rendered automated-rebuild reconciler object (Job OR CronJob) by its role label.
+is_neo4j_auto_rebuild(obj) if {
+	obj.metadata.labels["netops.io/rebuild-role"] == "neo4j-auto-rebuild"
+}
+
+# The reconciler pod-template spec, normalized across Job and CronJob.
+neo4j_auto_rebuild_pod_spec(obj) := obj.spec.template.spec if {
+	obj.kind == "Job"
+}
+
+neo4j_auto_rebuild_pod_spec(obj) := obj.spec.jobTemplate.spec.template.spec if {
+	obj.kind == "CronJob"
+}
+
+# Flattened command+args text of a reconciler container (the sh -c script body).
+neo4j_auto_rebuild_argv(c) := array.concat(object.get(c, "command", []), object.get(c, "args", []))
+
+# --- L3: the reconciler exec MUST be wrapped in `sh -c` so the in-script $VAR
+# (the assembled DSN + the metric path) expand in the shell — a raw exec argv does
+# NOT do $(VAR) substitution and would re-project against a literal `$(VAR)` host,
+# silently mis-targeting (the spec's named L3 risk). ---
+neo4j_auto_rebuild_uses_sh_c(c) if {
+	cmd := object.get(c, "command", [])
+	cmd[0] == "sh"
+	cmd[1] == "-c"
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not neo4j_auto_rebuild_uses_sh_c(c)
+	msg := sprintf("neo4j auto-rebuild %q container %q must wrap its exec in `sh -c` (L3 — a raw argv would not expand the in-script $(VAR) DSN/metric-path and would re-project against a literal host; ADR-0005 D5)", [input.metadata.name, c.name])
+}
+
+# --- the reconciler MUST re-project from Postgres via the EXISTING metric-emitting
+# rebuild path: app.engines.topology.auto_rebuild is the thin operator CLI over
+# app.engines.topology.metrics.timed_rebuild (→ rebuild() → projector.full_rebuild).
+# A wipe with no Postgres re-projection is not a rebuild (Neo4j holds no
+# un-rebuildable state — ADR-0005 D5). Asserted on the rendered argv text. ---
+neo4j_auto_rebuild_runs_reprojection(c) if {
+	some arg in neo4j_auto_rebuild_argv(c)
+	contains(arg, "app.engines.topology.auto_rebuild")
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not neo4j_auto_rebuild_runs_reprojection(c)
+	msg := sprintf("neo4j auto-rebuild %q container %q must re-project from Postgres via the metric-emitting full-rebuild path (app.engines.topology.metrics.timed_rebuild) — a wipe with no re-projection is not a rebuild (ADR-0005 D5)", [input.metadata.name, c.name])
+}
+
+# --- the rebuild DURATION metric MUST be emitted as a node_exporter TEXTFILE
+# `.prom` (the established no-pushgateway pattern — a CronJob pod is not scrapable;
+# the file survives the pod for the agent to collect). This value is the
+# topology-RTO the W4-T4 drill compares against + the G-OBS freshness SLO reads;
+# without it the recovery is invisible. Asserted on the script text. ---
+neo4j_auto_rebuild_emits_metric(c) if {
+	some arg in neo4j_auto_rebuild_argv(c)
+	contains(arg, "topology_rebuild_seconds")
+	contains(arg, ".prom")
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not neo4j_auto_rebuild_emits_metric(c)
+	msg := sprintf("neo4j auto-rebuild %q container %q must emit the rebuild-DURATION metric as a node_exporter textfile (`topology_rebuild_seconds` in a `.prom` file) — it is the topology-RTO the W4-T4 drill + G-OBS freshness SLO read (PRODUCTION.md §3.2/§11)", [input.metadata.name, c.name])
+}
+
+# --- L5 belt-and-braces: the script MUST guard that the metric file was actually
+# written non-empty (`test -s`), so a silently-empty metric write FAILS the run
+# rather than passing with no topology-RTO recorded. ---
+neo4j_auto_rebuild_guards_metric(c) if {
+	some arg in neo4j_auto_rebuild_argv(c)
+	contains(arg, "test -s")
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not neo4j_auto_rebuild_guards_metric(c)
+	msg := sprintf("neo4j auto-rebuild %q container %q must assert the metric file is non-empty (`test -s`) so a silently-empty rebuild-duration write FAILS the run (L5)", [input.metadata.name, c.name])
+}
+
+# --- secret-surface: any reconciler env whose NAME signals a credential (the
+# Postgres password or the Neo4j auth) MUST be a secretKeyRef with NO inline
+# `value:` literal (ADR-0029 §6). Reuses the drill's credential-name predicate. ---
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	neo4j_drill_credential_env(e.name)
+	object.get(e, "value", null) != null
+	msg := sprintf("neo4j auto-rebuild %q env %q must NOT carry an inline `value:` literal — the Postgres password / Neo4j auth are external-secret refs only (ADR-0029 §6)", [input.metadata.name, e.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	some e in object.get(c, "env", [])
+	neo4j_drill_credential_env(e.name)
+	not e.valueFrom.secretKeyRef
+	msg := sprintf("neo4j auto-rebuild %q env %q must be sourced from valueFrom.secretKeyRef (credentials are by-reference only; ADR-0029 §6)", [input.metadata.name, e.name])
+}
+
+# --- the reconciler rebuilds into the LIVE Neo4j from Postgres — it carries no
+# data PVC of its own (parity with the drill: the projection is re-derived, never
+# restored onto a mounted data volume). ---
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some v in object.get(neo4j_auto_rebuild_pod_spec(input), "volumes", [])
+	v.persistentVolumeClaim
+	msg := sprintf("neo4j auto-rebuild %q must mount NO persistentVolumeClaim — the graph is RE-PROJECTED from Postgres, never restored onto a data volume (ADR-0005 D5)", [input.metadata.name])
+}
+
+# --- the reconciler talks to Postgres + Neo4j, not the K8s API:
+# automountServiceAccountToken=false (parity with the backup/drill pods, ADR-0029 §5). ---
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	neo4j_auto_rebuild_pod_spec(input).automountServiceAccountToken != false
+	msg := sprintf("neo4j auto-rebuild %q pod must set automountServiceAccountToken=false — it talks to Postgres + Neo4j, not the K8s API (ADR-0029 §5)", [input.metadata.name])
+}
+
+# --- per-container hardening (the reconciler is a batch kind, separate from the
+# platform Deployment/StatefulSet rules; assert the same ADR-0029 §3 controls):
+# drop ALL caps, add none, non-root, RO-rootfs, no-privesc, requests AND limits. ---
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not drops_all(c)
+	msg := sprintf("neo4j auto-rebuild %q container %q must drop ALL capabilities (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	some cap in object.get(object.get(object.get(c, "securityContext", {}), "capabilities", {}), "add", [])
+	msg := sprintf("neo4j auto-rebuild %q container %q must add NO capabilities (found %q; ADR-0029 §3)", [input.metadata.name, c.name, cap])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	c.securityContext.runAsNonRoot != true
+	msg := sprintf("neo4j auto-rebuild %q container %q must set runAsNonRoot=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	c.securityContext.readOnlyRootFilesystem != true
+	msg := sprintf("neo4j auto-rebuild %q container %q must set readOnlyRootFilesystem=true (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	c.securityContext.allowPrivilegeEscalation != false
+	msg := sprintf("neo4j auto-rebuild %q container %q must set allowPrivilegeEscalation=false (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not c.resources.requests
+	msg := sprintf("neo4j auto-rebuild %q container %q must declare resource requests (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_neo4j_auto_rebuild(input)
+	some c in neo4j_auto_rebuild_pod_spec(input).containers
+	not c.resources.limits
+	msg := sprintf("neo4j auto-rebuild %q container %q must declare resource limits (ADR-0029 §3)", [input.metadata.name, c.name])
+}
+
+# ===========================================================================
+# W1-T4 — Redis Sentinel HA tier (ADR-0044 §1, ADR-0008)
+#
+# The opt-in redisSentinel tier (default OFF) renders a Redis StatefulSet (1 seed
+# primary + 2 replicas, component `redis`), a Sentinel StatefulSet (3 Sentinels,
+# component `redis-sentinel`), a Redis config ConfigMap, and the Sentinel/Redis
+# NetworkPolicy edges. The generic per-workload hardening rules above ALSO cover
+# both StatefulSets by component label (`redis` and `redis-sentinel` are both in
+# platform_workload_components), so drop-ALL / non-root / RO-rootfs / no-privesc /
+# RuntimeDefault-seccomp / limits are already gated there — these rules add the
+# Sentinel-SPECIFIC controls (ADR-0044 §1): AOF on, auth required + by-reference,
+# 3 Sentinels at an odd quorum, and the failover-aware (sentinel-monitored) shape.
+# They pass VACUOUSLY on the default single-instance render (no redis-sentinel
+# objects there) and BITE on a non-compliant Sentinel render (ci/redis-sentinel/
+# bite fixtures). The W1-T4 mutual-exclusion (redisSentinel + services.redis both
+# on) is a Helm `fail` (redis-sentinel.yaml), proven by the bite script, not a rego
+# rule (a `fail` never renders YAML to test).
+# ===========================================================================
+
+# True for the W1-T4 Redis config ConfigMap (carries the AOF + replication coords).
+is_redis_sentinel_configmap(obj) if {
+	obj.kind == "ConfigMap"
+	obj.metadata.labels["app.kubernetes.io/component"] == "redis"
+	endswith(obj.metadata.name, "-redis-sentinel-config")
+}
+
+# --- AOF ON (ADR-0044 §1): the Redis config MUST set `appendonly yes` so a
+# full-shard restart recovers the last durable state rather than starting empty.
+# A `appendonly no` (or a missing directive) defeats the persistence guarantee. ---
+deny contains msg if {
+	is_redis_sentinel_configmap(input)
+	some k, v in object.get(input, "data", {})
+	k == "redis.conf"
+	# Match an ACTIVE `appendonly yes` line, not a commented `# appendonly yes`
+	# (which `contains` would be fooled by even with `appendonly no` set).
+	not regex.match(`(?m)^\s*appendonly\s+yes\s*(#.*)?$`, v)
+	msg := sprintf("Redis Sentinel config %q must set `appendonly yes` — AOF persistence is required so a full-shard restart recovers durable state (ADR-0044 §1)", [input.metadata.name])
+}
+
+# --- the Redis config MUST NOT inline a password literal: requirepass/masterauth
+# are injected at startup from the platform Secret env (sh -c expansion), NEVER
+# baked into the ConfigMap (ADR-0029 §6 / ADR-0044 §1). A `requirepass <value>` or
+# `masterauth <value>` directive in the .conf is a denied inline secret. ---
+redis_config_inlines_secret(line) if {
+	regex.match(`^\s*requirepass\s+\S`, line)
+}
+
+redis_config_inlines_secret(line) if {
+	regex.match(`^\s*masterauth\s+\S`, line)
+}
+
+redis_config_inlines_secret(line) if {
+	regex.match(`sentinel\s+auth-pass\s+\S+\s+\S`, line)
+}
+
+deny contains msg if {
+	is_redis_sentinel_configmap(input)
+	some _, v in object.get(input, "data", {})
+	some line in split(v, "\n")
+	redis_config_inlines_secret(line)
+	msg := sprintf("Redis Sentinel config %q must NOT inline requirepass/masterauth/auth-pass — the password is supplied as REDIS_PASSWORD env from the Secret at startup, never baked into the ConfigMap (ADR-0029 §6 / ADR-0044 §1)", [input.metadata.name])
+}
+
+# True for the W1-T4 Redis (data) StatefulSet — component `redis` AND it mounts the
+# `-redis-sentinel-config` ConfigMap. The serviceName-disambiguation matters: the
+# DEFAULT single-instance services.redis StatefulSet ALSO carries component `redis`
+# (and 1 replica), so the Sentinel rules below MUST NOT fire on it — they are scoped
+# by the sentinel-config volume, which only the HA-tier StatefulSet mounts. This
+# keeps the GA default render passing while biting on a non-compliant Sentinel tier.
+is_redis_data_statefulset(obj) if {
+	obj.kind == "StatefulSet"
+	obj.metadata.labels["app.kubernetes.io/component"] == "redis"
+	statefulset_mounts_sentinel_config(obj)
+}
+
+statefulset_mounts_sentinel_config(obj) if {
+	some v in object.get(obj.spec.template.spec, "volumes", [])
+	endswith(object.get(object.get(v, "configMap", {}), "name", ""), "-redis-sentinel-config")
+}
+
+# True for the W1-T4 Sentinel StatefulSet — component `redis-sentinel`.
+is_redis_sentinel_statefulset(obj) if {
+	obj.kind == "StatefulSet"
+	obj.metadata.labels["app.kubernetes.io/component"] == "redis-sentinel"
+}
+
+# --- auth REQUIRED + by-reference: every Redis/Sentinel container MUST source a
+# REDIS_PASSWORD env from a secretKeyRef and carry NO inline `value:` literal
+# (ADR-0044 §1 secure-by-default auth / ADR-0029 §6). ---
+redis_container_has_secret_password(c) if {
+	some e in object.get(c, "env", [])
+	e.name == "REDIS_PASSWORD"
+	e.valueFrom.secretKeyRef
+	object.get(e, "value", null) == null
+}
+
+deny contains msg if {
+	is_redis_data_statefulset(input)
+	some c in input.spec.template.spec.containers
+	not redis_container_has_secret_password(c)
+	msg := sprintf("Redis Sentinel data StatefulSet %q container %q must set REDIS_PASSWORD from valueFrom.secretKeyRef (auth required + by-reference; ADR-0044 §1 / ADR-0029 §6)", [input.metadata.name, c.name])
+}
+
+deny contains msg if {
+	is_redis_sentinel_statefulset(input)
+	some c in input.spec.template.spec.containers
+	not redis_container_has_secret_password(c)
+	msg := sprintf("Redis Sentinel StatefulSet %q container %q must set REDIS_PASSWORD from valueFrom.secretKeyRef (Sentinel auth-pass by-reference; ADR-0044 §1 / ADR-0029 §6)", [input.metadata.name, c.name])
+}
+
+# A REDIS_PASSWORD env carrying an inline `value:` literal is a denied inline secret.
+deny contains msg if {
+	is_redis_data_statefulset(input)
+	some c in input.spec.template.spec.containers
+	some e in object.get(c, "env", [])
+	e.name == "REDIS_PASSWORD"
+	object.get(e, "value", null) != null
+	msg := sprintf("Redis Sentinel data StatefulSet %q env REDIS_PASSWORD must NOT carry an inline `value:` literal — it is an external-secret ref only (ADR-0029 §6)", [input.metadata.name])
+}
+
+deny contains msg if {
+	is_redis_sentinel_statefulset(input)
+	some c in input.spec.template.spec.containers
+	some e in object.get(c, "env", [])
+	e.name == "REDIS_PASSWORD"
+	object.get(e, "value", null) != null
+	msg := sprintf("Redis Sentinel StatefulSet %q env REDIS_PASSWORD must NOT carry an inline `value:` literal — it is an external-secret ref only (ADR-0029 §6)", [input.metadata.name])
+}
+
+# --- the seed Redis shard MUST have >= 3 instances (1 primary + 2 replicas,
+# ADR-0044 §1 — 3 is the minimum for a meaningful replica set). ---
+deny contains msg if {
+	is_redis_data_statefulset(input)
+	# Omitted spec.replicas defaults to 1 in K8s; `input.spec.replicas < 3` would be
+	# UNDEFINED (fail-open) on omission, so default to 1 before comparing.
+	replicas := object.get(input.spec, "replicas", 1)
+	replicas < 3
+	msg := sprintf("Redis Sentinel data StatefulSet %q must run >= 3 replicas (1 primary + 2 replicas; ADR-0044 §1), got %v", [input.metadata.name, replicas])
+}
+
+# --- there MUST be 3 Sentinels (ADR-0044 §1 — an odd quorum so a single Sentinel
+# loss cannot deadlock the failover vote). Fewer than 3 cannot form the 2-of-3
+# majority the design requires. ---
+deny contains msg if {
+	is_redis_sentinel_statefulset(input)
+	# Omitted spec.replicas defaults to 1 in K8s; default to 1 before comparing so an
+	# omitted count is treated as non-compliant rather than failing open.
+	replicas := object.get(input.spec, "replicas", 1)
+	replicas < 3
+	msg := sprintf("Redis Sentinel StatefulSet %q must run >= 3 Sentinels (odd quorum, single-loss-tolerant; ADR-0044 §1), got %v", [input.metadata.name, replicas])
+}
+
+# --- the Sentinel container MUST actually run sentinel (a `--sentinel` flag or a
+# `sentinel monitor` in its startup script): a Sentinel StatefulSet that runs a
+# plain redis-server is not monitoring anything and provides NO failover. Asserted
+# on the rendered command/args text. ---
+deny contains msg if {
+	is_redis_sentinel_statefulset(input)
+	some c in input.spec.template.spec.containers
+	not sentinel_runs_sentinel(c)
+	msg := sprintf("Redis Sentinel StatefulSet %q container %q must run Sentinel (a `--sentinel` flag / `sentinel monitor` directive) — without it there is no monitoring or automatic failover (ADR-0044 §1)", [input.metadata.name, c.name])
+}
+
+sentinel_runs_sentinel(c) if {
+	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
+	# Require the actual `--sentinel` execution flag, not any "sentinel" substring (a
+	# script that merely echoes `sentinel monitor ...` but runs `redis-server $CONF`
+	# without `--sentinel` would otherwise pass while NOT starting Sentinel mode).
+	regex.match(`(^|\s)--sentinel(\s|$)`, arg)
+}
+
+# --- the Sentinel startup MUST monitor the shard (a `sentinel monitor <name> ...
+# <quorum>` line) — the monitor directive is the whole point. Asserted on argv. ---
+deny contains msg if {
+	is_redis_sentinel_statefulset(input)
+	some c in input.spec.template.spec.containers
+	not sentinel_has_monitor(c)
+	msg := sprintf("Redis Sentinel StatefulSet %q container %q must declare a `sentinel monitor` directive (name + seed primary + quorum) — Sentinel must monitor the shard to drive failover (ADR-0044 §1)", [input.metadata.name, c.name])
+}
+
+sentinel_has_monitor(c) if {
+	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
+	contains(arg, "sentinel monitor")
 }

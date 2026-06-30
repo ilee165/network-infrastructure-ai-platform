@@ -1,0 +1,48 @@
+# NEGATIVE fixture (ADR-0042 §2 / Alt #3) — a CNPG Cluster that declares the
+# quorum `synchronous` stanza (so CNPG populates synchronous_standby_names =
+# `ANY 1 (...)`) but sets NO cluster-level `synchronous_commit`. PostgreSQL's
+# built-in default for synchronous_commit is `on`, and CNPG leaves an unset
+# parameter at the PG default — so EVERY commit (discovery/config/telemetry)
+# waits for the quorum replica. That is the SAME throughput-collapse failure as
+# the explicit `synchronous_commit: on` case, reached implicitly. Audit-path
+# scoping (ADR-0042 §2) requires the cluster DEFAULT be lowered to `local`/`off`
+# so non-audit writes stay async, with W1-T2's per-txn `SET LOCAL
+# synchronous_commit=remote_apply` raising it back ONLY for audit transactions.
+# The cnpg rule MUST DENY this implicit over-scoping, not just the explicit
+# forced literals.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: netops-pg-syncunset-negative
+  labels:
+    app.kubernetes.io/component: postgres
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4-1-pgvector
+  priorityClassName: netops-postgres-ha
+  postgresql:
+    runAsNonRoot: true
+    synchronous:
+      method: any
+      number: 1
+      failoverQuorum: true
+    # THE DEFECT: synchronous_standby_names is populated by the stanza above, but
+    # NO synchronous_commit is set here, so it stays at the PG default `on` —
+    # forcing the quorum round-trip onto EVERY write (not just the audit path).
+    parameters:
+      shared_buffers: 256MB
+  bootstrap:
+    initdb:
+      database: netops
+      owner: netops
+      postInitSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector
+  storage:
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi

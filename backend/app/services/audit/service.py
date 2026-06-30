@@ -18,12 +18,23 @@ from typing import Any, Final
 from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models.audit import AuditLog
 from app.models.mixins import utcnow
 from app.services.audit.chain import GENESIS_HASH, compute_entry_hash, hex_short
 
 _logger = get_logger(__name__)
+
+#: The ``synchronous_commit`` levels the audit transaction is permitted to raise
+#: itself to (ADR-0042 §2). A CLOSED allowlist used as a defence-in-depth guard on
+#: top of the :class:`~app.core.config.Settings.audit_synchronous_commit`
+#: ``Literal``: the value is interpolated into a ``SET LOCAL synchronous_commit``
+#: statement, and ``SET`` takes no bound parameters, so the value MUST be proven to
+#: be one of these fixed tokens before it is ever string-formatted — never free
+#: text, no injection surface. ``local``/``off`` are deliberately absent: this path
+#: only ever RAISES durability for the audit write, never lowers it.
+_AUDIT_SYNC_COMMIT_LEVELS: Final = frozenset({"remote_apply", "on", "remote_write"})
 
 # Fixed key for the audit-chain advisory lock (finding W4-T1 #1/#2). A single
 # transaction-scoped ``pg_advisory_xact_lock`` on this constant serialises every
@@ -244,7 +255,24 @@ async def record(
     volatile DB ``nextval`` default (which would force a full table rewrite on add,
     #1). Ordering the chain by ``seq`` — not ``(created_at, id)`` — means
     equal-``created_at`` rows can never be ordered ambiguously (A4).
+
+    Synchronous durability (W1-T2, ADR-0042 §2/§4): on PostgreSQL this append issues
+    ``SET LOCAL synchronous_commit = <level>`` (see
+    :func:`_apply_audit_synchronous_commit`) so the CALLER'S transaction — the one
+    that carries this audit row, atomic with the action it describes (ADR-0011 §2,
+    ADR-0038) — is acknowledged only once a quorum replica holds (and, at
+    ``remote_apply``, has replayed) the WAL. This is what makes "zero committed-audit
+    loss on a primary kill" (§11 G-REL §316, the W4-T3 drill) possible. ``SET LOCAL``
+    is the only correct mechanism under PgBouncer transaction-mode pooling: it is
+    transaction-scoped, so it survives pooling AND cannot leak the synchronous level
+    onto the NEXT pooled transaction that reuses the same backend. The cluster
+    default ``synchronous_commit`` stays ``local`` (W1-T1), so a transaction that
+    writes NO audit row keeps the cheap async commit — the per-transaction scoping
+    ADR-0042 §2 requires. SQLite has no such GUC, so the step is PostgreSQL-only;
+    redaction and the hash chain are entirely unchanged — only WRITE DURABILITY
+    changes.
     """
+    await _apply_audit_synchronous_commit(session)
     prev_hash, next_seq = await _current_chain_head(session)
     entry = AuditLog(
         # Assign id/created_at/seq app-side BEFORE the flush so the canonical hashed
@@ -297,6 +325,45 @@ def _is_postgresql(session: AsyncSession) -> bool:
     monotonic ``seq`` assignment.
     """
     return session.bind is not None and session.bind.dialect.name == "postgresql"
+
+
+async def _apply_audit_synchronous_commit(session: AsyncSession) -> None:
+    """Raise the CALLER'S transaction to synchronous commit for the audit write (ADR-0042 §2).
+
+    Issues ``SET LOCAL synchronous_commit = <level>`` on *session* so the
+    transaction that carries this ``audit_log`` append is acknowledged only once a
+    quorum replica holds the WAL (``ANY 1`` standby, W1-T1) — the app-side half of
+    the §11 G-REL §316 "zero committed-audit-entry loss" guarantee the W4-T3
+    failover drill exercises live.
+
+    Transaction-mode-pooling safe (ADR-0042 §4): ``SET LOCAL`` binds the setting to
+    the CURRENT transaction only, so (a) it survives PgBouncer transaction-mode
+    pooling — a session-level ``SET`` would be dropped at the pooled-transaction
+    boundary — and (b) it CANNOT leak the synchronous level onto the next pooled
+    transaction that reuses the same backend connection. Scoping is therefore exact:
+    only the audit-writing transaction pays the replica round-trip; a transaction
+    that emits no audit row keeps the cluster-default ``local`` async commit (W1-T1).
+
+    PostgreSQL-only: SQLite has no ``synchronous_commit`` GUC, so the step is a
+    no-op there (the unit suite's single connection has nothing to tune). The level
+    comes from :attr:`~app.core.config.Settings.audit_synchronous_commit` and is
+    re-checked against the closed :data:`_AUDIT_SYNC_COMMIT_LEVELS` allowlist before
+    interpolation — ``SET`` takes no bound parameters, so proving the value is one of
+    the fixed tokens is what keeps this free of an injection surface. ``local``/``off``
+    can never be selected (the ``Literal`` + the allowlist both exclude them): this
+    path only ever RAISES the audit write's durability, never lowers it.
+    """
+    if not _is_postgresql(session):
+        return
+    level = get_settings().audit_synchronous_commit
+    if level not in _AUDIT_SYNC_COMMIT_LEVELS:  # defence-in-depth; the Literal already bounds it.
+        raise ValueError(
+            f"audit_synchronous_commit must be one of {sorted(_AUDIT_SYNC_COMMIT_LEVELS)}, "
+            f"got {level!r}"
+        )
+    # ``SET`` accepts no bound parameters; ``level`` is proven to be a fixed allowlist
+    # token above, so this string-format carries no injection surface.
+    await session.execute(text(f"SET LOCAL synchronous_commit = {level}"))
 
 
 async def _current_chain_head(session: AsyncSession) -> tuple[bytes, int]:

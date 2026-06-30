@@ -331,6 +331,360 @@ spec:
         - protocol: TCP
           port: {{ .Values.networkPolicy.postgres.port }}
 {{- end }}
+{{- if and .Values.services.neo4j.enabled .Values.services.neo4j.autoRebuild.enabled (or .Values.services.postgres.enabled .Values.cloudNativePg.enabled) }}
+---
+# ---------------------------------------------------------------------------
+# allow-neo4j-rebuild-egress (W1-T3) — the automated-rebuild reconciler pods
+# (component `neo4j-rebuild`) RE-PROJECT the topology: they READ the inventory from
+# postgres:5432 (the system of record) and WRITE the projected graph to neo4j:7687.
+# Same default-deny gap as the worker/audit jobs: without this allow the reconciler
+# cannot reach either store and every rebuild FAILS, leaving the topology stale after
+# a liveness-recreate. DNS is cluster-wide via allow-dns-egress; this adds the two §2
+# data-store edges (mirrors allow-worker-egress, scoped to PG+NEO). No empty-`to` rule.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-neo4j-rebuild-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: neo4j-rebuild
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "neo4j-rebuild") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # neo4j-rebuild → postgres:5432 (reads the normalized inventory to re-project).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+    # neo4j-rebuild → neo4j:7687 (writes the re-projected topology graph).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.neo4j.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.neo4j.port }}
+{{- end }}
+{{- if .Values.cloudNativePg.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-cnpg-pooler-ingress (W1-T1, ADR-0042 §3/§4) — under default-deny the
+# PgBouncer Pooler (and the CNPG Cluster + the pgvector-replica smoke Job — ALL
+# carry component=postgres) get NO ingress, so api/worker → pooler:5432 would be
+# blocked and the HA tier could not serve a single connection. This allow lets the
+# postgres-component pods ACCEPT ingress on 5432 from: api + worker (the app DB
+# path through the Pooler), the audit/credential CronJobs, and OTHER
+# postgres-component pods (pooler → cluster, smoke → cluster `-ro`, and intra-
+# cluster streaming replication). Renders ONLY with the CNPG tier; allow-list
+# minimal (one port, specific selectors — never an empty `from`).
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-cnpg-pooler-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- if .Values.services.api.enabled }}
+        # api → pooler:5432 (the app DB path through PgBouncer).
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 14 }}
+        {{- end }}
+        {{- if .Values.services.worker.enabled }}
+        # worker → pooler:5432.
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "worker") | nindent 14 }}
+        {{- end }}
+        {{- if .Values.audit.chainVerify.enabled }}
+        # audit-chain-verify → pooler:5432.
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "audit") | nindent 14 }}
+        {{- end }}
+        {{- if .Values.credentials.rotation.enabled }}
+        # credential-rotation → pooler:5432.
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "credentials") | nindent 14 }}
+        {{- end }}
+        # postgres → postgres:5432 (pooler → cluster, smoke → cluster `-ro`, and
+        # intra-cluster streaming replication — all component=postgres).
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+---
+# ---------------------------------------------------------------------------
+# allow-cnpg-postgres-egress (W1-T1, ADR-0042 §3/§4) — the postgres-component pods
+# (Pooler, Cluster, smoke Job) are selected by the default-deny floor, so their
+# EGRESS is denied too. The Pooler must reach the Cluster primary, the smoke Job
+# must reach the `-ro` replica Service, and the Cluster instances must reach each
+# other for streaming replication — every hop is postgres → postgres:5432. This
+# allows EXACTLY that intra-component edge (plus cluster-wide DNS via
+# allow-dns-egress). No blanket egress — one port, the postgres selector only.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-cnpg-postgres-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # postgres → postgres:5432 (pooler → cluster, smoke → cluster `-ro`,
+    # intra-cluster replication). DNS egress is granted cluster-wide separately.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+{{- end }}
+{{- if .Values.redisSentinel.enabled }}
+---
+# ---------------------------------------------------------------------------
+# allow-redis-sentinel-client-egress (W1-T4, ADR-0044 §1) — under the default-deny
+# floor the api/worker get NO egress to the Sentinels, so the failover-aware
+# client (sentinel:// URL) could not query Sentinel for the current primary and
+# the broker tier would be unreachable. The §2 `api/worker → redis:6379` broker
+# edges (allow-api-egress / allow-worker-egress above) already permit the DATA
+# port; this adds the ONE missing Sentinel-DISCOVERY edge (api/worker →
+# sentinel:26379). Renders only with the Sentinel tier; allow-list minimal (one
+# port, the sentinel selector — never an empty `to`). Skipped when both api and
+# worker are disabled: operator: In with an empty values list is rejected by the
+# Kubernetes API server as an invalid LabelSelectorRequirement.
+# ---------------------------------------------------------------------------
+{{- if or .Values.services.api.enabled .Values.services.worker.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-redis-sentinel-client-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis-sentinel
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - {{ $name }}
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          {{- if .Values.services.api.enabled }}
+          - api
+          {{- end }}
+          {{- if .Values.services.worker.enabled }}
+          - worker
+          {{- end }}
+  policyTypes:
+    - Egress
+  egress:
+    # api/worker → sentinel:26379 (Sentinel primary-discovery query).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.sentinel.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.sentinel.port }}
+{{- end }}
+---
+# ---------------------------------------------------------------------------
+# allow-redis-sentinel-ingress (W1-T4, ADR-0044 §1) — the Sentinel pods accept
+# ingress on :26379 from: api/worker (primary-discovery), OTHER Sentinels (the
+# quorum gossip pub/sub), and the Redis pods (Sentinel↔Redis hello). Under
+# default-deny the Sentinels would otherwise accept nothing and the quorum could
+# never form. Allow-list minimal — one port, specific selectors, never empty `from`.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-redis-sentinel-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis-sentinel
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.networkPolicy.sentinel.podSelectorLabels | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- if .Values.services.api.enabled }}
+        # api → sentinel:26379 (primary discovery).
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 14 }}
+        {{- end }}
+        {{- if .Values.services.worker.enabled }}
+        # worker → sentinel:26379.
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "worker") | nindent 14 }}
+        {{- end }}
+        # sentinel → sentinel:26379 (quorum gossip — Sentinel pub/sub between peers).
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.sentinel.podSelectorLabels | nindent 14 }}
+        # redis → sentinel:26379 (Sentinel hello/announce exchange).
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.broker.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.sentinel.port }}
+---
+# ---------------------------------------------------------------------------
+# allow-redis-sentinel-egress (W1-T4, ADR-0044 §1) — the Sentinel pods (selected
+# by the default-deny floor) must EGRESS to: every Redis instance on :6379 (to
+# monitor health + drive failover) and their Sentinel peers on :26379 (quorum
+# gossip). No blanket egress — exactly those two intra-tier edges (+ cluster-wide
+# DNS via allow-dns-egress).
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-redis-sentinel-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis-sentinel
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.networkPolicy.sentinel.podSelectorLabels | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # sentinel → redis:6379 (monitor every Redis instance; drive promotion).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.broker.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.broker.port }}
+    # sentinel → sentinel:26379 (quorum gossip to peers).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.sentinel.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.sentinel.port }}
+---
+# ---------------------------------------------------------------------------
+# allow-redis-ingress (W1-T4, ADR-0044 §1) — the Redis pods accept ingress on
+# :6379 from: api/worker (the broker/result/cache + rate-limit clients), the
+# Sentinels (health monitoring), and OTHER Redis pods (replica → primary streaming
+# replication). Under default-deny they would otherwise accept nothing and neither
+# the broker nor replication could connect. Allow-list minimal — one port.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-redis-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.networkPolicy.broker.podSelectorLabels | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- if .Values.services.api.enabled }}
+        # api → redis:6379 (broker/result/cache + rate-limit).
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 14 }}
+        {{- end }}
+        {{- if .Values.services.worker.enabled }}
+        # worker → redis:6379 (Celery broker + result backend).
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "worker") | nindent 14 }}
+        {{- end }}
+        # sentinel → redis:6379 (health monitoring / failover).
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.sentinel.podSelectorLabels | nindent 14 }}
+        # redis → redis:6379 (replica → primary streaming replication).
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.broker.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.broker.port }}
+---
+# ---------------------------------------------------------------------------
+# allow-redis-replication-egress (W1-T4, ADR-0044 §1) — the Redis pods (selected
+# by the default-deny floor) must EGRESS to each other on :6379 for streaming
+# replication (replica → primary; after a promotion the direction flips). No
+# blanket egress — exactly the one intra-tier edge (+ cluster-wide DNS).
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-redis-replication-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.networkPolicy.broker.podSelectorLabels | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # redis → redis:6379 (replica → primary streaming replication; intra-shard).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.broker.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.broker.port }}
+{{- end }}
 {{- if .Values.services.ollama.enabled }}
 {{- if or .Values.services.api.enabled .Values.services.worker.enabled }}
 ---

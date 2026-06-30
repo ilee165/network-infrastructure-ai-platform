@@ -1,0 +1,68 @@
+# NEGATIVE fixture (ADR-0044 §1) — a Sentinel-tier Redis (data) StatefulSet that
+# OMITS spec.replicas entirely. Kubernetes defaults an omitted StatefulSet replica
+# count to 1, so this is a 1-replica "HA" shard with no replica to promote on a
+# primary loss. MUST be DENIED by the >=3-replicas rule via its omission default
+# (object.get(input.spec, "replicas", 1)) — a plain `input.spec.replicas < 3` would
+# be UNDEFINED here and FAIL OPEN. (Fully hardened otherwise; the ONLY violation is
+# the omitted replica count.) This is the fixture that catches the #10 fail-open.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: netops-redis
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: redis
+spec:
+  serviceName: netops-redis-headless
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netops
+        app.kubernetes.io/component: redis
+    spec:
+      serviceAccountName: redis-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command: ["sh", "-c", "exec redis-server /etc/redis/redis.conf --requirepass $REDIS_PASSWORD --masterauth $REDIS_PASSWORD"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: netops-dev-secrets
+                  key: redis-password
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/redis
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: netops-redis-sentinel-config

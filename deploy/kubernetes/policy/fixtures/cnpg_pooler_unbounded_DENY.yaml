@@ -1,0 +1,21 @@
+# NEGATIVE fixture (ADR-0042 §4 / G-SCA §330) — a transaction-mode Pooler with NO
+# default_pool_size. An unbounded server-side pool defeats the whole connection-
+# budget purpose: under a queue-burst + load the api/worker fan-out can exhaust
+# Postgres backends. The cnpg connection-budget rule MUST DENY a missing budget.
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: netops-pg-pooler-unbounded-negative
+  labels:
+    app.kubernetes.io/component: postgres
+spec:
+  cluster:
+    name: netops-pg
+  instances: 2
+  type: rw
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      # THE DEFECT: max_client_conn set but NO default_pool_size — the bounded
+      # server-side pool (the actual connection budget) is missing.
+      max_client_conn: "1000"

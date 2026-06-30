@@ -1,0 +1,24 @@
+# NEGATIVE fixture (ADR-0042 §3/§4) — a PgBouncer Pooler that is otherwise
+# compliant (transaction mode, bounded connection budget) but fronts the READ-
+# ONLY endpoint (type ro) instead of the read-write endpoint. The app + audit
+# write path reach the cluster through the `rw` Pooler so PgBouncer can re-point
+# to the new primary on failover; an `ro` Pooler on that path cannot serve writes.
+# The cnpg rule MUST DENY a non-`rw` Pooler — this fixture pins that the
+# `spec.type != rw` deny actually bites (a `type: ro` slips through if it regresses).
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: netops-pg-pooler-ro-negative
+  labels:
+    app.kubernetes.io/component: postgres
+spec:
+  cluster:
+    name: netops-pg
+  instances: 2
+  # THE DEFECT: read-only endpoint (must be `rw` for the app/audit write path).
+  type: ro
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "1000"
+      default_pool_size: "25"

@@ -1,0 +1,53 @@
+# POSITIVE fixture (ADR-0042) — a correctly-shaped CNPG Cluster: 1+2 instances,
+# ANY 1 quorum + failoverQuorum, pgvector post-init, non-root default, resources,
+# PriorityClass, credentials by-reference. MUST PASS conftest (no false-reject of
+# the compliant shape). Pairs with the DENY fixtures so a too-strict regression
+# (that false-rejects the compliant cluster) also fails the bite.
+#
+# Audit-path scoping (ADR-0042 §2): the quorum `synchronous` stanza populates
+# synchronous_standby_names, but the cluster DEFAULT synchronous_commit is set
+# EXPLICITLY to `local` so non-audit writes ack locally (async to the quorum) —
+# W1-T2's per-txn `SET LOCAL synchronous_commit=remote_apply` raises it back for
+# audit transactions only. An UNSET synchronous_commit would inherit the PG
+# default `on` and force the quorum round-trip onto every write (the implicit
+# over-scoping the cnpg rule now DENYs), so the explicit `local` is REQUIRED.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: netops-pg-positive
+  labels:
+    app.kubernetes.io/component: postgres
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4-1-pgvector
+  priorityClassName: netops-postgres-ha
+  postgresql:
+    # EXPLICIT non-root (ADR-0042 §4): the hardening gate requires this be present
+    # and exactly true — omission is now DENIED (fail-closed), so the compliant
+    # shape must carry it.
+    runAsNonRoot: true
+    synchronous:
+      method: any
+      number: 1
+      failoverQuorum: true
+    parameters:
+      # Cluster DEFAULT lowered to `local` (audit-path scoping, ADR-0042 §2): the
+      # quorum round-trip is paid per-transaction by W1-T2, NOT cluster-wide.
+      synchronous_commit: local
+  superuserSecret:
+    name: netops-cnpg-superuser
+  bootstrap:
+    initdb:
+      database: netops
+      owner: netops
+      postInitSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector
+  storage:
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi

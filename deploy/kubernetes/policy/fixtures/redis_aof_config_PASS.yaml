@@ -1,0 +1,26 @@
+# POSITIVE fixture (ADR-0044 §1) — a compliant Redis Sentinel config ConfigMap:
+# AOF ON (`appendonly yes`), and NO inlined requirepass/masterauth/auth-pass literal
+# (the password rides REDIS_PASSWORD env at startup). MUST PASS conftest (no
+# false-reject of the compliant shape). Pairs with the DENY config fixtures.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netops-redis-sentinel-config
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: redis
+data:
+  redis.conf: |
+    appendonly yes
+    appendfsync everysec
+    dir /data
+    port 6379
+    bind 0.0.0.0
+    protected-mode no
+  sentinel.conf.tmpl: |
+    port 26379
+    bind 0.0.0.0
+    dir /data
+    sentinel down-after-milliseconds netops-redis 5000
+    sentinel failover-timeout netops-redis 60000
+    sentinel parallel-syncs netops-redis 1

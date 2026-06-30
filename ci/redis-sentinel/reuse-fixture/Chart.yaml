@@ -1,0 +1,15 @@
+apiVersion: v2
+# Throwaway fixture chart for the W1-T4 Redis Sentinel render-twice REUSE-STABILITY
+# assertion (ci/redis-sentinel/render-twice.sh). NOT shipped — it exists only so CI
+# can prove the dev-fallback reuse branch (templates/secret.yaml, the redis-password
+# key the Sentinel tier consumes by-reference) yields a byte-identical PASSWORD when
+# a prior Secret is present. `helm template`'s real `lookup` cannot be primed without
+# an API server, so the fixture injects the prior Secret data via values and exercises
+# the IDENTICAL Sprig reuse idiom (`index $prior.data <key> | b64dec`) the production
+# secret.yaml uses on upgrade. A regenerated redis password would sever every broker /
+# replication / Sentinel-auth connection (the L4 trap, exactly the CNPG case).
+name: redis-sentinel-reuse-fixture
+description: W1-T4 Redis Sentinel render-twice reuse-stability fixture (not shipped)
+type: application
+version: 0.0.0
+appVersion: "0"

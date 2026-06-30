@@ -1,0 +1,20 @@
+# POSITIVE fixture (ADR-0042 §4) — a correctly-shaped PgBouncer Pooler:
+# transaction mode, a bounded connection budget (max_client_conn +
+# default_pool_size), fronting the read-write endpoint (type rw). MUST PASS
+# conftest (no false-reject of the compliant pooler).
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: netops-pg-pooler-positive
+  labels:
+    app.kubernetes.io/component: postgres
+spec:
+  cluster:
+    name: netops-pg
+  instances: 2
+  type: rw
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "1000"
+      default_pool_size: "25"

@@ -156,6 +156,17 @@ secrets:
     backupTlsServerKey: backup-tls-server-key
     backupTlsClientCert: backup-tls-client-crt
     backupTlsClientKey: backup-tls-client-key
+    # CloudNativePG HA tier (W1-T1, ADR-0042 §1). CNPG reads kubernetes.io/basic-
+    # auth Secrets (username + password) for the SUPERUSER and the app/replication
+    # role. REFERENCE key NAMES only — the dev path generates the passwords via
+    # `lookup` reuse-or-generate (idempotent; NEVER regenerated on upgrade — a
+    # regen severs every DB connection, L4). Production supplies them via
+    # secrets.existingSecret-style external secrets. The Secret OBJECT names are
+    # derived (<fullname>-cnpg-superuser / -cnpg-app); these are the in-Secret keys.
+    cnpgSuperuserUsername: username
+    cnpgSuperuserPassword: password
+    cnpgAppUsername: username
+    cnpgAppPassword: password
   # KMS master-key REFERENCE (ADR-0032 / D11). The pod receives a KMS HANDLE or
   # a mounted secret PATH — never the KEK itself. This is the indirect handle the
   # envelope-encryption layer resolves at runtime against the customer KMS/Vault.
@@ -270,6 +281,50 @@ services:
       limits:
         cpu: "2"
         memory: 2Gi
+    # -- AUTOMATED-REBUILD reconciler (W1-T3, ADR-0005 D5; PRODUCTION.md §3.2 —
+    #    single Neo4j + automated rebuild). Neo4j Community has no clustering, so a
+    #    re-projection from Postgres (the system of record) IS the HA/recovery story.
+    #    This renders a post-rollout Job (immediate projection on every apply) + a
+    #    steady-state reconciler CronJob that re-projects when the graph is empty/
+    #    stale — the state a liveness-fail -> container recreate leaves on the PVC —
+    #    so recovery is automatic with NO manual step, and records the rebuild
+    #    DURATION (`topology_rebuild_seconds`) as the topology-RTO the W4-T4 drill +
+    #    G-OBS freshness SLO read. Distinct from the W5-T3 quarterly rebuild-DRILL.
+    autoRebuild:
+      # ON by default (secure/resilient-by-default — ADR-0029 §0). Disabling renders
+      # NO reconciler and emits a NOTES warning: a liveness-fail would then leave the
+      # topology graph stale until a human re-projects (a conscious warned opt-out).
+      enabled: true
+      # Steady-state reconcile cadence. Every 5 min: a no-op when the graph is fresh,
+      # a re-projection when the post-recreate graph is empty/stale. Frequent enough
+      # that a liveness-fail self-heals quickly without busy-looping the rebuild.
+      schedule: "*/5 * * * *"
+      # Re-project only when the last projection is older than this many seconds (the
+      # post-recreate EMPTY graph reads as infinitely stale -> always rebuilds; a fresh
+      # graph is a no-op). 0 forces an unconditional rebuild each tick.
+      stalenessSeconds: 300
+      # The node_exporter textfile-collector dir the rebuild-duration .prom is written
+      # to (the no-pushgateway pattern — a Job pod is not scrapable; the file survives
+      # the pod for a node_exporter/agent to collect). Mirrors audit.chainVerify.
+      metricsDir: /var/lib/node_exporter/textfile
+      # Bound concurrency + history so a long re-projection never overlaps the next
+      # tick and finished Job pods are reaped.
+      concurrencyPolicy: Forbid
+      startingDeadlineSeconds: 300
+      backoffLimit: 1
+      successfulJobsHistoryLimit: 3
+      failedJobsHistoryLimit: 3
+      # Auto-reap the finished post-rollout hook Job pod.
+      ttlSecondsAfterFinished: 3600
+      # Resource requests + limits (never absent — ADR-0029 §3). The re-projection is
+      # CPU/IO-bound at scale; the steady-state no-op tick is light. Sized like the api.
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
 
   # redis: celery broker + result backend. Toggleable; P2 → Sentinel.
   redis:
@@ -302,6 +357,254 @@ services:
       limits:
         cpu: "4"
         memory: 8Gi
+
+# -- CloudNativePG HA data tier (W1-T1, ADR-0042). The HA replacement for the
+#    single-instance services.postgres StatefulSet above: a CloudNativePG
+#    `Cluster` of 1 primary + 2 streaming replicas with automated failover, a
+#    PgBouncer `Pooler` (transaction mode) fronting every connection, and
+#    QUORUM synchronous replication SCOPED to the audit write path (ADR-0042 §2).
+#
+#    OPT-IN, default OFF. This wave (W1-T1) ships the manifests + policy gates;
+#    the live failover/zero-audit-loss drill is W4-T3 and the app-side per-
+#    transaction `SET LOCAL synchronous_commit` is W1-T2. Enabling REQUIRES the
+#    CloudNativePG operator (CRDs + controller) pre-installed in the cluster and
+#    is MUTUALLY EXCLUSIVE with services.postgres.enabled (the chart REFUSES to
+#    render both — one Postgres tier, never two; see _validation.tpl). The
+#    single-instance StatefulSet stays the default so the GA render is unchanged.
+#
+#    SECURE BY DEFAULT: every CNPG pod runs non-root with a dropped-ALL,
+#    RuntimeDefault-seccomp, RO-rootfs container context (operator-managed +
+#    asserted by the cnpg.* conftest rules). A PriorityClass ranks Postgres
+#    ABOVE the batch workers so the data tier is never evicted for a worker.
+#
+#    SYNC-AUDIT (the load-bearing decision, ADR-0042 §2): `synchronous.method:
+#    any` + `number: 1` is CNPG's `ANY 1 (<replicas>)` quorum — a commit is
+#    acknowledged once AT LEAST ONE replica holds the WAL. It is NOT forced onto
+#    every write: `synchronous_commit` stays at the cluster default (local/off
+#    for non-audit txns); W1-T2 sets `SET LOCAL synchronous_commit=remote_apply`
+#    ONLY on the caller transaction that appends an `audit_log` row, so only
+#    audited state changes pay the round-trip. `ANY 1` (not `ANY 2`/`FIRST`)
+#    keeps audit commits succeeding while one replica is healthy (§2 availability
+#    trade-off). All credentials are external-secret REFERENCES (never inlined).
+cloudNativePg:
+  # OPT-IN HA tier — default OFF (the services.postgres StatefulSet is the GA
+  # default). Set true (and services.postgres.enabled=false) to run Postgres
+  # under the CloudNativePG operator. Enabling both is a REFUSED render.
+  enabled: false
+  # 1 primary + 2 streaming replicas (ADR-0042 §1). 3 is the minimum for a
+  # quorum (ANY 1 over 2 standbys) AND for CNPG failover quorum — do not lower.
+  instances: 3
+  # pgvector image (the system of record carries documents/embeddings — ADR-0004;
+  # pgvector MUST be present on every instance, replicas included — ADR-0042 §5).
+  # CNPG ships operand images; we pin the pgvector-bearing PostgreSQL 16 build to
+  # an explicit immutable tag (NEVER `latest` — admission rejects it, ADR-0029 §5).
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4-1-pgvector
+  # Per-instance persistent storage (the PGDATA PVC, ReadWriteOnce).
+  storage:
+    size: 20Gi
+  # Per-instance resource requests + limits (never absent — ADR-0029 §3). Sized
+  # at/above the single-instance StatefulSet so an HA primary is not under-provisioned.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  # PriorityClass so Postgres outranks the batch workers (ADR-0042 scope / §1).
+  # Rendered by priorityclass.yaml; the worker Deployment is unpriorited (default
+  # 0), so under node pressure the scheduler evicts a worker before a PG instance.
+  priorityClass:
+    # Create the PriorityClass with the chart (set false to reference one the
+    # operator pre-created cluster-wide). The CNPG Cluster references it by name.
+    create: true
+    name: netops-postgres-ha
+    # Well above the 0 default of unpriorited batch workers, below system-critical.
+    value: 1000000
+  # QUORUM synchronous replication (ADR-0042 §2). `any`+`1` == `ANY 1 (replicas)`:
+  # acknowledge a commit once >=1 replica is durable. CNPG generates
+  # synchronous_standby_names from this stanza — DO NOT set it directly. This is
+  # the cluster-level quorum SET. Audit-path scoping is achieved by the EXPLICIT
+  # async `commit` default below (NOT by leaving synchronous_commit unset, which
+  # would inherit the PG default `on` and force sync on every write).
+  synchronous:
+    method: any
+    number: 1
+    # EXPLICIT cluster-default synchronous_commit (ADR-0042 §2 / Alt #3). `local`
+    # acks non-audit writes locally (async to the quorum) so they do NOT pay the
+    # replica round-trip; W1-T2's per-transaction `SET LOCAL
+    # synchronous_commit=remote_apply` raises it back for AUDIT writes only. This
+    # MUST stay `local`/`off` — `on`/`remote_write`/`remote_apply` here would
+    # force sync on ALL writes (throughput collapse), and an unset value inherits
+    # the PG default `on` (the same collapse). The cnpg conftest rule REFUSES both.
+    commit: local
+    # failoverQuorum: a promoted replica is checked to hold the quorum-acked WAL
+    # before it serves writes — the data-safety guarantee the W4-T3 drill asserts
+    # (zero committed-audit-row loss). Requires >=3 instances + synchronous (above).
+    failoverQuorum: true
+  # PgBouncer pooler (ADR-0042 §4). TRANSACTION mode multiplexes the scaled-out
+  # api (>=2 HPA replicas) + KEDA workers onto a small server-side pool — the
+  # connection-budget rationale W4-T6 asserts (G-SCA §330, no exhaustion). The
+  # audit `SET LOCAL` (W1-T2) is transaction-mode-safe; a session `SET` would be
+  # dropped by pooling, so transaction mode is REQUIRED here, not incidental.
+  pgbouncer:
+    # `transaction` is mandatory for the connection budget + the audit SET LOCAL
+    # to be correct (ADR-0042 §4). `session`/`statement` are REFUSED by the cnpg
+    # conftest rule — they break the budget rationale and the per-txn sync scoping.
+    poolMode: transaction
+    # Pooler instances (the PgBouncer pods, HA-fronted). 2 for availability.
+    instances: 2
+    # Connection budget (ADR-0042 §4 / G-SCA §330). maxClientConn is the large
+    # client-facing ceiling (many short app connections); defaultPoolSize is the
+    # SMALL per-user/db server-side pool PgBouncer multiplexes them onto — this is
+    # the number that must stay well under Postgres max_connections so the backend
+    # is never exhausted. Operators tune to their api/worker fan-out.
+    maxClientConn: 1000
+    defaultPoolSize: 25
+    # Pooler pod resources (never absent — ADR-0029 §3).
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  # Bootstrap: initdb creates the platform database + owner, then post-init SQL
+  # installs pgvector. CNPG runs postInitSQL on the PRIMARY; a streaming replica
+  # INHERITS installed extensions, so pgvector is present on replicas too — but
+  # ADR-0042 §5 requires this be VERIFIED, not assumed (the pgvector-on-replica
+  # smoke). DB/owner mirror config.postgres so the app connection is unchanged.
+  bootstrap:
+    database: netops
+    owner: netops
+    # `CREATE EXTENSION IF NOT EXISTS vector` — pgvector on the cluster (inherited
+    # by replicas). IF NOT EXISTS keeps re-bootstrap idempotent.
+    postInitSQL:
+      - CREATE EXTENSION IF NOT EXISTS vector
+  # Superuser + app credential secrets (ADR-0042 §1, L4). CNPG reads a
+  # kubernetes.io/basic-auth Secret (username+password). REFERENCE ONLY: in dev the
+  # chart generates them via `lookup` reuse-or-generate (NEVER regenerated on
+  # upgrade — a regen severs every connection, ADR-0042 §1 / P1-W4 L4). The key
+  # NAMES live under secrets.keys.cnpg*; the rendered dev Secrets are
+  # cloudnativepg-secret.yaml.
+  #
+  # PRODUCTION: CNPG requires TWO DISTINCT basic-auth Secrets — the SUPERUSER
+  # Secret MUST carry username=postgres and the app/initdb Secret MUST carry
+  # username=<bootstrap.owner>. One Secret cannot satisfy both roles, and the
+  # platform `secrets.existingSecret` is NOT a basic-auth user/pass Secret — so it
+  # is NEVER reused for CNPG. Supply each role's external Secret by NAME here (each
+  # a kubernetes.io/basic-auth Secret with the correct username + password keys per
+  # secrets.keys.cnpg*). Set BOTH or NEITHER (a half-supplied pair fails the render
+  # — see cloudnativepg-secret.yaml). Empty (default) = dev-generated.
+  superuserSecret: ""
+  appSecret: ""
+  # pgvector-on-replica smoke (ADR-0042 §5). Rendered as a Job manifest that runs
+  # an embedding/similarity query against a REPLICA (read-only service). On a real
+  # cluster (W4-T1 kind) it asserts the extension is queryable on a replica; with
+  # kind absent locally it is a RENDERED EMULATION (the Job manifest + its policy
+  # assertions render and validate; the live query is the W4 drill). Default ON
+  # with the tier so the guard ships; the real assertion is W4-T1.
+  pgvectorReplicaSmoke:
+    enabled: true
+  # Backup integration (ADR-0042 §1 / ADR-0030). When the backup tier is enabled
+  # the CNPG Cluster archives WAL + takes base backups to the SAME object store as
+  # the pgBackRest tier (Barman Cloud plugin / built-in barman-cloud), repo-
+  # encrypted, credentials by-reference only. This wires the CNPG `backup` stanza
+  # to the existing backup.postgres.repo/encryption config — no new object store.
+  backup:
+    # Follow backup.postgres.enabled by default (resilient-by-default). The CNPG
+    # Cluster's barman-cloud destinationPath/credentials reuse the existing repo.
+    enabled: true
+
+# -- Redis Sentinel HA data tier (W1-T4, ADR-0044 §1 / ADR-0008). The HA
+#    replacement for the single-instance services.redis StatefulSet above: ONE
+#    Redis shard — 1 primary + 2 streaming replicas — monitored by 3 Sentinel
+#    processes that perform quorum-based failure detection and AUTOMATIC primary
+#    election/promotion, with AOF persistence (`appendonly yes`) so a full-shard
+#    restart recovers the last durable state rather than starting empty. Clients
+#    (api/worker/KEDA) discover the current primary VIA SENTINEL (a Sentinel-aware
+#    `sentinel://` URL), so a primary change is transparent — there is NO static
+#    Redis host pin (ADR-0044 §1, the load-bearing failover-aware-client decision).
+#
+#    OPT-IN, default OFF. This wave (W1-T4) ships the manifests + policy gates +
+#    the failover-aware client config; the LIVE Sentinel-failover drill is W4-T1
+#    (rendered emulation locally — kind absent). Enabling it is MUTUALLY EXCLUSIVE
+#    with services.redis.enabled (the chart REFUSES to render both — one Redis
+#    tier, never two colliding on the Service name; see redis-sentinel.yaml). The
+#    single-instance StatefulSet stays the default so the GA render is unchanged.
+#
+#    BROKER-LOSS TOLERANCE (the explicit ADR-0044 §1 posture, the W4-T5 rationale):
+#    Redis stays EXPENDABLE (ADR-0008) — durable job/session state lives in
+#    Postgres, so a Redis/Sentinel failover loses at most in-flight queue entries,
+#    never committed data. Celery tasks are IDEMPOTENT + RE-ENQUEUEABLE (ADR-0008
+#    §5: acks_late, reject_on_worker_lost, upsert-style writes) and scheduled jobs
+#    (backups, retention) RE-FIRE on the next Celery-beat tick. Sentinel HA reduces
+#    the WINDOW of broker unavailability; the idempotency + Postgres-as-record
+#    design already covers the data-loss dimension. Single-shard Sentinel only —
+#    Redis Cluster (hash-slot) sharding is OUT of scope (ADR-0044 §1).
+#
+#    SECURE BY DEFAULT (ADR-0029 §3): auth REQUIRED (requirepass + masterauth +
+#    Sentinel auth-pass, all by-reference to secrets.keys.redisPassword — NEVER
+#    inlined); non-root; readOnlyRootFilesystem; dropped-ALL caps; RuntimeDefault
+#    seccomp; resource requests+limits. The dev Redis password is the SAME
+#    `lookup` reuse-or-generate value as the single-instance tier (secret.yaml,
+#    L4 — reused on upgrade, NEVER regenerated, or a regen would sever every
+#    broker connection just like the CNPG case).
+redisSentinel:
+  # OPT-IN HA tier — default OFF (the services.redis StatefulSet is the GA
+  # default). Set true (and services.redis.enabled=false) to run Redis under
+  # Sentinel. Enabling both is a REFUSED render (one Redis tier only).
+  enabled: false
+  # 1 primary + 2 replicas (ADR-0044 §1). 3 is the minimum for a meaningful
+  # replica set and matches the Sentinel quorum below — do not lower.
+  replicas: 3
+  # Redis data port (clients + replication). Mirrors services.redis.port so the
+  # NetworkPolicy broker edge (networkPolicy.broker.port) is unchanged.
+  port: 6379
+  # Per-Redis-pod persistent storage (the AOF/RDB PVC, ReadWriteOnce).
+  storage:
+    size: 2Gi
+  # Per-Redis-pod resource requests + limits (never absent — ADR-0029 §3). Sized
+  # at the single-instance tier so an HA primary is not under-provisioned.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # AOF persistence (ADR-0044 §1 — `appendonly yes` so recent state survives a
+  # full-shard restart). everysec fsync is the durability/throughput default;
+  # `always` is heavier, `no` defeats the AOF guarantee. Keep AOF on.
+  aof:
+    enabled: true
+    appendfsync: everysec
+  # Sentinel quorum (ADR-0044 §1). 3 Sentinels with a quorum of 2 is the odd
+  # majority so a single Sentinel loss cannot deadlock the failover vote.
+  sentinel:
+    # 3 Sentinel processes (odd quorum). Do not lower below 3.
+    replicas: 3
+    # Sentinel control port (Sentinel pub/sub + the clients' primary-discovery
+    # query). The NetworkPolicy sentinel edge opens exactly this port.
+    port: 26379
+    # Agreeing Sentinels required to authorize a failover. 2-of-3 majority: a
+    # single Sentinel partition/loss still leaves a quorum, but no MINORITY can
+    # promote a split-brain primary (ADR-0044 §1).
+    quorum: 2
+    # The logical primary name Sentinel monitors + clients pass as master_name on
+    # the `sentinel://` URL. Stable so the client coordinate never drifts.
+    masterName: netops-redis
+    # Failover tuning (Sentinel defaults, surfaced so operators can tune RTO).
+    downAfterMilliseconds: 5000
+    failoverTimeoutMilliseconds: 60000
+    # Per-Sentinel-pod resources (never absent — ADR-0029 §3). Sentinel is light.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
 
 # -- Backup / DR tier (W5-T1, ADR-0030 §1/§4). pgBackRest continuous WAL
 #    archiving + weekly-full / daily-incr backups of the Postgres system of
@@ -1085,6 +1388,23 @@ config:
   redis:
     host: netops-redis
     port: 6379
+    # Redis DB index the Celery broker/result-backend + cache use (the `/0` on the
+    # redis_url). Kept explicit so the Sentinel `sentinel://…/<db>` URL the
+    # netops.redisUrl helper builds carries the same DB as the single-instance URL.
+    db: 0
+    # -- Sentinel failover-aware client coordinates (W1-T4, ADR-0044 §1). When the
+    #    redisSentinel HA tier is enabled, the api/worker/KEDA dial Redis VIA
+    #    SENTINEL (a `sentinel://h0:26379;h1:26379;h2:26379/<db>` URL) instead of a
+    #    fixed host, so a primary change is transparent (no static Redis host pin).
+    #    These are NON-SECRET coordinates only (the password is by-reference via
+    #    secrets.keys.redisPassword); the netops.redisUrl helper composes the URL +
+    #    the configmap surfaces NETOPS_REDIS_SENTINEL_MASTER/_HOSTS so a
+    #    Sentinel-aware client (kombu/redis-py) resolves the primary at connect time.
+    sentinel:
+      # The Sentinel master name clients pass as master_name (mirrors
+      # redisSentinel.sentinel.masterName — keep them in sync; the chart reads the
+      # redisSentinel value when the tier is on, this is the documented coordinate).
+      masterName: netops-redis
   # External LLM provider selection (ADR-0009). "ollama" routes to the in-cluster
   # ollama Service when services.ollama.enabled; otherwise an external provider.
   llm:
@@ -1296,6 +1616,23 @@ networkPolicy:
       app.kubernetes.io/name: netops
       app.kubernetes.io/component: redis
     port: 6379
+  # -- Redis Sentinel HA edges (W1-T4, ADR-0044 §1). Under the default-deny floor
+  #    the Sentinel/Redis components get NO ingress/egress; these seams open EXACTLY
+  #    the edges the Sentinel topology needs (allow-list minimal, no blanket egress):
+  #      - api/worker/KEDA → sentinel:26379  (clients query Sentinel for the primary)
+  #      - api/worker      → redis:6379      (already the §2 broker edge above)
+  #      - sentinel        → redis:6379      (Sentinel monitors every Redis instance)
+  #      - sentinel        → sentinel:26379  (Sentinel pub/sub gossip for quorum)
+  #      - redis           → redis:6379      (replica → primary streaming replication)
+  #    These render ONLY with the redisSentinel tier; the single-instance default
+  #    render is byte-unchanged. The Sentinel pods carry component=redis-sentinel.
+  sentinel:
+    # Selector for the Sentinel pods (the api/worker/KEDA query, and Sentinel
+    # gossips to its peers). W1-T4 owns the Sentinel StatefulSet; this is the seam.
+    podSelectorLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: redis-sentinel
+    port: 26379
   # ---- W4 GA per-edge allow seams (ADR-0029 §2 edge table) -----------------
   # The W4 networkpolicies.yaml renders the platform default-deny floor plus one
   # additive allow per ADR-0029 §2 / PRODUCTION.md §3.1 arrow — NO edge that is

@@ -20,8 +20,19 @@ Renders only when mtls.postgres.enabled AND mtls.postgres.certManager.enabled.
 Set certManager.enabled=false to use the dev/CI fallback (secret.yaml generates a
 self-signed CA + pair via the `lookup` reuse-or-generate pattern, L4) — then this
 file renders NOTHING and cert-manager need not be installed.
+
+CNPG HA tier (W1-T2, ADR-0042 / ADR-0039 §1): when cloudNativePg.enabled the
+in-chart Postgres StatefulSet is NOT rendered — the CloudNativePG OPERATOR owns
+issuance + rotation of the cluster's server/client TLS material (its own CA), and
+the api/worker reach it through the PgBouncer Pooler. This chart's in-chart
+mtls.postgres server-cert/pg_hba machinery (which targets the `netops-postgres`
+StatefulSet Service that does not exist under CNPG) is therefore N/A: this whole
+template renders NOTHING on the CNPG path and the api/worker get NO verify-full
+CLIENT config pointed at a server this chart never wired. Live CNPG↔app mTLS is
+W4-T1. The `netops.pgMtlsEnabled` helper encodes this gate so the app env half
+(dbClientTlsEnv) stays consistent with this server half.
 */ -}}
-{{- if .Values.mtls.postgres.enabled }}
+{{- if include "netops.pgMtlsEnabled" . }}
 {{- $m := .Values.mtls.postgres -}}
 {{- /*
 M8 (PR#76 round-2 #25): FAIL FAST on the EXTERNAL-Postgres + mTLS-on combination.

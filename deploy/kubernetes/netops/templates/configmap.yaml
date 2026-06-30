@@ -15,7 +15,9 @@ metadata:
 data:
   NETOPS_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   # Postgres (D11) — password is by-reference (secrets.keys.postgresPassword).
-  NETOPS_POSTGRES_HOST: {{ .Values.config.postgres.host | quote }}
+  # When the CloudNativePG HA tier is enabled this resolves to the PgBouncer
+  # Pooler rw Service (the single-instance Service is not rendered) — ADR-0042 §4.
+  NETOPS_POSTGRES_HOST: {{ include "netops.postgresHost" . | quote }}
   NETOPS_POSTGRES_PORT: {{ .Values.config.postgres.port | quote }}
   NETOPS_POSTGRES_DB: {{ .Values.config.postgres.database | quote }}
   NETOPS_POSTGRES_USER: {{ .Values.config.postgres.user | quote }}
@@ -23,6 +25,26 @@ data:
   NETOPS_NEO4J_URI: {{ .Values.config.neo4j.uri | quote }}
   NETOPS_NEO4J_USER: {{ .Values.config.neo4j.user | quote }}
   # Redis broker/result backend — password is by-reference (secrets.keys.redisPassword).
+  # NETOPS_REDIS_URL is the SOURCE OF TRUTH the app reads (config.redis_url; the
+  # Celery broker/result backend, the rate-limiter, and the health probe all dial
+  # it). Under the redisSentinel HA tier (W1-T4, ADR-0044 §1) this resolves to a
+  # `sentinel://h0:26379;h1:26379;h2:26379/<db>` URL so the client discovers the
+  # CURRENT primary via Sentinel and re-points on failover with NO config change —
+  # there is NO static Redis host pin. When the tier is off it is the plain
+  # single-instance `redis://host:port/db` URL (the GA default render is unchanged).
+  # The password is NEVER in this URL — it is the separate NETOPS_REDIS_PASSWORD
+  # secretKeyRef env on the api/worker pods.
+  NETOPS_REDIS_URL: {{ include "netops.redisUrl" . | quote }}
+  # Sentinel discovery coordinates (NON-SECRET) the Sentinel-aware client passes
+  # in its transport options (master_name + the Sentinel host list). Surfaced even
+  # when the tier is off so the coordinate is stable; the URL scheme above is what
+  # switches the client into Sentinel mode.
+  NETOPS_REDIS_SENTINEL_MASTER: {{ include "netops.redisSentinelMaster" . | quote }}
+  {{- if .Values.redisSentinel.enabled }}
+  NETOPS_REDIS_SENTINEL_HOSTS: {{ include "netops.redisSentinelHosts" . | quote }}
+  {{- end }}
+  # Single-instance coordinates (retained for backward compatibility / external
+  # broker overrides). Under the Sentinel tier the URL above supersedes these.
   NETOPS_REDIS_HOST: {{ .Values.config.redis.host | quote }}
   NETOPS_REDIS_PORT: {{ .Values.config.redis.port | quote }}
   # LLM provider (ADR-0009). When provider=ollama and services.ollama.enabled,

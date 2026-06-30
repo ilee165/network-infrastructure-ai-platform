@@ -138,6 +138,15 @@ round-2 #25.)
 | `backup.postgres.encryption.cipherType` | `aes-256-cbc` | repo encryption, independent of object-store SSE; passphrase by external-secret ref |
 | `backup.postgres.repo.endpoint` / `.bucket` / `.prefix` | MinIO svc / `netops-backups` / `/pgbackrest` | object-store repo; credential scoped write-to-`pgbackrest/` only (`pcaps/` is W5-T4) |
 | `secrets.keys.backupRepo*` | reference key names | repo cipher pass + S3 key/secret — REFERENCE ONLY, never inlined |
+| `cloudNativePg.enabled` | `false` | OPT-IN CloudNativePG HA tier (W1-T1, ADR-0042). Mutually exclusive with `services.postgres.enabled` (render REFUSES both). Requires the CNPG operator pre-installed |
+| `cloudNativePg.instances` | `3` | 1 primary + 2 streaming replicas (the ANY 1 quorum + failover-quorum minimum) |
+| `cloudNativePg.synchronous.{method,number,failoverQuorum}` | `any` / `1` / `true` | QUORUM sync `ANY 1 (replicas)` for the audit write path (ADR-0042 §2). NOT forced on all writes — W1-T2 scopes it per-transaction via `SET LOCAL` |
+| `cloudNativePg.pgbouncer.poolMode` | `transaction` | PgBouncer transaction-mode pooling (the connection budget + audit `SET LOCAL` correctness; ADR-0042 §4). `session`/`statement` are policy-rejected |
+| `cloudNativePg.pgbouncer.{maxClientConn,defaultPoolSize}` | `1000` / `25` | connection budget (G-SCA §330): large client ceiling multiplexed onto a small server-side pool |
+| `cloudNativePg.priorityClass.{create,name,value}` | `true` / `netops-postgres-ha` / `1000000` | PriorityClass so Postgres outranks the unpriorited batch workers under node pressure |
+| `cloudNativePg.pgvectorReplicaSmoke.enabled` | `true` | renders the pgvector-on-replica smoke Job (ADR-0042 §5); the LIVE query is the W4-T1 kind drill (rendered emulation locally) |
+| `cloudNativePg.backup.enabled` | `true` | CNPG WAL/base-backup archiving to the same object store as the pgBackRest tier (ADR-0030), credentials by-reference |
+| `secrets.keys.cnpg*` | reference key names | CNPG superuser/app basic-auth passwords — dev path `lookup` reuse-or-generate (L4, never regenerated); production via existingSecret |
 | `serviceAccounts.automountServiceAccountToken` | `false` | workloads need no K8s API token |
 | `packet.analysis.*` / `packet.capture.capabilities.add` | full §2 profile / `[NET_RAW,NET_ADMIN]` | NET_RAW only on capture |
 
@@ -154,17 +163,46 @@ The chart is gated in CI (`.github/workflows/ci.yml` `infra` job) by:
 `helm lint` → `helm template` → `kubeconform -strict` → `kube-linter` →
 `conftest test --all-namespaces` (the Rego in `deploy/kubernetes/policy/rego/`
 asserts every control above on the rendered manifests) → **Trivy config scan
-(gating)** for IaC misconfig. This job is the **G-SEC K8s-posture evidence**
-(see `docs/security/2026-06-22-w4-k8s-posture-signoff.md`).
+(gating)** for IaC misconfig. The opt-in CloudNativePG HA tier (ADR-0042) is
+additionally rendered with `cloudNativePg.enabled=true` and gated by the same
+kubeconform/kube-linter/conftest set, the **cnpg sync-quorum + pooler-budget BITE**
+(`deploy/kubernetes/policy/fixtures/run-cnpg-bite.sh`) and the **CNPG render-twice
+L4 guard** (`ci/cnpg/render-twice.sh`). This job is the **G-SEC K8s-posture
+evidence** (see `docs/security/2026-06-22-w4-k8s-posture-signoff.md`).
 
 Compose lockstep: `deploy/docker/seccomp/packet-analysis-seccomp.json` is the
 byte-for-byte mirror of this chart's profile, wired into the `packet-analysis`
 Compose service via `security_opt: ["seccomp=..."]` (ADR-0031 §3).
 
+## CloudNativePG HA data tier (W1-T1, ADR-0042)
+
+OPT-IN (`cloudNativePg.enabled=true`, default OFF). Replaces the single-instance
+`services.postgres` StatefulSet (set `services.postgres.enabled=false` — the chart
+REFUSES to render both Postgres tiers) with a CloudNativePG `Cluster` of 1 primary
++ 2 streaming replicas, a PgBouncer `Pooler` (transaction mode), a PriorityClass so
+Postgres outranks batch workers, and **quorum synchronous replication scoped to the
+audit write path** (`synchronous: {method: any, number: 1, failoverQuorum: true}` =
+`ANY 1 (replicas)`). It does NOT force synchronous commit on all writes: the cluster
+default `synchronous_commit` is set EXPLICITLY to `local` (ADR-0042 §2) so non-audit
+writes ack locally — leaving it unset would inherit the PG default `on` and force the
+quorum round-trip onto every write — and W1-T2 raises it back per-transaction via
+`SET LOCAL synchronous_commit=remote_apply` on the audit-writing transaction.
+pgvector is installed at bootstrap (inherited by replicas) and verified queryable on
+a replica by the smoke Job. Requires the CloudNativePG operator (CRDs + controller)
+pre-installed. mTLS to the CNPG cluster + app-side read/write routing are W1-T2; the
+live failover / zero-audit-loss drill is W4-T3.
+
+CNPG superuser/replication passwords use the same `lookup` reuse-or-generate dev
+fallback as the platform Secret (L4 — never regenerated on upgrade); production
+supplies them via `secrets.existingSecret` / external-secrets. The HA render is
+gated in CI (render + kubeconform + kube-linter + conftest + the cnpg sync-quorum/
+pooler-budget BITE + the CNPG render-twice L4 guard).
+
 ## P2 carry-forward (not in this chart)
 
-- **HA / scale-out:** HPA, KEDA per-queue workers, CloudNativePG, Redis Sentinel,
-  PodDisruptionBudgets (ADR-0029 §1, P2 §3).
+- **HA / scale-out:** HPA, KEDA per-queue workers, Redis Sentinel,
+  PodDisruptionBudgets (ADR-0029 §1, P2 §3). CloudNativePG (Postgres HA) is now in
+  this chart as the opt-in tier above (W1-T1, ADR-0042).
 - **api→PgBouncer→PG** NetworkPolicy rewrite (P1 is api→PG direct; ADR-0029 §2).
 - **cosign enforcement + SBOM** producing pipeline (W6); this chart is the
   admission *enforcement* side only.

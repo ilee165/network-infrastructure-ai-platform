@@ -1,0 +1,32 @@
+{{- /*
+PriorityClass for the CloudNativePG HA data tier (W1-T1, ADR-0042 §1 / scope).
+
+Postgres is the single system of record (ADR-0004) — under node pressure the
+scheduler must evict a BATCH WORKER before a Postgres instance, never the
+reverse. This PriorityClass gives the CNPG Cluster pods a priority well ABOVE the
+unpriorited (default 0) api/worker/batch Deployments, so PG outranks them.
+
+Rendered only when the CNPG tier is enabled AND priorityClass.create is true
+(set create:false to reference a PriorityClass the operator pre-created
+cluster-wide). The CNPG Cluster references this by name (cloudNativePg.priorityClass.name).
+
+PriorityClass is a cluster-scoped object (no namespace) — it is NOT RBAC and is
+NOT a ClusterRole/ClusterRoleBinding (the chart still ships ZERO of those,
+ADR-0029 §5). globalDefault stays false so it NEVER becomes the cluster-wide
+default priority (that would silently re-rank every other workload).
+*/ -}}
+{{- if and .Values.cloudNativePg.enabled .Values.cloudNativePg.priorityClass.create }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.cloudNativePg.priorityClass.name }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+value: {{ .Values.cloudNativePg.priorityClass.value }}
+# NEVER the cluster-wide default — scoped to the Postgres tier by name only.
+globalDefault: false
+description: >-
+  CloudNativePG Postgres HA data tier (ADR-0042). Ranks the system-of-record
+  Postgres pods ABOVE the unpriorited batch workers so a worker is evicted
+  before a Postgres instance under node pressure.
+{{- end }}
