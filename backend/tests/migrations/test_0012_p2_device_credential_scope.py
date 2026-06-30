@@ -1,10 +1,12 @@
-"""Migration 0012 (ADR-0040): device-credential scope columns + single head.
+"""Migration 0012 (ADR-0040): device-credential scope columns.
 
 Unit tests drive ``alembic upgrade head --sql`` in-process against the PostgreSQL
 dialect (no DB/Docker/network) and assert the emitted DDL adds the three nullable
 scope columns to ``device_credentials``. A real PostgreSQL round-trip (NullPool,
-skipped when unreachable) proves up->down->up is clean, and ``alembic heads`` is
-asserted to be the SINGLE head ``0012`` chaining after W4-T1's ``0011``.
+skipped when unreachable) proves up->down->up is clean.
+
+The single-head assertion moved to ``test_0013_p3_config_backup_runs.py`` once
+revision 0013 became the linear chain head.
 """
 
 from __future__ import annotations
@@ -66,13 +68,6 @@ def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> Generator[None, No
 # ---------------------------------------------------------------------------
 # Single head + revision wiring
 # ---------------------------------------------------------------------------
-
-
-def test_single_head_is_0012() -> None:
-    """`alembic heads` resolves to exactly one head, revision 0012 (no branch)."""
-    script = ScriptDirectory.from_config(_alembic_config())
-    heads = script.get_heads()
-    assert heads == ["0012"], f"expected single head 0012, got {heads}"
 
 
 def test_0012_revises_0011() -> None:

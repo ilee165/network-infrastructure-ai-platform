@@ -19,6 +19,11 @@ W2-T4 spec mandates ``tests/pg/``):
     transition, one audit row, the CR stays ``executing``), and the **four-eyes gate
     is not bypassed** (a self-approve is still refused). Idempotency hardens the
     execution handoff without weakening the ADR-0020 two-person control.
+  * **nightly_backup orchestrator** — a redelivered ``config.nightly_backup`` with
+    the SAME ``run_id`` emits exactly ONE ``config.backup_run_started`` audit row,
+    exactly ONE ``config.backup_run_finished`` audit row, and dispatches exactly ONE
+    fan-out wave of captures — the ``config_backup_runs`` DB-level uniqueness guard
+    (``ON CONFLICT DO NOTHING``) prevents the duplicate (ADR-0043 §6).
 
 No real secret appears here: the only sentinel is an inert fake config string and
 throwaway bcrypt-shaped hashes created inside the test, asserted to be absent from
@@ -28,6 +33,8 @@ audit detail where relevant.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from sqlalchemy import func, select
@@ -42,7 +49,7 @@ from app.models.change_requests import (
     ChangeRequestKind,
     ChangeRequestState,
 )
-from app.models.config_mgmt import ConfigSnapshot, ConfigSource
+from app.models.config_mgmt import ConfigBackupRun, ConfigSnapshot, ConfigSource
 from app.models.identity import Role as DbRole
 from app.models.identity import User
 from app.services.change_requests.service import AUTOMATION_PRINCIPAL, ChangeRequestService
@@ -234,3 +241,113 @@ async def test_cr_execution_retry_does_not_double_execute(pg_engine: AsyncEngine
             )
         ).scalar_one()
         assert approval_count == 1
+
+
+# ---------------------------------------------------------------------------
+# nightly_backup: double-delivery -> one started/finished audit pair, one fan-out
+# ---------------------------------------------------------------------------
+
+
+async def test_nightly_backup_double_delivery_yields_one_audit_pair(
+    pg_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redelivered ``config.nightly_backup`` with the same ``run_id`` is idempotent.
+
+    The second delivery must emit exactly ONE ``config.backup_run_started`` audit row
+    and exactly ONE ``config.backup_run_finished`` audit row — never a duplicate pair.
+    The DB-level ``config_backup_runs`` uniqueness guard (``ON CONFLICT DO NOTHING``)
+    is the enforcement mechanism: a re-run whose ``run_uuid`` already exists skips
+    the fan-out and the audit emit entirely (ADR-0043 §6 / ADR-0008 §5).
+
+    This test runs against REAL PostgreSQL because the uniqueness guard only surfaces
+    as a true idempotency proof on a backend that enforces unique constraints with
+    actual concurrent write semantics — SQLite's single-writer model hides this class
+    of hazard (the standing P2 lesson).
+    """
+    from contextlib import asynccontextmanager
+
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    # Point the worker's per-phase session seam at the REAL-PG engine.
+    @asynccontextmanager
+    async def _pg_session() -> AsyncIterator[AsyncSession]:
+        async with maker() as session:
+            yield session
+
+    monkeypatch.setattr(config_tasks, "_session", _pg_session)
+
+    # Seed one reachable device (so the backup isn't "empty" — we want the full
+    # fan-out path exercised, not just the early-return empty-list path).
+    async with maker() as setup:
+        device_id = await _seed_device(setup)
+
+    # Stub _reachable_device_ids so we control the device list without needing
+    # SSH infrastructure — the idempotency proof is in the audit path, not SSH.
+    async def _fake_reachable() -> list[uuid.UUID]:
+        return [device_id]
+
+    monkeypatch.setattr(config_tasks, "_reachable_device_ids", _fake_reachable)
+
+    # Stub _dispatch_captures so we avoid a real Celery broker while still
+    # exercising the nightly_backup audit path.  Returns a minimal "all ok"
+    # result that drives the "succeeded" branch.
+    capture_wave_calls: list[int] = []
+
+    def _fake_dispatch(run_id: str, device_ids: list[str]) -> list[dict[str, Any]]:
+        capture_wave_calls.append(1)
+        return [
+            {"ok": True, "device_id": str(did), "content_hash": "abc", "created": True}
+            for did in device_ids
+        ]
+
+    monkeypatch.setattr(config_tasks, "_dispatch_captures", _fake_dispatch)
+
+    # A stable run_id supplied by the "beat scheduler" — both deliveries carry it.
+    stable_run_id = str(uuid.uuid4())
+
+    # First delivery.
+    result1 = config_tasks.nightly_backup(run_id=stable_run_id)
+    assert result1["status"] == "succeeded"
+
+    # Second delivery (the redelivery) — same run_id, same task.
+    result2 = config_tasks.nightly_backup(run_id=stable_run_id)
+
+    # The redelivery returns a skip sentinel — no second fan-out, no second audit.
+    assert result2["status"] == "skipped", (
+        f"a redelivered nightly_backup with the same run_id must return 'skipped', got {result2!r}"
+    )
+
+    # Exactly one fan-out wave was dispatched.
+    assert len(capture_wave_calls) == 1, (
+        f"expected exactly 1 capture wave, got {len(capture_wave_calls)}"
+    )
+
+    async with maker() as check:
+        # Exactly one config_backup_runs row.
+        run_count = (
+            await check.execute(select(func.count()).select_from(ConfigBackupRun))
+        ).scalar_one()
+        assert run_count == 1, "redelivery must not insert a second config_backup_runs row"
+
+        started_audits = (
+            await check.execute(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(AuditLog.action == "config.backup_run_started")
+            )
+        ).scalar_one()
+        finished_audits = (
+            await check.execute(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(AuditLog.action == "config.backup_run_finished")
+            )
+        ).scalar_one()
+
+    assert started_audits == 1, (
+        f"redelivery must not append a second backup_run_started audit row; got {started_audits}"
+    )
+    assert finished_audits == 1, (
+        f"redelivery must not append a second backup_run_finished audit row; got {finished_audits}"
+    )

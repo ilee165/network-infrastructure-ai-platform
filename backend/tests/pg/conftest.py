@@ -63,6 +63,7 @@ _DEFAULT_PG_URL = "postgresql+asyncpg://netops:netops@127.0.0.1:5432/netops_test
 _RESET_TABLES = (
     "audit_chain_checkpoint",
     "audit_log",
+    "config_backup_runs",
     "config_snapshots",
     "approvals",
     "change_requests",

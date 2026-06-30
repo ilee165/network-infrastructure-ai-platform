@@ -398,6 +398,44 @@ def test_nightly_backup_run_is_audited(
     assert "config.backup_run_finished" in actions
 
 
+def test_nightly_backup_double_delivery_with_stable_run_id_is_idempotent(
+    eager_celery: None, db_url: str, wired: dict[str, FakeSshTransport]
+) -> None:
+    """A redelivered nightly_backup with the same run_id skips the second effect.
+
+    W2-T4 finding (ADR-0043 §6 / ADR-0008 §5): ``task_acks_late`` is global, so
+    a worker killed mid-run causes ``nightly_backup`` to be redelivered. The fix:
+    accept an optional ``run_id`` parameter and guard on a DB-level uniqueness
+    check (``config_backup_runs`` PK) before emitting any audit or fan-out.
+
+    This is the fast aiosqlite smoke; the authoritative PG proof is in
+    ``tests/pg/test_worker_idempotency_pg.py::test_nightly_backup_double_delivery_*``.
+    """
+    _seed_device(db_url, mgmt_ip="10.0.0.1")
+    wired["10.0.0.1"] = FakeSshTransport("10.0.0.1", dead=False, config=RUNNING_CONFIG)
+
+    import uuid as _uuid
+
+    stable_run_id = str(_uuid.uuid4())
+
+    # First delivery: new run, full effect.
+    result1 = tasks.nightly_backup(run_id=stable_run_id)
+    assert result1["status"] == "succeeded"
+
+    # Second delivery (redelivery): same run_id — must skip, no second effect.
+    result2 = tasks.nightly_backup(run_id=stable_run_id)
+    assert result2["status"] == "skipped", (
+        f"redelivered nightly_backup must return 'skipped', got {result2!r}"
+    )
+
+    # Exactly one started + one finished audit row — never duplicated.
+    all_audit = _fetch_all(db_url, AuditLog)
+    started = [r for r in all_audit if r.action == "config.backup_run_started"]
+    finished = [r for r in all_audit if r.action == "config.backup_run_finished"]
+    assert len(started) == 1, f"expected 1 backup_run_started audit row, got {len(started)}"
+    assert len(finished) == 1, f"expected 1 backup_run_finished audit row, got {len(finished)}"
+
+
 # ---------------------------------------------------------------------------
 # secret discipline
 # ---------------------------------------------------------------------------

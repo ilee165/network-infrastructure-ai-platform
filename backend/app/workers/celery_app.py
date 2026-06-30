@@ -81,12 +81,19 @@ QUEUE_REDELIVERY_RATIONALE: dict[str, str] = {
         "the run lifecycle deterministically from stored run params."
     ),
     QUEUE_CONFIG: (
-        "Idempotent by content-addressing. ``config.capture_device`` -> "
-        "engines.config_mgmt.capture_snapshot dedups on (device_id, content_hash): "
-        "a redelivery of an unchanged config stores NO new blob and (W2-T4 fix) "
-        "emits NO second ``config.snapshot_captured`` audit row — it only advances "
-        "``captured_at`` to mark the fresh observation. ``config.nightly_backup`` is "
-        "beat-scheduled fan-out; its child captures carry that idempotency."
+        "Idempotent by content-addressing + DB-level run guard. "
+        "``config.capture_device`` -> engines.config_mgmt.capture_snapshot dedups "
+        "on (device_id, content_hash): a redelivery of an unchanged config stores NO "
+        "new blob and (W2-T4 fix) emits NO second ``config.snapshot_captured`` audit "
+        "row — it only advances ``captured_at`` to mark the fresh observation. "
+        "``config.nightly_backup`` (the beat orchestrator) accepts an optional "
+        "``run_id`` and derives a deterministic slot UUID when absent; it INSERTs a "
+        "``config_backup_runs`` row ON CONFLICT DO NOTHING before any audit emit or "
+        "fan-out — a redelivered task finds the row already present, returns "
+        "``status='skipped'``, and emits no second ``config.backup_run_started`` / "
+        "``config.backup_run_finished`` audit pair and dispatches no second capture "
+        "wave (W2-T4 finding, ADR-0043 §6, proven on real PG in "
+        "tests/pg/test_worker_idempotency_pg.py)."
     ),
     QUEUE_PACKET_CAPTURE: (
         "``packet.capture_*`` writes are keyed to a pre-created capture row whose "

@@ -18,6 +18,20 @@ Two tasks, routed to the ``config`` queue by name prefix:
   ``config.capture_device`` per device (a Celery group), gathers per-device
   summaries, audits the run start/finish, and reports counts.
 
+  Idempotency (W2-T4 finding, ADR-0043 §6 / ADR-0008 §5): ``task_acks_late``
+  is global, so a worker killed between receipt and ack causes ``nightly_backup``
+  to be **redelivered**. With the old ``uuid.uuid4()``-on-entry approach, each
+  delivery generated a fresh run UUID, unconditionally emitting a duplicate
+  ``config.backup_run_started`` + ``config.backup_run_finished`` audit pair and
+  dispatching a second full fan-out wave — the exact "double audit row" hazard
+  the ADR names. Fix: ``nightly_backup`` now accepts an optional ``run_id``
+  parameter. Beat (or any caller) supplies a stable, slot-derived UUID; when
+  ``run_id`` is absent the task derives one deterministically from the UTC date
+  slot (SHA-256 of ``"config.nightly_backup:<YYYY-MM-DD>"``). Before emitting
+  any audit or fan-out, it INSERTs a ``config_backup_runs`` row with
+  ``ON CONFLICT DO NOTHING``; if the row already exists (redelivery), the task
+  returns immediately with ``status="skipped"`` — one effect, every time.
+
 Async DB from sync Celery follows the discovery-task pattern exactly: each task
 phase wraps its DB work in ``asyncio.run`` with a fresh engine per invocation,
 and module-level seams (``_make_engine``, ``_registry``, ``_key_provider``,
@@ -34,16 +48,20 @@ not a capture concern.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 import structlog
 from celery import group
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app import db
@@ -52,7 +70,7 @@ from app.core.crypto import KeyProvider, get_key_provider
 from app.core.errors import PluginError
 from app.engines.config_mgmt import capture_snapshot
 from app.models import Device, DeviceStatus
-from app.models.config_mgmt import ConfigSource
+from app.models.config_mgmt import ConfigBackupRun, ConfigSource
 from app.models.inventory import CredentialKind, DeviceCredential
 from app.plugins.base import Capability, ConfigBackupCapability, PluginCapability
 from app.plugins.registry import PluginRegistry, get_default_registry
@@ -363,6 +381,77 @@ def capture_device(
 # ---------------------------------------------------------------------------
 
 
+def _slot_uuid(slot: str) -> UUID:
+    """Derive a deterministic UUID from a scheduled-slot string.
+
+    Uses the SHA-256 digest of ``"config.nightly_backup:<slot>"`` (where *slot*
+    is the UTC date ``YYYY-MM-DD``) to produce a stable, collision-resistant UUID
+    that is identical on every delivery of the same beat tick — so a redelivered
+    task carries the same ``run_uuid`` and the ``ON CONFLICT DO NOTHING`` guard
+    recognises it as a duplicate.
+    """
+    digest = hashlib.sha256(f"config.nightly_backup:{slot}".encode()).digest()
+    # Build a UUID from the first 16 bytes of the digest (variant/version bits
+    # overwritten — this is a name-derived opaque token, not RFC-4122 v5).
+    return UUID(bytes=digest[:16])
+
+
+async def _claim_backup_run(run_uuid: UUID, scheduled_slot: str) -> bool:
+    """INSERT a ``config_backup_runs`` row with ON CONFLICT DO NOTHING.
+
+    Returns ``True`` if the row was **newly inserted** (this is the first —
+    or only — delivery), ``False`` if it already existed (redelivery).
+
+    The DB-level uniqueness of ``run_uuid`` (the PK) is the enforcement
+    mechanism: PostgreSQL's ``ON CONFLICT DO NOTHING`` skips the INSERT when
+    the PK row exists and sets ``cursor.rowcount == 0``; SQLite's
+    ``INSERT OR IGNORE`` does the same. The caller treats ``rowcount == 0`` as
+    a redelivery signal and returns a skip sentinel without touching the audit
+    log or dispatching captures.
+
+    Implementation uses the dialect-specific ``insert`` (PostgreSQL or SQLite)
+    because SQLAlchemy's generic ``Insert`` does not expose ``.on_conflict_*``
+    methods — those are dialect extensions. Both flavours are identical in
+    semantics: skip on PK conflict, no error raised, rowcount reflects whether
+    the INSERT actually landed.
+    """
+    async with _session() as session:
+        dialect = session.bind.dialect.name if session.bind is not None else "sqlite"
+        values: dict[str, Any] = {
+            "run_uuid": run_uuid,
+            "scheduled_slot": scheduled_slot,
+            "status": "running",
+            "started_at": datetime.now(UTC),
+        }
+        if dialect == "postgresql":
+            stmt: Any = (
+                pg_insert(ConfigBackupRun)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["run_uuid"])
+            )
+        else:
+            # aiosqlite unit-test backend: INSERT OR IGNORE on PK conflict.
+            stmt = sqlite_insert(ConfigBackupRun).values(**values).on_conflict_do_nothing()
+        cursor = await session.execute(stmt)
+        await session.commit()
+        # rowcount == 1 → newly inserted (first delivery);
+        # rowcount == 0 → conflict skipped (redelivery).
+        return cursor.rowcount == 1  # type: ignore[attr-defined]
+
+
+async def _finish_backup_run(run_uuid: UUID, status: str) -> None:
+    """Mark the ``config_backup_runs`` row as finished (mutable lifecycle column)."""
+    from sqlalchemy import update as sa_update
+
+    async with _session() as session:
+        await session.execute(
+            sa_update(ConfigBackupRun)
+            .where(ConfigBackupRun.run_uuid == run_uuid)
+            .values(status=status, finished_at=datetime.now(UTC))
+        )
+        await session.commit()
+
+
 async def _reachable_device_ids() -> list[UUID]:
     """All device ids in ``reachable`` state — the nightly backup target set."""
     async with _session() as session:
@@ -410,21 +499,46 @@ def _dispatch_captures(run_id: str, device_ids: list[str]) -> list[dict[str, Any
 
 
 @celery_app.task(name="config.nightly_backup")
-def nightly_backup() -> dict[str, Any]:
+def nightly_backup(run_id: str | None = None) -> dict[str, Any]:
     """Scheduled nightly backup of every reachable device (Celery beat).
 
     Fans one ``config.capture_device`` task out per reachable device, gathers
     the summaries, and audits the run start and finish. The terminal status is
     ``succeeded`` (all captured), ``partial`` (some failed), ``empty`` (no
-    reachable devices), or ``failed`` (every device failed).
+    reachable devices), ``failed`` (every device failed), or ``skipped`` (a
+    redelivered task whose ``run_id`` was already claimed — the idempotency
+    guard fired).
+
+    Idempotency (W2-T4 finding, ADR-0043 §6): ``run_id`` is an optional
+    parameter so the beat caller (or a test) can supply a stable UUID. When
+    absent, a deterministic UUID is derived from the UTC date slot so that
+    every redelivery of the same beat tick carries the same token. The task
+    INSERTs a ``config_backup_runs`` row with ``ON CONFLICT DO NOTHING``
+    before any audit emit or fan-out; if the INSERT is a no-op (row already
+    existed), the task returns ``{"status": "skipped"}`` without emitting a
+    second audit pair or dispatching a second wave of captures.
     """
-    run_uuid = uuid.uuid4()
-    run_id = str(run_uuid)
+    # Resolve the scheduled slot (UTC date) and the stable run UUID.
+    scheduled_slot = datetime.now(UTC).strftime("%Y-%m-%d")
+    run_uuid = uuid.UUID(run_id) if run_id is not None else _slot_uuid(scheduled_slot)
+    run_id_str = str(run_uuid)
+
+    # --- Idempotency guard (W2-T4 fix) ---
+    # INSERT the run record; if it already exists (redelivery), skip everything.
+    claimed = asyncio.run(_claim_backup_run(run_uuid, scheduled_slot))
+    if not claimed:
+        logger.info(
+            "config.backup_skipped_redelivery",
+            run_id=run_id_str,
+            scheduled_slot=scheduled_slot,
+        )
+        return {"run_id": run_id_str, "status": "skipped"}
+
     device_uuids = asyncio.run(_reachable_device_ids())
     device_ids = [str(d) for d in device_uuids]
 
     asyncio.run(_audit_run(_BACKUP_RUN_STARTED, run_uuid, {"device_count": len(device_ids)}))
-    logger.info("config.backup_started", run_id=run_id, device_count=len(device_ids))
+    logger.info("config.backup_started", run_id=run_id_str, device_count=len(device_ids))
 
     if not device_ids:
         asyncio.run(
@@ -432,10 +546,11 @@ def nightly_backup() -> dict[str, Any]:
                 _BACKUP_RUN_FINISHED, run_uuid, {"status": "empty", "succeeded": 0, "failed": 0}
             )
         )
-        logger.info("config.backup_finished", run_id=run_id, status="empty")
-        return {"run_id": run_id, "status": "empty", "succeeded": 0, "failed": 0}
+        asyncio.run(_finish_backup_run(run_uuid, "empty"))
+        logger.info("config.backup_finished", run_id=run_id_str, status="empty")
+        return {"run_id": run_id_str, "status": "empty", "succeeded": 0, "failed": 0}
 
-    results = _dispatch_captures(run_id, device_ids)
+    results = _dispatch_captures(run_id_str, device_ids)
     succeeded = [r for r in results if r.get("ok")]
     failed = [r for r in results if not r.get("ok")]
 
@@ -453,15 +568,16 @@ def nightly_backup() -> dict[str, Any]:
             {"status": status, "succeeded": len(succeeded), "failed": len(failed)},
         )
     )
+    asyncio.run(_finish_backup_run(run_uuid, status))
     logger.info(
         "config.backup_finished",
-        run_id=run_id,
+        run_id=run_id_str,
         status=status,
         succeeded=len(succeeded),
         failed=len(failed),
     )
     return {
-        "run_id": run_id,
+        "run_id": run_id_str,
         "status": status,
         "succeeded": len(succeeded),
         "failed": len(failed),
