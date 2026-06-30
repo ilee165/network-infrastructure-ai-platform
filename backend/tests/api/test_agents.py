@@ -765,3 +765,125 @@ class TestWebSocketFanout:
         assert published, "the producer published at least one frame onto the channel"
         for payload in published:
             assert token not in payload, "the bearer token must never reach the shared channel"
+
+    async def test_persisted_step_replayed_and_relayed_is_sent_at_most_once(
+        self,
+        app: FastAPI,
+        token_for: Callable[[str], str],
+        sessionmaker: async_sessionmaker[AsyncSession],
+        users: dict[str, User],
+    ) -> None:
+        """A step seen from BOTH the DB replay and the live relay is sent exactly once.
+
+        The production producer persists a step THEN publishes a live frame whose
+        ``data`` is byte-identical to the step's DB read model. The handler replays
+        the persisted step from the DB and also drains the buffered live frame — so
+        without cross-source dedup the SAME step lands on the wire twice. We persist
+        one step and publish its exact read model as a live frame, then assert the
+        peer receives that step's content exactly once (F-agents-582 / F-agents-609).
+        """
+        from app.agents.framework.traces import PostgresTraceRecorder, TraceStep, TraceStepKind
+        from app.services.agent_stream import (
+            AgentStreamFrame,
+            InMemoryAgentStreamFanout,
+            channel_for,
+        )
+        from app.services.agent_stream.fanout import _InMemoryBus
+
+        bus = _InMemoryBus()
+        replica_a = InMemoryAgentStreamFanout(bus)
+        app.state.stream_fanout = InMemoryAgentStreamFanout(bus)  # serving replica
+
+        viewer = users["viewer"]
+        async with sessionmaker() as db:
+            session_row = AgentSession(
+                user_id=viewer.id,
+                invoking_role="viewer",
+                intent="stream",
+                status=AgentSessionStatus.RUNNING,
+            )
+            db.add(session_row)
+            await db.commit()
+            session_id = session_row.id
+
+        # Persist one step through the real recorder so the handler replays it from
+        # the DB; the recorder links the trace to THIS session (so _load_traces finds it).
+        recorder = PostgresTraceRecorder(sessionmaker, session_id=session_id)
+        trace = await recorder.start("discovery")
+        step = TraceStep(kind=TraceStepKind.PLAN, summary="route", detail="pick discovery")
+        await recorder.record_step(trace.trace_id, step)
+
+        # The live frame's data is the EXACT read model of the persisted step — what
+        # PublishingTraceRecorder fans onto the channel in production.
+        live_data = agents_router._step_read(step).model_dump(mode="json")
+
+        fake_ws = _FakeWebSocket(app, session_id=str(session_id), token=token_for("viewer"))
+
+        async def _drive_handler() -> None:
+            await agents_router.stream_session(fake_ws, session_id, sessionmaker)  # type: ignore[arg-type]
+
+        handler = asyncio.create_task(_drive_handler())
+        await _await_subscriber(bus, channel_for(str(session_id)))
+        await replica_a.publish(
+            AgentStreamFrame(session_id=str(session_id), trace_id=trace.trace_id, data=live_data)
+        )
+        async with sessionmaker() as db:
+            row = await db.get(AgentSession, session_id)
+            assert row is not None
+            row.status = AgentSessionStatus.COMPLETED
+            await db.commit()
+        await asyncio.wait_for(handler, timeout=5.0)
+
+        # The step's content is on the wire exactly ONCE despite both sources seeing it.
+        step_frames = [
+            f for f in fake_ws.sent if f.get("kind") == "plan" and f.get("summary") == "route"
+        ]
+        assert len(step_frames) == 1, (
+            f"a step seen from both DB replay and live relay must be sent once; got {step_frames}"
+        )
+
+    async def test_running_session_past_poll_budget_sends_no_terminal_end(
+        self,
+        app: FastAPI,
+        token_for: Callable[[str], str],
+        sessionmaker: async_sessionmaker[AsyncSession],
+        users: dict[str, User],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When the poll budget is exhausted with the run still RUNNING, no end frame.
+
+        Emitting ``AgentStreamEnd(status=running)`` would tell the client the stream
+        is terminal while the run has not finished (empty answer) — a contradictory,
+        misleading frame. The handler must close WITHOUT a terminal end so the client
+        knows to reconnect; the terminal end is reserved for a real terminal status
+        (F-agents-588).
+        """
+        from app.services.agent_stream import InMemoryAgentStreamFanout
+        from app.services.agent_stream.fanout import _InMemoryBus
+
+        app.state.stream_fanout = InMemoryAgentStreamFanout(_InMemoryBus())
+        # Tiny budget so the loop exhausts immediately while the session stays RUNNING.
+        monkeypatch.setattr(agents_router, "_STREAM_MAX_POLLS", 2)
+        monkeypatch.setattr(agents_router, "_STREAM_POLL_SECONDS", 0.0)
+
+        viewer = users["viewer"]
+        async with sessionmaker() as db:
+            session_row = AgentSession(
+                user_id=viewer.id,
+                invoking_role="viewer",
+                intent="stream",
+                status=AgentSessionStatus.RUNNING,  # never transitions — budget exhausts first
+            )
+            db.add(session_row)
+            await db.commit()
+            session_id = session_row.id
+
+        fake_ws = _FakeWebSocket(app, session_id=str(session_id), token=token_for("viewer"))
+        await agents_router.stream_session(fake_ws, session_id, sessionmaker)  # type: ignore[arg-type]
+
+        end_frames = [f for f in fake_ws.sent if f.get("event") == "end"]
+        assert not end_frames, (
+            "a still-RUNNING run past its poll budget must not send a terminal end; "
+            f"got {end_frames}"
+        )
+        assert fake_ws.close_code is not None, "the socket must still be closed"

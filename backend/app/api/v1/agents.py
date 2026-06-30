@@ -560,6 +560,13 @@ async def stream_session(
 
     answer = ""
     status = AgentSessionStatus.RUNNING
+    # A step can be observed from TWO sources — the durable DB replay and the live
+    # pub/sub relay — and the producer makes a live frame byte-identical to its
+    # replayed read model (traces._step_read_model). Track a stable per-step key so
+    # a step already sent from one source is not re-sent from the other (at-most-once
+    # on the wire). The key is derived from the read-model fields the producer also
+    # fills, so it matches across both sources.
+    emitted_keys: set[str] = set()
     # Subscribe BEFORE accepting the socket (and before the DB replay): once we
     # are attached to the channel, a frame published by any replica is buffered on
     # our subscription rather than lost in the accept/replay gap.
@@ -573,25 +580,59 @@ async def stream_session(
             steps = [step for trace in traces for step in trace.steps]
             # Durable replay: emit any newly persisted step (completeness, §5).
             while emitted < len(steps):
-                await websocket.send_json(_step_read(steps[emitted]).model_dump(mode="json"))
+                data = _step_read(steps[emitted]).model_dump(mode="json")
+                key = _step_frame_key(data)
+                if key not in emitted_keys:
+                    emitted_keys.add(key)
+                    await websocket.send_json(data)
                 emitted += 1
             # Liveness: relay any live frames already fanned out for this session
             # (ADR-0044 §2). Done on EVERY iteration — including the terminal one —
             # so a frame that arrived on the wire just before the run finished is
             # still delivered before the end frame rather than needlessly dropped.
-            await _relay_pending_live_frames(websocket, live_frames)
+            # Cross-source dedup: a frame whose step was already replayed from the DB
+            # (or vice-versa) is skipped via the shared ``emitted_keys`` set.
+            await _relay_pending_live_frames(websocket, live_frames, emitted_keys)
             if status is not AgentSessionStatus.RUNNING:
                 answer = _final_answer_from_traces(traces)
                 break
             await asyncio.sleep(_STREAM_POLL_SECONDS)
 
-    await websocket.send_json(AgentStreamEnd(status=status, answer=answer).model_dump(mode="json"))
+    # Only emit the terminal ``end`` frame when the run actually REACHED a terminal
+    # status. If the poll budget was exhausted while the run is still RUNNING,
+    # sending AgentStreamEnd(status=running) would be a contradictory, misleading
+    # terminal frame (event=end yet not finished, empty answer) — instead close
+    # without claiming termination so the client knows to reconnect (F-agents-588).
+    if status is not AgentSessionStatus.RUNNING:
+        await websocket.send_json(
+            AgentStreamEnd(status=status, answer=answer).model_dump(mode="json")
+        )
     await websocket.close()
+
+
+def _step_frame_key(data: dict[str, object]) -> str:
+    """Stable cross-source identity of a streamed step read model.
+
+    Both the DB-replay read model (``_step_read(step).model_dump``) and the live
+    fanned-out frame (``traces._step_read_model``) carry the same fields, so a key
+    built from them matches a step regardless of which source observed it first.
+    ``occurred_at`` is monotonic per run and the ``(kind, summary, tool_name)``
+    triple disambiguates same-instant steps.
+    """
+    return "\x1f".join(
+        (
+            str(data.get("kind")),
+            str(data.get("occurred_at")),
+            str(data.get("summary")),
+            str(data.get("tool_name")),
+        )
+    )
 
 
 async def _relay_pending_live_frames(
     websocket: WebSocket,
     live_frames: object,
+    emitted_keys: set[str],
 ) -> None:
     """Relay any live pub/sub frames currently available, without blocking.
 
@@ -599,6 +640,11 @@ async def _relay_pending_live_frames(
     terminal-status poll cadence: a frame that has arrived on the channel is sent
     to the peer immediately; if none has arrived this returns at once. Best-effort
     (ADR-0044 §5) — no buffering beyond what the subscription already holds.
+
+    Cross-source dedup: a frame whose step was already emitted from the DB replay
+    (or an earlier live frame) is skipped via the shared ``emitted_keys`` set so a
+    persisted step — published as a frame byte-identical to its replay — is sent at
+    most once on the wire (F-agents-582 / F-agents-609).
     """
     anext_frame = live_frames.__anext__  # type: ignore[attr-defined]
     while True:
@@ -608,6 +654,10 @@ async def _relay_pending_live_frames(
             )
         except (TimeoutError, StopAsyncIteration):
             return
+        key = _step_frame_key(frame.data)
+        if key in emitted_keys:
+            continue
+        emitted_keys.add(key)
         await websocket.send_json(frame.data)
 
 
