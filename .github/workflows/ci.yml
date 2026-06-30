@@ -1358,6 +1358,66 @@ jobs:
           fi
           echo "frontend lockfile: in sync."
 
+  # Observability SLO gate (P3 W3-T3, ADR-0046 §6; PRODUCTION.md §11 G-OBS §385).
+  # Validates the SLO recording rules (W3-T2) AND the multi-window burn-rate alert
+  # rules (W3-T3) with `promtool check rules`, runs the `promtool test rules` cases
+  # (recording-rule semantics + the alert FIRING/healthy alert-as-test), and runs
+  # the alert-as-test BITE proof (a muted, never-firing alert MUST fail its firing
+  # test — the anti-false-green control). Cluster-free: promtool over synthetic
+  # series, so it bites on every PR (ADR-0046 §0/§6). L5 (pipefail) + `test -s` so a
+  # piped promtool invocation cannot mask a non-zero exit (the P1-W4 pipe-masks-exit
+  # trap). This job is in the `all-gates` needs list below — a red promtool gate
+  # blocks merge.
+  observability:
+    name: observability (promtool check + test + alert-as-test bite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install promtool (Prometheus)
+        run: |
+          set -o pipefail
+          PROM_VERSION=2.53.2
+          curl -sSL -o /tmp/prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp
+          install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version
+
+      # `promtool check rules` validates the rule files load (syntax + PromQL parse)
+      # for BOTH the W3-T2 recording rules and the W3-T3 burn-rate alerts. pipefail +
+      # `test -s` guard so a piped/empty result cannot pass green.
+      - name: promtool check rules (recording + burn-rate alerts)
+        run: |
+          set -o pipefail
+          promtool check rules \
+            deploy/observability/slo-recording.rules.yaml \
+            deploy/observability/api-request-rate.rules.yaml \
+            deploy/observability/slo-burn-rate.alerts.yaml | tee /tmp/promtool-check.out
+          test -s /tmp/promtool-check.out
+
+      # `promtool test rules` runs the semantic cases: the W3-T2 recording-rule
+      # tests (the SLI computes the expected value on healthy + regressed series) and
+      # the W3-T3 alert-as-test cases (each alert FIRES on a perturbed series and
+      # stays SILENT on a healthy one). A green-at-setup alert that never fires fails
+      # here (ADR-0046 §6).
+      - name: promtool test rules (recording-rule semantics + alert firing/healthy)
+        run: |
+          set -o pipefail
+          promtool test rules deploy/observability/slo-recording.rules.test.yaml | tee /tmp/promtool-rec.out
+          test -s /tmp/promtool-rec.out
+          promtool test rules deploy/observability/slo-burn-rate.alerts.test.yaml | tee /tmp/promtool-alert.out
+          test -s /tmp/promtool-alert.out
+
+      # BITE proof: the clean rules pass AND a MUTED (never-firing) alert fails its
+      # firing test — proves the alert-as-test gate actually catches a false-green
+      # alert before it is relied on (ADR-0046 §6; the carry-forward run-and-bite
+      # rule). The mutation is on a temp copy; committed rules are untouched.
+      - name: promtool alert-as-test bite proof
+        run: bash deploy/observability/run-promtool-bite.sh
+
   # Single required-check aggregator (P1 W6-T4). Branch protection should require
   # ONLY this job; it transitively depends on every gate, so a failure or skip of
   # ANY upstream job (dependency audits, secret scan, image/Trivy, chart/policy)
@@ -1379,7 +1439,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile, observability]
     steps:
       - name: Assert every gate succeeded
         env:

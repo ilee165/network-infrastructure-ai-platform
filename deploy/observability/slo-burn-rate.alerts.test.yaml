@@ -1,0 +1,426 @@
+# promtool test rules — ALERT-AS-TEST BITE proof for slo-burn-rate.alerts.yaml
+# (P3 W3-T3, ADR-0046 §2/§6; PRODUCTION.md §6 / §11 G-OBS §385).
+#
+# THE anti-false-green control (P1-W4 lesson, ADR-0046 §6): every burn-rate alert
+# ships BOTH
+#   * a FIRING case  — a perturbed series that BREACHES the burn condition, asserting
+#     the alert transitions to firing within its window (the should-fire negative
+#     control; a green-at-setup rule that never fires FAILS here), and
+#   * a HEALTHY case — a within-objective series, asserting the alert stays SILENT
+#     (no false positive).
+#
+# BITE ORDER (proven during authoring): the FIRING case was written first and run
+# against the rules file with the alert ABSENT -> the test went RED ("expected
+# alerts ... got none"); adding the alert turned it GREEN. A rule that loads but
+# never fires cannot pass this file.
+#
+# rule_files loads BOTH the W3-T2 recording rules (the gauge alerts read the
+# recorded slo:*:seconds series) AND the W3-T3 alerts, so the alerts are evaluated
+# exactly as Prometheus would (over the recorded SLI series), not against ad-hoc
+# expressions.
+#
+# Run:  promtool test rules deploy/observability/slo-burn-rate.alerts.test.yaml
+#
+# WINDOW NOTE: the slow (ticket) tier reads 6h ranges, so the input series run past
+# 6h and the slow cases evaluate at 6h+. Rates are written as per-minute step
+# series; eval times clear the `for:` hold of each alert.
+
+rule_files:
+  - slo-recording.rules.yaml
+  - slo-burn-rate.alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ===========================================================================
+  # §6 row 1 — API availability burn-rate. FIRING: a heavy 5xx stream drives the
+  # error ratio (~0.23) far above the 14.4x*0.001=0.0144 page threshold over both
+  # the 5m and 1h legs. HEALTHY: all 2xx -> error ratio 0 -> silent.
+  # ===========================================================================
+  - interval: 1m
+    name: api availability fast burn — FIRES on a sustained 5xx stream
+    input_series:
+      # 700/min good (2xx) + 200/min bad (5xx) -> error ratio = 200/900 = 0.222.
+      - series: 'netops_http_requests_total{status_class="2xx", route="/api/v1/devices"}'
+        values: '0+700x90'
+      - series: 'netops_http_requests_total{status_class="5xx", route="/api/v1/devices"}'
+        values: '0+200x90'
+    alert_rule_test:
+      # Eval at 75m: both the 5m and the 1h leg have a full window of the 5xx burn,
+      # and the for:2m hold is satisfied. The page alert must be firing.
+      - eval_time: 75m
+        alertname: NetopsApiAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: api_availability
+              tier: fast
+            exp_annotations:
+              summary: "API availability burning the 30-day error budget fast (>=14.4x)"
+              description: "The non-5xx request ratio (SLI slo:netops_api_availability:ratio_rate5m) is consuming the 0.1% / 30-day error budget at >=14.4x over BOTH the 5m and 1h windows. At this rate ~2% of the 30-day budget is spent in 1h."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-availability.md"
+
+  - interval: 1m
+    name: api availability — healthy all-2xx traffic does NOT fire
+    input_series:
+      - series: 'netops_http_requests_total{status_class="2xx", route="/api/v1/devices"}'
+        values: '0+900x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: NetopsApiAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: NetopsApiAvailabilitySlowBurn
+        exp_alerts: []
+
+  - interval: 1m
+    name: api availability slow burn — FIRES on a sustained low-grade 5xx stream
+    input_series:
+      # ~1.5% errors: 985/min 2xx + 15/min 5xx -> error ratio 0.015 > 6x*0.001=0.006,
+      # sustained long enough for the 6h leg + the for:15m hold.
+      - series: 'netops_http_requests_total{status_class="2xx", route="/api/v1/devices"}'
+        values: '0+985x420'
+      - series: 'netops_http_requests_total{status_class="5xx", route="/api/v1/devices"}'
+        values: '0+15x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: NetopsApiAvailabilitySlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: api_availability
+              tier: slow
+            exp_annotations:
+              summary: "API availability burning the 30-day error budget slowly (>=6x)"
+              description: "The non-5xx request ratio is consuming the 0.1% / 30-day budget at >=6x over BOTH the 30m and 6h windows (~5% of the 30-day budget in 6h)."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-availability.md"
+
+  # ===========================================================================
+  # §6 row 2 — API read latency p95/p99. FIRING (p95): a large fraction of requests
+  # spill past the 0.25s (300ms) bucket so too_slow_frac (~0.83) >> 14.4*0.05=0.72.
+  # FIRING (p99): a fraction spill past le=1.0 so too_slow_frac (~0.33) > 14.4*0.01.
+  # HEALTHY: nearly all requests land in the fast bucket -> silent.
+  # Cumulative histogram: each higher le includes lower counts.
+  # ===========================================================================
+  - interval: 1m
+    name: api read p95 fast burn — FIRES when most requests exceed 300ms
+    input_series:
+      # per-minute: 100 fast(<=0.1), only +5 by le=0.25 (so 105 of 600 are <=300ms),
+      # the rest (495) spill to le=0.5/1.0/+Inf. too_slow_frac = 1 - 105/600 = 0.825.
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.1"}'
+        values: '0+100x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.25"}'
+        values: '0+105x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.5"}'
+        values: '0+300x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="1.0"}'
+        values: '0+500x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="+Inf"}'
+        values: '0+600x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: NetopsApiReadLatencyP95FastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: api_read_latency
+              tier: fast
+              objective: p95
+            exp_annotations:
+              summary: "API read p95 latency budget burning fast (>=14.4x too-slow fraction)"
+              description: "The fraction of read requests exceeding the 300 ms p95 objective is burning the 5% latency budget at >=14.4x over BOTH 5m and 1h. SLI quantile series: slo:netops_api_read_latency:p95_5m."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
+
+  - interval: 1m
+    name: api read p99 fast burn — FIRES when a fraction exceed 1s
+    input_series:
+      # 600/min total; 500 land <=1.0s, 100 spill past 1.0s.
+      # too_slow_frac(p99) = 1 - 500/600 = 0.167 > 14.4*0.01 = 0.144.
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.1"}'
+        values: '0+400x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.25"}'
+        values: '0+450x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.5"}'
+        values: '0+480x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="1.0"}'
+        values: '0+500x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="+Inf"}'
+        values: '0+600x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: NetopsApiReadLatencyP99FastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: api_read_latency
+              tier: fast
+              objective: p99
+            exp_annotations:
+              summary: "API read p99 latency budget burning fast (>=14.4x too-slow fraction)"
+              description: "The fraction of read requests exceeding the 1 s p99 objective is burning the 1% latency budget at >=14.4x over BOTH 5m and 1h. SLI quantile series: slo:netops_api_read_latency:p99_5m."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
+
+  - interval: 1m
+    name: api read latency — healthy fast responses do NOT fire p95/p99
+    input_series:
+      # 595 of 600/min are <=0.25s; tiny tail. too_slow_frac(p95)=1-595/600=0.0083
+      # << 0.72; too_slow_frac(p99)=1-599/600 << 0.144. Both silent.
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.1"}'
+        values: '0+590x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.25"}'
+        values: '0+595x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.5"}'
+        values: '0+598x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="1.0"}'
+        values: '0+599x90'
+      - series: 'netops_http_request_duration_seconds_bucket{le="+Inf"}'
+        values: '0+600x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: NetopsApiReadLatencyP95FastBurn
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: NetopsApiReadLatencyP99FastBurn
+        exp_alerts: []
+
+  - interval: 1m
+    name: api read p95 slow burn — FIRES on a sustained moderate too-slow fraction
+    input_series:
+      # 600/min; 400 <=0.25s, 200 spill -> too_slow_frac=0.333 > 6*0.05=0.30,
+      # sustained past the 6h leg + for:15m.
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.1"}'
+        values: '0+350x420'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.25"}'
+        values: '0+400x420'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.5"}'
+        values: '0+500x420'
+      - series: 'netops_http_request_duration_seconds_bucket{le="1.0"}'
+        values: '0+560x420'
+      - series: 'netops_http_request_duration_seconds_bucket{le="+Inf"}'
+        values: '0+600x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: NetopsApiReadLatencyP95SlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: api_read_latency
+              tier: slow
+              objective: p95
+            exp_annotations:
+              summary: "API read p95 latency budget burning slowly (>=6x too-slow fraction)"
+              description: "The fraction of read requests exceeding the 300 ms p95 objective is burning the 5% latency budget at >=6x over BOTH 30m and 6h."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
+
+  # ===========================================================================
+  # §6 row 3 — Agent first-token latency, PER profile. FIRING (local): most local
+  # first-token events exceed 5s. FIRING (external): most external events exceed 3s.
+  # HEALTHY: fast first tokens -> silent. Proves the per-profile objective split.
+  # ===========================================================================
+  - interval: 1m
+    name: agent first-token local fast burn — FIRES when local p95 exceeds 5s
+    input_series:
+      # local: 20/min total, only 2 land <=5.0s, 18 spill -> too_slow_frac=0.9 > 0.72.
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="1.0"}'
+        values: '0+1x90'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="2.5"}'
+        values: '0+2x90'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="5.0"}'
+        values: '0+2x90'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="+Inf"}'
+        values: '0+20x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: NetopsAgentFirstTokenLocalFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: agent_first_token_latency
+              tier: fast
+              profile: local
+            exp_annotations:
+              summary: "Agent first-token p95 (local profile) latency budget burning fast"
+              description: "The fraction of local-profile first-token events exceeding the 5 s p95 objective is burning the 5% budget at >=14.4x over BOTH 5m and 1h. SLI: slo:netops_agent_first_token_latency:p95_5m{profile=\"local\"}."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
+
+  - interval: 1m
+    name: agent first-token external fast burn — FIRES when external p95 exceeds 3s
+    input_series:
+      # external: 20/min total, only 2 land <=3.0s, 18 spill -> too_slow_frac=0.9 > 0.72.
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="1.0"}'
+        values: '0+1x90'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="3.0"}'
+        values: '0+2x90'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}'
+        values: '0+20x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: NetopsAgentFirstTokenExternalFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: agent_first_token_latency
+              tier: fast
+              profile: external
+            exp_annotations:
+              summary: "Agent first-token p95 (external profile) latency budget burning fast"
+              description: "The fraction of external-profile first-token events exceeding the 3 s p95 objective is burning the 5% budget at >=14.4x over BOTH 5m and 1h. SLI: slo:netops_agent_first_token_latency:p95_5m{profile=\"external\"}."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
+
+  - interval: 1m
+    name: agent first-token — healthy fast tokens do NOT fire (either profile)
+    input_series:
+      # local: 19 of 20 land <=5.0s; external: 19 of 20 land <=3.0s. Both silent.
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="1.0"}'
+        values: '0+15x90'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="5.0"}'
+        values: '0+19x90'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="+Inf"}'
+        values: '0+20x90'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="1.0"}'
+        values: '0+15x90'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="3.0"}'
+        values: '0+19x90'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}'
+        values: '0+20x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: NetopsAgentFirstTokenLocalFastBurn
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: NetopsAgentFirstTokenExternalFastBurn
+        exp_alerts: []
+
+  # ===========================================================================
+  # §6 row 4 — Discovery success. FIRING: a sustained failed/partial stream drops
+  # the success ratio so the error ratio (~0.20) >> 14.4*0.01=0.144 over 5m AND 1h
+  # (the §337 queue-stall signal). HEALTHY: all succeeded -> silent.
+  # ===========================================================================
+  - interval: 1m
+    name: discovery success fast burn — FIRES on sustained failed/partial runs
+    input_series:
+      # 80/min succeeded + 20/min failed -> error ratio 0.20 > 0.144.
+      - series: 'netops_discovery_runs_total{status="succeeded"}'
+        values: '0+80x90'
+      - series: 'netops_discovery_runs_total{status="failed"}'
+        values: '0+20x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: NetopsDiscoverySuccessFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: discovery_success
+              tier: fast
+            exp_annotations:
+              summary: "Discovery success rate burning the budget fast (>=14.4x) — possible queue stall"
+              description: "The discovery failed/partial ratio is consuming the 1% per-run error budget at >=14.4x over BOTH 5m and 1h (SLI slo:netops_discovery_success:ratio_rate_run). A sustained drop is the §337 queue-stall MTTD signal."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-discovery-success.md"
+
+  - interval: 1m
+    name: discovery success — healthy all-succeeded does NOT fire
+    input_series:
+      - series: 'netops_discovery_runs_total{status="succeeded"}'
+        values: '0+100x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: NetopsDiscoverySuccessFastBurn
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: NetopsDiscoverySuccessSlowBurn
+        exp_alerts: []
+
+  # ===========================================================================
+  # §6 row 7 — Topology projection lag gauge. FIRING: the recorded freshness gauge
+  # climbs to 600s (> 300s objective) and STAYS there -> fast breach + slow
+  # confirmation both fire. HEALTHY: 42s (< 300s) -> silent.
+  # ===========================================================================
+  - interval: 1m
+    name: topology projection lag — FIRES fast+slow on a sustained 600s stall
+    input_series:
+      # Stale at 600s for 45m (clears the 5m fast window, the 30m slow window, and
+      # both for: holds).
+      - series: 'topology_graph_age_seconds'
+        values: '600x45'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NetopsTopologyProjectionLagFastBreach
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: topology_projection_lag
+              tier: fast
+            exp_annotations:
+              summary: "Topology projection lag breached the 5 min freshness objective (fast)"
+              description: "slo:netops_topology_projection_lag:seconds exceeded 300 s (the < 5 min §6 objective) across the last 5m. The Neo4j projection is stale relative to the latest discovery run."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-topology-projection-lag.md"
+      - eval_time: 45m
+        alertname: NetopsTopologyProjectionLagSlowBreach
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: topology_projection_lag
+              tier: slow
+            exp_annotations:
+              summary: "Topology projection lag sustained above the 5 min objective (slow)"
+              description: "slo:netops_topology_projection_lag:seconds stayed above 300 s for the entire 30m window — a sustained projection-freshness breach, not a transient rebuild spike."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-topology-projection-lag.md"
+
+  - interval: 1m
+    name: topology projection lag — fresh 42s does NOT fire
+    input_series:
+      - series: 'topology_graph_age_seconds'
+        values: '42x45'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NetopsTopologyProjectionLagFastBreach
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: NetopsTopologyProjectionLagSlowBreach
+        exp_alerts: []
+
+  # ===========================================================================
+  # §6 row 8 — Audit->SIEM export lag gauge. FIRING: the recorded lag gauge climbs
+  # to 180s (> 60s objective) and STAYS -> fast + slow both fire. HEALTHY: 5s -> silent.
+  # ===========================================================================
+  - interval: 1m
+    name: audit->SIEM export lag — FIRES fast+slow on a sustained 180s backlog
+    input_series:
+      - series: 'audit_export_lag_seconds'
+        values: '180x45'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NetopsAuditSiemExportLagFastBreach
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: audit_siem_export_lag
+              tier: fast
+            exp_annotations:
+              summary: "Audit->SIEM export lag breached the 60 s objective (fast)"
+              description: "slo:netops_audit_siem_export_lag:seconds exceeded 60 s (the p95 < 60 s §6 / ADR-0045 §3 objective) across the last 5m. Audit events are not reaching the customer SIEM within the lag SLO."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-audit-siem-export-lag.md"
+      - eval_time: 45m
+        alertname: NetopsAuditSiemExportLagSlowBreach
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: audit_siem_export_lag
+              tier: slow
+            exp_annotations:
+              summary: "Audit->SIEM export lag sustained above the 60 s objective (slow)"
+              description: "slo:netops_audit_siem_export_lag:seconds stayed above 60 s for the entire 30m window — a sustained SIEM export backlog (§388 G-OBS: export operating outside the lag SLO)."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-audit-siem-export-lag.md"
+
+  - interval: 1m
+    name: audit->SIEM export lag — caught-up 5s does NOT fire
+    input_series:
+      - series: 'audit_export_lag_seconds'
+        values: '5x45'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NetopsAuditSiemExportLagFastBreach
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: NetopsAuditSiemExportLagSlowBreach
+        exp_alerts: []
