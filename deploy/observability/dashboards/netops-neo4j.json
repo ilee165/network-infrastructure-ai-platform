@@ -1,0 +1,200 @@
+{
+  "uid": "netops-neo4j",
+  "title": "NetOps — Neo4j golden signals",
+  "netopsSubject": "neo4j",
+  "description": "Golden-signal dashboard for Neo4j (ADR-0046 §4, §335). The LATENCY panel reads the platform's own W3-T2 projection-freshness recording rule (slo:netops_topology_projection_lag:seconds, §6 row 7). FLAGGED: traffic / errors / heap-saturation read the conventional Neo4j metrics-endpoint series (neo4j_database_transaction_*, neo4j_dbms_vm_heap_*); enabling the Neo4j Prometheus metrics endpoint + a ServiceMonitor is named-deferred to the operator (Neo4j is rebuilt-not-backed-up, D5; metrics are opt-in, expose-don't-bundle ADR-0015).",
+  "tags": [
+    "netops",
+    "golden-signals",
+    "slo",
+    "neo4j"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Prometheus",
+        "hide": 0,
+        "current": {},
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Latency — projection freshness lag (SLO < 5 min)",
+      "netopsGoldenSignal": "latency",
+      "description": "slo:netops_topology_projection_lag:seconds — the W3-T2 §6-row-7 recording rule (the platform's own freshness gauge, ADR-0030). This is the one Neo4j signal the platform emits natively.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "slo:netops_topology_projection_lag:seconds",
+          "legendFormat": "projection lag",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Traffic — transactions/s (exporter)",
+      "netopsGoldenSignal": "traffic",
+      "description": "neo4j metrics: neo4j_transaction_committed_total. Requires Neo4j metrics endpoint (FLAGGED).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(neo4j_database_transaction_committed_total[5m])",
+          "legendFormat": "committed tx/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Errors — rolled-back transactions (exporter)",
+      "netopsGoldenSignal": "errors",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(neo4j_database_transaction_rollbacks_total[5m])",
+          "legendFormat": "rollbacks/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Saturation — heap used / page cache (exporter)",
+      "netopsGoldenSignal": "saturation",
+      "description": "neo4j_dbms_vm_heap_used / max — JVM heap saturation. Requires Neo4j metrics endpoint (FLAGGED).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "neo4j_dbms_vm_heap_used_ratio",
+          "legendFormat": "heap used ratio",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "netopsProvenance": {
+    "task": "W3-T4",
+    "adr": "ADR-0046 §4",
+    "production": "PRODUCTION.md §6 / §11 G-OBS §335"
+  }
+}

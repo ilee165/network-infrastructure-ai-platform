@@ -1,0 +1,209 @@
+{
+  "uid": "netops-postgres",
+  "title": "NetOps — Postgres golden signals",
+  "netopsSubject": "postgres",
+  "description": "Golden-signal dashboard for Postgres (ADR-0046 §4, §335). FLAGGED: Postgres has NO in-repo Prometheus series — these panels read the conventional postgres_exporter series (pg_stat_database_*, pg_stat_activity_count, pg_settings_max_connections). Wiring postgres_exporter + a ServiceMonitor is named-deferred to the operator (expose-don't-bundle, ADR-0015); the chart does not bundle it. The panel queries are the canonical exporter series so they bind on a cluster that runs the exporter.",
+  "tags": [
+    "netops",
+    "golden-signals",
+    "slo",
+    "postgres"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Prometheus",
+        "hide": 0,
+        "current": {},
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Latency — query / commit time (exporter)",
+      "netopsGoldenSignal": "latency",
+      "description": "postgres_exporter: rate(pg_stat_database_blk_read_time)/rate(blks_read). Requires postgres_exporter (FLAGGED).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_database_blk_read_time_seconds_total{datname=\"netops\"}[5m])",
+          "legendFormat": "block read time/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Traffic — transactions/s (commits + rollbacks)",
+      "netopsGoldenSignal": "traffic",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_database_xact_commit{datname=\"netops\"}[5m])",
+          "legendFormat": "commits/s",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_database_xact_rollback{datname=\"netops\"}[5m])",
+          "legendFormat": "rollbacks/s",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Errors — rollback ratio + deadlocks",
+      "netopsGoldenSignal": "errors",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(pg_stat_database_deadlocks{datname=\"netops\"}[5m])",
+          "legendFormat": "deadlocks/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Saturation — connections used vs max (budget under PgBouncer)",
+      "netopsGoldenSignal": "saturation",
+      "description": "sum(pg_stat_activity_count) / pg_settings_max_connections — the connection-budget saturation that PgBouncer caps (ADR-0042 §4). Requires postgres_exporter (FLAGGED).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(pg_stat_activity_count) / max(pg_settings_max_connections)",
+          "legendFormat": "connection saturation",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "netopsProvenance": {
+    "task": "W3-T4",
+    "adr": "ADR-0046 §4",
+    "production": "PRODUCTION.md §6 / §11 G-OBS §335"
+  }
+}

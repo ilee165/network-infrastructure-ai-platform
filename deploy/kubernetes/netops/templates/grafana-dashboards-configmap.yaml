@@ -1,0 +1,63 @@
+{{- /*
+GOLDEN-SIGNAL GRAFANA DASHBOARDS — provisioning ConfigMap (W3-T4, ADR-0046 §4;
+PRODUCTION.md §6 / §11 G-OBS §335).
+
+Ships the in-repo golden-signal dashboards-as-code (deploy/observability/dashboards/
+*.json) into the cluster as a Grafana-sidecar-discoverable ConfigMap — NO click-ops
+(ADR-0046 §4: "dashboards are code in the repo ... provisioned via the chart"). The
+`grafana_dashboard: "1"` label is the kube-prometheus-stack / Grafana sidecar
+selector: a Grafana running that sidecar auto-loads every dashboard in `data`
+without a manual import.
+
+SINGLE SOURCE OF TRUTH + LINT GATE
+  The dashboard JSON embedded here via `.Files.Get` is the SAME file the structural
+  lint (deploy/observability/dashboards/lint_dashboards.py) + its bite proof
+  (run-dashboard-lint-bite.sh) validate, and whose panels read the W3-T2 §1
+  recording-rule `slo:` series + the ADR-0015 `netops_*` base series. A renamed base
+  metric breaks the dashboard lint, by design (ADR-0046 §4) — never silently the
+  dashboard.
+
+EXPOSE-DON'T-BUNDLE (ADR-0015 alt.1 / ADR-0046 §4)
+  Renders ONLY when observability.grafanaDashboards.enabled. A default install
+  exposes the `netops_*` series on /metrics but does NOT bundle a Prometheus/Grafana
+  stack; the dashboards ship as opt-in CODE. Running the monitoring stack (and this
+  ConfigMap) stays the operator's choice — same posture as the W3-T2 PrometheusRule.
+
+  NOTE on PG/Neo4j/Redis panels: those dashboards read the conventional
+  postgres_exporter / redis_exporter / neo4j-metrics series (this chart bundles no
+  exporter — expose-don't-bundle). Wiring those exporters is named-deferred to the
+  operator; the dashboard descriptions FLAG it (and the lint asserts the FLAG).
+*/ -}}
+{{- if .Values.observability.grafanaDashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "netops.fullname" . }}-grafana-dashboards
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    netops.ai/golden-signal-dashboards: "true"
+    # Grafana sidecar discovery selector (kube-prometheus-stack default). Override
+    # the key/value via values if your Grafana sidecar watches a different label.
+    {{ .Values.observability.grafanaDashboards.sidecarLabel.key }}: {{ .Values.observability.grafanaDashboards.sidecarLabel.value | quote }}
+    {{- with .Values.observability.grafanaDashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.observability.grafanaDashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{- /*
+  Embed every committed dashboard JSON. `.Files.Glob` walks the chart-relative
+  path; the dashboards live OUTSIDE the chart dir (deploy/observability/dashboards),
+  so they are vendored into the chart at deploy/kubernetes/netops/dashboards/ (a
+  copy kept in lockstep by the sync check) and embedded from there. Each entry is
+  keyed by its filename so the sidecar provisions one dashboard per key.
+  */}}
+  {{- $root := . }}
+  {{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+  {{ base $path }}: |-
+{{ $root.Files.Get $path | indent 4 }}
+  {{- end }}
+{{- end }}

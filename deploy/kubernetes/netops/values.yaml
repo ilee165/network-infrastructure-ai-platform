@@ -1446,6 +1446,24 @@ observability:
     # ruleSelector (e.g. `release: kube-prometheus-stack`) matches it. Keep empty
     # for the default operator discovery; set per your operator's selector.
     labels: {}
+  # -- Golden-signal Grafana dashboards-as-code (W3-T4, ADR-0046 §4; §335). The
+  #    in-repo dashboards (deploy/observability/dashboards/*.json, vendored to the
+  #    chart at dashboards/) ship as a sidecar-discoverable ConfigMap. OFF by
+  #    default (expose-don't-bundle, ADR-0015): the platform exposes the series;
+  #    provisioning the dashboards is the operator's opt-in choice. Enable on a
+  #    cluster running Grafana with the dashboard sidecar (kube-prometheus-stack).
+  grafanaDashboards:
+    enabled: false
+    # The label the Grafana dashboard sidecar selects on. The kube-prometheus-stack
+    # default is `grafana_dashboard: "1"`; override if your sidecar watches another.
+    sidecarLabel:
+      key: grafana_dashboard
+      value: "1"
+    # Extra labels / annotations merged onto the ConfigMap (e.g. a folder
+    # annotation `grafana_folder: NetOps` the sidecar honours). Keep empty for the
+    # default flat provisioning.
+    labels: {}
+    annotations: {}
 
 # -- Device-credential ROTATION (W4-T2, ADR-0040 §1/§3; ADR-0015). A scheduled
 #    CronJob runs the confirm-then-swap, fail-closed device-secret rotation pass:

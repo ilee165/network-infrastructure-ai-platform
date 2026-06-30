@@ -1,0 +1,200 @@
+{
+  "uid": "netops-queue-docs",
+  "title": "NetOps — worker queue: docs golden signals",
+  "netopsSubject": "docs",
+  "description": "Golden-signal dashboard for the docs worker queue (ADR-0046 §4, §335). Built on netops_celery_queue_depth{queue} (ADR-0015 §2) (no per-queue success/duration series exists yet — FLAGGED, see panels). Per-pod CPU/memory saturation is operator-exporter-provided (not bundled).",
+  "tags": [
+    "netops",
+    "golden-signals",
+    "slo",
+    "docs"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Prometheus",
+        "hide": 0,
+        "current": {},
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Latency — queue drain time proxy (depth / drain rate)",
+      "netopsGoldenSignal": "latency",
+      "description": "No per-task duration histogram is emitted for this queue today; the backlog depth is the available latency proxy (a deep, non-draining queue is high task-wait latency). FLAGGED: a per-queue task-runtime histogram is named-deferred to the worker-metrics owner.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (queue) (netops_celery_queue_depth{queue=~\"docs\"})",
+          "legendFormat": "{{queue}} depth",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Traffic — queue depth (pending tasks)",
+      "netopsGoldenSignal": "traffic",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (queue) (netops_celery_queue_depth{queue=~\"docs\"})",
+          "legendFormat": "{{queue}} pending",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Errors — queue backlog growth (stall proxy)",
+      "netopsGoldenSignal": "errors",
+      "description": "No per-queue success/error series is emitted for this queue today; a sustained positive backlog-growth (deriv of netops_celery_queue_depth) is the stall/error proxy. FLAGGED: a per-queue task-failure counter (e.g. netops_celery_task_failures_total{queue}) is named-deferred to the worker-metrics owner.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "deriv(netops_celery_queue_depth{queue=~\"docs\"}[10m])",
+          "legendFormat": "{{queue}} backlog growth /s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Saturation — pending backlog per queue (the queue-stall signal)",
+      "netopsGoldenSignal": "saturation",
+      "description": "netops_celery_queue_depth{queue} — the ADR-0046 §5 queue-stall saturation signal the W3-T5 fault-injection perturbs. A climbing depth without drain is the stall MTTD input.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (queue) (netops_celery_queue_depth{queue=~\"docs\"})",
+          "legendFormat": "{{queue}} depth",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "netopsProvenance": {
+    "task": "W3-T4",
+    "adr": "ADR-0046 §4",
+    "production": "PRODUCTION.md §6 / §11 G-OBS §335"
+  }
+}
