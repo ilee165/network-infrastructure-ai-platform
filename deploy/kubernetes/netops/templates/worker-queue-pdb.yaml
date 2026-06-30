@@ -27,7 +27,16 @@ GUARD: rendered only when workerScaling.enabled AND workerScaling.podDisruptionB
 {{- $generalQueues := list "discovery" "config" "docs" -}}
 {{- range $qname := $generalQueues }}
 {{- $q := index $root.Values.workerScaling.queues $qname }}
-{{- if $q }}
+{{- /*
+SCALE-TO-ZERO GUARD (W2-T3 review fix, F-queuepdb-zero): render a minAvailable:1 PDB
+ONLY for a queue whose ScaledObject floor is >= 1 (discovery/config). A queue that
+KEDA may idle to 0 (docs: minReplicaCount 0, scale-from-zero) has NO floor to
+protect, and a minAvailable:1 PDB over 0 healthy pods is permanently unsatisfiable
+(disruptionsAllowed=0) — it would block kubectl drain / node cordon / rolling node
+upgrades indefinitely. A queue allowed to be 0 must never gate a drain, so it gets
+NO PDB. discovery/config (floor 1) keep minAvailable:1 unchanged and byte-stable.
+*/ -}}
+{{- if and $q (ge (int $q.minReplicaCount) 1) }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

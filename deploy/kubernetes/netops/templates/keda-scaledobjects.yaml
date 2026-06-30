@@ -95,6 +95,18 @@ spec:
 {{- if eq $q.target "packet-capture" }}{{- $ns = $captureNs -}}{{- end }}
 {{- $isPacket := $q.sandboxPinned | default false }}
 {{- /*
+RENDER GUARD (W2-T3 review fix, F-keda-notarget): a GENERAL (non-packet)
+ScaledObject targets the per-queue worker Deployment (worker-queue-deployments.yaml),
+which is gated on (services.worker.enabled AND workerScaling.enabled). This outer
+block is gated on workerScaling.enabled ONLY, so with services.worker.enabled=false
+the general SOs would render with NO target Deployment — orphan SOs that KEDA
+reports ScaledObjectCheckFailed on and never scales. Render a general SO IFF its
+target Deployment renders (i.e. services.worker.enabled). PACKET SOs are exempt:
+they target the always-present ADR-0031 packet-capture/packet-analysis Deployments,
+which do not depend on the base worker.
+*/ -}}
+{{- if or $isPacket $root.Values.services.worker.enabled }}
+{{- /*
 Resolve the scale-target Deployment NAME. Packet queues target the EXISTING
 ADR-0031 Deployment by its literal name (packet-capture / packet-analysis), which
 is sandbox-pinned. General queues target the per-queue worker Deployment rendered
@@ -156,5 +168,6 @@ spec:
       authenticationRef:
         name: {{ include "netops.fullname" $root }}-redis-auth
       {{- end }}
+{{- end }}
 {{ end }}
 {{- end }}

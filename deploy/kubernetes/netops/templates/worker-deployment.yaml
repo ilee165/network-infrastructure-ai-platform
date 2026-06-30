@@ -35,6 +35,18 @@ unchanged — the default render is byte-for-byte identical.
 {{- $workerQueues = append $workerQueues $q -}}
 {{- end -}}
 {{- end -}}
+{{- /*
+EMPTY-RESIDUAL GUARD (W2-T3 review fix, F-worker-emptyQ): when workerScaling is on,
+the scaled general queues (discovery/config/docs) are FILTERED OUT of the base
+worker's -Q list. If an operator scopes services.worker.queues to ONLY the scaled
+set, the residual $workerQueues is EMPTY — the base worker would then render
+`-Q ""`, a celery worker that consumes NO queues (a wasted, idle pod) AND drops the
+`system` default queue the readiness probe's broker round-trip depends on (header
+above). Render the base worker ONLY when at least one non-scaled queue remains; a
+fully-scaled queue set is a valid config that simply produces no base worker. The
+default (residual topology+system) is unaffected and byte-stable.
+*/ -}}
+{{- if gt (len $workerQueues) 0 }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -162,4 +174,5 @@ spec:
           emptyDir:
             sizeLimit: 256Mi
         {{- include "netops.dbClientTlsVolume" . | nindent 8 }}
+{{- end }}
 {{- end }}
