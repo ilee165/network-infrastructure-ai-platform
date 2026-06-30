@@ -18,6 +18,7 @@ Covers the task's security exit criteria:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 
@@ -43,7 +44,7 @@ from app.api import deps
 from app.api.v1 import agents as agents_router
 from app.core.config import Settings
 from app.core.security import Role, create_access_token, hash_password
-from app.models import AgentSessionStatus, AuditLog, Base, ReasoningTraceRow, User
+from app.models import AgentSession, AgentSessionStatus, AuditLog, Base, ReasoningTraceRow, User
 from app.models import Role as RoleRow
 from app.services import audit
 from tests.agents.conftest import SpecialistFactory, _StubSpecialist, scripted_model
@@ -442,3 +443,241 @@ class TestWebSocketStream:
         ):
             ws.receive_json()
         assert exc_info.value.code == agents_router._WS_POLICY_VIOLATION
+
+    async def test_ticket_issued_on_one_replica_redeems_on_the_socket(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        token_for: Callable[[str], str],
+    ) -> None:
+        """A single-use stream ticket (shared store) authenticates the WebSocket.
+
+        Proves the ticket path end-to-end over the shared store: the JWT never
+        appears in the WebSocket URL — only the opaque ticket does.
+        """
+        session_id = await self._start_session(client, token_for)
+        issued = await client.post(
+            f"/api/v1/agents/{session_id}/stream-ticket",
+            headers={"Authorization": f"Bearer {token_for('viewer')}"},
+        )
+        assert issued.status_code == 201, issued.text
+        ticket = issued.json()["ticket"]
+
+        sync_client = TestClient(app)
+        frames: list[dict[str, Any]] = []
+        with sync_client.websocket_connect(
+            f"/api/v1/agents/{session_id}/stream?ticket={ticket}"
+        ) as ws:
+            while True:
+                frame = ws.receive_json()
+                frames.append(frame)
+                if frame.get("event") == "end":
+                    break
+        assert frames[-1]["event"] == "end"
+        # A single-use ticket cannot be redeemed twice (shared store, GETDEL-style).
+        with (
+            pytest.raises(WebSocketDisconnect) as exc_info,
+            sync_client.websocket_connect(
+                f"/api/v1/agents/{session_id}/stream?ticket={ticket}"
+            ) as ws2,
+        ):
+            ws2.receive_json()
+        assert exc_info.value.code == agents_router._WS_POLICY_VIOLATION
+
+
+# --------------------------------------------------------------------------- #
+# WebSocket fan-out: the handler subscribes to the per-session Redis pub/sub
+# channel and relays live frames published by ANY replica (ADR-0044 §2). Driven
+# in a single event loop against a fake WebSocket + a real shared in-memory bus,
+# so cross-replica live delivery through the real ``stream_session`` handler is
+# deterministic (no TestClient cross-thread loop boundary).
+# --------------------------------------------------------------------------- #
+class _FakeWebSocket:
+    """Minimal WebSocket double recording the frames the handler relays."""
+
+    def __init__(self, app: FastAPI, *, session_id: str, token: str) -> None:
+        self.app = app
+        self.path_params = {"session_id": session_id}
+        self.query_params = {"token": token}
+        self.sent: list[dict[str, Any]] = []
+        self.accepted = False
+        self.close_code: int | None = None
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    async def send_json(self, data: dict[str, Any]) -> None:
+        self.sent.append(data)
+
+    async def close(self, code: int = 1000) -> None:
+        self.close_code = code
+
+
+async def _await_subscriber(bus: Any, channel: str, *, timeout: float = 3.0) -> None:
+    """Block until at least one subscriber is attached to *channel* on *bus*.
+
+    The handler subscribes (attaches to the bus) before it accepts and before any
+    real DB I/O completes; the producer must not publish until that attach has
+    happened, or the at-most-once bus correctly drops the frame. Polling the bus
+    directly is deterministic regardless of how many event-loop turns the handler's
+    aiosqlite awaits take.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if bus._subscribers.get(channel):
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"no subscriber attached to {channel} within {timeout}s")
+
+
+class TestWebSocketFanout:
+    async def test_live_frame_published_by_another_replica_is_relayed(
+        self,
+        app: FastAPI,
+        token_for: Callable[[str], str],
+        sessionmaker: async_sessionmaker[AsyncSession],
+        users: dict[str, User],
+    ) -> None:
+        """A frame published for session X by "replica A" is relayed to a peer on "replica B".
+
+        The serving handler (replica B) subscribes to the session channel; a
+        separate fan-out instance (replica A) publishes a live frame; the peer
+        receives it — proving any-replica-serves-any-session, plus that the
+        trace/audit-join id rides the frame and no token is on the channel.
+        """
+        from app.services.agent_stream import (
+            AgentStreamFrame,
+            InMemoryAgentStreamFanout,
+        )
+        from app.services.agent_stream.fanout import _InMemoryBus
+
+        # One shared bus = one Redis: replica A (producer) and replica B (the
+        # serving handler) attach to the same bus.
+        bus = _InMemoryBus()
+        replica_a = InMemoryAgentStreamFanout(bus)
+        app.state.stream_fanout = InMemoryAgentStreamFanout(bus)  # replica B (handler)
+
+        # A RUNNING session (no persisted steps) so the handler enters live relay.
+        viewer = users["viewer"]
+        async with sessionmaker() as db:
+            session_row = AgentSession(
+                user_id=viewer.id,
+                invoking_role="viewer",
+                intent="stream",
+                status=AgentSessionStatus.RUNNING,
+            )
+            db.add(session_row)
+            await db.commit()
+            session_id = session_row.id
+
+        fake_ws = _FakeWebSocket(app, session_id=str(session_id), token=token_for("viewer"))
+        trace_id = "abcd1234abcd1234abcd1234abcd1234"
+        live = AgentStreamFrame(
+            session_id=str(session_id),
+            trace_id=trace_id,
+            data={"kind": "tool_call", "summary": "ping", "trace_id": trace_id},
+        )
+
+        async def _drive_handler() -> None:
+            await agents_router.stream_session(fake_ws, session_id, sessionmaker)  # type: ignore[arg-type]
+
+        from app.services.agent_stream import channel_for
+
+        handler = asyncio.create_task(_drive_handler())
+        # Wait until the handler has actually subscribed before publishing, or the
+        # at-most-once bus would (correctly) drop a frame sent into the gap.
+        await _await_subscriber(bus, channel_for(str(session_id)))
+        await replica_a.publish(live)
+        # Then terminate the session so the handler's poll loop exits cleanly.
+        async with sessionmaker() as db:
+            row = await db.get(AgentSession, session_id)
+            assert row is not None
+            row.status = AgentSessionStatus.COMPLETED
+            await db.commit()
+        await asyncio.wait_for(handler, timeout=5.0)
+
+        # The live frame's content (data) was relayed to the peer.
+        relayed = [f for f in fake_ws.sent if f.get("kind") == "tool_call"]
+        assert relayed, f"the live frame was not relayed; got {fake_ws.sent}"
+        assert relayed[0]["summary"] == "ping"
+        # The trace/audit-join id rode the frame to the peer (G-OBS).
+        assert relayed[0]["trace_id"] == trace_id
+        # The terminal frame closed the stream.
+        assert fake_ws.sent[-1]["event"] == "end"
+        # The bearer token never appears in any relayed frame.
+        token = token_for("viewer")
+        for frame in fake_ws.sent:
+            assert token not in str(frame)
+
+    async def test_token_is_never_published_to_the_channel(
+        self,
+        app: FastAPI,
+        token_for: Callable[[str], str],
+        sessionmaker: async_sessionmaker[AsyncSession],
+        users: dict[str, User],
+    ) -> None:
+        """The serving edge authenticates with the token but never puts it on the bus.
+
+        We capture every payload published to the shared bus while a socket is
+        served and assert the token/JWT is absent (the secret-surface bite). A
+        negative control: a frame that tried to carry the token would be refused
+        by ``AgentStreamFrame.to_payload`` (see test_agent_stream_fanout).
+        """
+        from app.services.agent_stream import (
+            AgentStreamFrame,
+            InMemoryAgentStreamFanout,
+        )
+        from app.services.agent_stream.fanout import _InMemoryBus
+
+        published: list[str] = []
+        bus = _InMemoryBus()
+        original_publish = bus.publish
+
+        async def _spy_publish(channel: str, frame: AgentStreamFrame) -> None:
+            published.append(frame.to_payload())
+            await original_publish(channel, frame)
+
+        bus.publish = _spy_publish  # type: ignore[method-assign]
+        replica_a = InMemoryAgentStreamFanout(bus)
+        app.state.stream_fanout = InMemoryAgentStreamFanout(bus)
+
+        viewer = users["viewer"]
+        async with sessionmaker() as db:
+            session_row = AgentSession(
+                user_id=viewer.id,
+                invoking_role="viewer",
+                intent="stream",
+                status=AgentSessionStatus.RUNNING,
+            )
+            db.add(session_row)
+            await db.commit()
+            session_id = session_row.id
+
+        token = token_for("viewer")
+        fake_ws = _FakeWebSocket(app, session_id=str(session_id), token=token)
+
+        async def _drive_handler() -> None:
+            await agents_router.stream_session(fake_ws, session_id, sessionmaker)  # type: ignore[arg-type]
+
+        from app.services.agent_stream import channel_for
+
+        handler = asyncio.create_task(_drive_handler())
+        await _await_subscriber(bus, channel_for(str(session_id)))
+        await replica_a.publish(
+            AgentStreamFrame(
+                session_id=str(session_id),
+                trace_id="0" * 32,
+                data={"kind": "plan", "summary": "go"},
+            )
+        )
+        async with sessionmaker() as db:
+            row = await db.get(AgentSession, session_id)
+            assert row is not None
+            row.status = AgentSessionStatus.COMPLETED
+            await db.commit()
+        await asyncio.wait_for(handler, timeout=5.0)
+
+        assert published, "the producer published at least one frame onto the channel"
+        for payload in published:
+            assert token not in payload, "the bearer token must never reach the shared channel"

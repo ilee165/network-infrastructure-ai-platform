@@ -58,9 +58,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # fails open and the login lockout fails closed, per design.
         from redis.asyncio import from_url
 
+        from app.services.agent_stream import (
+            RedisAgentStreamFanout,
+            RedisStreamTicketStore,
+        )
         from app.services.rate_limit import RedisRateLimiter
 
-        app_.state.rate_limiter = RedisRateLimiter(from_url(app_settings.redis_url))
+        # One Sentinel-aware client (W1-T4 wires ``redis_url`` at the Sentinel
+        # service, so no static host pin) shared by the rate limiter and the
+        # stateless agent-session fan-out + ticket store (ADR-0044 §2).
+        redis_client = from_url(app_settings.redis_url)
+        app_.state.rate_limiter = RedisRateLimiter(redis_client)
+        # W2-T2: externalize WebSocket session state to Redis so any ``api``
+        # replica serves any session — the pub/sub fan-out for live frames and the
+        # shared single-use stream-ticket store (redeemable cross-replica).
+        app_.state.stream_fanout = RedisAgentStreamFanout(redis_client)
+        app_.state.stream_ticket_store = RedisStreamTicketStore(redis_client)
         # P1 W6-T1/T2 (ADR-0032 §2/§5): select the active KEK provider, enforce the
         # prod-grade gate, surface its posture on the startup banner + /metrics, and
         # audit ``kek.provider.select`` (identifiers/versions only, never key bytes).
