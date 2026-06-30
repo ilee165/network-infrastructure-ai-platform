@@ -20,6 +20,13 @@
 #   - PDB maxUnavailable-only      -> over a small tier a drain can reach zero;
 #     §3.2 names minAvailable as the floor             (§3.2)
 #
+# Positives (compliant shapes that MUST NOT be false-rejected):
+#   - HPA minReplicas 2 + CPU + request-rate dual signal (standard render)
+#   - HPA CPU-only + netops.ai/requestrate-disabled=true annotation (opt-out render
+#     when requestRate.enabled=false — cluster has no Prometheus adapter; a deliberate
+#     opt-out must not be treated the same as an accidental regression)
+#   - PDB minAvailable 1
+#
 # Run:  bash deploy/kubernetes/policy/fixtures/run-api-hpa-pdb-bite.sh
 # CI:   the `infra` job runs this after the conftest gate (needs only conftest).
 set -euo pipefail
@@ -34,6 +41,7 @@ NEG_NO_CPU="${HERE}/api_hpa_no_cpu_DENY.yaml"
 NEG_PDB_ZERO="${HERE}/api_pdb_zero_DENY.yaml"
 NEG_PDB_MAXUNAVAIL="${HERE}/api_pdb_maxunavailable_DENY.yaml"
 POS_HPA="${HERE}/api_hpa_compliant_PASS.yaml"
+POS_HPA_OPTOUT="${HERE}/api_hpa_cpu_only_optout_PASS.yaml"
 POS_PDB="${HERE}/api_pdb_compliant_PASS.yaml"
 
 fail=0
@@ -113,6 +121,9 @@ expect_deny "pdb maxunavailable-only" "${NEG_PDB_MAXUNAVAIL}" "must set an integ
 echo "-- positive (compliant api HPA) MUST PASS --"
 expect_pass "hpa compliant" "${POS_HPA}"
 
+echo "-- positive (cpu-only HPA with requestrate-disabled annotation — opt-out) MUST PASS --"
+expect_pass "hpa cpu-only opt-out (requestrate-disabled annotation)" "${POS_HPA_OPTOUT}"
+
 echo "-- positive (compliant api PDB) MUST PASS --"
 expect_pass "pdb compliant" "${POS_PDB}"
 
@@ -120,4 +131,4 @@ if [ "${fail}" -ne 0 ]; then
   echo "::error::api HPA + PDB policy bite FAILED" >&2
   exit 1
 fi
-echo "api HPA + PDB policy bite: all directions correct (floor>=2 + CPU+req-rate dual signal + PDB minAvailable>=1)."
+echo "api HPA + PDB policy bite: all directions correct (floor>=2 + CPU+req-rate dual signal + opt-out annotation + PDB minAvailable>=1)."

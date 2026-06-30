@@ -3444,6 +3444,16 @@ api_hpa_has_request_rate_metric(hpa) if {
 	m.type == "External"
 }
 
+# Explicit opt-out: the template emits netops.ai/requestrate-disabled="true" when
+# requestRate.enabled=false (cluster has no Prometheus adapter). A CPU-only HPA
+# carrying that annotation is an INTENTIONAL choice, not a silent regression —
+# the deny rule is suppressed. A CPU-only HPA WITHOUT the annotation (i.e. a
+# chart render where the request-rate block was silently dropped) is still DENIED.
+# See api-hpa.yaml and values.yaml services.api.autoscaling.requestRate.enabled.
+api_hpa_has_request_rate_metric(hpa) if {
+	object.get(hpa.metadata.annotations, "netops.ai/requestrate-disabled", "") == "true"
+}
+
 # --- api PDB: minAvailable must guarantee >= 1 ready replica (PRODUCTION.md §3.2:
 # "a node drain must never take api to zero"). An integer minAvailable must be
 # >= 1; a PDB that omits minAvailable (relying on maxUnavailable, which over a

@@ -1,0 +1,31 @@
+# POSITIVE — CPU-only api HPA carrying the explicit opt-out annotation
+# (netops.ai/requestrate-disabled: "true"). This is the shape rendered by the
+# chart when services.api.autoscaling.requestRate.enabled=false (cluster has no
+# Prometheus adapter). The annotation marks the CPU-only render as an INTENTIONAL
+# choice, so the apiscale deny rule must NOT fire. MUST PASS (no false-reject).
+# Contrast with api_hpa_cpu_only_DENY.yaml which omits the annotation and
+# represents an ACCIDENTAL loss of the request-rate signal — that must still DENY.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: netops-api
+  namespace: netops
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: api
+  annotations:
+    netops.ai/requestrate-disabled: "true"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: netops-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

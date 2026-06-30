@@ -51,6 +51,15 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "netops.componentLabels" (dict "ctx" . "component" "api") | nindent 4 }}
+  {{- if not $a.requestRate.enabled }}
+  annotations:
+    # The request-rate Pods metric is explicitly disabled (requestRate.enabled=false
+    # — cluster has no Prometheus adapter). This annotation tells the conftest
+    # apiscale deny rule that the CPU-only render is an INTENTIONAL opt-out, not
+    # a silent regression. A CPU-only HPA WITHOUT this annotation is still DENIED
+    # (accidental loss of the dual-signal). See hardening.rego api_hpa_has_request_rate_metric.
+    netops.ai/requestrate-disabled: "true"
+  {{- end }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

@@ -655,6 +655,31 @@ jobs:
       - name: conftest api HPA + PDB bite (floor>=2 + CPU+req-rate + PDB minAvailable>=1)
         run: bash deploy/kubernetes/policy/fixtures/run-api-hpa-pdb-bite.sh
 
+      # W2-T1 (ADR-0043 §1) — api HPA requestRate opt-out render + policy validation.
+      # requestRate.enabled=false is a DOCUMENTED opt-out for clusters without a
+      # Prometheus adapter (values.yaml services.api.autoscaling.requestRate). The
+      # template emits netops.ai/requestrate-disabled=true on the HPA; the rego rule
+      # suppresses the deny for that annotation. This step renders with the flag OFF
+      # and runs conftest to prove the opt-out render is accepted (not vacuously — the
+      # HPA IS in the render and the policy runs over it). A CPU-only HPA WITHOUT the
+      # annotation (api_hpa_cpu_only_DENY.yaml) is still rejected by the bite above.
+      - name: Render + validate api HPA requestRate opt-out (requestRate.enabled=false)
+        run: |
+          set -o pipefail
+          helm template netops deploy/kubernetes/netops \
+            --namespace netops --kube-version 1.29.0 \
+            --set services.api.autoscaling.requestRate.enabled=false | tr -d '\r' > rendered-hpa-optout.yaml
+          test -s rendered-hpa-optout.yaml
+          kubeconform -strict -summary \
+            -kubernetes-version 1.29.0 \
+            -ignore-missing-schemas \
+            -skip ClusterPolicy,Cluster,Pooler \
+            rendered-hpa-optout.yaml
+          kube-linter lint rendered-hpa-optout.yaml --config deploy/kubernetes/.kube-linter.yaml
+          conftest test rendered-hpa-optout.yaml \
+            --policy deploy/kubernetes/policy/rego \
+            --all-namespaces
+
       # W1-T1 (ADR-0042) — CloudNativePG HA tier render + policy validation. The
       # CNPG Cluster/Pooler/PriorityClass are OPT-IN (default OFF), so the default
       # `rendered.yaml` above does NOT contain them and the cnpg.* conftest rules
