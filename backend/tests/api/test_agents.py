@@ -824,6 +824,25 @@ class TestWebSocketFanout:
 
         handler = asyncio.create_task(_drive_handler())
         await _await_subscriber(bus, channel_for(str(session_id)))
+
+        # Prove the DB-replay source contributed FIRST: the persisted step must reach
+        # the wire before any live frame is published. Without this the final
+        # ``len == 1`` could be satisfied by live-relay-only (a broken DB replay) or
+        # DB-replay-only (a dropped live relay); asserting the pre-publish state pins
+        # that BOTH sources observe the step and the dedup is what keeps it single.
+        for _ in range(500):
+            if any(f.get("kind") == "plan" and f.get("summary") == "route" for f in fake_ws.sent):
+                break
+            await asyncio.sleep(0.01)
+        pre_publish = [
+            f for f in fake_ws.sent if f.get("kind") == "plan" and f.get("summary") == "route"
+        ]
+        assert len(pre_publish) == 1, (
+            f"DB replay must deliver the persisted step before the live frame; got {pre_publish}"
+        )
+
+        # Now publish the IDENTICAL live frame — the relay must recognise it as the
+        # already-replayed step (shared emitted_keys) and NOT re-send it.
         await replica_a.publish(
             AgentStreamFrame(session_id=str(session_id), trace_id=trace.trace_id, data=live_data)
         )
@@ -886,4 +905,11 @@ class TestWebSocketFanout:
             "a still-RUNNING run past its poll budget must not send a terminal end; "
             f"got {end_frames}"
         )
-        assert fake_ws.close_code is not None, "the socket must still be closed"
+        # Assert the GRACEFUL close (bare websocket.close() -> 1000), not merely "any
+        # close": an early auth/policy/not-found rejection would close with
+        # _WS_POLICY_VIOLATION (1008) before ever reaching the poll-budget path, and
+        # `is not None` would pass on that wrong reason too.
+        assert fake_ws.close_code == 1000, (
+            "a budget-exhausted still-RUNNING socket must close gracefully (1000), not "
+            f"via an early {agents_router._WS_POLICY_VIOLATION} rejection; got {fake_ws.close_code}"
+        )
