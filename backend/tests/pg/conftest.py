@@ -52,14 +52,24 @@ from sqlalchemy.pool import NullPool
 #: the dev/CI credential is ``netops``/``netops`` on an ephemeral throwaway DB.
 _DEFAULT_PG_URL = "postgresql+asyncpg://netops:netops@127.0.0.1:5432/netops_test"
 
-#: Tables every W4-control test writes to. Truncated per test (CASCADE so the
-#: partitioned ``audit_log`` children and FK-referencing rows go too) for a
-#: deterministic, order-independent fixture (Requirement 6).
+#: Tables the PG tests write to. Truncated per test (CASCADE so the partitioned
+#: ``audit_log`` children and FK-referencing rows go too) for a deterministic,
+#: order-independent fixture (Requirement 6). Beyond the W4-control tables this
+#: adds the W2-T4 worker-idempotency surface: ``config_snapshots`` (config-capture
+#: redelivery dedup) and the ChangeRequest spine (``change_requests`` / ``approvals``
+#: + the ``users`` the four-eyes guard compares — CASCADE removes the CR/approval/FK
+#: rows the throwaway users own; the migration-seeded ``roles`` are intentionally
+#: NOT truncated so a freshly-created test user can reference a real role).
 _RESET_TABLES = (
     "audit_chain_checkpoint",
     "audit_log",
+    "config_backup_runs",
+    "config_snapshots",
+    "approvals",
+    "change_requests",
     "devices",
     "device_credentials",
+    "users",
 )
 
 

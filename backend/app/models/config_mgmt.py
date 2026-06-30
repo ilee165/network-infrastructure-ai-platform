@@ -50,6 +50,7 @@ from app.models.mixins import JSON_VARIANT, TimestampMixin, UtcDateTime, UuidPkM
 __all__ = [
     "EMBEDDING_DIM",
     "CompliancePolicy",
+    "ConfigBackupRun",
     "ConfigSnapshot",
     "ConfigSource",
     "Document",
@@ -75,6 +76,30 @@ class ConfigSource(StrEnum):
 
     SCHEDULED = "scheduled"
     ON_DEMAND = "on_demand"
+
+
+class ConfigBackupRun(Base):
+    """One nightly-backup run record — the idempotency guard for ``config.nightly_backup``.
+
+    ``run_uuid`` is both the primary key and the idempotency token: the beat caller
+    (or a deterministic slot-derived UUID) supplies it before the fan-out, and the
+    INSERT uses ``ON CONFLICT DO NOTHING``. A redelivered ``nightly_backup`` task
+    that inserts the same ``run_uuid`` gets no row inserted (``rowcount == 0``) and
+    skips the audit emit + fan-out, collapsing the double-delivery to exactly one
+    started/finished audit pair and one wave of captures (ADR-0008 §5, ADR-0043 §6).
+
+    ``status`` is a short VARCHAR updated once at run completion (``"running"`` →
+    terminal value). It is NOT append-only — it is a mutable lifecycle column, not
+    part of the audit hash chain.
+    """
+
+    __tablename__ = "config_backup_runs"
+
+    run_uuid: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    scheduled_slot: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
 
 class DocumentKind(StrEnum):

@@ -27,13 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import secrets
-import time
 import uuid
 from collections.abc import Callable
 from typing import Annotated, Final
 
-from fastapi import APIRouter, Depends, Query, WebSocket
+from fastapi import APIRouter, Depends, Query, Request, WebSocket
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy import func, select
@@ -42,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import db
 from app.agents import build_default_supervisor
 from app.agents.framework.supervisor import SupervisorState
-from app.agents.framework.traces import ReasoningTrace, TraceStep
+from app.agents.framework.traces import PostgresTraceRecorder, ReasoningTrace, TraceStep
 from app.api.deps import (
     TOKEN_TYPE_ACCESS,
     enforce_api_rate_limit,
@@ -98,6 +96,13 @@ from app.schemas.packet_api import (
 )
 from app.services import audit
 from app.services.agent_session import AgentSessionService
+from app.services.agent_stream import (
+    AgentStreamFanout,
+    AgentStreamFrame,
+    InMemoryAgentStreamFanout,
+    InMemoryStreamTicketStore,
+    StreamTicketStore,
+)
 from app.services.change_requests import ChangeRequestService
 from app.workers.celery_app import QUEUE_PACKET_CAPTURE, celery_app
 
@@ -146,20 +151,78 @@ _STREAM_MAX_POLLS = 1500
 #: is destroyed on first use so it cannot be replayed.
 _TICKET_TTL_SECONDS = 30
 
+
 # ---------------------------------------------------------------------------
-# In-process single-use stream-ticket store.
-#
-# Maps opaque ticket string -> (user_id, session_id, expiry_epoch_float).
-# Tickets are created by ``POST /agents/{id}/stream-ticket`` (authenticated
-# via the normal Authorization header) and consumed once by the WebSocket
-# upgrade handler, so the bearer JWT never appears in a URL.
-#
-# This implementation is intentionally process-local and therefore correct for
-# single-replica deployments; a multi-replica deployment should replace this
-# dict with a shared Redis SET EX / GETDEL pair without changing any of the
-# API contracts.
+# Shared single-use stream-ticket store + per-session pub/sub fan-out (W2-T2,
+# ADR-0044 §2). Both are externalized to Redis so the WebSocket stream is
+# STATELESS — a ticket issued on replica A is redeemable on replica B, and a
+# session opened on replica A is served (its live frames relayed) from replica B.
+# Production binds the Redis-backed implementations onto ``app.state`` at startup
+# over the Sentinel-aware client; tests override the two DI seams below with the
+# in-memory implementations (no Redis, no network).
 # ---------------------------------------------------------------------------
-_ticket_store: dict[str, tuple[uuid.UUID, uuid.UUID, float]] = {}
+def get_stream_ticket_store(websocket: WebSocket) -> StreamTicketStore:
+    """Return the shared single-use stream-ticket store (overridable DI seam).
+
+    Production reads the Redis-backed store bound on ``app.state`` at startup (a
+    ticket issued on any replica redeems on any replica, ADR-0044 §2). When none
+    is bound (a bare dev run) a process-local store is used. Tests override this
+    seam with an :class:`InMemoryStreamTicketStore`.
+    """
+    store = getattr(websocket.app.state, "stream_ticket_store", None)
+    if store is None:
+        store = InMemoryStreamTicketStore()
+        websocket.app.state.stream_ticket_store = store
+    return store
+
+
+def get_stream_ticket_store_http(request: Request) -> StreamTicketStore:
+    """HTTP-scope variant of :func:`get_stream_ticket_store` for the ticket-issue route.
+
+    The ``POST /stream-ticket`` route runs in an HTTP scope (no WebSocket), so it
+    resolves the same ``app.state`` store via the request. Tests override
+    :func:`get_stream_ticket_store` and this both bind to the same instance.
+    """
+    store = getattr(request.app.state, "stream_ticket_store", None)
+    if store is None:
+        store = InMemoryStreamTicketStore()
+        request.app.state.stream_ticket_store = store
+    return store
+
+
+def get_stream_fanout(websocket: WebSocket) -> AgentStreamFanout:
+    """Return the per-session pub/sub fan-out (overridable DI seam, ADR-0044 §2).
+
+    Production reads the Redis pub/sub fan-out bound on ``app.state`` at startup
+    over the Sentinel-aware client; the serving replica subscribes to the session
+    channel and relays live frames. When none is bound (a bare dev run) an
+    in-memory fan-out is used. Tests override this seam so two "replicas" can share
+    one in-memory bus and prove cross-replica delivery without a real Redis.
+    """
+    fanout = getattr(websocket.app.state, "stream_fanout", None)
+    if fanout is None:
+        fanout = InMemoryAgentStreamFanout()
+        websocket.app.state.stream_fanout = fanout
+    return fanout
+
+
+def get_stream_fanout_http(request: Request) -> AgentStreamFanout:
+    """HTTP-scope variant of :func:`get_stream_fanout` for the run producer.
+
+    ``POST /agents`` drives the supervisor in an HTTP scope (no WebSocket), and it
+    is the PRODUCER side of the fan-out: the trace recorder it builds publishes
+    each persisted step as a live frame (ADR-0044 §2/§6). It must resolve the SAME
+    ``app.state.stream_fanout`` instance the WebSocket subscriber reads — so a step
+    fanned out by a run on this replica is relayed by whichever replica serves the
+    socket. Binding the lazily-created in-memory fan-out back onto ``app.state``
+    (as the WS seam also does) keeps the producer and subscriber on one bus in a
+    bare dev run; tests override :func:`get_stream_fanout` to share an explicit bus.
+    """
+    fanout = getattr(request.app.state, "stream_fanout", None)
+    if fanout is None:
+        fanout = InMemoryAgentStreamFanout()
+        request.app.state.stream_fanout = fanout
+    return fanout
 
 
 def get_change_request_service(sessionmaker: SessionMaker) -> ChangeRequestService:
@@ -268,8 +331,12 @@ async def _load_session_or_404(
 async def _load_traces(
     sessionmaker: async_sessionmaker[AsyncSession], session_id: uuid.UUID
 ) -> list[ReasoningTrace]:
-    """Reload every reasoning trace linked to *session_id*, oldest first."""
-    service = AgentSessionService(sessionmaker)
+    """Reload every reasoning trace linked to *session_id*, oldest first.
+
+    This is a pure DB read (the durable replay path), so it uses the
+    :class:`PostgresTraceRecorder` directly — never the publishing producer
+    wrapper, which only the *run* path needs to fan live frames onto the channel.
+    """
     async with sessionmaker() as session:
         rows = (
             (
@@ -282,7 +349,7 @@ async def _load_traces(
             .scalars()
             .all()
         )
-    recorder = service.recorder_for(session_id)
+    recorder = PostgresTraceRecorder(sessionmaker, session_id=session_id)
     return [await recorder.get(row_id.hex) for row_id in rows]
 
 
@@ -318,41 +385,6 @@ def _answer_of(state: SupervisorState) -> str:
     return content if isinstance(content, str) else str(content)
 
 
-def _issue_ticket(user_id: uuid.UUID, session_id: uuid.UUID) -> str:
-    """Mint an opaque single-use ticket and store it with a TTL.
-
-    Purges expired entries on each call so the dict cannot grow unboundedly in
-    long-running processes — the bounded rate of ticket issuance keeps this O(n)
-    purge cheap in practice.
-    """
-    now = time.monotonic()
-    expired = [k for k, (_, _, exp) in _ticket_store.items() if exp <= now]
-    for k in expired:
-        del _ticket_store[k]
-
-    ticket = secrets.token_urlsafe(32)
-    _ticket_store[ticket] = (user_id, session_id, now + _TICKET_TTL_SECONDS)
-    return ticket
-
-
-def _consume_ticket(ticket: str, session_id: uuid.UUID) -> uuid.UUID | None:
-    """Exchange *ticket* for the issuing user_id, or return ``None``.
-
-    The ticket is removed on first call (single-use); expired tickets are also
-    rejected.  Returns ``None`` for unknown, expired, or session-mismatched
-    tickets — callers must not distinguish these cases to the client.
-    """
-    entry = _ticket_store.pop(ticket, None)
-    if entry is None:
-        return None
-    user_id, stored_session_id, expiry = entry
-    if time.monotonic() > expiry:
-        return None
-    if stored_session_id != session_id:
-        return None
-    return user_id
-
-
 @router.post(
     "/{session_id}/stream-ticket",
     response_model=StreamTicketResponse,
@@ -363,6 +395,7 @@ async def create_stream_ticket(
     session_id: uuid.UUID,
     user: Viewer,
     sessionmaker: SessionMaker,
+    ticket_store: Annotated[StreamTicketStore, Depends(get_stream_ticket_store_http)],
 ) -> StreamTicketResponse:
     """Issue a short-lived single-use ticket for the trace-stream WebSocket.
 
@@ -370,15 +403,20 @@ async def create_stream_ticket(
     client would otherwise have to embed the JWT in the URL — leaking it into
     server access logs, browser history, and ``Referer`` headers.  This
     endpoint issues an opaque 30-second ticket instead; the WebSocket upgrade
-    handler calls :func:`_consume_ticket` to redeem it (single use, TTL-bound)
-    and the JWT never appears in a URL.
+    handler redeems it (single use, TTL-bound) and the JWT never appears in a URL.
+
+    The ticket is stored in the **shared** store (Redis in prod, ADR-0044 §2) so
+    a ticket issued on this replica is redeemable on any replica — the WebSocket
+    stream is stateless and not pinned to the issuing replica.
 
     Returns 404 when the session does not exist (consistent with the REST
     ``GET`` surface) so the caller cannot probe for session ids via ticket
     issuance.
     """
     await _load_session_or_404(sessionmaker, session_id)
-    ticket = _issue_ticket(user.id, session_id)
+    ticket = await ticket_store.issue(
+        user_id=user.id, session_id=session_id, ttl_seconds=_TICKET_TTL_SECONDS
+    )
     return StreamTicketResponse(ticket=ticket)
 
 
@@ -389,6 +427,7 @@ async def start_session(
     sessionmaker: SessionMaker,
     settings: Annotated[Settings, Depends(get_app_settings)],
     builder: Annotated[object, Depends(get_supervisor_builder)],
+    stream_fanout: Annotated[AgentStreamFanout, Depends(get_stream_fanout_http)],
 ) -> StartSessionResponse:
     """Start an agent session and drive the supervisor to completion.
 
@@ -399,7 +438,10 @@ async def start_session(
     run produces is linked back to the session with its own audit entry.
     """
     role = Role.from_name(user.role.name) or Role.VIEWER
-    service = AgentSessionService(sessionmaker)
+    # Pass the per-session fan-out so ``recorder_for`` returns the production
+    # PRODUCER (ADR-0044 §2/§6): every persisted reasoning step is fanned out as a
+    # live frame on the session channel, served by any subscribing replica.
+    service = AgentSessionService(sessionmaker, stream_fanout=stream_fanout)
 
     run_session = await service.start(user_id=user.id, role=role, intent=body.intent)
     await _audit(
@@ -480,20 +522,33 @@ async def stream_session(
     session_id: uuid.UUID,
     sessionmaker: SessionMaker,
 ) -> None:
-    """Stream a session's recorded reasoning steps in order, then a terminal frame.
+    """Stream a session's reasoning steps, then a terminal frame — statelessly.
 
-    Authentication mirrors the REST surface: the peer presents the same JWT
-    access token as a ``token`` query parameter. An unauthenticated or
-    unauthorized peer is closed with :data:`_WS_POLICY_VIOLATION` *before* any
-    trace frame is sent, so the socket never leaks a reasoning trace to a
-    caller who could not read it over REST.
+    Authentication mirrors the REST surface and happens **at the edge, per
+    connection** (ADR-0044 §3): the peer presents a single-use stream ticket
+    (preferred) or the same JWT access token as a ``token`` query parameter. An
+    unauthenticated or unauthorized peer is closed with :data:`_WS_POLICY_VIOLATION`
+    *before* any frame is sent, so the socket never leaks a trace to a caller who
+    could not read it over REST. The bearer token is verified here and is **never**
+    published onto the shared pub/sub channel.
 
-    Settings are read from ``websocket.app.state`` (a WebSocket scope has no
-    HTTP :class:`~fastapi.Request`, so the REST ``get_app_settings`` dependency
-    cannot resolve here).
+    Statelessness (ADR-0044 §2/§5): this replica **subscribes to the session's
+    Redis pub/sub channel** (keyed by the opaque session id) and relays live frames
+    to its peer — so a session opened on another replica is served here without
+    affinity. Postgres remains the durable record: persisted steps are replayed
+    from the DB first (completeness / reconnect backfill), then live frames are
+    relayed best-effort (at-most-once on the wire) until the run reaches a terminal
+    status. A frame missed on the live wire is recovered by the DB replay, never
+    lost session state.
+
+    Settings/fan-out/ticket-store are read from ``websocket.app.state`` (a
+    WebSocket scope has no HTTP :class:`~fastapi.Request`, so the REST
+    ``get_app_settings`` dependency cannot resolve here).
     """
     settings: Settings = websocket.app.state.settings
-    user = await _authenticate_socket(websocket, sessionmaker, settings)
+    fanout = get_stream_fanout(websocket)
+    ticket_store = get_stream_ticket_store(websocket)
+    user = await _authenticate_socket(websocket, sessionmaker, settings, ticket_store)
     if user is None:
         return  # _authenticate_socket already closed the socket.
 
@@ -503,25 +558,107 @@ async def stream_session(
         await websocket.close(code=_WS_POLICY_VIOLATION)
         return
 
-    await websocket.accept()
-    emitted = 0
     answer = ""
     status = AgentSessionStatus.RUNNING
-    for _ in range(_STREAM_MAX_POLLS):
-        row = await _load_session_or_404(sessionmaker, session_id)
-        status = row.status
-        traces = await _load_traces(sessionmaker, session_id)
-        steps = [step for trace in traces for step in trace.steps]
-        while emitted < len(steps):
-            await websocket.send_json(_step_read(steps[emitted]).model_dump(mode="json"))
-            emitted += 1
-        if status is not AgentSessionStatus.RUNNING:
-            answer = _final_answer_from_traces(traces)
-            break
-        await asyncio.sleep(_STREAM_POLL_SECONDS)
+    # A step can be observed from TWO sources — the durable DB replay and the live
+    # pub/sub relay — and the producer makes a live frame byte-identical to its
+    # replayed read model (traces._step_read_model). Track a stable per-step key so
+    # a step already sent from one source is not re-sent from the other (at-most-once
+    # on the wire). The key is derived from the read-model fields the producer also
+    # fills, so it matches across both sources.
+    emitted_keys: set[str] = set()
+    # Subscribe BEFORE accepting the socket (and before the DB replay): once we
+    # are attached to the channel, a frame published by any replica is buffered on
+    # our subscription rather than lost in the accept/replay gap.
+    async with fanout.subscribe(str(session_id)) as live_frames:
+        await websocket.accept()
+        emitted = 0
+        for _ in range(_STREAM_MAX_POLLS):
+            row = await _load_session_or_404(sessionmaker, session_id)
+            status = row.status
+            traces = await _load_traces(sessionmaker, session_id)
+            steps = [step for trace in traces for step in trace.steps]
+            # Durable replay: emit any newly persisted step (completeness, §5).
+            while emitted < len(steps):
+                data = _step_read(steps[emitted]).model_dump(mode="json")
+                key = _step_frame_key(data)
+                if key not in emitted_keys:
+                    emitted_keys.add(key)
+                    await websocket.send_json(data)
+                emitted += 1
+            # Liveness: relay any live frames already fanned out for this session
+            # (ADR-0044 §2). Done on EVERY iteration — including the terminal one —
+            # so a frame that arrived on the wire just before the run finished is
+            # still delivered before the end frame rather than needlessly dropped.
+            # Cross-source dedup: a frame whose step was already replayed from the DB
+            # (or vice-versa) is skipped via the shared ``emitted_keys`` set.
+            await _relay_pending_live_frames(websocket, live_frames, emitted_keys)
+            if status is not AgentSessionStatus.RUNNING:
+                answer = _final_answer_from_traces(traces)
+                break
+            await asyncio.sleep(_STREAM_POLL_SECONDS)
 
-    await websocket.send_json(AgentStreamEnd(status=status, answer=answer).model_dump(mode="json"))
+    # Only emit the terminal ``end`` frame when the run actually REACHED a terminal
+    # status. If the poll budget was exhausted while the run is still RUNNING,
+    # sending AgentStreamEnd(status=running) would be a contradictory, misleading
+    # terminal frame (event=end yet not finished, empty answer) — instead close
+    # without claiming termination so the client knows to reconnect (F-agents-588).
+    if status is not AgentSessionStatus.RUNNING:
+        await websocket.send_json(
+            AgentStreamEnd(status=status, answer=answer).model_dump(mode="json")
+        )
     await websocket.close()
+
+
+def _step_frame_key(data: dict[str, object]) -> str:
+    """Stable cross-source identity of a streamed step read model.
+
+    Both the DB-replay read model (``_step_read(step).model_dump``) and the live
+    fanned-out frame (``traces._step_read_model``) carry the same fields, so a key
+    built from them matches a step regardless of which source observed it first.
+    ``occurred_at`` is monotonic per run and the ``(kind, summary, tool_name)``
+    triple disambiguates same-instant steps.
+    """
+    return "\x1f".join(
+        (
+            str(data.get("kind")),
+            str(data.get("occurred_at")),
+            str(data.get("summary")),
+            str(data.get("tool_name")),
+        )
+    )
+
+
+async def _relay_pending_live_frames(
+    websocket: WebSocket,
+    live_frames: object,
+    emitted_keys: set[str],
+) -> None:
+    """Relay any live pub/sub frames currently available, without blocking.
+
+    Drains the subscription with a near-zero timeout so the relay loop keeps its
+    terminal-status poll cadence: a frame that has arrived on the channel is sent
+    to the peer immediately; if none has arrived this returns at once. Best-effort
+    (ADR-0044 §5) — no buffering beyond what the subscription already holds.
+
+    Cross-source dedup: a frame whose step was already emitted from the DB replay
+    (or an earlier live frame) is skipped via the shared ``emitted_keys`` set so a
+    persisted step — published as a frame byte-identical to its replay — is sent at
+    most once on the wire (F-agents-582 / F-agents-609).
+    """
+    anext_frame = live_frames.__anext__  # type: ignore[attr-defined]
+    while True:
+        try:
+            frame: AgentStreamFrame = await asyncio.wait_for(
+                anext_frame(), timeout=_STREAM_POLL_SECONDS
+            )
+        except (TimeoutError, StopAsyncIteration):
+            return
+        key = _step_frame_key(frame.data)
+        if key in emitted_keys:
+            continue
+        emitted_keys.add(key)
+        await websocket.send_json(frame.data)
 
 
 def _final_answer_from_traces(traces: list[ReasoningTrace]) -> str:
@@ -537,20 +674,24 @@ async def _authenticate_socket(
     websocket: WebSocket,
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: Settings,
+    ticket_store: StreamTicketStore,
 ) -> User | None:
     """Resolve either a ``ticket`` or ``token`` query param to a ``viewer+`` user.
 
     Preferred path — ``ticket``: the client obtained a short-lived single-use
     opaque ticket via ``POST /agents/{id}/stream-ticket`` (authenticated with
-    the normal ``Authorization`` header).  :func:`_consume_ticket` redeems the
-    ticket (single-use, TTL-enforced) so the bearer JWT never appears in a URL.
+    the normal ``Authorization`` header). The ticket is redeemed once against the
+    **shared** store (Redis in prod, ADR-0044 §2) so a ticket issued on any replica
+    is redeemable here and the bearer JWT never appears in a URL.
 
     Fallback path — ``token``: a raw JWT access token passed directly.  This
     path exists so internal tooling and existing tests can reach the stream
     without the ticket round-trip; the fallback is not used by the browser SPA.
 
-    On any failure the socket is closed with :data:`_WS_POLICY_VIOLATION` and
-    ``None`` is returned; the caller must not proceed.
+    Either way auth happens **at this serving edge** and the bearer token is never
+    placed on the shared pub/sub channel (ADR-0044 §3). On any failure the socket
+    is closed with :data:`_WS_POLICY_VIOLATION` and ``None`` is returned; the
+    caller must not proceed.
     """
     session_id_str = websocket.path_params.get("session_id", "")
 
@@ -561,7 +702,7 @@ async def _authenticate_socket(
         except ValueError:
             await websocket.close(code=_WS_POLICY_VIOLATION)
             return None
-        user_id = _consume_ticket(ticket, session_id)
+        user_id = await ticket_store.consume(ticket=ticket, session_id=session_id)
         if user_id is None:
             await websocket.close(code=_WS_POLICY_VIOLATION)
             return None

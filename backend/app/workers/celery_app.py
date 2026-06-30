@@ -13,6 +13,17 @@ to the zero-capability, no-egress ``packet_analysis`` sandbox.
 
 Execution semantics per ADR-0008 §5: acks-late + reject-on-worker-lost (tasks
 must be idempotent), prefetch 1 for fair fan-out, JSON-only serialization.
+
+Redelivery safety per queue (W2-T4, ADR-0043 §6 — the code half of "scale-in /
+node loss only re-runs work"): ``task_acks_late`` + ``task_reject_on_worker_lost``
+are enabled GLOBALLY, so a task interrupted by a scaled-in / lost worker is
+**redelivered, not lost** — but that is only safe if every side-effecting task on
+the queue is idempotent under re-run. The per-queue rationale is documented in
+:data:`QUEUE_REDELIVERY_RATIONALE` (and re-asserted on real PG in
+``tests/pg/test_worker_idempotency_pg.py``); the live worker-kill proof is W4-T5.
+The CR four-eyes gate (ADR-0020) is **not** weakened by any of this: a redelivered
+CR execution is an idempotent no-op via the lifecycle state-machine guard, never a
+second write that bypasses approval.
 """
 
 from __future__ import annotations
@@ -48,6 +59,71 @@ WORK_QUEUES: tuple[str, ...] = (
     QUEUE_DOCS,
     QUEUE_TOPOLOGY,
 )
+
+#: Per-queue redelivery-safety rationale (W2-T4, ADR-0043 §6 / ADR-0008 §5).
+#:
+#: ``task_acks_late`` + ``task_reject_on_worker_lost`` are GLOBAL (see
+#: :func:`create_celery_app`), so a task on ANY queue is redelivered — not lost —
+#: when its worker is scaled-in / killed mid-run. That is only correct because
+#: every side-effecting task is idempotent under re-run; this mapping records WHY
+#: a redelivery on each queue produces no duplicate side effect. It is documentation
+#: (asserted by ``tests/pg/test_worker_idempotency_pg.py`` + the per-task unit
+#: suites; the live worker-kill proof is W4-T5), not a runtime config input.
+QUEUE_REDELIVERY_RATIONALE: dict[str, str] = {
+    QUEUE_DISCOVERY: (
+        "Idempotent by natural-key upsert. ``discovery.collect_device`` persists "
+        "via select-by-(mgmt_ip / device_id, name) upsert (engines.discovery."
+        "persistence) — a re-run overwrites the same device/interface/route/neighbor "
+        "rows, never inserting duplicates. Credential-decrypt audit rows are an "
+        "append-only evidence trail (a re-run records a genuine second decrypt "
+        "event), and raw_artifacts are retention-purged append-only evidence; "
+        "neither is a duplicated business side effect. ``discovery.run`` re-drives "
+        "the run lifecycle deterministically from stored run params."
+    ),
+    QUEUE_CONFIG: (
+        "Idempotent by content-addressing + DB-level run guard. "
+        "``config.capture_device`` -> engines.config_mgmt.capture_snapshot dedups "
+        "on (device_id, content_hash): a redelivery of an unchanged config stores NO "
+        "new blob and (W2-T4 fix) emits NO second ``config.snapshot_captured`` audit "
+        "row — it only advances ``captured_at`` to mark the fresh observation. "
+        "``config.nightly_backup`` (the beat orchestrator) accepts an optional "
+        "``run_id`` and derives a deterministic slot UUID when absent; it INSERTs a "
+        "``config_backup_runs`` row ON CONFLICT DO NOTHING before any audit emit or "
+        "fan-out — a redelivered task finds the row already present, returns "
+        "``status='skipped'``, and emits no second ``config.backup_run_started`` / "
+        "``config.backup_run_finished`` audit pair and dispatches no second capture "
+        "wave (W2-T4 finding, ADR-0043 §6, proven on real PG in "
+        "tests/pg/test_worker_idempotency_pg.py)."
+    ),
+    QUEUE_PACKET_CAPTURE: (
+        "``packet.capture_*`` writes are keyed to a pre-created capture row whose "
+        "state machine (engines.packet.capture) guards re-entry, and "
+        "``packet.purge_expired`` is a cutoff-driven retention sweep that tombstones "
+        "by id — a re-run deletes/tombstones nothing already tombstoned (a no-op)."
+    ),
+    QUEUE_PACKET_ANALYSIS: (
+        "``packet.analyze_*`` reads the pcap READ-ONLY in the zero-egress sandbox and "
+        "writes findings keyed to the capture id; a re-run recomputes the same "
+        "deterministic findings for the same immutable pcap (safe overwrite)."
+    ),
+    QUEUE_DOCS: (
+        "Generated documents are content-addressed / keyed to their source "
+        "(config snapshot, run) the same way as config snapshots; a re-run "
+        "regenerates the same artifact rather than appending a duplicate. (No "
+        "docs Celery task is wired yet — the include list reserves ``.docs``.)"
+    ),
+    QUEUE_TOPOLOGY: (
+        "``topology.sync_after_run`` is a full projection of current inventory into "
+        "Neo4j + a snapshot; it is an overwrite/rebuild, so a redelivery re-projects "
+        "the same state (idempotent) and never re-raises."
+    ),
+    QUEUE_SYSTEM: (
+        "Operational tasks only. ``system.healthcheck`` is read-only; "
+        "``credentials.re_wrap_keys`` is a confirm-then-swap KEK re-wrap that is "
+        "idempotent by construction (already-active-version rows are skipped, the "
+        "decrypted payload is byte-identical), so a redelivery re-wraps nothing new."
+    ),
+}
 
 
 def create_celery_app() -> Celery:

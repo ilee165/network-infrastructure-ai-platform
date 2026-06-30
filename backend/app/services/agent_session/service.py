@@ -35,12 +35,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agents.framework.approval import ApprovalGate, ChangeRequestGate
 from app.agents.framework.supervisor import SupervisorState, run_supervisor
 from app.agents.framework.tools import AgentRunIdentity, GateFactory
-from app.agents.framework.traces import PostgresTraceRecorder
+from app.agents.framework.traces import (
+    PostgresTraceRecorder,
+    PublishingTraceRecorder,
+    TraceRecorder,
+)
 from app.core.errors import NotFoundError, translate_llm_error
 from app.core.logging import get_logger
 from app.core.security import Role
 from app.models.agents import AgentSession, AgentSessionStatus
 from app.models.mixins import utcnow
+from app.services.agent_stream import AgentStreamFanout
 from app.services.change_requests import ChangeRequestService
 
 _logger = get_logger(__name__)
@@ -49,8 +54,19 @@ _logger = get_logger(__name__)
 class AgentSessionService:
     """Owns the lifecycle of one :class:`AgentSession` per supervisor run."""
 
-    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        *,
+        stream_fanout: AgentStreamFanout | None = None,
+    ) -> None:
         self._sessionmaker = sessionmaker
+        # The per-session pub/sub fan-out (ADR-0044 §2). When supplied, the trace
+        # recorder this service builds becomes the PRODUCTION PRODUCER: each
+        # persisted reasoning step is fanned out as a live frame so a session
+        # running on any ``api`` replica is served live from any other. When
+        # ``None`` (CLI/tests that do not stream), the recorder stays Postgres-only.
+        self._stream_fanout = stream_fanout
 
     async def start(self, *, user_id: uuid.UUID, role: Role, intent: str) -> AgentSession:
         """Open and persist a ``RUNNING`` session for *user_id* / *role*.
@@ -203,14 +219,28 @@ class AgentSessionService:
 
         return factory
 
-    def recorder_for(self, session_id: uuid.UUID) -> PostgresTraceRecorder:
+    def recorder_for(self, session_id: uuid.UUID) -> TraceRecorder:
         """Build a trace recorder whose persisted traces link to *session_id*.
 
         Callers build the supervisor graph with this recorder so that every
         reasoning trace recorded during the run carries the session FK (brief §6:
         traces are linked to the session and the audit log).
+
+        When this service was constructed with a ``stream_fanout`` (the API does so
+        from ``app.state.stream_fanout``), the Postgres recorder is wrapped in a
+        :class:`~app.agents.framework.traces.PublishingTraceRecorder` — the
+        production producer (ADR-0044 §2/§6): every persisted step is fanned out as
+        a live :class:`AgentStreamFrame` on the session channel (keyed by the opaque
+        session id), so a session running on this replica is served live from any
+        replica subscribing for it. Without a fan-out the recorder is Postgres-only
+        (durable replay still works), so non-streaming callers are unchanged.
         """
-        return PostgresTraceRecorder(self._sessionmaker, session_id=session_id)
+        recorder: TraceRecorder = PostgresTraceRecorder(self._sessionmaker, session_id=session_id)
+        if self._stream_fanout is not None:
+            recorder = PublishingTraceRecorder(
+                recorder, fanout=self._stream_fanout, session_id=str(session_id)
+            )
+        return recorder
 
     async def _finish(self, session_id: uuid.UUID, status: AgentSessionStatus) -> AgentSession:
         """Apply a terminal *status* + ``completed_at`` once (idempotent)."""
