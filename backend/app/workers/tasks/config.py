@@ -240,6 +240,18 @@ async def _persist(
 
     Returns ``(content_hash, created)``. The snapshot and its audit entry commit
     atomically.
+
+    Idempotency (W2-T4, ADR-0043 §6 / ADR-0008 §5): with ``acks_late`` a
+    worker-killed ``config.capture_device`` is **redelivered**, so this path runs
+    twice for the same config. :func:`capture_snapshot` already content-addresses
+    the blob — the second run is a dedup hit (``created=False``) that writes no new
+    snapshot row, advancing only ``captured_at`` to mark the fresh observation. The
+    ``config.snapshot_captured`` **audit row is emitted only when a new blob was
+    actually stored** (``result.created``): a redelivery must not append a duplicate
+    audit row for a capture that already happened (the exact "double audit row" the
+    ADR names as the redelivery hazard). An unchanged re-observation is not an
+    audited capture event, so the task is idempotent end-to-end — same content twice
+    yields one snapshot row and one audit row.
     """
     async with _session() as session:
         result = await capture_snapshot(
@@ -249,19 +261,20 @@ async def _persist(
             source=source,
             capture_run_id=capture_run_id,
         )
-        await audit.record(
-            session,
-            actor=_ACTOR,
-            action=_SNAPSHOT_CAPTURED,
-            target_type="config_snapshot",
-            target_id=str(result.snapshot.id),
-            detail={
-                "device_id": str(device_id),
-                "content_hash": result.content_hash,
-                "created": result.created,
-                "source": source.value,
-            },
-        )
+        if result.created:
+            await audit.record(
+                session,
+                actor=_ACTOR,
+                action=_SNAPSHOT_CAPTURED,
+                target_type="config_snapshot",
+                target_id=str(result.snapshot.id),
+                detail={
+                    "device_id": str(device_id),
+                    "content_hash": result.content_hash,
+                    "created": result.created,
+                    "source": source.value,
+                },
+            )
         await session.commit()
         return result.content_hash, result.created
 

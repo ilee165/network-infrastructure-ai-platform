@@ -264,6 +264,13 @@ def test_unchanged_recapture_does_not_store_a_second_blob(
     assert second["created"] is False
     assert second["content_hash"] == first["content_hash"]
     assert len(_fetch_all(db_url, ConfigSnapshot)) == 1
+    # W2-T4 / ADR-0043 §6: an unchanged re-capture (a redelivered ``acks_late``
+    # task) is idempotent — it neither stores a second blob NOR appends a second
+    # ``config.snapshot_captured`` audit row. The capture is audited once, when the
+    # blob was actually written. (The authoritative concurrency-safe proof is the
+    # real-PG ``tests/pg/test_worker_idempotency_pg.py``; this is the fast smoke.)
+    captured = [r for r in _fetch_all(db_url, AuditLog) if r.action == "config.snapshot_captured"]
+    assert len(captured) == 1
 
 
 def test_capture_decryption_is_audited(
