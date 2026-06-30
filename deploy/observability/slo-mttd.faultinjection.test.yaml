@@ -1,0 +1,252 @@
+# Fault-injection MTTD harness — synthetic DB-down / queue-stall / LLM-provider-
+# failure series, asserting each W3-T3 burn-rate alert fires within MTTD < 5 min
+# (P3 W3-T5, ADR-0046 §5; PRODUCTION.md §11 G-OBS §386).
+#
+# WHY THIS FILE EXISTS — THE MTTD GATE (the window IS the assertion)
+# -----------------------------------------------------------------
+# §11 G-OBS §386 is a release criterion: "synthetic failures (DB down, queue
+# stall, LLM provider failure) detected by alerts with MTTD < 5 min EACH". The
+# W3-T3 alert-as-test file (slo-burn-rate.alerts.test.yaml) proves each alert
+# FIRES EVENTUALLY — but it evaluates at 75 m / 400 m, far past 5 min, so it does
+# NOT bound the detection latency. That is exactly the risk ADR-0046 §5 / the
+# task spec calls out: "a harness that asserts an alert fires but never checks the
+# window → MTTD unproven". THIS file closes it: for each of the three §386
+# scenarios it asserts the corresponding fast/PAGE-tier alert is
+#   * STILL SILENT at the sub-budget edge (it is not an instant single-spike trip
+#     that would also flap), AND
+#   * ALREADY FIRING at an eval time STRICTLY < 5 min after the fault begins.
+# The fault series starts at t=0 (the moment of injection), so the firing
+# eval_time IS the simulated MTTD. A regression that slowed detection past 5 min
+# (e.g. a longer `for:`, a slower confirmation leg added to the fast tier) would
+# push the firing edge to >=5 min and FAIL this file — the window is the gate.
+#
+# SCENARIO -> ALERT MAPPING (ADR-0046 §5; the three §386 faults)
+# --------------------------------------------------------------
+#   * DB DOWN  — Postgres unreachable -> /api/v1/* requests 5xx -> the non-5xx
+#     availability ratio collapses -> NetopsApiAvailabilityFastBurn (the §6 row-1
+#     PAGE alert, for:2m). Synthetic: a sustained 5xx stream from t=0.
+#   * QUEUE STALL — the discovery worker queue stops draining ->
+#     netops_discovery_runs_total{status="failed"} climbs, the success ratio
+#     drops -> NetopsDiscoverySuccessFastBurn (the §6 row-4 PAGE alert, the
+#     ADR-0046 §5 "queue stall -> success ratio drops" signal, for:2m).
+#   * LLM-PROVIDER FAILURE — the external LLM provider errors/stalls -> agent
+#     first-token events spill past the 3 s p95 objective ->
+#     NetopsAgentFirstTokenExternalFastBurn (the §6 row-3 PAGE alert, for:2m).
+#     There is NO dedicated netops_llm_* error-ratio SLO row in §6 (the §6 table
+#     has no LLM-availability row; netops_llm_requests_total carries no error
+#     label), so the operator-visible symptom of a provider failure is the
+#     first-token latency spike — the existing §6 SLO that the failure breaches.
+#     A dedicated LLM-error-ratio SLO + alert would be a NEW §6 row and a NEW
+#     W3-T3 alert (out of W3-T5 scope; not fabricated here) — FLAGGED below.
+#
+# MEASURED MTTD (pinned empirically with promtool over these series; see the
+# silent/firing eval-time pair per scenario — the firing edge is the MTTD):
+#   * DB down              : silent at 2 m, FIRING at 4 m  -> MTTD <= 4 min  (< 5)
+#   * Queue stall          : silent at 2 m, FIRING at 4 m  -> MTTD <= 4 min  (< 5)
+#   * LLM-provider failure  : silent at 2 m, FIRING at 3 m  -> MTTD  = 3 min  (< 5)
+# Each fault series starts at t=0; the asserted firing edge is the simulated MTTD,
+# pinned STRICTLY < the 5 min §386 budget. The rate-ratio alerts (DB / queue) are
+# asserted at 4 m rather than the 3 m razor's-edge of their for:2m hold: at the
+# exact 3 m tick the rate-ratio sits ON the hold boundary and promtool's
+# transition there is timing-marginal, so the STABLE firing edge (4 m, still < 5)
+# is asserted to keep the gate deterministic — a flaky firing tick would itself be
+# a false-green/false-red risk. The histogram-fraction alert (LLM) breaches on the
+# first full sample and is deterministic at 3 m. The silent-at-2 m leg proves the
+# alert is not an instant single-spike trip (it confirms over the for:2m hold +
+# window) — the window discipline, not just "fires eventually". The window is the gate.
+#
+# NEGATIVE CONTROL (no false positive — both directions, the alert-as-test rule)
+# -----------------------------------------------------------------------------
+# Each scenario also feeds a HEALTHY series (all-2xx / all-succeeded / fast
+# first-token) and asserts the SAME alert stays SILENT at 5 min — so the MTTD
+# proof distinguishes "fires correctly on the fault" from "fires always".
+#
+# BASIS = SYNTHETIC, SIMULATED BUDGET (ADR-0046 §5 — never claimed as live)
+# ------------------------------------------------------------------------
+# This is the in-CI, cluster-free MTTD proof: promtool over synthetic series at
+# compressed timestamps. The LIVE-CLUSTER MTTD run (the same alerts firing on a
+# real injected fault on the W4-T1 kind cluster + the 30-day soak) is
+# NAMED-DEFERRED to W4/W5 per ADR-0046 §0/§5 (no real cluster on this host) — it
+# is the soak/drill proof, NOT a substitute for this gate, and is not silently
+# dropped.
+#
+# rule_files loads the W3-T2 recording rules AND the W3-T3 alerts so each alert
+# is evaluated over the recorded SLI series exactly as Prometheus would.
+#
+# Run:  promtool test rules deploy/observability/slo-mttd.faultinjection.test.yaml
+# Bite: bash deploy/observability/run-mttd-bite.sh  (a slowed/muted alert must
+#       miss its < 5 min MTTD assertion — proves THIS gate bites, ADR-0046 §6).
+
+rule_files:
+  - slo-recording.rules.yaml
+  - slo-burn-rate.alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ===========================================================================
+  # SCENARIO 1 — DB DOWN (§386). Postgres unreachable -> /api/v1/* 5xx spike.
+  # 700/min 2xx + 200/min 5xx from t=0 -> error ratio 200/900 = 0.222, far above
+  # the 14.4*0.001 = 0.0144 page threshold over BOTH the 5m and 1h legs (a
+  # constant-rate stream gives the same rate-ratio over either window). The fast
+  # PAGE alert (for:2m) is SILENT at 2 m and FIRING by 4 m -> MTTD <= 4 min < 5.
+  # ===========================================================================
+  - interval: 1m
+    name: "MTTD db-down — NetopsApiAvailabilityFastBurn fires within 5 min (measured <=4 min)"
+    input_series:
+      - series: 'netops_http_requests_total{status_class="2xx", route="/api/v1/devices"}'
+        values: '0+700x10'
+      - series: 'netops_http_requests_total{status_class="5xx", route="/api/v1/devices"}'
+        values: '0+200x10'
+    alert_rule_test:
+      # Not an instant single-spike trip (the for:2m + window discipline): silent
+      # while the burn is still confirming over the hold.
+      - eval_time: 2m
+        alertname: NetopsApiAvailabilityFastBurn
+        exp_alerts: []
+      # MTTD edge: FIRING by 4 m — strictly < the 5 min §386 budget. THE gate.
+      - eval_time: 4m
+        alertname: NetopsApiAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: api_availability
+              tier: fast
+            exp_annotations:
+              summary: "API availability burning the 30-day error budget fast (>=14.4x)"
+              description: "The non-5xx request ratio (SLI slo:netops_api_availability:ratio_rate5m) is consuming the 0.1% / 30-day error budget at >=14.4x over BOTH the 5m and 1h windows. At this rate ~2% of the 30-day budget is spent in 1h."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-availability.md"
+      # Reconfirm: still firing at the 5 min budget edge (detection holds).
+      - eval_time: 5m
+        alertname: NetopsApiAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: api_availability
+              tier: fast
+            exp_annotations:
+              summary: "API availability burning the 30-day error budget fast (>=14.4x)"
+              description: "The non-5xx request ratio (SLI slo:netops_api_availability:ratio_rate5m) is consuming the 0.1% / 30-day error budget at >=14.4x over BOTH the 5m and 1h windows. At this rate ~2% of the 30-day budget is spent in 1h."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-availability.md"
+
+  - interval: 1m
+    name: "MTTD db-down NEGATIVE CONTROL — healthy all-2xx does NOT fire at 5 min"
+    input_series:
+      - series: 'netops_http_requests_total{status_class="2xx", route="/api/v1/devices"}'
+        values: '0+900x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NetopsApiAvailabilityFastBurn
+        exp_alerts: []
+
+  # ===========================================================================
+  # SCENARIO 2 — QUEUE STALL (§386). The discovery worker queue stops draining ->
+  # runs terminate failed/partial -> the success ratio drops (ADR-0046 §5).
+  # 80/min succeeded + 20/min failed from t=0 -> error ratio 0.20, above the
+  # 14.4*0.01 = 0.144 page threshold over BOTH 5m and 1h. The fast PAGE alert
+  # (for:2m) is SILENT at 2 m and FIRING by 4 m -> MTTD <= 4 min < 5.
+  # ===========================================================================
+  - interval: 1m
+    name: "MTTD queue-stall — NetopsDiscoverySuccessFastBurn fires within 5 min (measured <=4 min)"
+    input_series:
+      - series: 'netops_discovery_runs_total{status="succeeded"}'
+        values: '0+80x10'
+      - series: 'netops_discovery_runs_total{status="failed"}'
+        values: '0+20x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NetopsDiscoverySuccessFastBurn
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: NetopsDiscoverySuccessFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: discovery_success
+              tier: fast
+            exp_annotations:
+              summary: "Discovery success rate burning the budget fast (>=14.4x) — possible queue stall"
+              description: "The discovery failed/partial ratio is consuming the 1% per-run error budget at >=14.4x over BOTH 5m and 1h (SLI slo:netops_discovery_success:ratio_rate_run). A sustained drop is the §337 queue-stall MTTD signal."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-discovery-success.md"
+      - eval_time: 5m
+        alertname: NetopsDiscoverySuccessFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: discovery_success
+              tier: fast
+            exp_annotations:
+              summary: "Discovery success rate burning the budget fast (>=14.4x) — possible queue stall"
+              description: "The discovery failed/partial ratio is consuming the 1% per-run error budget at >=14.4x over BOTH 5m and 1h (SLI slo:netops_discovery_success:ratio_rate_run). A sustained drop is the §337 queue-stall MTTD signal."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-discovery-success.md"
+
+  - interval: 1m
+    name: "MTTD queue-stall NEGATIVE CONTROL — healthy all-succeeded does NOT fire at 5 min"
+    input_series:
+      - series: 'netops_discovery_runs_total{status="succeeded"}'
+        values: '0+100x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NetopsDiscoverySuccessFastBurn
+        exp_alerts: []
+
+  # ===========================================================================
+  # SCENARIO 3 — LLM-PROVIDER FAILURE (§386). The external provider errors/stalls
+  # -> agent first-token events spill past the 3 s p95 objective. 20/min events,
+  # only 2 land <= 3 s, 18 spill -> too_slow_frac 0.9 >> 14.4*0.05 = 0.72 over
+  # BOTH 5m and 1h. The histogram-fraction alert breaches on the first full
+  # sample, so the fast PAGE alert (for:2m) is SILENT at 2 m and FIRING at 3 m ->
+  # MTTD = 3 min < 5 (a step faster than the rate-ratio alerts, both within budget).
+  # ===========================================================================
+  - interval: 1m
+    name: "MTTD llm-provider-failure — NetopsAgentFirstTokenExternalFastBurn fires within 5 min (measured 3 min)"
+    input_series:
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="1.0"}'
+        values: '0+1x10'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="3.0"}'
+        values: '0+2x10'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}'
+        values: '0+20x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NetopsAgentFirstTokenExternalFastBurn
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: NetopsAgentFirstTokenExternalFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: agent_first_token_latency
+              tier: fast
+              profile: external
+            exp_annotations:
+              summary: "Agent first-token p95 (external profile) latency budget burning fast"
+              description: "The fraction of external-profile first-token events exceeding the 3 s p95 objective is burning the 5% budget at >=14.4x over BOTH 5m and 1h. SLI: slo:netops_agent_first_token_latency:p95_5m{profile=\"external\"}."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
+      - eval_time: 5m
+        alertname: NetopsAgentFirstTokenExternalFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: agent_first_token_latency
+              tier: fast
+              profile: external
+            exp_annotations:
+              summary: "Agent first-token p95 (external profile) latency budget burning fast"
+              description: "The fraction of external-profile first-token events exceeding the 3 s p95 objective is burning the 5% budget at >=14.4x over BOTH 5m and 1h. SLI: slo:netops_agent_first_token_latency:p95_5m{profile=\"external\"}."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
+
+  - interval: 1m
+    name: "MTTD llm-provider-failure NEGATIVE CONTROL — healthy fast first-token does NOT fire at 5 min"
+    input_series:
+      # 19 of 20 land <= 3 s -> too_slow_frac 0.05 << 0.72 -> silent.
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="1.0"}'
+        values: '0+15x10'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="3.0"}'
+        values: '0+19x10'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}'
+        values: '0+20x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NetopsAgentFirstTokenExternalFastBurn
+        exp_alerts: []

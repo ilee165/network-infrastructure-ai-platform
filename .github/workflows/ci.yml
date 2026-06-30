@@ -1418,6 +1418,28 @@ jobs:
       - name: promtool alert-as-test bite proof
         run: bash deploy/observability/run-promtool-bite.sh
 
+      # W3-T5 fault-injection MTTD harness (ADR-0046 §5; §386). Drives the three
+      # synthetic §386 faults (DB down -> 5xx spike, queue stall -> discovery
+      # success drop, LLM-provider failure -> first-token spill) and asserts the
+      # corresponding fast/PAGE alert FIRES within MTTD < 5 min (firing at 3 m,
+      # strictly < the budget), plus a healthy negative control per scenario that
+      # stays silent. The window IS the assertion — not just "fires eventually".
+      # Cluster-free: promtool over synthetic series at compressed timestamps; the
+      # live-cluster MTTD run is named-deferred to W4/W5 (ADR-0046 §0/§5).
+      - name: promtool fault-injection MTTD harness (< 5 min, 3 scenarios + neg controls)
+        run: |
+          set -o pipefail
+          promtool test rules deploy/observability/slo-mttd.faultinjection.test.yaml | tee /tmp/promtool-mttd.out
+          test -s /tmp/promtool-mttd.out
+
+      # BITE proof for the MTTD gate (the run-and-bite rule for a NEW gate,
+      # ADR-0046 §6): the clean rules detect each fault < 5 min AND fast alerts
+      # SLOWED past the budget (for:2m -> for:6m) MUST fail the MTTD assertions —
+      # proving the window is load-bearing, not a vacuous "fires eventually" check.
+      # Mutation is on a temp copy; committed rules are untouched.
+      - name: promtool fault-injection MTTD bite proof
+        run: bash deploy/observability/run-mttd-bite.sh
+
       # W3-T4 golden-signal dashboards-as-code (ADR-0046 §4; §335). Visual
       # rendering is named-deferred (no live Grafana on the host) — the BITING
       # layer is this structural/coverage lint + the provisioning-ConfigMap
