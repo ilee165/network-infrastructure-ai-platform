@@ -532,6 +532,90 @@ async def _await_subscriber(bus: Any, channel: str, *, timeout: float = 3.0) -> 
 
 
 class TestWebSocketFanout:
+    async def test_production_run_path_fans_recorded_steps_onto_the_channel(
+        self,
+        app: FastAPI,
+        scripted_builder: Callable[..., Any],
+        settings: Settings,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        users: dict[str, User],
+    ) -> None:
+        """The REAL run path is the producer — not a test-only ``replica_a.publish``.
+
+        ``AgentSessionService(stream_fanout=...)`` is exactly what ``POST /agents``
+        constructs in production. Driving its ``run`` over the scripted supervisor
+        records reasoning steps through the ``PublishingTraceRecorder`` (the wired
+        producer), which fans each persisted step onto the session channel. A
+        subscriber on a SEPARATE fan-out instance (a second replica over the same
+        bus) receives those frames — proving the ADR-0044 §6 exit criterion end to
+        end through the production producer, with no manual publish.
+        """
+        from app.agents.framework.traces import PublishingTraceRecorder
+        from app.services.agent_session import AgentSessionService
+        from app.services.agent_stream import (
+            AgentStreamFrame,
+            InMemoryAgentStreamFanout,
+            channel_for,
+        )
+        from app.services.agent_stream.fanout import _InMemoryBus
+
+        # One shared bus = one Redis. replica A runs the session (producer);
+        # replica B subscribes (consumer). Different fan-out instances => no
+        # in-process affinity, just like two ``api`` pods.
+        bus = _InMemoryBus()
+        replica_a = InMemoryAgentStreamFanout(bus)  # producer side of the run
+        replica_b = InMemoryAgentStreamFanout(bus)  # subscribing replica
+
+        viewer = users["viewer"]
+        service = AgentSessionService(sessionmaker, stream_fanout=replica_a)
+        run_session = await service.start(
+            user_id=viewer.id, role=Role.VIEWER, intent="why is bgp down?"
+        )
+
+        # The producer is the wired run path: recorder_for returns the publishing
+        # recorder because the service was built with a fan-out (the production wiring).
+        recorder = service.recorder_for(run_session.id)
+        assert isinstance(recorder, PublishingTraceRecorder)
+        graph = scripted_builder(Role.VIEWER, settings, trace_recorder=recorder)
+
+        received: list[AgentStreamFrame] = []
+
+        async def _consume() -> None:
+            async with replica_b.subscribe(str(run_session.id)) as frames:
+                await _await_subscriber(bus, channel_for(str(run_session.id)))
+                while True:
+                    received.append(await asyncio.wait_for(frames.__anext__(), timeout=5.0))
+
+        consumer = asyncio.create_task(_consume())
+        # Let the consumer attach before the producing run records any step, or the
+        # at-most-once bus would (correctly) drop frames sent into the gap.
+        await _await_subscriber(bus, channel_for(str(run_session.id)))
+
+        await service.run(
+            graph,
+            "why is bgp down?",
+            user_id=viewer.id,
+            role=Role.VIEWER,
+            session_id=run_session.id,
+        )
+        # Give the consumer a moment to drain the frames the run produced.
+        await asyncio.sleep(0.05)
+        consumer.cancel()
+        with pytest.raises((asyncio.CancelledError, TimeoutError)):
+            await consumer
+
+        # The production producer fanned real session content onto the channel.
+        assert received, "the production run path published no frames onto the channel"
+        kinds = [f.data["kind"] for f in received]
+        assert kinds[0] == "plan", f"first fanned frame should be the routing plan; got {kinds}"
+        assert "conclusion" in kinds, f"the terminal reasoning step was not fanned; got {kinds}"
+        # Every fanned frame is scoped to this session and rides its trace id.
+        for frame in received:
+            assert frame.session_id == str(run_session.id)
+            assert frame.trace_id
+            # No credential rides a fanned frame (re-serialization re-checks).
+            assert "token" not in frame.to_payload().lower()
+
     async def test_live_frame_published_by_another_replica_is_relayed(
         self,
         app: FastAPI,

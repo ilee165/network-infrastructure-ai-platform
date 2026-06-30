@@ -40,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import db
 from app.agents import build_default_supervisor
 from app.agents.framework.supervisor import SupervisorState
-from app.agents.framework.traces import ReasoningTrace, TraceStep
+from app.agents.framework.traces import PostgresTraceRecorder, ReasoningTrace, TraceStep
 from app.api.deps import (
     TOKEN_TYPE_ACCESS,
     enforce_api_rate_limit,
@@ -206,6 +206,25 @@ def get_stream_fanout(websocket: WebSocket) -> AgentStreamFanout:
     return fanout
 
 
+def get_stream_fanout_http(request: Request) -> AgentStreamFanout:
+    """HTTP-scope variant of :func:`get_stream_fanout` for the run producer.
+
+    ``POST /agents`` drives the supervisor in an HTTP scope (no WebSocket), and it
+    is the PRODUCER side of the fan-out: the trace recorder it builds publishes
+    each persisted step as a live frame (ADR-0044 §2/§6). It must resolve the SAME
+    ``app.state.stream_fanout`` instance the WebSocket subscriber reads — so a step
+    fanned out by a run on this replica is relayed by whichever replica serves the
+    socket. Binding the lazily-created in-memory fan-out back onto ``app.state``
+    (as the WS seam also does) keeps the producer and subscriber on one bus in a
+    bare dev run; tests override :func:`get_stream_fanout` to share an explicit bus.
+    """
+    fanout = getattr(request.app.state, "stream_fanout", None)
+    if fanout is None:
+        fanout = InMemoryAgentStreamFanout()
+        request.app.state.stream_fanout = fanout
+    return fanout
+
+
 def get_change_request_service(sessionmaker: SessionMaker) -> ChangeRequestService:
     """Build the :class:`ChangeRequestService` over the process sessionmaker (DI seam).
 
@@ -312,8 +331,12 @@ async def _load_session_or_404(
 async def _load_traces(
     sessionmaker: async_sessionmaker[AsyncSession], session_id: uuid.UUID
 ) -> list[ReasoningTrace]:
-    """Reload every reasoning trace linked to *session_id*, oldest first."""
-    service = AgentSessionService(sessionmaker)
+    """Reload every reasoning trace linked to *session_id*, oldest first.
+
+    This is a pure DB read (the durable replay path), so it uses the
+    :class:`PostgresTraceRecorder` directly — never the publishing producer
+    wrapper, which only the *run* path needs to fan live frames onto the channel.
+    """
     async with sessionmaker() as session:
         rows = (
             (
@@ -326,7 +349,7 @@ async def _load_traces(
             .scalars()
             .all()
         )
-    recorder = service.recorder_for(session_id)
+    recorder = PostgresTraceRecorder(sessionmaker, session_id=session_id)
     return [await recorder.get(row_id.hex) for row_id in rows]
 
 
@@ -404,6 +427,7 @@ async def start_session(
     sessionmaker: SessionMaker,
     settings: Annotated[Settings, Depends(get_app_settings)],
     builder: Annotated[object, Depends(get_supervisor_builder)],
+    stream_fanout: Annotated[AgentStreamFanout, Depends(get_stream_fanout_http)],
 ) -> StartSessionResponse:
     """Start an agent session and drive the supervisor to completion.
 
@@ -414,7 +438,10 @@ async def start_session(
     run produces is linked back to the session with its own audit entry.
     """
     role = Role.from_name(user.role.name) or Role.VIEWER
-    service = AgentSessionService(sessionmaker)
+    # Pass the per-session fan-out so ``recorder_for`` returns the production
+    # PRODUCER (ADR-0044 §2/§6): every persisted reasoning step is fanned out as a
+    # live frame on the session channel, served by any subscribing replica.
+    service = AgentSessionService(sessionmaker, stream_fanout=stream_fanout)
 
     run_session = await service.start(user_id=user.id, role=role, intent=body.intent)
     await _audit(

@@ -14,15 +14,21 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import NotFoundError
+from app.core.logging import get_logger
 from app.models.agents import ReasoningTraceRow, ReasoningTraceStep
 from app.models.agents import TraceStepKind as OrmTraceStepKind
+
+if TYPE_CHECKING:
+    from app.services.agent_stream import AgentStreamFanout
+
+_logger = get_logger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -339,6 +345,104 @@ class PostgresTraceRecorder:
         if row is None:
             raise NotFoundError(f"reasoning trace '{trace_id}' does not exist")
         return row
+
+
+def _step_read_model(step: TraceStep) -> dict[str, Any]:
+    """Project a :class:`TraceStep` to the JSON read model the stream emits.
+
+    This is the SAME shape the WebSocket relays for a DB-replayed step
+    (``app.api.v1.agents._step_read(step).model_dump(mode="json")``): ``kind`` /
+    ``summary`` / ``detail`` / ``tool_name`` / ``evidence`` / ISO ``occurred_at``.
+    Producing it here lets a live fanned-out frame be byte-identical to its
+    durable replay, so a client cannot tell a live frame from a replayed one.
+    """
+    return {
+        "kind": step.kind.value,
+        "summary": step.summary,
+        "detail": step.detail,
+        "tool_name": step.tool_name,
+        "evidence": [ref.model_dump(mode="json") for ref in step.evidence],
+        "occurred_at": step.occurred_at.isoformat(),
+    }
+
+
+class PublishingTraceRecorder:
+    """A :class:`TraceRecorder` that ALSO fans each recorded step onto the bus.
+
+    This is the **production producer** for the stateless agent-session fan-out
+    (ADR-0044 §2/§6, W2-T2). It wraps any inner recorder (the
+    :class:`PostgresTraceRecorder` in production) and, once a step is durably
+    persisted, publishes an :class:`~app.services.agent_stream.AgentStreamFrame`
+    carrying the step read model + the trace/audit-join id onto the session's
+    Redis pub/sub channel. A session running on any ``api`` replica therefore fans
+    its live reasoning frames to a peer subscribing on any other replica — the
+    "session opened on replica A served from replica B" exit criterion — instead of
+    the channel carrying no real session content (the dead-producer defect).
+
+    Ordering of the two effects is deliberate: **persist first, publish second.**
+    Postgres is the durable replay source (ADR-0044 §5); the live publish is
+    best-effort (at-most-once on the wire), so a publish failure (Redis blip,
+    Sentinel failover, no subscriber) is swallowed — the step is already durable
+    and a reconnecting client backfills it from the DB. A publish failure must
+    never fail the run or lose a persisted step.
+
+    The terminal ``end`` frame is intentionally NOT produced here: the WebSocket
+    handler synthesizes it from the session's terminal DB status, so the producer
+    only ever fans the per-step session content.
+    """
+
+    def __init__(
+        self,
+        inner: TraceRecorder,
+        *,
+        fanout: AgentStreamFanout,
+        session_id: str,
+    ) -> None:
+        self._inner = inner
+        self._fanout = fanout
+        self._session_id = session_id
+
+    async def start(self, agent_name: str) -> ReasoningTrace:
+        """Delegate trace creation to the inner recorder."""
+        return await self._inner.start(agent_name)
+
+    async def record_step(self, trace_id: str, step: TraceStep) -> ReasoningTrace:
+        """Persist *step* via the inner recorder, then fan it onto the channel.
+
+        Persist-then-publish: the durable write happens first (Postgres is the
+        replay source); the live frame is published best-effort afterwards and any
+        publish error is logged and swallowed so it can never break the run.
+        """
+        trace = await self._inner.record_step(trace_id, step)
+        await self._publish_step(trace_id, step)
+        return trace
+
+    async def complete(self, trace_id: str) -> ReasoningTrace:
+        """Delegate completion to the inner recorder (no terminal frame here)."""
+        return await self._inner.complete(trace_id)
+
+    async def _publish_step(self, trace_id: str, step: TraceStep) -> None:
+        """Best-effort publish of one recorded step as a live frame (never raises)."""
+        # Imported lazily so this low-level framework module does not depend on the
+        # service layer at import time (and to keep the dependency one-directional).
+        from app.services.agent_stream import AgentStreamFrame
+
+        try:
+            frame = AgentStreamFrame(
+                session_id=self._session_id,
+                trace_id=trace_id,
+                data=_step_read_model(step),
+            )
+            await self._fanout.publish(frame)
+        except Exception:  # noqa: BLE001 - best-effort live fan-out; DB is durable.
+            # At-most-once on the wire (ADR-0044 §5): the step is already persisted,
+            # so a failed live publish is recovered by the client's DB replay. Never
+            # propagate — a fan-out hiccup must not fail an agent run.
+            _logger.warning(
+                "agent_stream.publish_failed",
+                session_id=self._session_id,
+                trace_id=trace_id,
+            )
 
 
 def _step_from_row(row: ReasoningTraceStep) -> TraceStep:
