@@ -3472,3 +3472,92 @@ api_pdb_guarantees_one(pdb) if {
 	ma >= 1
 }
 
+# ===========================================================================
+# W2-T3 (ADR-0043 §2/§3/§4) — KEDA per-queue worker ScaledObject controls.
+# The ScaledObject is a KEDA CRD with no built-in schema, so it is on the
+# kubeconform -skip list; these rules keep it POLICY-covered so the skip cannot
+# hide a regression. Each rule expresses one ADR-0043 requirement and fails the
+# gate if a rendered ScaledObject violates it. NEVER weaken a rule to go green.
+# ===========================================================================
+
+# The known SANDBOX-pinned packet Deployments (ADR-0031 §5): a packet ScaledObject
+# may target ONLY one of these, so a scaled packet pod stays on the tainted pool.
+workerscale_sandbox_targets := {"packet-capture", "packet-analysis"}
+
+# A ScaledObject is a PACKET one if it carries the packet-sandbox label (the
+# template stamps it from queues.<q>.sandboxPinned).
+workerscale_is_packet(so) if {
+	so.metadata.labels["netops.io/packet-sandbox"] == "true"
+}
+
+# --- PACKET-POOL EXCEPTION (ADR-0043 §4, MANDATORY SECURITY CONTROL): a packet
+# ScaledObject MUST target a sandbox-pinned Deployment (packet-capture /
+# packet-analysis). Scaling adds replicas only; if the target were a general
+# Deployment a scaled NET_RAW / untrusted-parser pod could land on a general
+# node — the exact co-scheduling the tainted pool exists to prevent. ---
+deny contains msg if {
+	input.kind == "ScaledObject"
+	workerscale_is_packet(input)
+	target := object.get(input.spec.scaleTargetRef, "name", "")
+	not workerscale_sandbox_targets[target]
+	msg := sprintf("packet KEDA ScaledObject %q must target a sandbox-pinned Deployment (%v) so scaled pods stay on the ADR-0031 tainted node pool — a NET_RAW/untrusted-parser pod must never scale onto a general node (ADR-0043 §4); got target %q", [input.metadata.name, workerscale_sandbox_targets, target])
+}
+
+# --- A packet ScaledObject's target must not be EMPTY (a missing scaleTargetRef
+# name would scale nothing AND defeat the sandbox-target check above). ---
+deny contains msg if {
+	input.kind == "ScaledObject"
+	workerscale_is_packet(input)
+	object.get(input.spec.scaleTargetRef, "name", "") == ""
+	msg := sprintf("packet KEDA ScaledObject %q must set spec.scaleTargetRef.name to a sandbox-pinned packet Deployment (ADR-0043 §4)", [input.metadata.name])
+}
+
+# --- SENTINEL-AWARE TRIGGER (ADR-0043 §2): every worker ScaledObject must scale
+# on a redis-sentinel trigger that discovers the primary via Sentinel — NOT a
+# plain `redis` scaler with a static `address`/`host` (a static primary pin
+# breaks on failover, the failover-aware-client decision ADR-0044 forbids). ---
+deny contains msg if {
+	input.kind == "ScaledObject"
+	not workerscale_has_sentinel_trigger(input)
+	msg := sprintf("KEDA ScaledObject %q must use a redis-sentinel trigger with sentinelAddresses + sentinelMaster (the primary is discovered via Sentinel so a Redis failover does not break scaling — ADR-0043 §2 / ADR-0044); a plain redis scaler with a static host pin is rejected", [input.metadata.name])
+}
+
+workerscale_has_sentinel_trigger(so) if {
+	some t in object.get(so.spec, "triggers", [])
+	t.type == "redis-sentinel"
+	object.get(t.metadata, "sentinelAddresses", "") != ""
+	object.get(t.metadata, "sentinelMaster", "") != ""
+}
+
+# --- CREDENTIAL BY REFERENCE (secure-by-default): a ScaledObject trigger must
+# NOT inline a Redis password into its metadata — the credential is supplied via
+# a KEDA TriggerAuthentication (authenticationRef). An inlined `password` (or a
+# `passwordFromEnv` pointing at a literal) is a secret-surface leak in the
+# rendered manifest. ---
+deny contains msg if {
+	input.kind == "ScaledObject"
+	some t in object.get(input.spec, "triggers", [])
+	object.get(t.metadata, "password", "") != ""
+	msg := sprintf("KEDA ScaledObject %q trigger inlines a Redis password in metadata — the credential MUST be by-reference via a TriggerAuthentication authenticationRef, never inlined (secure-by-default)", [input.metadata.name])
+}
+
+# --- COHERENT PER-QUEUE BOUNDS (ADR-0043 §3): maxReplicaCount must be >=
+# minReplicaCount, and a missing maxReplicaCount (KEDA default 100) over an
+# isolated queue would let one queue consume the whole node budget and starve the
+# others — the §329 failure. Require an explicit maxReplicaCount and a coherent
+# floor<=ceiling so isolation ceilings are real, not the KEDA default. ---
+deny contains msg if {
+	input.kind == "ScaledObject"
+	not is_number(object.get(input.spec, "maxReplicaCount", null))
+	msg := sprintf("KEDA ScaledObject %q must set an explicit maxReplicaCount — a per-queue isolation ceiling (a missing ceiling inherits the KEDA default and lets one queue consume the whole budget, starving the others; ADR-0043 §3 / G-SCA §329)", [input.metadata.name])
+}
+
+deny contains msg if {
+	input.kind == "ScaledObject"
+	min := object.get(input.spec, "minReplicaCount", 0)
+	max := object.get(input.spec, "maxReplicaCount", 0)
+	is_number(max)
+	max < min
+	msg := sprintf("KEDA ScaledObject %q maxReplicaCount (%v) must be >= minReplicaCount (%v)", [input.metadata.name, max, min])
+}
+

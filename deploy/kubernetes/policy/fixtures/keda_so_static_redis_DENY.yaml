@@ -1,0 +1,27 @@
+# NEGATIVE — a ScaledObject using the plain `redis` scaler with a STATIC primary
+# address (host pin) instead of the redis-sentinel scaler. A static primary pin
+# breaks on a Redis failover (the address points at the demoted primary) — the
+# failover-aware-client decision ADR-0044 / ADR-0043 §2 forbids. MUST be DENIED by
+# the workerscale Sentinel-aware-trigger rule.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: netops-worker-discovery
+  namespace: netops
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: worker-scaling
+    netops.io/celery-queue: "discovery"
+spec:
+  scaleTargetRef:
+    name: netops-worker-discovery
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+    - type: redis
+      metadata:
+        address: "netops-redis:6379"
+        listName: "discovery"
+        listLength: "5"
+      authenticationRef:
+        name: netops-redis-auth

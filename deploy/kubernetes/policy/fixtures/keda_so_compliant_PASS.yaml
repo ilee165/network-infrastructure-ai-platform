@@ -1,0 +1,33 @@
+# POSITIVE — the compliant per-queue worker ScaledObject shape (W2-T3, ADR-0043
+# §2/§3/§4). A PACKET ScaledObject: sandbox-pinned target (packet-analysis),
+# redis-sentinel trigger with Sentinel discovery (no static host pin), credential
+# by-reference (authenticationRef — no inlined password), explicit coherent
+# min/max. MUST PASS the workerscale.* rules (no false-reject).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: netops-worker-packet-analysis
+  namespace: netops
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: worker-scaling
+    netops.io/celery-queue: "packet_analysis"
+    netops.io/packet-sandbox: "true"
+spec:
+  scaleTargetRef:
+    name: packet-analysis
+  minReplicaCount: 0
+  maxReplicaCount: 4
+  pollingInterval: 20
+  cooldownPeriod: 300
+  triggers:
+    - type: redis-sentinel
+      metadata:
+        sentinelAddresses: "netops-redis-sentinel-0.netops-redis-sentinel-headless:26379;netops-redis-sentinel-1.netops-redis-sentinel-headless:26379;netops-redis-sentinel-2.netops-redis-sentinel-headless:26379"
+        sentinelMaster: "netops-redis"
+        listName: "packet_analysis"
+        listLength: "2"
+        databaseIndex: "0"
+        enableTLS: "false"
+      authenticationRef:
+        name: netops-redis-auth

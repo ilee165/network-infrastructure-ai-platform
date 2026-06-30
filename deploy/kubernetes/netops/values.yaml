@@ -698,6 +698,135 @@ redisSentinel:
         cpu: 200m
         memory: 128Mi
 
+# -- KEDA per-queue worker autoscaling (W2-T3, ADR-0043 §2/§3/§4). One KEDA
+#    ScaledObject PER Celery work queue, scaling that queue's OWN worker
+#    Deployment on the queue's Redis LIST LENGTH. Independent per-queue min/max +
+#    cooldown is the STRUCTURAL per-queue-isolation guarantee (G-SCA §329): a
+#    `discovery` burst scales ONLY the discovery Deployment and can never consume
+#    `config`/`docs`/`packet` replica budget (separate Deployments, separate
+#    ScaledObjects, separate ceilings). W4-T6 asserts this isolation under a 10x
+#    `discovery` depth and a negative control (a shared scaler) makes it go red.
+#
+#    OPT-IN, default OFF — KEDA is an extra operator + CRDs (ScaledObject) NOT in
+#    the GA baseline (ADR-0043 §5: the named fallback is an HPA on celery-exporter
+#    metrics, a chart-values decision, NOT a silent default). Mirrors the
+#    redisSentinel / cloudNativePg opt-in-HA-tier precedent. When enabled the
+#    chart renders per-queue worker Deployments (discovery/config/docs) + their
+#    ScaledObjects, and ScaledObjects for the existing ADR-0031 packet Deployments
+#    (packet-capture/packet-analysis). The base shared `services.worker`
+#    Deployment then serves ONLY the residual topology+system queues (the scaled
+#    general queues move to their own Deployments — see the mutual-exclusion note
+#    on services.worker.queues). Enabling requires a KEDA operator in the cluster.
+workerScaling:
+  enabled: false
+
+  # SENTINEL-AWARE Redis trigger (ADR-0043 §2, cross-ref ADR-0044 / W1-T4). The
+  # KEDA `redis-sentinel` scaler discovers the CURRENT primary via the Sentinel
+  # quorum, so a failover does NOT break scaling (no static primary host pin —
+  # the same failover-aware-client decision the api/worker dial via netops.redisUrl).
+  # These coordinates are derived from the redisSentinel tier so they cannot drift;
+  # surfaced here only so an operator can override the discovery target. The
+  # trigger reads `LLEN <queue>` (the Celery broker stores each queue as a Redis
+  # list keyed by the queue name) and a per-queue listLength target below.
+  redis:
+    # Sentinel master_name the scaler resolves the primary by. Defaults to the
+    # redisSentinel master name (a single source of truth) — override only to
+    # point at an EXTERNAL Sentinel-managed Redis.
+    sentinelMasterName: ""
+    # `;`-joined Sentinel host:port discovery list. Empty -> derived from the
+    # in-chart redisSentinel headless Service (netops.redisSentinelHosts) so it
+    # tracks the Sentinel replica count. Override for an external Sentinel.
+    sentinelAddresses: ""
+    # Redis logical DB the Celery broker uses (matches config.redis.db).
+    databaseIndex: 0
+    # Whether the scaler authenticates to Redis. The password is supplied to KEDA
+    # by-reference via a TriggerAuthentication referencing the platform Secret
+    # (secrets.keys.redisPassword) — NEVER inlined into the ScaledObject.
+    enableTLS: false
+
+  # KEDA TriggerAuthentication: how the scaler reads the Redis password BY
+  # REFERENCE from the platform Secret (NEVER inlined into a ScaledObject/values).
+  triggerAuth:
+    # Render a TriggerAuthentication wired to the platform Secret's redisPassword
+    # key. The packet-* ScaledObjects live in their own namespace(s), so the
+    # template renders the auth object once per distinct namespace it is used in.
+    enabled: true
+
+  # Per-queue scale + cooldown knobs. INDEPENDENT per queue (per-queue isolation,
+  # G-SCA §329). pollingInterval/cooldownPeriod set the burst-drain realism W4-T6
+  # measures against (ADR-0043 §2): too long a poll and a burst drains slowly; too
+  # short a cooldown and the tier flaps.
+  defaults:
+    # KEDA evaluates the trigger every pollingInterval seconds (ADR-0043 §2:
+    # PROPOSED 15-30s). 20s is responsive without hammering Sentinel/Redis.
+    pollingInterval: 20
+    # Seconds KEDA waits after the last active trigger before scaling a queue back
+    # toward its floor (ADR-0043 §2: PROPOSED 300s). Prevents flapping on a dip.
+    cooldownPeriod: 300
+
+  # One entry per SCALED Celery work queue. Each becomes ONE ScaledObject ⇄ ONE
+  # Deployment ⇄ ONE queue (the structural isolation, ADR-0043 §3). `listName` is
+  # the Redis list key (the Celery queue name) the scaler reads LLEN of.
+  #
+  # General queues (discovery/config/docs): a per-queue worker Deployment is
+  # rendered under workerScaling (worker-queue-deployments.yaml) as the scale
+  # target. `topology`/`system` are NOT scaled here (not in the W2-T3 four) and
+  # stay on the base shared worker.
+  #
+  # Packet queues (packet_capture/packet_analysis): the scale target is the
+  # EXISTING ADR-0031 Deployment, which is pinned to the tainted sandbox node pool
+  # (packetNodePool) — so scaled packet pods STAY on the sandbox pool and a
+  # NET_RAW / untrusted-parser pod can never burst onto a general node
+  # (ADR-0043 §4, a mandatory SECURITY control). `sandboxPinned: true` records and
+  # asserts that binding (the conftest workerscale.* rule denies a packet
+  # ScaledObject whose target is not sandbox-pinned).
+  queues:
+    discovery:
+      # The Redis list key (Celery queue name) — `LLEN discovery` is the backlog.
+      listName: discovery
+      # Scale target: the per-queue worker Deployment rendered for this queue.
+      target: discovery
+      # Floor: a warm 1 (discovery bursts often; cold-start latency hurts SLO).
+      minReplicaCount: 1
+      # Ceiling: per-queue, independent of the other queues (isolation). PROPOSED.
+      maxReplicaCount: 10
+      # Pending tasks per replica before scaling out (the demand-per-pod target).
+      listLength: 5
+    config:
+      listName: config
+      target: config
+      minReplicaCount: 1
+      maxReplicaCount: 6
+      listLength: 5
+    docs:
+      listName: docs
+      target: docs
+      # docs may idle to 0 between bursts (KEDA scale-from-zero, ADR-0043 §2 — a
+      # capability the celery-exporter-HPA fallback lacks).
+      minReplicaCount: 0
+      maxReplicaCount: 4
+      listLength: 5
+    packet_capture:
+      listName: packet_capture
+      # Scale target: the EXISTING ADR-0031 packet-capture Deployment (NET_RAW,
+      # on the sandbox pool). Scaling adds replicas ONLY within the tainted pool.
+      target: packet-capture
+      sandboxPinned: true
+      # Floor 0: capture is bursty (on-demand). Ceiling bounded by the SANDBOX
+      # pool capacity, NOT the general worker tier (ADR-0043 §4).
+      minReplicaCount: 0
+      maxReplicaCount: 4
+      listLength: 2
+    packet_analysis:
+      listName: packet_analysis
+      # Scale target: the EXISTING ADR-0031 packet-analysis Deployment (zero-cap,
+      # untrusted-pcap parser, on the sandbox pool).
+      target: packet-analysis
+      sandboxPinned: true
+      minReplicaCount: 0
+      maxReplicaCount: 4
+      listLength: 2
+
 # -- Backup / DR tier (W5-T1, ADR-0030 §1/§4). pgBackRest continuous WAL
 #    archiving + weekly-full / daily-incr backups of the Postgres system of
 #    record, repo-encrypted (aes-256-cbc), written to a MinIO/S3 object store.
