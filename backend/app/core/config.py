@@ -246,6 +246,53 @@ class Settings(BaseSettings):
     raw_artifact_retention_hour: int = 4
     raw_artifact_retention_minute: int = 0
 
+    # -- Audit -> SIEM export pipeline (P3 W3-T1, ADR-0045) ---------------------
+    # The export streams every committed audit_log row to the customer SIEM
+    # at-least-once, in seq order, over a vendor-neutral transport (syslog/CEF over
+    # TLS or HTTPS/JSON). Opt-in: with no ``audit_export_format`` the exporter is a
+    # warned no-op (a deployment with no SIEM is unchanged). All transports are
+    # TLS-only (ADR-0045 §1); the endpoint credential is a token, never logged.
+    # --------------------------------------------------------------------------
+
+    #: Active SIEM export transport (ADR-0045 §1). ``syslog``/``cef`` use the
+    #: RFC5425 TLS syslog sink (``audit_export_host``/``_port``); ``https-json`` POSTs
+    #: to ``audit_export_endpoint``. ``None`` (default) DISABLES the exporter so a
+    #: deployment with no SIEM is unchanged (a warned no-op, never a silent drop).
+    audit_export_format: Literal["syslog", "cef", "https-json"] | None = None
+
+    #: SIEM syslog/CEF collector host + port for the TLS syslog sink (``syslog``/
+    #: ``cef`` formats). Required when the format is ``syslog`` or ``cef``.
+    audit_export_host: str | None = None
+    audit_export_port: int = 6514
+
+    #: SIEM HTTPS/JSON collector endpoint (the ``https-json`` format). Required when
+    #: the format is ``https-json``; an ``https://`` URL (TLS-only, ADR-0045 §1).
+    audit_export_endpoint: str | None = None
+
+    #: Vault credential_ref / bearer token for the HTTPS sink Authorization header.
+    #: A ``SecretStr`` so it never appears in a repr/log; only the sink reads it.
+    audit_export_bearer_token: SecretStr | None = None
+
+    #: TLS material for the export egress (ADR-0045 §1 — TLS-only). The CA bundle
+    #: verifying the SIEM server cert (system trust when None); an optional client
+    #: cert/key pair for mutual TLS (both-or-neither — fail-closed, ADR-0039 §4).
+    audit_export_ca_cert: Path | None = None
+    audit_export_client_cert: Path | None = None
+    audit_export_client_key: Path | None = None
+
+    #: Bounded read-batch size per export cycle (ADR-0045 §3 — bounded memory). A
+    #: long SIEM outage grows the durable audit_log backlog + the lag gauge, never
+    #: unbounded memory: at most this many rows are held in flight per cycle.
+    audit_export_batch_size: int = 500
+
+    #: Seconds the exporter sleeps between cycles when caught up (no new rows). A
+    #: short interval keeps the export near-real-time for the p95 < 60 s SLO (§6).
+    audit_export_poll_seconds: float = 2.0
+
+    #: Capped backoff (seconds) the exporter waits after a sink failure before
+    #: retrying the SAME un-advanced batch (ADR-0045 §3 — buffer + retry, never drop).
+    audit_export_retry_backoff_seconds: float = 5.0
+
     #: OIDC / SSO identity federation (ADR-0028). OIDC is opt-in: with no
     #: configured issuer the platform stays local-only (CLAUDE.md local-first).
     #: Enabling it (a non-empty ``oidc_issuer``) fences the local-login path to

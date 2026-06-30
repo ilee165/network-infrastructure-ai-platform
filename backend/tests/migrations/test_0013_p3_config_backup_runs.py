@@ -2,8 +2,9 @@
 
 Unit tests drive ``alembic upgrade head --sql`` in-process against the PostgreSQL
 dialect (no DB/Docker/network) and assert the emitted DDL creates the
-``config_backup_runs`` table with the expected columns. ``alembic heads`` is
-asserted to be the SINGLE head ``0013`` chaining after ``0012``.
+``config_backup_runs`` table with the expected columns. Revision ``0013`` chains
+after ``0012`` (the single-head invariant is now owned by the LATEST migration's
+test — ``test_0014_p3_audit_export_cursor.py`` — since 0014 superseded 0013 as head).
 
 This table is the DB-level idempotency guard for ``config.nightly_backup``:
 a redelivered task (``task_acks_late`` + ``task_reject_on_worker_lost``)
@@ -54,21 +55,25 @@ def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Single head + revision wiring
+# Revision wiring (the single-head invariant moved to the 0014 test — see header).
 # ---------------------------------------------------------------------------
-
-
-def test_single_head_is_0013() -> None:
-    """`alembic heads` resolves to exactly one head, revision 0013 (no branch)."""
-    script = ScriptDirectory.from_config(_alembic_config())
-    heads = script.get_heads()
-    assert heads == ["0013"], f"expected single head 0013, got {heads}"
 
 
 def test_0013_revises_0012() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
     rev = script.get_revision("0013")
     assert rev.down_revision == "0012"
+
+
+def test_0013_is_an_ancestor_of_the_single_head() -> None:
+    """0013 stays on the single linear chain below the current head (no branch)."""
+    script = ScriptDirectory.from_config(_alembic_config())
+    heads = script.get_heads()
+    assert len(heads) == 1, f"expected a single head, got {heads}"
+    # 0013 must be reachable walking down from the single head — it is still on the
+    # one linear chain (0014 chained onto it), never orphaned by a branch.
+    chain = {rev.revision for rev in script.walk_revisions("base", heads[0])}
+    assert "0013" in chain
 
 
 # ---------------------------------------------------------------------------

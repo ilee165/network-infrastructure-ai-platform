@@ -38,6 +38,10 @@ KEK posture gauges (ADR-0032 §2/§4 — gate-checkable, not just a log line):
     ``netops_change_request_approval_latency_seconds`` — ChangeRequest workflow.
   * ``netops_celery_queue_depth{queue}`` — per-queue backlog gauge (the series the
     W3-T5 queue-stall fault-injection perturbs).
+  * ``audit_export_lag_seconds`` — audit→SIEM export lag (``now − commit_ts of the
+    last exported audit row``), the §6 ``p95 < 60 s`` SLI W3-T3 alerts on
+    (ADR-0045 §3). A held-down SIEM grows the backlog in the durable ``audit_log``
+    table (NOT in lost rows) and drives this gauge up; a recovered sink drains it.
 
 Registration is **graceful**, mirroring :mod:`app.engines.topology.metrics`:
 ``prometheus_client`` is an optional observability dependency (D15). When it is
@@ -58,6 +62,7 @@ from typing import Any
 
 __all__ = [
     "AGENT_FIRST_TOKEN_SECONDS",
+    "AUDIT_EXPORT_LAG_SECONDS",
     "CHANGE_REQUESTS_TOTAL",
     "CHANGE_REQUEST_APPROVAL_LATENCY_SECONDS",
     "CELERY_QUEUE_DEPTH",
@@ -75,6 +80,7 @@ __all__ = [
     "observe_http_request",
     "observe_llm_request",
     "record_change_request_transition",
+    "set_audit_export_lag",
     "set_celery_queue_depth",
     "set_provider_healthy",
     "set_provider_production_grade",
@@ -182,6 +188,15 @@ try:  # Optional observability dependency (D15) — degrade to no-ops if absent.
         ["queue"],
     )
 
+    # --- Audit → SIEM export — the export-lag SLI (ADR-0045 §3) ---
+    AUDIT_EXPORT_LAG_SECONDS: Any = Gauge(
+        "audit_export_lag_seconds",
+        "Audit->SIEM export lag in seconds: now - the commit timestamp of the last "
+        "audit_log row confirmed delivered to the SIEM (ADR-0045 §3). The p95 < 60 s "
+        "SLI W3-T3 alerts on; a held-down SIEM grows the durable backlog and drives "
+        "this up (no audit row is lost), a recovered sink drains it.",
+    )
+
     _PROM_ENABLED = True
 except ImportError:  # pragma: no cover - exercised only on a slim install
     # No prometheus_client: keep the symbols present (callers reference them) but
@@ -202,6 +217,7 @@ except ImportError:  # pragma: no cover - exercised only on a slim install
     CHANGE_REQUESTS_TOTAL = None
     CHANGE_REQUEST_APPROVAL_LATENCY_SECONDS = None
     CELERY_QUEUE_DEPTH = None
+    AUDIT_EXPORT_LAG_SECONDS = None
     _PROM_ENABLED = False
 
 
@@ -328,3 +344,17 @@ def set_celery_queue_depth(*, queue: str, depth: int) -> None:
     if not _PROM_ENABLED:
         return
     CELERY_QUEUE_DEPTH.labels(queue=queue).set(depth)
+
+
+def set_audit_export_lag(*, lag_seconds: float) -> None:
+    """Set the audit->SIEM export-lag gauge (ADR-0045 §3 — the §6 p95 < 60 s SLI).
+
+    *lag_seconds* is ``now − commit_ts of the last audit row confirmed delivered``,
+    computed by the export pipeline after each cycle (caught-up ⇒ ~0). The value
+    carries no row content, only the age of the cursor — never secret material. The
+    export pipeline owns the poll; this module owns only the series. No-op without
+    ``prometheus_client`` (the structured ``audit.export`` log line still records it).
+    """
+    if not _PROM_ENABLED:
+        return
+    AUDIT_EXPORT_LAG_SECONDS.set(lag_seconds)
