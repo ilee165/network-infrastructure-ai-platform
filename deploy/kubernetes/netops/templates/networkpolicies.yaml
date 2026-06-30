@@ -427,6 +427,13 @@ spec:
             matchLabels:
               {{- include "netops.serviceSelector" (dict "ctx" . "component" "credentials") | nindent 14 }}
         {{- end }}
+        {{- if .Values.audit.export.enabled }}
+        # audit-siem-export → pooler:5432 (READ audit_log + advance audit_export_cursor;
+        # W3-T1 — the exporter reads through the Pooler when CNPG is the data tier).
+        - podSelector:
+            matchLabels:
+              {{- include "netops.serviceSelector" (dict "ctx" . "component" "audit-siem-export") | nindent 14 }}
+        {{- end }}
         # postgres → postgres:5432 (pooler → cluster, smoke → cluster `-ro`, and
         # intra-cluster streaming replication — all component=postgres).
         - podSelector:

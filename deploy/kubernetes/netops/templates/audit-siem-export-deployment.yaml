@@ -24,7 +24,11 @@ W4-LESSON guards:
        footgun does not apply. The by-reference Postgres password + the optional SIEM
        bearer token are secretKeyRef env, NEVER inlined in the manifest.
   egress — the companion audit-siem-export-networkpolicy.yaml confines this pod's
-       egress to the configured SIEM endpoint only (ADR-0045 §5 / ADR-0041 posture).
+       egress to TWO destinations only (ADR-0045 §5 / ADR-0041 posture): the
+       configured external SIEM endpoint CIDR(s), and the in-cluster postgres:5432
+       read path (the §2 -allow-worker-egress is component-scoped to the worker and
+       does NOT cover this exporter, so it gets its OWN Postgres egress allow). DNS is
+       cluster-wide via -allow-dns-egress. Everything else stays default-denied.
 
 SECURE-BY-DEFAULT, OPT-IN: renders only when audit.export.enabled (a deployment with
 no customer SIEM is unchanged). FAIL CLOSED on a misconfigured endpoint: an enabled
