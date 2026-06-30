@@ -100,6 +100,18 @@ class Settings(BaseSettings):
     #: Celery broker/result backend + cache (ADR-0008).
     redis_url: str = "redis://redis:6379/0"
 
+    #: TCP port the worker exposes its Prometheus ``/metrics`` exposition on
+    #: (W3-T0, ADR-0015 §2). The Celery worker has no HTTP server, so a tiny
+    #: ``prometheus_client`` HTTP server is started in the worker process at boot
+    #: (``app.workers.celery_app``) to serve the same default-REGISTRY series the
+    #: api ``/metrics`` route exposes. The K8s worker Deployments scrape this port.
+    worker_metrics_port: int = 9808
+
+    #: Celery-beat interval (seconds) for the ``system.sample_queue_depths`` task
+    #: that refreshes the ``netops_celery_queue_depth`` saturation gauge from each
+    #: work queue's Redis backlog (W3-T0, ADR-0015 §2 / ADR-0046 §1/§5).
+    queue_depth_sample_seconds: float = 15.0
+
     #: Neo4j topology/knowledge graph (ADR-0005).
     neo4j_uri: str = "bolt://neo4j:7687"
     neo4j_user: str = "neo4j"

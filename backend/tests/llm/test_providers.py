@@ -105,3 +105,24 @@ class TestErrors:
         # rejects construction, which must surface as the platform error.
         with pytest.raises(LLMProfileError, match="failed to construct"):
             get_chat_model("openai", settings)
+
+
+# ---------------------------------------------------------------------------
+# W3-T0: LLM request-count metric emitted at the factory (the one event site)
+# ---------------------------------------------------------------------------
+
+
+def test_get_chat_model_increments_llm_requests_total() -> None:
+    """``get_chat_model`` counts the request by profile + resolved model (ADR-0046 §1)."""
+    from app.core import metrics
+
+    settings = Settings(_env_file=None, llm_local_model="llama3.1:8b")
+    model_name = settings.llm_local_model
+    before = metrics.LLM_REQUESTS_TOTAL.labels(  # type: ignore[attr-defined]
+        profile="local", model=model_name
+    )._value.get()
+    get_chat_model("local", settings)
+    after = metrics.LLM_REQUESTS_TOTAL.labels(  # type: ignore[attr-defined]
+        profile="local", model=model_name
+    )._value.get()
+    assert after == before + 1

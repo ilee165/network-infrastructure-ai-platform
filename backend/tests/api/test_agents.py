@@ -913,3 +913,37 @@ class TestWebSocketFanout:
             "a budget-exhausted still-RUNNING socket must close gracefully (1000), not "
             f"via an early {agents_router._WS_POLICY_VIOLATION} rejection; got {fake_ws.close_code}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# W3-T0: agent first-token latency observed after a started run.
+# --------------------------------------------------------------------------- #
+class TestFirstTokenMetric:
+    @staticmethod
+    def _first_token_count() -> float:
+        """Read the per-``local``-profile histogram sample count off the registry."""
+        from prometheus_client import generate_latest
+
+        target = 'netops_agent_first_token_seconds_count{profile="local"}'
+        for line in generate_latest().decode().splitlines():
+            if line.startswith(target):
+                return float(line.rsplit(" ", 1)[1])
+        return 0.0
+
+    async def test_start_observes_first_token_latency(
+        self, client: httpx.AsyncClient, token_for: Callable[[str], str]
+    ) -> None:
+        """A run that persists a reasoning step records ONE first-token sample.
+
+        The profile label resolves from the reasoning-role profile (default
+        ``local`` in the unit settings). The histogram's per-profile sample COUNT
+        must advance by exactly one across the request (ADR-0046 §1).
+        """
+        before = self._first_token_count()
+        resp = await client.post(
+            "/api/v1/agents",
+            json={"intent": "why is bgp down?"},
+            headers={"Authorization": f"Bearer {token_for('viewer')}"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert self._first_token_count() == before + 1

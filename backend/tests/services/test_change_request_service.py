@@ -691,3 +691,36 @@ def test_change_request_action_constants() -> None:
     assert (
         audit_service.CHANGE_REQUEST_FAILED_TO_ROLLED_BACK == "change_request.failed_to_rolled_back"
     )
+
+
+# ---------------------------------------------------------------------------
+# W3-T0: ChangeRequest workflow-health metric emitted at the transition site
+# ---------------------------------------------------------------------------
+
+
+class TestChangeRequestMetrics:
+    """Every lifecycle transition increments ``netops_change_requests_total{state}``."""
+
+    @staticmethod
+    def _state_count(state: str) -> float:
+        from app.core import metrics
+
+        return metrics.CHANGE_REQUESTS_TOTAL.labels(state=state)._value.get()  # type: ignore[attr-defined]
+
+    async def test_create_and_submit_count_their_states(
+        self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        before_draft = self._state_count("draft")
+        before_pending = self._state_count("pending_approval")
+        requester = await _seed_user(sessionmaker, role_name="engineer")
+        cr = await service.create_draft(
+            requester_id=requester,
+            actor_role=Role.ENGINEER,
+            kind=ChangeRequestKind.CONFIG,
+            payload={"diff": "x"},
+        )
+        # The initial draft entry counted.
+        assert self._state_count("draft") == before_draft + 1
+        await service.submit(cr.id, actor_role=Role.ENGINEER, actor_id=requester)
+        # The submit transition counted the entered state.
+        assert self._state_count("pending_approval") == before_pending + 1

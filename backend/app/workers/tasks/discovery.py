@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -59,6 +60,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app import db
+from app.core import metrics
 from app.core.config import Settings, get_settings
 from app.core.crypto import KeyProvider, get_key_provider
 from app.core.errors import PluginError
@@ -599,8 +601,12 @@ def run_discovery(run_id: str) -> dict[str, Any]:
     bounded by the subnet allowlist (:func:`next_wave`).
     """
     run_uuid = uuid.UUID(run_id)
+    started_monotonic = time.monotonic()
     plan = asyncio.run(_start_run(run_uuid))
     if plan is None:
+        # The run never left planning (e.g. it was already terminal / unknown): a
+        # failed terminal state with no measurable run duration (ADR-0046 §1).
+        metrics.observe_discovery_run(status=DiscoveryRunStatus.FAILED.value)
         return {"run_id": run_id, "status": DiscoveryRunStatus.FAILED.value}
     logger.info("discovery.run_started", run_id=run_id, seeds=plan.seeds, hop_limit=plan.hop_limit)
 
@@ -652,6 +658,11 @@ def run_discovery(run_id: str) -> dict[str, Any]:
         status = DiscoveryRunStatus.SUCCEEDED
         error = None
     asyncio.run(_finish_run(run_uuid, status, stats, error))
+    # Discovery success-rate + duration SLI (ADR-0015 §2 / ADR-0046 §1): record the
+    # terminal status and the run wall-clock once the run is finished + committed.
+    metrics.observe_discovery_run(
+        status=status.value, duration_seconds=time.monotonic() - started_monotonic
+    )
     logger.info("discovery.run_finished", run_id=run_id, status=status.value)
 
     # Project the refreshed inventory into Neo4j once the run has devices

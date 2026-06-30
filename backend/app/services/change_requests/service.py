@@ -70,6 +70,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core import metrics
 from app.core.errors import ConflictError, ForbiddenError, NotFoundError
 from app.core.logging import get_logger
 from app.core.security import Role
@@ -239,6 +240,10 @@ class ChangeRequestService:
                 )
             await session.commit()
             cr_id = cr.id
+        # CR workflow-health SLI (ADR-0046 §1): the initial draft is a state ENTERED
+        # too, but create_draft does not go through _apply_transition, so count it
+        # here for complete lifecycle coverage (bounded enum label only).
+        metrics.record_change_request_transition(state=ChangeRequestState.DRAFT.value)
         _logger.info("change_request.created", cr_id=str(cr_id), requester_id=str(requester_id))
         return await self.get(cr_id)
 
@@ -599,6 +604,11 @@ class ChangeRequestService:
             reasoning_trace_id=cr.reasoning_trace_id,
             request_id=request_id,
         )
+        # ChangeRequest workflow-health SLI (ADR-0015 §2 / ADR-0046 §1): count the
+        # state ENTERED. Bounded enum label only — never the secret-bearing payload
+        # or target detail (ADR-0020 §4). The approve/reject edges additionally
+        # observe the approval-wait latency once a pending-since timestamp lands.
+        metrics.record_change_request_transition(state=new.value)
         _logger.info(
             "change_request.transition",
             cr_id=str(cr.id),

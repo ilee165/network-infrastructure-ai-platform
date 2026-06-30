@@ -49,6 +49,7 @@ from app.api.deps import (
     get_sessionmaker,
     require_role,
 )
+from app.core import metrics
 from app.core.config import Settings
 from app.core.errors import (
     AuthError,
@@ -376,6 +377,25 @@ def _step_read(step: TraceStep) -> AgentTraceStepRead:
     )
 
 
+def _first_token_seconds(traces: list[ReasoningTrace]) -> float | None:
+    """Seconds from the first trace's start to its first persisted step, or None.
+
+    The agent run is step-granular (no per-token stream at this layer), so the
+    first persisted reasoning step is the earliest user-visible output — the
+    operational first-token signal for the §6 first-token-latency SLI
+    (ADR-0046 §1). Both timestamps are UTC wall-clock; a run with no recorded step
+    yields ``None`` (nothing to observe). Clamped at ``0.0`` so clock skew between
+    the trace-start stamp and a step stamp can never record a negative latency.
+    """
+    if not traces:
+        return None
+    first = traces[0]
+    if not first.steps:
+        return None
+    delta = (first.steps[0].occurred_at - first.started_at).total_seconds()
+    return max(delta, 0.0)
+
+
 def _answer_of(state: SupervisorState) -> str:
     """Extract the final synthesized answer text from a finished run state."""
     messages = state.get("messages") or []
@@ -469,6 +489,14 @@ async def start_session(
 
     finished = await service.get(run_session.id)
     traces = await _load_traces(sessionmaker, run_session.id)
+    # Agent first-token latency SLI (ADR-0046 §1): observe time-to-first-persisted
+    # step, labelled by the resolved reasoning profile. Post-hoc over the loaded
+    # traces — no cost on the run hot path; skipped when the run produced no step.
+    first_token = _first_token_seconds(traces)
+    if first_token is not None:
+        async with sessionmaker() as profile_session:
+            profile = await effective_profile_for_role(profile_session, "reasoning", settings)
+        metrics.observe_agent_first_token(profile=profile, seconds=first_token)
     for trace in traces:
         await _audit(
             sessionmaker,

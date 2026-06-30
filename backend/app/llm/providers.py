@@ -174,6 +174,14 @@ def get_chat_model(
         # to a structlog line; M5 injects the append-only ``audit_log`` writer.
         sink = audit_sink if audit_sink is not None else LoggingLLMAuditSink()
         sink.record(LLMAuditEvent(profile=selected, model=model_name, role=_role))
+    # LLM cost/usage SLI (ADR-0015 §2 / ADR-0046 §1): count the request by profile
+    # + resolved model at the one factory all callers route through. Per-call
+    # latency + token totals are observed by the provider/runtime layer where the
+    # actual invoke happens, via ``metrics.observe_llm_request(... latency/tokens)``
+    # — this site owns only the request count (never a prompt/response body).
+    from app.core import metrics
+
+    metrics.observe_llm_request(profile=selected, model=model_name)
     provider_model = _build_provider_model(selected, model_name, resolved_settings, temperature)
     # A9: central, bypass-proof redaction wraps every model the factory returns.
     return wrap_with_redaction(provider_model)

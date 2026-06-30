@@ -1,0 +1,33 @@
+# prometheus-adapter mapping for the api-HPA request-rate metric (P3 W3-T0).
+#
+# This is the prometheus-adapter `rules:` snippet that exposes the
+# `http_requests_per_second` series — produced by api-request-rate.rules.yaml from
+# rate(netops_http_requests_total[...]) — through the custom.metrics.k8s.io API as
+# a per-Pod metric, which the W2 api HorizontalPodAutoscaler consumes
+# (values.yaml: services.api.autoscaling.requestRate.metricName).
+#
+# Merge this `rules:` list into the prometheus-adapter Helm values / ConfigMap
+# (`adapter.config` / the `config.yaml` the adapter mounts). It is shipped as a
+# standalone snippet here because the adapter is an OPT-IN operator add-on (ADR-0015
+# expose-don't-bundle): the platform exposes the counter + the recording rule; a
+# cluster without the adapter runs the api HPA on CPU only (values.yaml
+# requestRate.enabled=false is the documented opt-out, see api-hpa.yaml).
+#
+# HOST-LIMITATION NOTE (L1/L3): the adapter requires a live cluster + aggregated
+# apiserver and CANNOT be wired/verified on this build host. The live HPA-reads-
+# the-metric proof is the named-deferred W4-T6 drill (P3-PLATFORM-PLAN.md §0).
+
+rules:
+  - seriesQuery: 'http_requests_per_second{namespace!="",pod!=""}'
+    resources:
+      overrides:
+        namespace:
+          resource: namespace
+        pod:
+          resource: pod
+    name:
+      # The series is already the per-second rate (the recording rule applied
+      # rate()), so expose it under its own name with no further matches/rename.
+      matches: "^(.*)$"
+      as: "http_requests_per_second"
+    metricsQuery: 'sum by (<<.GroupBy>>) (<<.Series>>{<<.LabelMatchers>>})'

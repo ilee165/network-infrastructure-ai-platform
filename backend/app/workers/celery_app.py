@@ -30,9 +30,13 @@ from __future__ import annotations
 
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_init
 from kombu import Queue
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
+
+_logger = get_logger(__name__)
 
 #: Canonical D8 queue names — referenced by compose/K8s worker commands.
 QUEUE_DISCOVERY = "discovery"
@@ -213,9 +217,59 @@ def create_celery_app() -> Celery:
                     minute=str(settings.raw_artifact_retention_minute),
                 ),
             },
+            # queue-depth sampling (W3-T0, ADR-0015 §2 / ADR-0046 §1/§5): refresh the
+            # ``netops_celery_queue_depth`` saturation gauge from each work queue's
+            # Redis backlog every 15 s so the queue-stall SLI stays fresh between
+            # scrapes (the hand-rolled, no-celery-exporter-sidecar path).
+            "queue-depth-sample": {
+                "task": "system.sample_queue_depths",
+                "schedule": settings.queue_depth_sample_seconds,
+            },
         },
     )
     return celery
+
+
+def start_worker_metrics_server(port: int) -> bool:
+    """Start the worker's Prometheus ``/metrics`` HTTP server on *port* (W3-T0).
+
+    The Celery worker has no HTTP server of its own, so the default-REGISTRY
+    series — the KEK posture gauges, the topology-RTO histogram, and the
+    ``netops_*`` discovery/LLM/CR/queue series this worker emits (ADR-0015 §2) —
+    are exposed by a tiny ``prometheus_client`` HTTP server started once in the
+    worker main process. The K8s worker Deployments scrape this port.
+
+    Graceful by design (mirrors :mod:`app.core.metrics`): returns ``False`` (and
+    logs, never raises) when ``prometheus_client`` is absent or the port is
+    already bound — a metrics-server failure must never take a worker down or
+    stop it draining its queue.
+    """
+    try:
+        from prometheus_client import start_http_server
+    except ImportError:
+        _logger.info("worker.metrics_server_skipped", reason="prometheus_client_absent")
+        return False
+    try:
+        start_http_server(port)
+    except OSError as exc:
+        # Port already bound (e.g. a co-located second worker, or a re-init) must
+        # not crash the worker; the first server keeps serving the shared REGISTRY.
+        _logger.warning(
+            "worker.metrics_server_unavailable", port=port, reason_class=type(exc).__name__
+        )
+        return False
+    _logger.info("worker.metrics_server_started", port=port)
+    return True
+
+
+@worker_init.connect
+def _start_metrics_on_worker_init(**_kwargs: object) -> None:
+    """Expose ``/metrics`` once when a Celery worker boots (W3-T0, ADR-0015 §2).
+
+    ``worker_init`` fires once in the worker MAIN process (before prefork children),
+    so the HTTP server binds the configured port exactly once per worker.
+    """
+    start_worker_metrics_server(get_settings().worker_metrics_port)
 
 
 #: Worker entrypoint: ``celery -A app.workers.celery_app worker -Q <queue>``.

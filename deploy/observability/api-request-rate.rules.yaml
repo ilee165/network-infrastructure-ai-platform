@@ -1,0 +1,43 @@
+# api request-rate recording rule (P3 W3-T0, ADR-0043 §1 / ADR-0046 §1).
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The W2 api HorizontalPodAutoscaler (deploy/kubernetes/netops/values.yaml:
+# services.api.autoscaling.requestRate.metricName = http_requests_per_second)
+# scales the api tier on a per-pod request rate. That Pods metric is NOT emitted
+# directly by the application — it is DERIVED from the netops_http_requests_total
+# counter (which W3-T0 instruments via the FastAPI metrics middleware) by a
+# Prometheus recording rule, and surfaced to the HPA through the
+# prometheus-adapter custom-metrics API (see api-request-rate.adapter.yaml).
+#
+# This recording rule is the single source of the derived rate series both the
+# adapter and any dashboard read (the ADR-0046 §1 "one rule per SLI" discipline),
+# so the dashboard and the autoscaler never compute the same number two ways.
+#
+# HOST-LIMITATION NOTE (L1/L3 — flag, don't fake)
+# ------------------------------------------------
+# The custom-metrics adapter (prometheus-adapter) cannot be wired or verified on
+# this build host: it requires a running Kubernetes cluster + a Prometheus scrape
+# of the api /metrics endpoint + the aggregated-apiserver (custom.metrics.k8s.io)
+# registration. So W3-T0 ships (1) the netops_http_requests_total counter (live,
+# emitted by the middleware), (2) THIS recording rule, and (3) the adapter mapping
+# the rule feeds. Wiring + live verification of the adapter (HPA actually reading
+# http_requests_per_second) is the W4-T6 live-cluster drill, named-deferred per
+# P3-PLATFORM-PLAN.md §0 — never silently claimed as done here.
+#
+# promtool validation of this rules file is W3-T2's gate (it owns rule linting);
+# this task delivers the rule + the series it reads.
+
+groups:
+  - name: netops-api-request-rate
+    rules:
+      # Per-pod api request rate over a 2 m window, summed across status classes
+      # and routes (the HPA scales the tier on TOTAL load, not per-route), grouped
+      # by pod so the adapter exposes it as a per-Pod metric. The label set
+      # (namespace,pod) is what prometheus-adapter joins on; `route`/`status_class`
+      # are intentionally aggregated away here to keep the HPA signal pod-level.
+      - record: http_requests_per_second
+        expr: |
+          sum by (namespace, pod) (
+            rate(netops_http_requests_total[2m])
+          )
