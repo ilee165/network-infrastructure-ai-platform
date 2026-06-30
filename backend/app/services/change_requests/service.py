@@ -66,6 +66,7 @@ guard is in place so the handoff is provably driven by the Automation Agent.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -336,6 +337,10 @@ class ChangeRequestService:
                     "four-eyes violation: the approver must differ from the requester "
                     f"for change request '{cr_id}'"
                 )
+            # Compute approval-wait latency (ADR-0046 §1 SLI): seconds from when
+            # the CR entered pending_approval (updated_at set by the submit
+            # transition) to the moment of the approve decision.
+            approval_latency = (datetime.now(UTC) - cr.updated_at).total_seconds()
             session.add(
                 Approval(
                     change_request_id=cr.id,
@@ -351,6 +356,7 @@ class ChangeRequestService:
                 action=audit.CHANGE_REQUEST_PENDING_TO_APPROVED,
                 actor=f"user:{actor_id}",
                 request_id=request_id,
+                approval_latency_seconds=approval_latency,
             )
             await session.commit()
         return await self.get(cr_id)
@@ -373,6 +379,10 @@ class ChangeRequestService:
         async with self._sessionmaker() as session:
             cr = await self._load(session, cr_id)
             self._require_state(cr, ChangeRequestState.PENDING_APPROVAL, "reject")
+            # Compute approval-wait latency (ADR-0046 §1 SLI): seconds from when
+            # the CR entered pending_approval (updated_at set by the submit
+            # transition) to the moment of the reject decision.
+            approval_latency = (datetime.now(UTC) - cr.updated_at).total_seconds()
             session.add(
                 Approval(
                     change_request_id=cr.id,
@@ -388,6 +398,7 @@ class ChangeRequestService:
                 action=audit.CHANGE_REQUEST_PENDING_TO_DRAFT,
                 actor=f"user:{actor_id}",
                 request_id=request_id,
+                approval_latency_seconds=approval_latency,
             )
             await session.commit()
         return await self.get(cr_id)
@@ -578,6 +589,7 @@ class ChangeRequestService:
         action: str,
         actor: str,
         request_id: uuid.UUID | None = None,
+        approval_latency_seconds: float | None = None,
     ) -> None:
         """Mutate ``state`` and write the before/after-stamped, trace-linked audit row.
 
@@ -587,6 +599,9 @@ class ChangeRequestService:
         audited record self-identifies which devices/DDI refs the change touches
         (ADR-0020 §4) — never the secret-bearing CR ``payload``. ``request_id``
         is the inbound correlation id (ADR-0020 §4), ``None`` for non-HTTP calls.
+        ``approval_latency_seconds`` is the wall-clock seconds the CR spent in
+        ``pending_approval`` before the approve/reject decision; when provided it
+        is observed on the ADR-0046 §1 approval-latency histogram.
         """
         before = cr.state
         cr.state = new
@@ -607,8 +622,10 @@ class ChangeRequestService:
         # ChangeRequest workflow-health SLI (ADR-0015 §2 / ADR-0046 §1): count the
         # state ENTERED. Bounded enum label only — never the secret-bearing payload
         # or target detail (ADR-0020 §4). The approve/reject edges additionally
-        # observe the approval-wait latency once a pending-since timestamp lands.
-        metrics.record_change_request_transition(state=new.value)
+        # observe the approval-wait latency (seconds spent in pending_approval).
+        metrics.record_change_request_transition(
+            state=new.value, approval_latency_seconds=approval_latency_seconds
+        )
         _logger.info(
             "change_request.transition",
             cr_id=str(cr.id),
