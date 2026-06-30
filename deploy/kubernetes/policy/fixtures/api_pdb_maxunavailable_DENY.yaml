@@ -1,0 +1,17 @@
+# NEGATIVE — api PDB using maxUnavailable instead of minAvailable. Over a small
+# tier a maxUnavailable can permit a drain to zero; PRODUCTION.md §3.2 names
+# minAvailable as the floor. MUST be DENIED (no integer minAvailable >= 1).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: netops-api
+  namespace: netops
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: api
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netops
+      app.kubernetes.io/component: api

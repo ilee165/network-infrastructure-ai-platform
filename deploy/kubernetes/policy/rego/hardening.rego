@@ -3350,3 +3350,115 @@ sentinel_has_monitor(c) if {
 	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
 	contains(arg, "sentinel monitor")
 }
+
+# ===========================================================================
+# W2-T1 — api HorizontalPodAutoscaler + PodDisruptionBudget (ADR-0043 §1 /
+# PRODUCTION.md §3.2 / §11 G-SCA §327). The api half of the P3 compute scale-out.
+#
+# These rules assert the api-scale CONTRACT on the rendered HPA/PDB so a
+# regression (a floor dropped below 2, a CPU-only HPA, a PDB that allows zero, a
+# missing CPU basis) fails the gate. They select the api objects by the stable
+# `app.kubernetes.io/component: api` label so they are robust to the release-name
+# prefix (the rendered object is `<release>-api`). conftest feeds each rendered
+# document as a separate `input`; cross-document "object X must exist" is not
+# expressible here — the per-object contract below is what the gate enforces, and
+# the bite fixtures + the always-on default render are the existence proof.
+# NEVER weaken a rule to make it green — fix the manifest.
+# ===========================================================================
+
+is_api_object(obj) if {
+	obj.metadata.labels["app.kubernetes.io/component"] == "api"
+}
+
+# --- api HPA: FLOOR minReplicas >= 2 (PRODUCTION.md §3.2 / ADR-0043 §1, Alt #6).
+# A floor of 1 cannot survive a single node loss and defeats the PDB. An omitted
+# minReplicas defaults to 1 in K8s, so default to 1 before comparing (fail-closed
+# on omission rather than UNDEFINED / fail-open). ---
+deny contains msg if {
+	input.kind == "HorizontalPodAutoscaler"
+	is_api_object(input)
+	min := object.get(input.spec, "minReplicas", 1)
+	min < 2
+	msg := sprintf("api HorizontalPodAutoscaler %q must set minReplicas >= 2 (the api tier runs >=2 replicas ALWAYS to survive a single node loss and is the substrate the PDB protects; a floor of 1 defeats the PDB — PRODUCTION.md §3.2 / ADR-0043 §1, Alt #6), got %v", [input.metadata.name, min])
+}
+
+# --- api HPA: maxReplicas must be >= minReplicas (a coherent ceiling). ---
+deny contains msg if {
+	input.kind == "HorizontalPodAutoscaler"
+	is_api_object(input)
+	min := object.get(input.spec, "minReplicas", 1)
+	max := object.get(input.spec, "maxReplicas", 0)
+	max < min
+	msg := sprintf("api HorizontalPodAutoscaler %q maxReplicas (%v) must be >= minReplicas (%v)", [input.metadata.name, max, min])
+}
+
+# --- api HPA: scaleTargetRef must point at a Deployment (the api Deployment). ---
+deny contains msg if {
+	input.kind == "HorizontalPodAutoscaler"
+	is_api_object(input)
+	object.get(input.spec.scaleTargetRef, "kind", "") != "Deployment"
+	msg := sprintf("api HorizontalPodAutoscaler %q scaleTargetRef.kind must be Deployment (it autoscales the api Deployment; ADR-0043 §1)", [input.metadata.name])
+}
+
+# --- api HPA: must carry a CPU Resource-utilization metric. CPU% is the
+# compute-bound basis (and is meaningless without the container CPU request the
+# api Deployment sets) — ADR-0043 §1. ---
+deny contains msg if {
+	input.kind == "HorizontalPodAutoscaler"
+	is_api_object(input)
+	not api_hpa_has_cpu_metric(input)
+	msg := sprintf("api HorizontalPodAutoscaler %q must include a CPU Resource (Utilization) metric — the compute-bound signal (ADR-0043 §1)", [input.metadata.name])
+}
+
+api_hpa_has_cpu_metric(hpa) if {
+	some m in object.get(hpa.spec, "metrics", [])
+	m.type == "Resource"
+	m.resource.name == "cpu"
+	m.resource.target.type == "Utilization"
+}
+
+# --- api HPA: must NOT be CPU-only — it MUST carry a second, request-rate signal
+# (ADR-0043 §1 / Alt #1: a request flood that blocks on I/O drives p95 past the
+# §327 budget while CPU stays low, so CPU-only would not scale). The request-rate
+# signal is a Pods (or External) custom metric published by the W3 Prometheus
+# adapter. We require >= 2 metrics AND at least one non-CPU-resource metric, so a
+# render that silently drops the request-rate signal (regressing to CPU-only)
+# fails the gate. ---
+deny contains msg if {
+	input.kind == "HorizontalPodAutoscaler"
+	is_api_object(input)
+	not api_hpa_has_request_rate_metric(input)
+	msg := sprintf("api HorizontalPodAutoscaler %q must include a request-rate signal IN ADDITION to CPU (a Pods/External custom metric) — CPU-only was rejected (ADR-0043 §1 / Alt #1: an I/O-bound flood drives p95 past the §327 budget while CPU stays low)", [input.metadata.name])
+}
+
+# A request-rate metric is any Pods or External metric (the Prometheus-adapter
+# custom-metric shapes the request-rate signal renders as). A bare second
+# Resource/cpu would not count — it must be a non-resource demand signal.
+api_hpa_has_request_rate_metric(hpa) if {
+	some m in object.get(hpa.spec, "metrics", [])
+	m.type == "Pods"
+}
+
+api_hpa_has_request_rate_metric(hpa) if {
+	some m in object.get(hpa.spec, "metrics", [])
+	m.type == "External"
+}
+
+# --- api PDB: minAvailable must guarantee >= 1 ready replica (PRODUCTION.md §3.2:
+# "a node drain must never take api to zero"). An integer minAvailable must be
+# >= 1; a PDB that omits minAvailable (relying on maxUnavailable, which over a
+# small tier can allow zero) is rejected for the api tier — minAvailable is the
+# floor the §3.2 requirement names. ---
+deny contains msg if {
+	input.kind == "PodDisruptionBudget"
+	is_api_object(input)
+	not api_pdb_guarantees_one(input)
+	msg := sprintf("api PodDisruptionBudget %q must set an integer minAvailable >= 1 (a voluntary disruption must never take the api tier to zero — PRODUCTION.md §3.2 / ADR-0043 §1; a maxUnavailable-only PDB can drain a small tier to zero)", [input.metadata.name])
+}
+
+api_pdb_guarantees_one(pdb) if {
+	ma := object.get(pdb.spec, "minAvailable", null)
+	is_number(ma)
+	ma >= 1
+}
+

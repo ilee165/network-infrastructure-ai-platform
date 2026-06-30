@@ -1,0 +1,44 @@
+{{- /*
+api PodDisruptionBudget (W2-T1, ADR-0043 §1 — PRODUCTION.md §3.2).
+
+A VOLUNTARY disruption (node drain, rolling node upgrade, the W4-T8 N-2
+rehearsal) can never take the api tier below `minAvailable` ready replicas.
+With `minAvailable: 1` (the §3.2 floor) combined with the HPA `minReplicas: 2`
+floor (api-hpa.yaml) and a cross-node anti-affinity preference, an involuntary
+single-node loss still leaves >=1 api replica serving — "a node drain must never
+take api to zero" (W2-T1 exit criterion / ADR-0043 risk "No PDB").
+
+`minAvailable` (not `maxUnavailable`) is used deliberately: it is a FLOOR that
+holds regardless of how the HPA has scaled the tier (an absolute 1 ready replica
+is guaranteed whether the tier is at 2 or 10), whereas a percentage maxUnavailable
+would let a small tier drain to zero. The selector matches the api Deployment's
+pods via the stable component selector (netops.serviceSelector), so it tracks the
+exact pod set the HPA scales — no label drift.
+
+NOTE (ADR-0043 §1): with a single api replica a PDB minAvailable:1 would BLOCK a
+voluntary drain (it cannot evict the only pod). That is precisely why the HPA
+floor is 2 (>=2 always) — the PDB is only correct alongside that floor, and both
+ship together in W2-T1. The chart guards this: the HPA enforces minReplicas>=2.
+*/ -}}
+{{- if and .Values.services.api.enabled .Values.services.api.podDisruptionBudget.enabled }}
+{{- $pdb := .Values.services.api.podDisruptionBudget }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "netops.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "api") | nindent 4 }}
+spec:
+  minAvailable: {{ $pdb.minAvailable }}
+  # AlwaysAllow: a Running-but-NOT-Ready api pod can still be evicted during a
+  # drain (K8s 1.27+ GA). For a STATELESS tier this is correct — a stuck/unready
+  # replica must not BLOCK a node drain, and `minAvailable` already protects the
+  # HEALTHY count (a not-ready pod is not counted toward it). The default
+  # (IfHealthyBudget) would refuse to evict an unready pod while at the budget,
+  # deadlocking a drain on a crash-looping replica (ADR-0043 §1 drain-safety).
+  unhealthyPodEvictionPolicy: {{ $pdb.unhealthyPodEvictionPolicy }}
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "api") | nindent 6 }}
+{{- end }}

@@ -643,6 +643,18 @@ jobs:
       - name: conftest pg_hba weak-hostssl bite (negative + positive fixtures)
         run: bash deploy/kubernetes/policy/fixtures/run-pg-hba-bite.sh
 
+      # W2-T1 (ADR-0043 §1) — api HPA + PDB policy BITE. The api HPA + PDB are
+      # ON BY DEFAULT (resilient-by-default), so they ARE in the default
+      # `rendered.yaml` above and already schema/policy-gated by the conftest +
+      # kubeconform + kube-linter steps there (no separate render step needed).
+      # This step proves the apiscale.* rules actually BITE: NEGATIVE fixtures
+      # (HPA minReplicas 1, CPU-only HPA, no-CPU HPA, PDB minAvailable 0, PDB
+      # maxUnavailable-only) are each DENIED, while POSITIVE fixtures (the
+      # compliant minReplicas-2 + CPU+request-rate HPA, the minAvailable-1 PDB)
+      # still PASS. RED gate.
+      - name: conftest api HPA + PDB bite (floor>=2 + CPU+req-rate + PDB minAvailable>=1)
+        run: bash deploy/kubernetes/policy/fixtures/run-api-hpa-pdb-bite.sh
+
       # W1-T1 (ADR-0042) — CloudNativePG HA tier render + policy validation. The
       # CNPG Cluster/Pooler/PriorityClass are OPT-IN (default OFF), so the default
       # `rendered.yaml` above does NOT contain them and the cnpg.* conftest rules
