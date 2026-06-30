@@ -182,6 +182,42 @@ tests:
       - eval_time: 75m
         alertname: NetopsApiReadLatencyP99FastBurn
         exp_alerts: []
+      - eval_time: 400m
+        alertname: NetopsApiReadLatencyP95SlowBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: NetopsApiReadLatencyP99SlowBurn
+        exp_alerts: []
+
+  - interval: 1m
+    name: api read p99 slow burn — FIRES on a sustained moderate too-slow fraction
+    input_series:
+      # 600/min total; 530 land <=1.0s, 70 spill past 1.0s.
+      # too_slow_frac(p99) = 1 - 530/600 = 0.117 > 6*0.01=0.06 -> fires ticket tier.
+      # sustained past the 6h leg + for:15m.
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.1"}'
+        values: '0+400x420'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.25"}'
+        values: '0+450x420'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.5"}'
+        values: '0+500x420'
+      - series: 'netops_http_request_duration_seconds_bucket{le="1.0"}'
+        values: '0+530x420'
+      - series: 'netops_http_request_duration_seconds_bucket{le="+Inf"}'
+        values: '0+600x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: NetopsApiReadLatencyP99SlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: api_read_latency
+              tier: slow
+              objective: p99
+            exp_annotations:
+              summary: "API read p99 latency budget burning slowly (>=6x too-slow fraction)"
+              description: "The fraction of read requests exceeding the 1 s p99 objective is burning the 1% latency budget at >=6x over BOTH 30m and 6h (~5% of the 30-day budget in 6h)."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
 
   - interval: 1m
     name: api read p95 slow burn — FIRES on a sustained moderate too-slow fraction
@@ -290,6 +326,66 @@ tests:
       - eval_time: 75m
         alertname: NetopsAgentFirstTokenExternalFastBurn
         exp_alerts: []
+      - eval_time: 400m
+        alertname: NetopsAgentFirstTokenLocalSlowBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: NetopsAgentFirstTokenExternalSlowBurn
+        exp_alerts: []
+
+  - interval: 1m
+    name: agent first-token local slow burn — FIRES on a sustained too-slow local fraction
+    input_series:
+      # local: 20/min total; 12 land <=5.0s, 8 spill.
+      # too_slow_frac = 1 - 12/20 = 0.40 > 6*0.05=0.30 -> fires ticket tier.
+      # sustained past 6h leg + for:15m.
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="1.0"}'
+        values: '0+8x420'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="2.5"}'
+        values: '0+10x420'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="5.0"}'
+        values: '0+12x420'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="+Inf"}'
+        values: '0+20x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: NetopsAgentFirstTokenLocalSlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: agent_first_token_latency
+              tier: slow
+              profile: local
+            exp_annotations:
+              summary: "Agent first-token p95 (local profile) latency budget burning slowly (>=6x)"
+              description: "The fraction of local-profile first-token events exceeding the 5 s p95 objective is burning the 5% budget at >=6x over BOTH 30m and 6h (~5% of the 30-day budget in 6h)."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
+
+  - interval: 1m
+    name: agent first-token external slow burn — FIRES on a sustained too-slow external fraction
+    input_series:
+      # external: 20/min total; 12 land <=3.0s, 8 spill.
+      # too_slow_frac = 1 - 12/20 = 0.40 > 6*0.05=0.30 -> fires ticket tier.
+      # sustained past 6h leg + for:15m.
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="1.0"}'
+        values: '0+8x420'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="3.0"}'
+        values: '0+12x420'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}'
+        values: '0+20x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: NetopsAgentFirstTokenExternalSlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: agent_first_token_latency
+              tier: slow
+              profile: external
+            exp_annotations:
+              summary: "Agent first-token p95 (external profile) latency budget burning slowly (>=6x)"
+              description: "The fraction of external-profile first-token events exceeding the 3 s p95 objective is burning the 5% budget at >=6x over BOTH 30m and 6h (~5% of the 30-day budget in 6h)."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
 
   # ===========================================================================
   # §6 row 4 — Discovery success. FIRING: a sustained failed/partial stream drops

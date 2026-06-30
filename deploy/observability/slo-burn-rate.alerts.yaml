@@ -238,6 +238,37 @@ groups:
             the 1% latency budget at >=14.4x over BOTH 5m and 1h. SLI quantile
             series: slo:netops_api_read_latency:p99_5m.
           runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
+      - alert: NetopsApiReadLatencyP99SlowBurn
+        # p99<1s TICKET: 6x burn over 30m AND 6h. budget=0.01 -> 0.06 frac.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_http_request_duration_seconds_bucket{le="1.0"}[30m]))
+              /
+              sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[30m]))
+            ) > (6 * 0.01)
+            and
+            (
+              1 -
+              sum(rate(netops_http_request_duration_seconds_bucket{le="1.0"}[6h]))
+              /
+              sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[6h]))
+            ) > (6 * 0.01)
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          slo: api_read_latency
+          tier: slow
+          objective: p99
+        annotations:
+          summary: "API read p99 latency budget burning slowly (>=6x too-slow fraction)"
+          description: >-
+            The fraction of read requests exceeding the 1 s p99 objective is burning
+            the 1% latency budget at >=6x over BOTH 30m and 6h (~5% of the 30-day
+            budget in 6h).
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
 
   # ===========================================================================
   # §6 row 3 — Agent chat first-token latency, SLO p95 < 5 s (local profile) /
@@ -310,6 +341,68 @@ groups:
             The fraction of external-profile first-token events exceeding the 3 s p95
             objective is burning the 5% budget at >=14.4x over BOTH 5m and 1h. SLI:
             slo:netops_agent_first_token_latency:p95_5m{profile="external"}.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
+      - alert: NetopsAgentFirstTokenLocalSlowBurn
+        # local p95<5s TICKET: 6x burn over 30m AND 6h. budget=0.05 -> 0.30 frac.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="5.0"}[30m]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="+Inf"}[30m]))
+            ) > (6 * 0.05)
+            and
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="5.0"}[6h]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="+Inf"}[6h]))
+            ) > (6 * 0.05)
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          slo: agent_first_token_latency
+          tier: slow
+          profile: local
+        annotations:
+          summary: "Agent first-token p95 (local profile) latency budget burning slowly (>=6x)"
+          description: >-
+            The fraction of local-profile first-token events exceeding the 5 s p95
+            objective is burning the 5% budget at >=6x over BOTH 30m and 6h (~5% of
+            the 30-day budget in 6h).
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
+      - alert: NetopsAgentFirstTokenExternalSlowBurn
+        # external p95<3s TICKET: 6x burn over 30m AND 6h. budget=0.05 -> 0.30 frac.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="3.0"}[30m]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}[30m]))
+            ) > (6 * 0.05)
+            and
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="3.0"}[6h]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}[6h]))
+            ) > (6 * 0.05)
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          slo: agent_first_token_latency
+          tier: slow
+          profile: external
+        annotations:
+          summary: "Agent first-token p95 (external profile) latency budget burning slowly (>=6x)"
+          description: >-
+            The fraction of external-profile first-token events exceeding the 3 s p95
+            objective is burning the 5% budget at >=6x over BOTH 30m and 6h (~5% of
+            the 30-day budget in 6h).
           runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
 
   # ===========================================================================
