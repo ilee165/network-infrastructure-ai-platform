@@ -3512,12 +3512,20 @@ deny contains msg if {
 	msg := sprintf("packet KEDA ScaledObject %q must set spec.scaleTargetRef.name to a sandbox-pinned packet Deployment (ADR-0043 §4)", [input.metadata.name])
 }
 
-# --- SENTINEL-AWARE TRIGGER (ADR-0043 §2): every worker ScaledObject must scale
+# --- SENTINEL-AWARE TRIGGER (ADR-0043 §2): every WORKER ScaledObject must scale
 # on a redis-sentinel trigger that discovers the primary via Sentinel — NOT a
 # plain `redis` scaler with a static `address`/`host` (a static primary pin
-# breaks on failover, the failover-aware-client decision ADR-0044 forbids). ---
+# breaks on failover, the failover-aware-client decision ADR-0044 forbids).
+#
+# SCOPE: scoped to ScaledObjects stamped with the worker-scaling component label
+# (app.kubernetes.io/component == "worker-scaling") — the label netops.componentLabels
+# stamps on all W2-T3 ScaledObjects (keda-scaledobjects.yaml). A ScaledObject for a
+# non-sentinel use-case (CPU metric, cron, HTTP, etc.) that is NOT a Redis-backed
+# worker scaler is NOT subject to this architectural constraint. The sentinel-trigger
+# rule is a Redis-specific structural mandate, not a universal KEDA invariant. ---
 deny contains msg if {
 	input.kind == "ScaledObject"
+	input.metadata.labels["app.kubernetes.io/component"] == "worker-scaling"
 	not workerscale_has_sentinel_trigger(input)
 	msg := sprintf("KEDA ScaledObject %q must use a redis-sentinel trigger with sentinelAddresses + sentinelMaster (the primary is discovered via Sentinel so a Redis failover does not break scaling — ADR-0043 §2 / ADR-0044); a plain redis scaler with a static host pin is rejected", [input.metadata.name])
 }

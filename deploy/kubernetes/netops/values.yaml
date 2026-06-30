@@ -827,6 +827,25 @@ workerScaling:
       maxReplicaCount: 4
       listLength: 2
 
+  # -- Per-queue worker PodDisruptionBudgets (W2-T3 fix, ADR-0043 §2/§3). A node
+  #    drain / rolling upgrade can never evict all replicas of a queue-worker
+  #    simultaneously and silently drop in-flight Celery tasks. One PDB per
+  #    general queue (discovery, config, docs); packet queues target the ADR-0031
+  #    Deployments which are hardened separately. minAvailable:1 mirrors the api
+  #    PDB floor (api-pdb.yaml, W2-T1). AlwaysAllow lets a stuck/unready worker
+  #    pod be evicted during a drain without blocking it. ON by default alongside
+  #    workerScaling.enabled (resilient-by-default).
+  podDisruptionBudget:
+    enabled: true
+    # FLOOR of ready replicas a voluntary disruption must leave. An absolute 1
+    # ensures at least one healthy worker pod remains per queue during a drain,
+    # regardless of how KEDA has scaled the tier. Mirrors api minAvailable: 1.
+    minAvailable: 1
+    # AlwaysAllow (K8s 1.27+ GA): a Running-but-not-Ready worker pod can still
+    # be evicted during a drain — a stuck/crash-looping pod must NOT deadlock a
+    # node drain. minAvailable still protects the HEALTHY count.
+    unhealthyPodEvictionPolicy: AlwaysAllow
+
 # -- Backup / DR tier (W5-T1, ADR-0030 §1/§4). pgBackRest continuous WAL
 #    archiving + weekly-full / daily-incr backups of the Postgres system of
 #    record, repo-encrypted (aes-256-cbc), written to a MinIO/S3 object store.
