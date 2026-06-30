@@ -1,0 +1,106 @@
+{{- /*
+SLO RECORDING RULES — PrometheusRule (W3-T2, ADR-0046 §1; PRODUCTION.md §6 / §11 G-OBS).
+
+One Prometheus RECORDING rule per §6 SLI: the canonical `slo:<sli>:<op>` series the
+W3-T3 multi-window burn-rate alerts and the W3-T4 golden-signal dashboards both read
+(ADR-0046 §1 — "the alert and the dashboard read the SAME derived series"). Rendered
+as a prometheus-operator PrometheusRule (monitoring.coreos.com/v1) so an operator
+running kube-prometheus discovers the recording groups by its ruleSelector.
+
+SINGLE SOURCE OF TRUTH + promtool GATE
+  The rule BODY is identical to deploy/observability/slo-recording.rules.yaml, which
+  is what `promtool check rules` + `promtool test rules`
+  (deploy/observability/slo-recording.rules.test.yaml) validate — the alert-as-test
+  BITE proof (ADR-0046 §6). This template renders that SAME group set as an operator
+  object; a renamed base `netops_*` metric breaks BOTH the promtool gate and any
+  dashboard that reads the SLI series, by design (ADR-0046 §1).
+
+EXPOSE-DON'T-BUNDLE (ADR-0015 alt.1 / ADR-0046 §4)
+  Renders ONLY when observability.prometheusRule.enabled — a default install exposes
+  the base series on /metrics but does NOT bundle a Prometheus/operator stack. The
+  recording rules ship as opt-in CODE; running the monitoring stack stays the
+  operator's choice.
+
+1:1 ROW<->RULE + THE THREE FLAGGED GAPS (ADR-0046 §1; do NOT fabricate)
+  Six §6 rows have a backing series after W3-T0/W3-T1 and get a rule here. The three
+  reconciliation-job SLIs — config-backup completeness (row 5), CR->audit
+  completeness (row 6), reasoning-trace persistence (row 9) — have NO Prometheus base
+  series (their §6 "measured by" is a daily reconciliation JOB, not a /metrics
+  series), so they are FLAGGED to the reconciliation-job owners, NOT fabricated as
+  rules over a non-existent series (the P1-W4 false-green trap). See the standalone
+  rules file header for the named-deferred follow-up series.
+*/ -}}
+{{- if .Values.observability.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "netops.fullname" . }}-slo-recording
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    netops.ai/slo-rules: recording
+    {{- with .Values.observability.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    # §6 row 1 — API availability (non-5xx ratio), SLO >=99.9%/30d; budget = 0.1%.
+    # route/method aggregated away (global availability is the §6 reporting dim).
+    - name: netops-slo-api-availability
+      rules:
+        - record: slo:netops_api_availability:ratio_rate5m
+          expr: |
+            sum(rate(netops_http_requests_total{status_class!="5xx"}[5m]))
+            /
+            sum(rate(netops_http_requests_total[5m]))
+
+    # §6 row 2 — API read latency, SLO p95 < 300 ms AND p99 < 1 s. Two operations
+    # for the one row's two objectives, both off the single duration histogram.
+    - name: netops-slo-api-read-latency
+      rules:
+        - record: slo:netops_api_read_latency:p95_5m
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(netops_http_request_duration_seconds_bucket[5m]))
+            )
+        - record: slo:netops_api_read_latency:p99_5m
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (rate(netops_http_request_duration_seconds_bucket[5m]))
+            )
+
+    # §6 row 3 — Agent first-token latency p95, kept PER profile (the SLO target
+    # differs local < 5 s vs external < 3 s; profile is the bounded ADR-0009 enum).
+    - name: netops-slo-agent-first-token-latency
+      rules:
+        - record: slo:netops_agent_first_token_latency:p95_5m
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le, profile) (rate(netops_agent_first_token_seconds_bucket[5m]))
+            )
+
+    # §6 row 4 — Discovery job success rate, SLO >=99% per run. Global success ratio.
+    - name: netops-slo-discovery-success
+      rules:
+        - record: slo:netops_discovery_success:ratio_rate1h
+          expr: |
+            sum(rate(netops_discovery_runs_total{status="succeeded"}[1h]))
+            /
+            sum(rate(netops_discovery_runs_total[1h]))
+
+    # §6 row 7 — Topology projection freshness, SLO lag < 5 min. Base gauge:
+    # topology_graph_age_seconds (ADR-0030; the freshness textfile gauge).
+    - name: netops-slo-topology-projection-lag
+      rules:
+        - record: slo:netops_topology_projection_lag:seconds
+          expr: topology_graph_age_seconds
+
+    # §6 row 8 — Audit->SIEM export lag, SLO p95 < 60 s (ADR-0045 §3; W3-T1 gauge).
+    - name: netops-slo-audit-siem-export-lag
+      rules:
+        - record: slo:netops_audit_siem_export_lag:seconds
+          expr: audit_export_lag_seconds
+{{- end }}

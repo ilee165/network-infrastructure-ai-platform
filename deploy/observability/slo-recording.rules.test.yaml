@@ -1,0 +1,218 @@
+# promtool test rules — BITE proof for slo-recording.rules.yaml (P3 W3-T2, ADR-0046 §1/§6).
+#
+# A recording rule's "alert-as-test" is: feed synthetic base series and assert the
+# DERIVED `slo:*` SLI series computes the EXPECTED value — BOTH a healthy value
+# (SLI within objective) AND a regressed value (SLI breaching the objective). This
+# is the anti-false-green control for the recording layer (ADR-0046 §6): a rule that
+# silently evaluates to nothing on a real regression, or computes the SLI a
+# different way than intended, FAILS here. The FIRING (burn-rate alert transitions
+# to firing within MTTD) proof is W3-T3, which reads these exact recorded series.
+#
+# Run:  promtool test rules deploy/observability/slo-recording.rules.test.yaml
+# (`promtool check rules` validates the rule file itself; this file validates the
+# rules' SEMANTICS over synthetic series at compressed timestamps.)
+
+rule_files:
+  - slo-recording.rules.yaml
+
+# 1 m evaluation cadence; series are written in per-minute steps below.
+evaluation_interval: 1m
+
+tests:
+  # ===========================================================================
+  # §6 row 1 — API availability (non-5xx ratio). HEALTHY: all 2xx -> ratio 1.0.
+  # REGRESSED: a steady stream of 5xx drags the non-5xx ratio below the 0.999
+  # objective, proving the rule actually MOVES on a real availability regression
+  # (the false-green guard). 'route'/'method' vary across the input series and are
+  # aggregated away, proving the cardinality discipline (the SLI stays global).
+  # ===========================================================================
+  - interval: 1m
+    name: api availability — healthy (all non-5xx) vs regressed (5xx burn)
+    input_series:
+      # Healthy 2xx traffic on two different routes/methods (aggregated away).
+      - series: 'netops_http_requests_total{method="GET", route="/api/v1/devices", status_class="2xx"}'
+        values: '0+600x10'
+      - series: 'netops_http_requests_total{method="POST", route="/api/v1/changes", status_class="2xx"}'
+        values: '0+300x10'
+      # A 5xx stream begins — the budget-consuming errors.
+      - series: 'netops_http_requests_total{method="GET", route="/api/v1/devices", status_class="5xx"}'
+        values: '0+90x10'
+    promql_expr_test:
+      # Non-5xx ratio = (600+300) / (600+300+90) per-minute rate = 900/990 = 0.9090...
+      # That is BELOW the 0.999 objective — the regression is visible in the SLI.
+      # round() absorbs float-division noise; it drops __name__, so the asserted
+      # label set is {}.
+      - expr: round(slo:netops_api_availability:ratio_rate5m, 0.0001)
+        eval_time: 8m
+        exp_samples:
+          - labels: '{}'
+            value: 0.9091
+
+  - interval: 1m
+    name: api availability — fully healthy stays at 1.0 (no false-positive)
+    input_series:
+      - series: 'netops_http_requests_total{method="GET", route="/api/v1/devices", status_class="2xx"}'
+        values: '0+600x10'
+      - series: 'netops_http_requests_total{method="GET", route="/api/v1/devices", status_class="3xx"}'
+        values: '0+12x10'
+    promql_expr_test:
+      - expr: slo:netops_api_availability:ratio_rate5m
+        eval_time: 8m
+        exp_samples:
+          - labels: 'slo:netops_api_availability:ratio_rate5m'
+            value: 1
+
+  # ===========================================================================
+  # §6 row 2 — API read latency p95/p99. Synthetic histogram: most requests land
+  # in the fast buckets (<=0.25s) but a tail spills into the 0.5s and 1.0s buckets.
+  # We assert the p95/p99 quantile series RESOLVE (a concrete bucket boundary),
+  # proving the rule reads the `_bucket` series correctly with le aggregated.
+  # Cumulative histogram: each higher `le` bucket includes the lower counts.
+  # ===========================================================================
+  - interval: 1m
+    name: api read latency — p95/p99 resolve over the duration histogram
+    input_series:
+      # 100 fast requests (<=0.1s), +5 in (0.1,0.25], +3 in (0.25,0.5], +1 in (0.5,1.0].
+      - series: 'netops_http_request_duration_seconds_bucket{route="/api/v1/devices", method="GET", le="0.1"}'
+        values: '0+100x10'
+      - series: 'netops_http_request_duration_seconds_bucket{route="/api/v1/devices", method="GET", le="0.25"}'
+        values: '0+105x10'
+      - series: 'netops_http_request_duration_seconds_bucket{route="/api/v1/devices", method="GET", le="0.5"}'
+        values: '0+108x10'
+      - series: 'netops_http_request_duration_seconds_bucket{route="/api/v1/devices", method="GET", le="1.0"}'
+        values: '0+109x10'
+      - series: 'netops_http_request_duration_seconds_bucket{route="/api/v1/devices", method="GET", le="+Inf"}'
+        values: '0+109x10'
+    promql_expr_test:
+      # p95 of 109 obs = the 103.55th — inside the (0.1,0.25] bucket (100 below, 105
+      # cumulative). Linear-interp within that bucket: 0.1 + (0.25-0.1)*((103.55-100)/5).
+      - expr: round(slo:netops_api_read_latency:p95_5m, 0.001)
+        eval_time: 8m
+        exp_samples:
+          - labels: '{}'
+            value: 0.207
+      # p99 of 109 = the 107.91st obs — inside the (0.25,0.5] bucket (105 cum at le=0.25,
+      # 108 cum at le=0.5). Linear-interp: 0.25 + 0.25*((107.91-105)/(108-105)) = 0.4925.
+      - expr: round(slo:netops_api_read_latency:p99_5m, 0.001)
+        eval_time: 8m
+        exp_samples:
+          - labels: '{}'
+            value: 0.493
+
+  # ===========================================================================
+  # §6 row 3 — Agent first-token latency p95, kept PER profile (the SLO objective
+  # differs local vs external). Two profiles in the input; the SLI must stay
+  # split by `profile`, NOT collapse to one global quantile.
+  # ===========================================================================
+  - interval: 1m
+    name: agent first-token latency — p95 stays per-profile
+    input_series:
+      # local profile: all fast (<=1s) -> p95 ~ within the 1.0 bucket.
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="1.0"}'
+        values: '0+20x10'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="2.5"}'
+        values: '0+20x10'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="local", le="+Inf"}'
+        values: '0+20x10'
+      # external profile: a tail spills past 2.5s.
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="1.0"}'
+        values: '0+18x10'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="2.5"}'
+        values: '0+19x10'
+      - series: 'netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}'
+        values: '0+20x10'
+    promql_expr_test:
+      # Two distinct samples, one per profile — proves the rule did NOT aggregate
+      # profile away (which would erase the local-vs-external §6 objective split).
+      - expr: count(slo:netops_agent_first_token_latency:p95_5m)
+        eval_time: 8m
+        exp_samples:
+          - labels: '{}'
+            value: 2
+      # local p95 resolves inside the (0,1.0] bucket (all obs <=1.0). round() absorbs
+      # histogram_quantile float noise (0.9500000000000001).
+      - expr: round(slo:netops_agent_first_token_latency:p95_5m{profile="local"}, 0.001)
+        eval_time: 8m
+        exp_samples:
+          # round() drops __name__, so the asserted label set is just {profile="local"}.
+          - labels: '{profile="local"}'
+            value: 0.95
+
+  # ===========================================================================
+  # §6 row 4 — Discovery success rate. HEALTHY: all succeeded -> 1.0. REGRESSED:
+  # a run of `failed`/`partial` drops the ratio below the 0.99 objective.
+  # ===========================================================================
+  - interval: 1m
+    name: discovery success — regressed below 0.99 on failed/partial runs
+    input_series:
+      - series: 'netops_discovery_runs_total{status="succeeded"}'
+        values: '0+95x70'
+      - series: 'netops_discovery_runs_total{status="partial"}'
+        values: '0+3x70'
+      - series: 'netops_discovery_runs_total{status="failed"}'
+        values: '0+2x70'
+    promql_expr_test:
+      # succeeded / total = 95 / (95+3+2) = 0.95 — below the 0.99 objective.
+      # round() absorbs float-division noise (drops __name__ -> label set {}).
+      - expr: round(slo:netops_discovery_success:ratio_rate1h, 0.0001)
+        eval_time: 65m
+        exp_samples:
+          - labels: '{}'
+            value: 0.95
+
+  - interval: 1m
+    name: discovery success — fully healthy stays at 1.0
+    input_series:
+      - series: 'netops_discovery_runs_total{status="succeeded"}'
+        values: '0+100x70'
+    promql_expr_test:
+      - expr: slo:netops_discovery_success:ratio_rate1h
+        eval_time: 65m
+        exp_samples:
+          - labels: 'slo:netops_discovery_success:ratio_rate1h'
+            value: 1
+
+  # ===========================================================================
+  # §6 row 7 — Topology projection freshness gauge. HEALTHY: age 42s (< 300s
+  # objective). REGRESSED: age climbs to 600s, breaching the < 5 min objective.
+  # The rule re-publishes the gauge under the canonical SLI name unchanged.
+  # ===========================================================================
+  - interval: 1m
+    name: topology projection lag — fresh (42s) and stale (600s) both surface
+    input_series:
+      - series: 'topology_graph_age_seconds'
+        values: '42 42 42 600 600 600'
+    promql_expr_test:
+      - expr: slo:netops_topology_projection_lag:seconds
+        eval_time: 0m
+        exp_samples:
+          - labels: 'slo:netops_topology_projection_lag:seconds'
+            value: 42
+      # Breached the 300s objective — the SLI reflects the staleness.
+      - expr: slo:netops_topology_projection_lag:seconds
+        eval_time: 5m
+        exp_samples:
+          - labels: 'slo:netops_topology_projection_lag:seconds'
+            value: 600
+
+  # ===========================================================================
+  # §6 row 8 — Audit -> SIEM export lag gauge. HEALTHY: 5s (< 60s objective).
+  # REGRESSED: a held-down SIEM grows the durable backlog and the lag climbs to
+  # 180s, breaching the p95 < 60 s objective W3-T3 alerts on.
+  # ===========================================================================
+  - interval: 1m
+    name: audit->SIEM export lag — caught-up (5s) and backed-up (180s) both surface
+    input_series:
+      - series: 'audit_export_lag_seconds'
+        values: '5 5 5 180 180 180'
+    promql_expr_test:
+      - expr: slo:netops_audit_siem_export_lag:seconds
+        eval_time: 0m
+        exp_samples:
+          - labels: 'slo:netops_audit_siem_export_lag:seconds'
+            value: 5
+      - expr: slo:netops_audit_siem_export_lag:seconds
+        eval_time: 5m
+        exp_samples:
+          - labels: 'slo:netops_audit_siem_export_lag:seconds'
+            value: 180

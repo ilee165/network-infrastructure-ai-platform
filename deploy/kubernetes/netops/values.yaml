@@ -1422,6 +1422,31 @@ audit:
         cpu: "1"
         memory: 512Mi
 
+# -- OBSERVABILITY / SLO enforcement (W3-T2, ADR-0046 §1; PRODUCTION.md §6 / §11
+#    G-OBS). The SLO RECORDING-RULE layer: one Prometheus recording rule per §6 SLI
+#    (the canonical `slo:<sli>:<op>` series the W3-T3 burn-rate alerts and the W3-T4
+#    dashboards read). Rendered as a prometheus-operator PrometheusRule
+#    (monitoring.coreos.com/v1) so an operator running kube-prometheus picks the
+#    recording groups up by selector.
+#
+#    EXPOSE-DON'T-BUNDLE (ADR-0015 alt.1 / ADR-0046 §4): DISABLED by default — the
+#    platform exposes the `netops_*` / `audit_export_lag_seconds` /
+#    `topology_graph_age_seconds` series on /metrics; shipping the recording rules
+#    as opt-in CODE does NOT bundle a Prometheus/operator stack into the default
+#    install. An operator with kube-prometheus enables this to register the SLI
+#    series. The rule BODY is the single source of truth checked by `promtool` in
+#    deploy/observability/slo-recording.rules.yaml; this template renders that same
+#    rule set as an operator object (a renamed base metric breaks BOTH, by design).
+observability:
+  prometheusRule:
+    # Opt-in: render the PrometheusRule only on a cluster running the
+    # prometheus-operator CRD (monitoring.coreos.com/v1). Off by default.
+    enabled: false
+    # Extra labels merged onto the PrometheusRule metadata so an operator's
+    # ruleSelector (e.g. `release: kube-prometheus-stack`) matches it. Keep empty
+    # for the default operator discovery; set per your operator's selector.
+    labels: {}
+
 # -- Device-credential ROTATION (W4-T2, ADR-0040 §1/§3; ADR-0015). A scheduled
 #    CronJob runs the confirm-then-swap, fail-closed device-secret rotation pass:
 #    for each credential due, it STAGES a fresh KMS-wrapped DEK (via the EXISTING
