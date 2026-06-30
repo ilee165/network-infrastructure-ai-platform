@@ -127,6 +127,41 @@ expect_pass "hpa cpu-only opt-out (requestrate-disabled annotation)" "${POS_HPA_
 echo "-- positive (compliant api PDB) MUST PASS --"
 expect_pass "pdb compliant" "${POS_PDB}"
 
+# --- RENDER-DRIVEN assertion (F-pdb-autoscaleoff review fix): the conftest rule
+# requires minAvailable>=1 for any api PDB that IS rendered, but it cannot catch
+# the autoscaling-OFF single-replica seam where a minAvailable:1 PDB over ONE pod
+# deadlocks a voluntary drain. The chart's fix is to NOT render the api PDB on that
+# seam (api-pdb.yaml renders only when autoscaling.enabled OR replicas>=2). Assert
+# that render contract directly, mirroring the CI KEDA-tier render step (toggle
+# combo render), so the autoscaling-off path is gate-covered, not just the static
+# fixtures. Skipped (not failed) when helm is unavailable — CI has helm.
+if command -v helm >/dev/null 2>&1; then
+  CHART="${REPO}/deploy/kubernetes/netops"
+  echo "-- render (autoscaling OFF, default replicas=1): api PDB MUST be ABSENT (no drain deadlock) --"
+  RENDER_NOAUTO="$(helm template netops "${CHART}" --namespace netops --kube-version 1.29.0 \
+    --set services.api.autoscaling.enabled=false 2>&1 | tr -d '\r')"
+  if printf '%s' "${RENDER_NOAUTO}" \
+       | awk 'BEGIN{c=0} /^kind: PodDisruptionBudget/{p=1;next} p&&/name: netops-api$/{c++;p=0} END{exit c}'; then
+    echo "PASS: autoscaling-off single-replica render emits NO api PDB (drain-deadlock avoided)"
+  else
+    echo "FAIL: autoscaling-off single-replica render STILL emits an api PDB (minAvailable:1 over 1 pod deadlocks a drain — F-pdb-autoscaleoff)" >&2
+    fail=1
+  fi
+
+  echo "-- render (autoscaling OFF, static replicas=2): api PDB MUST be PRESENT (floor exists) --"
+  RENDER_NOAUTO2="$(helm template netops "${CHART}" --namespace netops --kube-version 1.29.0 \
+    --set services.api.autoscaling.enabled=false --set services.api.replicas=2 2>&1 | tr -d '\r')"
+  if printf '%s' "${RENDER_NOAUTO2}" \
+       | awk 'BEGIN{c=0} /^kind: PodDisruptionBudget/{p=1;next} p&&/name: netops-api$/{c++;p=0} END{exit (c>=1)?0:1}'; then
+    echo "PASS: autoscaling-off render with replicas>=2 emits the api PDB (the >=2 floor it protects exists)"
+  else
+    echo "FAIL: api PDB missing when a >=2 static replica floor exists (false-negative gating — F-pdb-autoscaleoff)" >&2
+    fail=1
+  fi
+else
+  echo "SKIP: helm not on PATH — autoscaling-off render assertion skipped (conftest fixtures still cover minAvailable>=1)"
+fi
+
 if [ "${fail}" -ne 0 ]; then
   echo "::error::api HPA + PDB policy bite FAILED" >&2
   exit 1

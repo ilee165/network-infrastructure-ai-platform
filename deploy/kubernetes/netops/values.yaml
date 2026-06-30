@@ -287,8 +287,12 @@ services:
     #    ready replicas. minAvailable:1 + the HPA floor of 2 means a single-node
     #    voluntary disruption always leaves >=1 api replica serving. ON by default
     #    (resilient-by-default); disabling emits a NOTES warning. Only correct
-    #    ALONGSIDE the >=2 HPA floor — a PDB minAvailable:1 over a single replica
-    #    would BLOCK a drain (cannot evict the only pod); the HPA floor prevents that.
+    #    ALONGSIDE a >=2 replica floor — a PDB minAvailable:1 over a single replica
+    #    would BLOCK a drain (cannot evict the only pod). GATING (F-pdb-autoscaleoff
+    #    review fix): the PDB renders ONLY when that floor exists — autoscaling.enabled
+    #    (HPA minReplicas guarded >=2) OR services.api.replicas >= 2. On the
+    #    single-replica seam (autoscaling off and replicas<2) NO PDB is emitted, so
+    #    the drain-deadlock cannot occur; the api-pdb.yaml guard enforces this.
     podDisruptionBudget:
       enabled: true
       # FLOOR of ready replicas a voluntary disruption must leave (PRODUCTION.md

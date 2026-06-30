@@ -19,8 +19,18 @@ NOTE (ADR-0043 §1): with a single api replica a PDB minAvailable:1 would BLOCK 
 voluntary drain (it cannot evict the only pod). That is precisely why the HPA
 floor is 2 (>=2 always) — the PDB is only correct alongside that floor, and both
 ship together in W2-T1. The chart guards this: the HPA enforces minReplicas>=2.
+
+GATING (W2-T1 review fix, F-pdb-autoscaleoff): the PDB is rendered ONLY when the
+api tier has a >=2 replica floor — i.e. when autoscaling is ON (HPA minReplicas
+is fail-fast-guarded >=2) OR a static replica count >=2 is configured. On the
+single-replica seam (autoscaling OFF and replicas<2) NO PDB is emitted, because a
+minAvailable:1 PDB over one pod is a hard drain deadlock (a voluntary disruption
+can never evict the only pod; unhealthyPodEvictionPolicy:AlwaysAllow does NOT
+rescue a single HEALTHY pod). NOTES.txt already warns that combo is not HA; this
+guard additionally keeps it drain-safe. The conftest api_pdb rule still requires
+minAvailable>=1 for any api PDB that IS rendered.
 */ -}}
-{{- if and .Values.services.api.enabled .Values.services.api.podDisruptionBudget.enabled }}
+{{- if and .Values.services.api.enabled .Values.services.api.podDisruptionBudget.enabled (or .Values.services.api.autoscaling.enabled (ge (int .Values.services.api.replicas) 2)) }}
 {{- $pdb := .Values.services.api.podDisruptionBudget }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
