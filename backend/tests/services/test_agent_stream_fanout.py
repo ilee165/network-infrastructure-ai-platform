@@ -201,6 +201,7 @@ class _FakePubSub:
         self.subscribed: list[str] = []
         self.unsubscribed: list[str] = []
         self.closed = False
+        self.get_message_calls: list[dict[str, Any]] = []
         self._messages: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     async def subscribe(self, channel: str) -> None:
@@ -218,6 +219,9 @@ class _FakePubSub:
     async def get_message(
         self, *, ignore_subscribe_messages: bool, timeout: float
     ) -> dict[str, Any] | None:
+        self.get_message_calls.append(
+            {"ignore_subscribe_messages": ignore_subscribe_messages, "timeout": timeout}
+        )
         try:
             return self._messages.get_nowait()
         except asyncio.QueueEmpty:
@@ -266,6 +270,13 @@ class TestRedisCallShapeContract:
 
         assert received.trace_id == TRACE_ID
         assert received.data["summary"] == "via redis"
+        # The production poll passes ignore_subscribe_messages=True and a positive
+        # timeout; without those the subscribe-confirmation message would stall the
+        # iterator on the first read. Pin the exact call shape (F-fanouttest-224).
+        assert any(
+            c["ignore_subscribe_messages"] is True and c["timeout"] > 0
+            for c in fake._pubsub.get_message_calls
+        ), "get_message must be called with ignore_subscribe_messages=True and a positive timeout"
         # Subscription cleaned up on exit (unsubscribe + close).
         assert fake._pubsub.unsubscribed == [channel_for(SESSION_ID)]
         assert fake._pubsub.closed is True

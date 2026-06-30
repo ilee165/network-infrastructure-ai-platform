@@ -332,6 +332,16 @@ async def test_nightly_backup_double_delivery_yields_one_audit_pair(
         ).scalar_one()
         assert run_count == 1, "redelivery must not insert a second config_backup_runs row"
 
+        # The row's PK is the SUPPLIED run_id — not an internally-derived slot UUID
+        # that merely happens to be stable; this pins the run_id parameter contract
+        # (a bug ignoring run_id would still yield run_count==1) (F-pgtest-318).
+        row = (
+            await check.execute(
+                select(ConfigBackupRun).where(ConfigBackupRun.run_uuid == uuid.UUID(stable_run_id))
+            )
+        ).scalar_one_or_none()
+        assert row is not None, "the ConfigBackupRun row must use the supplied run_id as its PK"
+
         started_audits = (
             await check.execute(
                 select(func.count())

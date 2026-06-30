@@ -88,6 +88,14 @@ def test_offline_sql_creates_config_backup_runs_table() -> None:
     for column in ("run_uuid", "scheduled_slot", "status", "started_at"):
         assert column in sql, f"expected column {column!r} in upgrade DDL"
 
+    # The PRIMARY KEY constraint on run_uuid is the idempotency guard (ON CONFLICT
+    # targets it); without it the column names would still appear but the dedup
+    # would be broken at the DDL level (F-mig-95).
+    assert "pk_config_backup_runs" in sql or "PRIMARY KEY" in sql.upper(), (
+        "the run_uuid PRIMARY KEY constraint (the ON CONFLICT idempotency target) "
+        "is missing from the upgrade DDL"
+    )
+
     # finished_at is nullable (no NOT NULL)
     for line in sql.splitlines():
         if "finished_at" in line and "ADD" in line.upper():
@@ -99,5 +107,9 @@ def test_offline_downgrade_drops_config_backup_runs_table() -> None:
     """Downgrade DDL drops the config_backup_runs table."""
     sql = _offline_sql_0013("downgrade")
     assert "config_backup_runs" in sql
-    # The downgrade should DROP the table (and its index)
-    assert "DROP" in sql.upper()
+    # The downgrade must DROP THE TABLE itself, not merely its index: a generic
+    # "DROP" check passes on the index drop alone even if the table drop were
+    # removed, leaving the table behind (F-mig-103).
+    assert any(
+        "DROP TABLE" in line.upper() and "config_backup_runs" in line for line in sql.splitlines()
+    ), "downgrade DDL must DROP TABLE config_backup_runs (not only its index)"

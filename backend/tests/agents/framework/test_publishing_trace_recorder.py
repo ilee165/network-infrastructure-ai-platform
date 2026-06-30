@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from app.agents.framework.traces import (
     InMemoryTraceRecorder,
     PublishingTraceRecorder,
@@ -50,6 +52,23 @@ class _ExplodingFanout:
 
     async def publish(self, frame: AgentStreamFrame) -> None:
         raise RuntimeError("redis is down")
+
+    def subscribe(self, session_id: str):  # pragma: no cover - unused in these tests
+        raise NotImplementedError
+
+
+class _RecordingFanout:
+    """A fan-out that records every publish so a test can assert the publish count.
+
+    Used to pin the no-publish-on-complete invariant and the one-frame-per-step
+    invariant without relying on the bus to surface (or hide) an extra frame.
+    """
+
+    def __init__(self) -> None:
+        self.published: list[AgentStreamFrame] = []
+
+    async def publish(self, frame: AgentStreamFrame) -> None:
+        self.published.append(frame)
 
     def subscribe(self, session_id: str):  # pragma: no cover - unused in these tests
         raise NotImplementedError
@@ -126,13 +145,15 @@ class TestProducerFansLiveFramesCrossReplica:
     async def test_complete_delegates_to_inner(self) -> None:
         """complete() delegates to the inner recorder (terminal frame is WS-synthesized)."""
         inner = InMemoryTraceRecorder()
-        recorder = PublishingTraceRecorder(
-            inner, fanout=InMemoryAgentStreamFanout(), session_id=SESSION_ID
-        )
+        spy = _RecordingFanout()
+        recorder = PublishingTraceRecorder(inner, fanout=spy, session_id=SESSION_ID)
         trace = await recorder.start("discovery")
         completed = await recorder.complete(trace.trace_id)
         assert completed.is_complete is True
         assert inner.get(trace.trace_id).is_complete is True
+        # complete() must NOT publish a frame — the terminal end is WS-synthesized
+        # from the DB status, never fanned by the producer (load-bearing contract).
+        assert spy.published == [], "complete() must not publish a frame onto the channel"
 
     def test_is_a_trace_recorder(self) -> None:
         """The wrapper satisfies the TraceRecorder protocol (drop-in)."""
@@ -146,7 +167,7 @@ class TestProducerFansLiveFramesCrossReplica:
         assert isinstance(recorder, TraceRecorder)
 
     async def test_publishes_one_frame_per_recorded_step(self) -> None:
-        """Each recorded step produces exactly one frame, in order."""
+        """Each recorded step produces exactly one frame, in order — and no extras."""
         bus = _InMemoryBus()
         recorder = PublishingTraceRecorder(
             InMemoryTraceRecorder(),
@@ -161,5 +182,21 @@ class TestProducerFansLiveFramesCrossReplica:
             await recorder.record_step(trace.trace_id, _plan_step("two"))
             first = await _first_frame(frames)
             second = await _first_frame(frames)
+            # No THIRD frame arrives: exactly one frame per recorded step, no
+            # duplicate publish (a one,one,two regression would surface here).
+            with pytest.raises(asyncio.TimeoutError):
+                await _first_frame(frames, timeout=0.1)
         assert first.data["summary"] == "one"
         assert second.data["summary"] == "two"
+
+    async def test_records_exactly_one_publish_per_step(self) -> None:
+        """A counting spy proves exactly one publish per recorded step (no duplicate)."""
+        spy = _RecordingFanout()
+        recorder = PublishingTraceRecorder(
+            InMemoryTraceRecorder(), fanout=spy, session_id=SESSION_ID
+        )
+        trace = await recorder.start("discovery")
+        await recorder.record_step(trace.trace_id, _plan_step("one"))
+        await recorder.record_step(trace.trace_id, _plan_step("two"))
+        assert len(spy.published) == 2
+        assert [f.data["summary"] for f in spy.published] == ["one", "two"]
