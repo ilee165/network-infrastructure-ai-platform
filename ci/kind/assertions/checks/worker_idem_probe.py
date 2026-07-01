@@ -209,6 +209,19 @@ async def _purge(sm: Any) -> None:
                     AuditLog.action == "config.snapshot_failed",
                 )
             )
+        # The nightly_backup started/finished audit pair carries target_id = the run
+        # uuid; purge the drill's own (fixed) run-ids so a re-run against a persisted
+        # DB does not leave a prior run's started/finished rows to inflate the
+        # exactly-once count below into a false-RED. Scoped to the drill's run-ids
+        # only — the general audit_log stays append-only / REVOKEd and untouched.
+        await session.execute(
+            delete(AuditLog).where(
+                AuditLog.action.in_(
+                    ["config.backup_run_started", "config.backup_run_finished"]
+                ),
+                AuditLog.target_id.in_([str(u) for u in _drill_backup_run_uuids()]),
+            )
+        )
         await session.execute(delete(Device).where(Device.mgmt_ip == _DRILL_MGMT_IP))
         if req_ids:
             await session.execute(delete(User).where(User.id.in_(req_ids)))
@@ -641,12 +654,21 @@ async def _cmd_backup() -> int:
         from app.models import AuditLog  # noqa: PLC0415
 
         async with sm() as session:
+            # Scope the exactly-once count to the drill's OWN (fixed) run-ids so a
+            # concurrent real beat nightly_backup firing during the drill window (a
+            # DIFFERENT run uuid) cannot inflate the count into a false-RED; combined
+            # with the _purge above (which clears this run's prior same-uuid rows),
+            # the count reflects only this drill's deliveries.
+            _drill_run_ids = [str(u) for u in _drill_backup_run_uuids()]
             started = int(
                 (
                     await session.execute(
                         select(func.count())
                         .select_from(AuditLog)
-                        .where(AuditLog.action == "config.backup_run_started")
+                        .where(
+                            AuditLog.action == "config.backup_run_started",
+                            AuditLog.target_id.in_(_drill_run_ids),
+                        )
                     )
                 ).scalar_one()
             )
@@ -655,7 +677,10 @@ async def _cmd_backup() -> int:
                     await session.execute(
                         select(func.count())
                         .select_from(AuditLog)
-                        .where(AuditLog.action == "config.backup_run_finished")
+                        .where(
+                            AuditLog.action == "config.backup_run_finished",
+                            AuditLog.target_id.in_(_drill_run_ids),
+                        )
                     )
                 ).scalar_one()
             )

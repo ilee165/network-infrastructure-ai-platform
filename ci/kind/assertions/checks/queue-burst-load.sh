@@ -303,9 +303,12 @@ echo "  burst   '${BURST_QUEUE}' -> ${BURST_DEPLOY} (baseline replicas=${BURST_R
 # OUT. We also seed a SMALL sibling backlog so we can prove the siblings' OWN backlog
 # still drains (isolation: their capacity is not stolen by the discovery burst).
 echo "LPUSHing ${BURST_ITEMS} items into the '${BURST_QUEUE}' Redis list (10x normal depth, KEDA's own signal)"
-# Build item list as separate positional args (L3: no word-splitting of a single string).
-# shellcheck disable=SC2046
-BURST_PUSH_OUT="$(redis_cli RPUSH "${BURST_QUEUE}" $(seq 1 "${BURST_ITEMS}" | while read -r i; do printf 'w4t6-%s\n' "$i"; done) || true)"
+# Build the item list as an array and pass each element as a SEPARATE positional arg
+# (L3: no word-splitting of a single string). mapfile captures the generated values
+# without word-splitting; "${_burst_items[@]}" then expands to one arg per item —
+# matching the sibling T7 compressed-soak.sh fix (no `# shellcheck disable=SC2046`).
+mapfile -t _burst_items < <(seq 1 "${BURST_ITEMS}" | while read -r i; do printf 'w4t6-%s\n' "$i"; done)
+BURST_PUSH_OUT="$(redis_cli RPUSH "${BURST_QUEUE}" "${_burst_items[@]}" || true)"
 echo "  RPUSH result: ${BURST_PUSH_OUT}"
 BURST_DEPTH="$(queue_len "${BURST_QUEUE}" || true)"
 echo "  '${BURST_QUEUE}' LLEN after burst = ${BURST_DEPTH}"

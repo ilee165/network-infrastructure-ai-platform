@@ -1133,6 +1133,63 @@ jobs:
                  "blocking gate awaits the ADR-0048 §4 planted-regression bite proof on a CI runner."
           fi
 
+  # Cluster-free drill NEGATIVE-CONTROL bite proofs — the BLOCKING gate (P3 W4, ADR-0047
+  # §2). Every W4 drill (T3–T7) ships a hardware-free *-bite.sh self-test that runs the
+  # REAL drill against a fake kubectl (+ real promtool for T7) and asserts the negative
+  # control turns it RED (plant → red → revert). These proofs need NO cluster and are
+  # deterministic, so — unlike the live HA bring-up in kind-harness-ha (signal-only for
+  # cluster-reliability reasons, ADR-0048 §3) — nothing prevents them from gating merge.
+  # This job runs them as a REQUIRED check (it is in `all-gates` `needs`) so a drill that
+  # STOPS BITING blocks merge (ADR-0047 §2 regression protection). The SAME steps also
+  # run as a fail-fast guard inside kind-harness-ha before the expensive live kind
+  # bring-up; THIS job is their authoritative merge gate. It promotes NO live drill — the
+  # G-REL/G-SCA LIVE assertions stay signal-only (a deliberate W5/GA step, ADR-0048 §4).
+  drill-bite-proofs:
+    name: drill-bite-proofs (cluster-free negative-control bite proofs — blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # validate-ha-overlay.sh renders the reduced-scale HA overlay → needs helm.
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+
+      # promtool — the W4-T7 compressed-soak bite runs a REAL `promtool test rules` over
+      # the W3-T2 recording rules + W3-T3 burn-rate alerts (same pin as the observability
+      # job). pipefail so a masked fetch cannot read green (L5).
+      - name: Install promtool (Prometheus) — for the W4-T7 compressed-soak SLO-held bite
+        run: |
+          set -o pipefail
+          PROM_VERSION=2.53.2
+          curl -sSL -o /tmp/prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp
+          install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version
+
+      # Static harness invariants + reduced-scale HA overlay render/counts (no cluster).
+      - name: Validate harness invariants incl. HA add-on (static, no cluster)
+        run: bash ci/kind/selftest/validate-harness.sh
+      - name: Validate reduced-scale HA overlay (render + counts, static)
+        run: bash ci/kind/ha/validate-ha-overlay.sh
+
+      # The five W4 drill negative-control bite proofs (plant → red → revert, no cluster).
+      # BLOCKING — a drill that stops biting fails this required gate.
+      - name: W4-T3 failover drill negative-control bite proof
+        run: bash ci/kind/selftest/pg-failover-bite.sh
+      - name: W4-T4 Neo4j rebuild drill negative-control bite proof
+        run: bash ci/kind/selftest/neo4j-rebuild-bite.sh
+      - name: W4-T5 worker-kill idempotency drill negative-control bite proof
+        run: bash ci/kind/selftest/worker-kill-idempotency-bite.sh
+      - name: W4-T6 queue-burst + API load + PgBouncer budget drill negative-control bite proof
+        run: bash ci/kind/selftest/queue-burst-load-bite.sh
+      - name: W4-T7 compressed-soak drill negative-control bite proof (real promtool + fake-kubectl)
+        run: bash ci/kind/selftest/compressed-soak-bite.sh
+
   # Ephemeral HA kind topology (P3 W4-T1, ADR-0047 / ADR-0048 §3). This job stands
   # up the reduced-scale HA substrate the W4 drills (T3–T8) + the gate promotion
   # (T2) run against: the SAME enforcing-CNI kind harness as the P2 kind-harness
@@ -1150,9 +1207,11 @@ jobs:
   # on this CI ubuntu runner, not locally. The RELIABILITY of this bring-up is the
   # explicit ADR-0048 §3 Prerequisite A for W4-T2 gate promotion; until W4-T2 has
   # exercised it green and dropped continue-on-error, this job runs for SIGNAL only.
-  # The STATIC layers (validate-harness.sh HA invariants + validate-ha-overlay.sh)
-  # need no cluster and are BLOCKING within the job; the live `HA=1 kind-harness.sh`
-  # step is continue-on-error.
+  # The STATIC layers (validate-harness.sh HA invariants + validate-ha-overlay.sh) and
+  # the drill negative-control bite proofs need no cluster and are BLOCKING within the
+  # job — a fail-fast guard before the expensive live bring-up. Their AUTHORITATIVE
+  # merge gate is the separate `drill-bite-proofs` job (in all-gates `needs`); the live
+  # `HA=1 kind-harness.sh` step is continue-on-error.
   kind-harness-ha:
     name: kind-harness-ha (reduced-scale HA topology — CNPG + KEDA + Sentinel, non-blocking live)
     runs-on: ubuntu-latest
@@ -1905,13 +1964,15 @@ jobs:
   # DELIBERATE OMISSION (P3 W4-T1): `kind-harness-ha` also remains NOT in `needs`. Its
   # live reduced-scale HA bring-up (CNPG + KEDA + Sentinel) is `continue-on-error`
   # signal-only; promoting the G-REL/G-SCA HA drills to blocking is a deliberate
-  # later step (W5/GA), not W4-T2.
+  # later step (W5/GA), not W4-T2. NOTE: only the LIVE bring-up is omitted — the
+  # cluster-free drill negative-control bite proofs (ADR-0047 §2) ARE required via the
+  # `drill-bite-proofs` job below, so a drill that stops biting blocks merge.
   all-gates:
     name: all-gates (required-check aggregator)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile, observability]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile, observability, drill-bite-proofs]
     steps:
       - name: Assert every gate succeeded
         env:

@@ -105,6 +105,17 @@ step uses `set -o pipefail` + `test -s <out>` so a silent mid-pipe failure canno
 read as green; Job/CronJob exec argv that reference env vars wrap them in `sh -c`
 (**L3**: K8s does not substitute `$(VAR)` in exec argv).
 
+Each negative control is proven to bite by a **cluster-free** self-test
+(`ci/kind/selftest/*-bite.sh`) that runs the REAL drill against a fake `kubectl`
+(+ real `promtool` for the compressed-soak SLO rules) and asserts the planted
+regression turns it RED. Because these proofs are deterministic and need no
+cluster, they run as a **blocking `drill-bite-proofs` CI job that is in
+`all-gates` `needs`** — so a drill that stops biting blocks merge. This is
+distinct from the LIVE reduced-scale drills in `kind-harness-ha`, which stay
+signal-only (`continue-on-error`, omitted from `all-gates`) until their
+blocking-promotion — a deliberate W5/GA step (ADR-0048 §4). The bite proofs
+also run inside `kind-harness-ha` as a fail-fast guard before the live bring-up.
+
 ### 3. The drill catalogue + §11 criteria + target numbers
 
 Each drill maps to a §11 criterion (the contract W4-T3..T8 implement):
