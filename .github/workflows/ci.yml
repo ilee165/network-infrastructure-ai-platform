@@ -1028,22 +1028,25 @@ jobs:
   # assertion-runner (W4-T4 mTLS handshake + W4-T5 egress-deny checks plug in),
   # and tears the cluster down on exit (success OR failure) via a trap.
   #
-  # BLOCKING GATE (PROMOTED — P3 W4-T2, ADR-0048). This job is now in the
-  # `all-gates` aggregator `needs` list below and its live `kind-harness.sh` step is
-  # NO LONGER `continue-on-error`, so a live mTLS-refusal or collector-egress-deny
-  # regression blocks merge. It was NON-blocking at P2 (P1-W4-LESSONS L1: a new
-  # gating CI tool must be validated before it is required, and the kind/CNI live
-  # path could not run on the P2 Windows authoring host). W4-T2 satisfies the
-  # ADR-0048 prerequisites: (A) the reliable enforcing-CNI kind topology (W4-T1),
-  # and (B) both live assertions PROVEN TO BITE on a planted regression, then
-  # reverted (ADR-0048 §4 — plaintext-allowed → mTLS red; NetworkPolicy-removed →
-  # collector red; see docs/runbooks/kind-harness.md "Gate status"). SCOPE: only the
-  # two named P2 sub-items (mTLS api/worker↔pg, collector default-deny egress) are
-  # promoted — kind-harness-ha and the HA drills stay non-blocking. The STATIC
-  # validator step (validate-harness.sh) stays blocking within the job; the live run
-  # is now blocking on top of it.
+  # NOT YET A BLOCKING GATE — promotion is AUTHORED but HELD pending the ADR-0048 §4
+  # bite proof. This job is deliberately ABSENT from the `all-gates` aggregator
+  # `needs` list below and its live `kind-harness.sh` step stays `continue-on-error`,
+  # so the two live assertions run for SIGNAL only. It was NON-blocking at P2
+  # (P1-W4-LESSONS L1: a new gating CI tool must be validated before it is required,
+  # and the kind/CNI live path could not run on the P2 Windows authoring host — that
+  # is still true on the W4 authoring host). ADR-0048 §4 (Prerequisite B,
+  # "non-negotiable") requires both live assertions be SHOWN to turn the gate RED on
+  # a planted regression, then reverted — on a CI ubuntu runner — BEFORE
+  # `continue-on-error` is dropped and BEFORE this job joins `all-gates`; Alternative
+  # 2 ("Promote without the bite proof") is Rejected. Prerequisite A (the reliable
+  # enforcing-CNI W4-T1 HA topology) IS in place; only Prerequisite B (the EXECUTED
+  # bite) is outstanding — it has NOT run on any runner (L1). Promoting now would be a
+  # false-green blocking gate (the ADR-0048 Risk "worse than continue-on-error"), so
+  # the promotion is held until a runner records the observed red→green. The STATIC
+  # validator step (validate-harness.sh) + the assertion-library self-tests +
+  # extract_secret.py tests stay blocking within the job regardless.
   kind-harness:
-    name: kind-harness (enforcing-CNI self-test + mTLS/collector assertions — blocking, ADR-0048)
+    name: kind-harness (enforcing-CNI self-test + mTLS/collector assertions — signal-only, promotion held pending ADR-0048 §4 bite)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -1090,38 +1093,44 @@ jobs:
           install_only: true
           version: v0.24.0
 
-      # The live enforcement run — PROMOTED TO BLOCKING (P3 W4-T2, ADR-0048 §2).
-      # `continue-on-error` DROPPED: a failed live run now fails the kind-harness
-      # job, and this job is in the `all-gates` `needs` list, so a live mTLS-refusal
-      # or collector-egress-deny regression BLOCKS merge. Prerequisites satisfied:
-      # (A) the reliable enforcing-CNI kind topology (W4-T1, ADR-0048 §3); (B) the
-      # two live assertions are PROVEN TO BITE on a planted regression, then reverted
-      # (ADR-0048 §4 — see docs/runbooks/kind-harness.md "Gate status" for the
-      # planted plaintext-allowed / NetworkPolicy-removed bite proofs). The harness
-      # applies the chart with mtls.postgres.enabled=true (mtls-postgres.sh asserts,
-      # does not SKIP) and networkPolicy.collectorEgress default-on (collector-egress.sh
-      # asserts, does not SKIP) — verified via `helm template netops` locally. L1:
-      # kind cannot run on the authoring host; the live bite runs on the CI runner.
-      # Teardown is inside the harness trap, so a failure here still deletes the cluster.
+      # The live enforcement run — NOT YET BLOCKING (continue-on-error: true).
+      # W4-T2 was AUTHORED to promote this to blocking, but ADR-0048 §4 (Prerequisite
+      # B, "non-negotiable") requires the two live assertions be SHOWN to turn the
+      # gate RED on a planted regression — plant → red → revert → green — on a CI
+      # ubuntu runner BEFORE `continue-on-error` is dropped and BEFORE this job joins
+      # `all-gates`. Alternative 2 ("Promote without the bite proof") is explicitly
+      # Rejected. Per P1-W4-LESSONS L1, kind CANNOT run on the authoring host (Windows,
+      # no Docker/Linux kind), so that observed red→green run has NOT been executed
+      # yet; until it is (and its run URL / planted→red→reverted commit pair is
+      # recorded in docs/runbooks/kind-harness.md "Prove-it-bites"), promoting to
+      # blocking would be a false-green blocking gate — the exact ADR-0048 Risk
+      # ("worse than continue-on-error"). So this step stays SIGNAL-ONLY.
+      # Prerequisite A (the reliable enforcing-CNI W4-T1 HA topology) IS in place;
+      # only Prerequisite B (the executed bite) is outstanding. The static layers
+      # above stay blocking within the job. Promotion is a deliberate later step once
+      # a runner has produced the observed bite. Teardown is inside the harness trap,
+      # so a failure here still deletes the cluster.
       - name: Run kind harness (create → CNI self-test → apply → assert → teardown)
         id: harness
+        continue-on-error: true
         run: bash ci/kind/kind-harness.sh
 
-      # Surface the live-run result in the job summary. Since W4-T2 the harness step
-      # is BLOCKING (no continue-on-error) and this job is in `all-gates` needs, so a
-      # non-success outcome already fails the job before this step; `if: always()`
-      # keeps the summary line even on failure. This step no longer suppresses or
-      # masks anything — it is informational only.
+      # Surface the live-run result in the job summary. The harness step is
+      # continue-on-error (SIGNAL-ONLY — not yet blocking, ADR-0048 §4 bite proof
+      # outstanding), so a non-success outcome does NOT fail the job; `if: always()`
+      # keeps the summary line regardless. This step is informational only — it does
+      # not (and must not) re-fail the job, or it would silently re-promote the gate
+      # to blocking without the executed bite.
       - name: Report kind harness outcome
         if: always()
         run: |
           set -euo pipefail
           outcome='${{ steps.harness.outcome }}'
-          echo "kind harness live-run outcome: ${outcome} (BLOCKING gate — ADR-0048)" >> "$GITHUB_STEP_SUMMARY"
+          echo "kind harness live-run outcome: ${outcome} (SIGNAL-ONLY — not yet blocking, ADR-0048 §4 bite proof pending)" >> "$GITHUB_STEP_SUMMARY"
           if [ "${outcome}" != "success" ]; then
-            echo "::error::kind-harness live run did not succeed (outcome=${outcome}) —" \
-                 "this is now a BLOCKING gate (P3 W4-T2, in all-gates needs). A live" \
-                 "mTLS-refusal or collector-egress-deny regression fails the merge."
+            echo "::warning::kind-harness live run did not succeed (outcome=${outcome}) —" \
+                 "this is currently SIGNAL-ONLY (not in all-gates needs). Promotion to a" \
+                 "blocking gate awaits the ADR-0048 §4 planted-regression bite proof on a CI runner."
           fi
 
   # Ephemeral HA kind topology (P3 W4-T1, ADR-0047 / ADR-0048 §3). This job stands
@@ -1180,12 +1189,13 @@ jobs:
           version: v0.24.0
 
       # The LIVE reduced-scale HA bring-up. Stays continue-on-error / non-blocking:
-      # W4-T2 promoted only the P2 `kind-harness` G-SEC assertions (mTLS + collector
-      # egress) to blocking, NOT this HA job. The reliable HA substrate is ADR-0048
-      # §3 Prerequisite A *for that* promotion; promoting these G-REL/G-SCA HA drills
-      # to blocking is a deliberate later step (W5/GA). L1 — not locally validated on
-      # the Windows authoring host; runs live only on this runner. Teardown is inside
-      # the harness trap, so a failure here still deletes the cluster (no leak).
+      # W4-T2 scopes its (currently HELD) promotion to only the P2 `kind-harness`
+      # G-SEC assertions (mTLS + collector egress), NOT this HA job. The reliable HA
+      # substrate is ADR-0048 §3 Prerequisite A *for that* promotion; promoting these
+      # G-REL/G-SCA HA drills to blocking is a deliberate later step (W5/GA). L1 —
+      # not locally validated on the Windows authoring host; runs live only on this
+      # runner. Teardown is inside the harness trap, so a failure here still deletes
+      # the cluster (no leak).
       - name: Run HA kind harness (create → CNI self-test → operators → apply → HA-ready → assert → teardown)
         id: ha-harness
         continue-on-error: true
@@ -1194,9 +1204,9 @@ jobs:
         run: bash ci/kind/kind-harness.sh
 
       # Surface the live HA-run result in the job summary without flipping any
-      # required aggregator. This HA job stays non-blocking (W4-T2 promoted only the
-      # P2 kind-harness G-SEC assertions); a future W5/GA step may drop
-      # continue-on-error above and add this job to the all-gates `needs` list.
+      # required aggregator. This HA job stays non-blocking (W4-T2 scopes its held
+      # promotion to only the P2 kind-harness G-SEC assertions); a future W5/GA step
+      # may drop continue-on-error above and add this job to the all-gates `needs` list.
       - name: Report HA kind harness outcome
         if: always()
         run: |
@@ -1677,24 +1687,29 @@ jobs:
   # even when a dependency fails; it then inspects the `needs.*.result` values and
   # FAILS unless every one is "success", so a failed OR skipped gate is a red gate.
   #
-  # PROMOTED (P3 W4-T2, ADR-0048): `kind-harness` is now in `needs` and its live run
-  # is no longer `continue-on-error`, so a live mTLS-refusal or collector-egress-deny
-  # regression blocks merge. Both live assertions were proven to bite on a planted
-  # regression, then reverted (ADR-0048 §4; docs/runbooks/kind-harness.md "Gate
-  # status"). Only the two named P2 sub-items were promoted (mTLS api/worker↔pg +
-  # collector default-deny egress) — no scope widening.
+  # PROMOTION HELD (P3 W4-T2, ADR-0048 §4): `kind-harness` is DELIBERATELY NOT in
+  # `needs` and its live run stays `continue-on-error`. The promotion is authored but
+  # gated behind the ADR-0048 §4 (Prerequisite B, "non-negotiable") planted-regression
+  # bite proof, which must be SHOWN red→green on a CI ubuntu runner BEFORE the gate
+  # joins this aggregator; Alternative 2 ("Promote without the bite proof") is
+  # Rejected. Per P1-W4-LESSONS L1 kind cannot run on the authoring host, so that
+  # observed bite has NOT been executed on any runner yet — adding `kind-harness`
+  # here now would make an UNVERIFIED gate merge-blocking (the ADR-0048 Risk "worse
+  # than continue-on-error"). Add it here (and drop the step's continue-on-error, and
+  # flip the runbook past-tense claims to reflect the real run) only once a runner has
+  # recorded plaintext-allowed→mTLS red→revert green and collector-broadened→deny
+  # red→revert green, with the run URLs cited.
   #
-  # DELIBERATE OMISSION (P3 W4-T1): `kind-harness-ha` remains NOT in `needs`. Its
+  # DELIBERATE OMISSION (P3 W4-T1): `kind-harness-ha` also remains NOT in `needs`. Its
   # live reduced-scale HA bring-up (CNPG + KEDA + Sentinel) is `continue-on-error`
   # signal-only; promoting the G-REL/G-SCA HA drills to blocking is a deliberate
-  # later step (W5/GA), not W4-T2 — this task promotes only the two G-SEC live
-  # assertions above (L1: the HA path is validated on the CI runner, not locally).
+  # later step (W5/GA), not W4-T2.
   all-gates:
     name: all-gates (required-check aggregator)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile, observability, kind-harness]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile, observability]
     steps:
       - name: Assert every gate succeeded
         env:
