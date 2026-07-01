@@ -235,7 +235,10 @@ register_cleanup cleanup
 redis_cli() {  # $@ = Redis command + args (each a separate word)
   printf '%s' "${REDIS_PW_VALUE}" | kubectl -n "${NS}" exec -i "${REDIS_POD}" -- sh -c '
     IFS= read -r RPW
-    exec redis-cli -p 6379 -a "$RPW" --no-auth-warning -n "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
+    # AUTH via the REDISCLI_AUTH env var (resolves through /proc/<pid>/environ —
+    # owner+root only), NOT -a on argv (world-readable in the pod PID namespace).
+    export REDISCLI_AUTH="$RPW"
+    exec redis-cli -p 6379 --no-auth-warning -n "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
       "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" \
       "${19}" "${20}" "${21}" "${22}" "${23}" "${24}" "${25}" "${26}" "${27}" "${28}" \
       "${29}" "${30}" "${31}" "${32}" "${33}" "${34}" "${35}" "${36}" "${37}" "${38}"
@@ -273,7 +276,11 @@ pgbouncer_server_conns() {
     printf '%s' "LEAK"
     return 0
   fi
-  [ -n "${out}" ] && printf '%s' "${out}" || printf '%s' "0"
+  # A legitimate reading is always >=1 (pg_stat_activity counts this probe's own
+  # backend), so an empty/failed read is a BROKEN probe, not a real 0 — emit an error
+  # token the trend assertion fails on rather than a false bounded 0 (a probe that
+  # measured nothing must not read as "no leak", ADR-0047 §2).
+  [ -n "${out}" ] && printf '%s' "${out}" || printf '%s' "CONN_ERR"
 }
 
 # --- helper: worker RSS in KiB (the memory-leak trend) ---------------------------
@@ -289,7 +296,7 @@ worker_rss_kb() {
     printf '%s' "LEAK"
     return 0
   fi
-  if [ -z "${pod}" ]; then printf '%s' "0"; return 0; fi
+  if [ -z "${pod}" ]; then printf '%s' "RSS_ERR"; return 0; fi
   # Prefer cgroup v2 memory.current (bytes) → KiB; robust without metrics-server.
   out="$(kubectl -n "${NS}" exec "${pod}" -- sh -c '
     if [ -r /sys/fs/cgroup/memory.current ]; then
@@ -300,7 +307,9 @@ worker_rss_kb() {
       echo 0
     fi
   ' 2>/dev/null | tr -d '[:space:]' || true)"
-  [ -n "${out}" ] && printf '%s' "${out}" || printf '%s' "0"
+  # A running worker's cgroup memory is always >0, so an empty/failed exec is a broken
+  # selector/exec, not a real 0 — emit an error token the trend assertion fails on.
+  [ -n "${out}" ] && printf '%s' "${out}" || printf '%s' "RSS_ERR"
 }
 
 # --- the in-pod steady-load + SLI sampler (bash /dev/tcp, no k6/locust/curl dep) --
@@ -394,12 +403,22 @@ run_sample() {  # $1 host $2 port $3 read_path $4 metrics_path $5 vus $6 reqs $7
           exec 8>&- 2>/dev/null || true
         fi
       )"
-      if printf "%s" "${metrics}" | grep -q "netops_discovery_runs_total"; then
+      # Distinguish a BROKEN discovery-metrics path from a legitimately idle one so a
+      # missing counter is not read as a healthy SLO (a false-green): METRICS_ERR when
+      # /metrics is unreachable/empty, NOCTR when reachable but the discovery counter is
+      # absent, NA when the counter is present but no runs happened this cycle (idle),
+      # else the computed failed/partial ratio. The window loop treats NA + a numeric
+      # ratio as valid readings and FAILS if the counter was NEVER present the window.
+      if [ -z "${metrics}" ]; then
+        disc_err="METRICS_ERR"
+      elif printf "%s" "${metrics}" | grep -q "netops_discovery_runs_total"; then
         succ="$(printf "%s" "${metrics}" | awk "/^netops_discovery_runs_total\{.*status=\"succeeded\"/ {s+=\$NF} END{printf \"%d\", s}")"
         tot="$(printf "%s" "${metrics}" | awk "/^netops_discovery_runs_total\{/ {s+=\$NF} END{printf \"%d\", s}")"
         if [ "${tot:-0}" -gt 0 ]; then
           disc_err=$(( (tot - succ) * 1000 / tot ))
         fi
+      else
+        disc_err="NOCTR"
       fi
     fi
     echo "SOAK sample avail_err_permille=${avail_err} slow_frac_permille=${slow_frac} disc_err_permille=${disc_err} p95_ms=${p95} reqs=${total}"
@@ -430,9 +449,9 @@ else
 fi
 declare -A QDEPTH_START
 for q in ${SOAK_QUEUES}; do
-  d="$(queue_len "${q}" || true)"
-  [ "${d}" = "QUEUE_LEN_ERR" ] && d="0"
-  QDEPTH_START["${q}"]="${d:-0}"
+  # Keep QUEUE_LEN_ERR / empty as a distinct token — a failed LLEN is a broken probe,
+  # not a real 0; the trend assertion fails on it (a real depth of 0 is fine).
+  QDEPTH_START["${q}"]="$(queue_len "${q}" || true)"
 done
 echo "  START: pgbouncer_conns=${CONN_START} worker_rss_kb=${RSS_START} queue_depths=[$(for q in ${SOAK_QUEUES}; do printf '%s=%s ' "${q}" "${QDEPTH_START[${q}]}"; done)]"
 
@@ -448,6 +467,7 @@ MAX_SLOW_FRAC=0
 MAX_DISC_ERR=0
 MAX_P95=0
 SLI_READ_OK=0
+DISC_OK=0   # set when any sample yielded a valid discovery reading (numeric ratio or NA/idle)
 soak_deadline=$(( $(date +%s) + SOAK_WINDOW_S ))
 # do-while: run at least ONE sample cycle before checking the deadline, so a
 # sub-sample-interval window (or the wall-clock second ticking over between setting
@@ -465,7 +485,7 @@ while :; do
   SAMPLE_OUT="$(run_sample "${API_HOST}" "${API_PORT}" "${API_HEALTH_PATH}" "${API_METRICS_PATH}" "${LOAD_VUS}" "${LOAD_REQUESTS}" "${LATENCY_BOUNDARY_MS}" "${NEG_CONTROL}" || true)"
   a="$(printf '%s\n' "${SAMPLE_OUT}" | sed -n 's/.* avail_err_permille=\([0-9NA]*\).*/\1/p' | head -1)"
   s="$(printf '%s\n' "${SAMPLE_OUT}" | sed -n 's/.* slow_frac_permille=\([0-9NA]*\).*/\1/p' | head -1)"
-  d="$(printf '%s\n' "${SAMPLE_OUT}" | sed -n 's/.* disc_err_permille=\([0-9NA]*\).*/\1/p' | head -1)"
+  d="$(printf '%s\n' "${SAMPLE_OUT}" | sed -n 's/.* disc_err_permille=\([0-9A-Z_]*\).*/\1/p' | head -1)"
   p="$(printf '%s\n' "${SAMPLE_OUT}" | sed -n 's/.* p95_ms=\([0-9NA]*\).*/\1/p' | head -1)"
   SAMPLES=$(( SAMPLES + 1 ))
   echo "  sample ${SAMPLES}: ${SAMPLE_OUT}"
@@ -476,9 +496,14 @@ while :; do
   if [ -n "${s}" ] && [ "${s}" != "NA" ]; then
     [ "${s}" -gt "${MAX_SLOW_FRAC}" ] && MAX_SLOW_FRAC="${s}"
   fi
-  if [ -n "${d}" ] && [ "${d}" != "NA" ]; then
-    [ "${d}" -gt "${MAX_DISC_ERR}" ] && MAX_DISC_ERR="${d}"
-  fi
+  # NA (counter present, idle) and a numeric ratio are both VALID discovery readings;
+  # METRICS_ERR / NOCTR / empty mean the discovery-metrics path was unreadable this
+  # sample and do NOT count (the window fails below if it was never readable).
+  case "${d}" in
+    NA) DISC_OK=1 ;;
+    ''|*[!0-9]*) : ;;
+    *) DISC_OK=1; [ "${d}" -gt "${MAX_DISC_ERR}" ] && MAX_DISC_ERR="${d}" ;;
+  esac
   if [ -n "${p}" ] && [ "${p}" != "NA" ]; then
     [ "${p}" -gt "${MAX_P95}" ] && MAX_P95="${p}"
   fi
@@ -509,14 +534,16 @@ else
   _fail "API read-latency SLO BREACHED over the window: worst too-slow fraction ${MAX_SLOW_FRAC}‰ EXCEEDS the ${LATENCY_SLOW_FRAC_PERMILLE}‰ fast-burn budget (worst p95=${MAX_P95}ms) — a burn-rate alert WOULD fire (§6 row 2 / G-REL §315 VIOLATED)"
 fi
 # (c) Discovery success: the failed/partial ratio (from the /metrics discovery
-#     counters, when present) stayed within the fast-burn budget. MAX_DISC_ERR stays
-#     0 when either every sample had 0 discovery errors OR the counter was absent
-#     this window (disc_err=NA never updates the max) — both are within budget, so a
-#     0‰ worst is reported as within-budget with the caveat noted. A non-zero worst
-#     over budget is a real breach. The availability + latency SLIs are the
-#     load-bearing soak signals; discovery is asserted here when it has data.
-if [ "${MAX_DISC_ERR}" -le "${DISCOVERY_ERR_BUDGET_PERMILLE}" ]; then
-  _pass "Discovery success SLO within budget over the window: worst failed/partial ratio ${MAX_DISC_ERR}‰ <= ${DISCOVERY_ERR_BUDGET_PERMILLE}‰ fast-burn budget (0‰ may indicate no discovery runs / no counter this window) — no NetopsDiscoverySuccessFastBurn would fire (§6 row 4 / ADR-0046 §2)"
+#     counter) stayed within the fast-burn budget. DISC_OK is set only when at least
+#     one sample yielded a VALID reading (a numeric ratio, or NA = counter present but
+#     idle); if the counter was absent / /metrics unreadable EVERY sample the SLO is
+#     UNMEASURED and fails (a broken discovery-metrics path must not read green — the
+#     false-green ADR-0047 §2 forbids). MAX_DISC_ERR stays 0 when the counter was
+#     present with no failed runs — within budget.
+if [ "${DISC_OK}" -ne 1 ]; then
+  _fail "Discovery success SLO could NOT be measured over the ${SOAK_WINDOW_S}s window — the netops_discovery_runs_total counter was absent or /metrics was unreadable EVERY sample (a broken discovery-metrics path reading within-budget is a false-green, not a healthy discovery SLO; §6 row 4 / ADR-0047 §2)"
+elif [ "${MAX_DISC_ERR}" -le "${DISCOVERY_ERR_BUDGET_PERMILLE}" ]; then
+  _pass "Discovery success SLO within budget over the window: worst failed/partial ratio ${MAX_DISC_ERR}‰ <= ${DISCOVERY_ERR_BUDGET_PERMILLE}‰ fast-burn budget (0‰ = the counter was present with no failed runs this window) — no NetopsDiscoverySuccessFastBurn would fire (§6 row 4 / ADR-0046 §2)"
 else
   _fail "Discovery success SLO BREACHED over the window: worst failed/partial ratio ${MAX_DISC_ERR}‰ EXCEEDS the ${DISCOVERY_ERR_BUDGET_PERMILLE}‰ fast-burn budget — a burn-rate alert WOULD fire (§6 row 4 / G-REL §315 VIOLATED)"
 fi
@@ -536,43 +563,57 @@ else
   CONN_END="$(pgbouncer_server_conns 0 || true)"
   RSS_END="$(worker_rss_kb 0 || true)"
 fi
-# Normalise non-numeric reads to 0 so the arithmetic is safe (a broken read is not a
-# leak — but the SLI-read guard above already ensures the load path worked).
-case "${CONN_START}" in ''|*[!0-9]*) CONN_START=0;; esac
-case "${CONN_END}"   in ''|*[!0-9]*) CONN_END=0;; esac
-case "${RSS_START}"  in ''|*[!0-9]*) RSS_START=0;; esac
-case "${RSS_END}"    in ''|*[!0-9]*) RSS_END=0;; esac
+# A resource probe that could not take a real reading returns an explicit error token
+# (CONN_ERR / RSS_ERR / QUEUE_LEN_ERR), NOT 0 — a failed probe is an UNMEASURED leak
+# signal, not a bounded 0->0 trend, so each assertion below FAILS on a non-integer
+# reading rather than silently normalising to 0 and reading green (a broken probe
+# reading "no leak" is the false-green ADR-0047 §2 forbids; the SLI-read guard above
+# only covers the /health load path, not these separate resource probes). A queue
+# depth of 0 is a legitimate value; only the error token / empty is a failed read.
+_is_uint() { case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
 declare -A QDEPTH_END
 for q in ${SOAK_QUEUES}; do
   if [ "${NEG_CONTROL}" = "1" ]; then
     QDEPTH_END["${q}"]=$(( ${QDEPTH_START[${q}]:-0} + QUEUE_DEPTH_GROWTH_TOLERANCE + 50 ))
   else
-    d="$(queue_len "${q}" || true)"
-    [ "${d}" = "QUEUE_LEN_ERR" ] && d="0"
-    case "${d}" in ''|*[!0-9]*) d=0;; esac
-    QDEPTH_END["${q}"]="${d}"
+    QDEPTH_END["${q}"]="$(queue_len "${q}" || true)"
   fi
 done
 echo "  END:   pgbouncer_conns=${CONN_END} worker_rss_kb=${RSS_END} queue_depths=[$(for q in ${SOAK_QUEUES}; do printf '%s=%s ' "${q}" "${QDEPTH_END[${q}]}"; done)]"
 
 # (a) PgBouncer server connections bounded.
-CONN_DELTA=$(( CONN_END - CONN_START ))
-if [ "${CONN_DELTA}" -le "${CONN_GROWTH_TOLERANCE}" ]; then
-  _pass "PgBouncer server-connection count BOUNDED over the window: ${CONN_START} -> ${CONN_END} (delta ${CONN_DELTA} <= ${CONN_GROWTH_TOLERANCE} tolerance) — no connection leak (ADR-0047 §2 soak / ADR-0042 §4)"
+if ! _is_uint "${CONN_START}" || ! _is_uint "${CONN_END}"; then
+  CONN_DELTA="ERR"
+  _fail "PgBouncer server-connection probe did NOT return a real reading (START=${CONN_START} END=${CONN_END}) — cannot assert a bounded connection trend (a failed probe is not a 0->0 pass; the connection-leak witness was never measured, ADR-0047 §2 soak)"
 else
-  _fail "PgBouncer server-connection count TRENDED UP over the window: ${CONN_START} -> ${CONN_END} (delta ${CONN_DELTA} > ${CONN_GROWTH_TOLERANCE} tolerance) — a connection leak that would surface over calendar time (ADR-0047 §2 soak VIOLATED)"
+  CONN_DELTA=$(( CONN_END - CONN_START ))
+  if [ "${CONN_DELTA}" -le "${CONN_GROWTH_TOLERANCE}" ]; then
+    _pass "PgBouncer server-connection count BOUNDED over the window: ${CONN_START} -> ${CONN_END} (delta ${CONN_DELTA} <= ${CONN_GROWTH_TOLERANCE} tolerance) — no connection leak (ADR-0047 §2 soak / ADR-0042 §4)"
+  else
+    _fail "PgBouncer server-connection count TRENDED UP over the window: ${CONN_START} -> ${CONN_END} (delta ${CONN_DELTA} > ${CONN_GROWTH_TOLERANCE} tolerance) — a connection leak that would surface over calendar time (ADR-0047 §2 soak VIOLATED)"
+  fi
 fi
 # (b) worker RSS bounded (memory leak witness).
-RSS_DELTA=$(( RSS_END - RSS_START ))
-if [ "${RSS_DELTA}" -le "${WORKER_RSS_GROWTH_TOLERANCE_KB}" ]; then
-  _pass "Worker RSS BOUNDED over the window: ${RSS_START}KiB -> ${RSS_END}KiB (delta ${RSS_DELTA}KiB <= ${WORKER_RSS_GROWTH_TOLERANCE_KB}KiB tolerance) — no memory leak (ADR-0047 §2 soak)"
+if ! _is_uint "${RSS_START}" || ! _is_uint "${RSS_END}"; then
+  RSS_DELTA="ERR"
+  _fail "Worker RSS probe did NOT return a real reading (START=${RSS_START} END=${RSS_END}) — cannot assert a bounded memory trend (a failed probe is not a 0->0 pass; the memory-leak witness was never measured, ADR-0047 §2 soak)"
 else
-  _fail "Worker RSS TRENDED UP over the window: ${RSS_START}KiB -> ${RSS_END}KiB (delta ${RSS_DELTA}KiB > ${WORKER_RSS_GROWTH_TOLERANCE_KB}KiB tolerance) — a memory leak that would surface over calendar time (ADR-0047 §2 soak VIOLATED)"
+  RSS_DELTA=$(( RSS_END - RSS_START ))
+  if [ "${RSS_DELTA}" -le "${WORKER_RSS_GROWTH_TOLERANCE_KB}" ]; then
+    _pass "Worker RSS BOUNDED over the window: ${RSS_START}KiB -> ${RSS_END}KiB (delta ${RSS_DELTA}KiB <= ${WORKER_RSS_GROWTH_TOLERANCE_KB}KiB tolerance) — no memory leak (ADR-0047 §2 soak)"
+  else
+    _fail "Worker RSS TRENDED UP over the window: ${RSS_START}KiB -> ${RSS_END}KiB (delta ${RSS_DELTA}KiB > ${WORKER_RSS_GROWTH_TOLERANCE_KB}KiB tolerance) — a memory leak that would surface over calendar time (ADR-0047 §2 soak VIOLATED)"
+  fi
 fi
 # (c) each soak queue depth bounded (a backlog trend = workers not keeping up = leak).
 QUEUE_TRENDED=0
 for q in ${SOAK_QUEUES}; do
-  qs="${QDEPTH_START[${q}]:-0}"; qe="${QDEPTH_END[${q}]:-0}"
+  qs="${QDEPTH_START[${q}]:-}"; qe="${QDEPTH_END[${q}]:-}"
+  if ! _is_uint "${qs}" || ! _is_uint "${qe}"; then
+    QUEUE_TRENDED=$(( QUEUE_TRENDED + 1 ))
+    _fail "Queue '${q}' depth probe did NOT return a real reading (START=${qs} END=${qe}) — cannot assert a bounded backlog trend (a failed LLEN is not a 0->0 pass, ADR-0047 §2 soak)"
+    continue
+  fi
   qd=$(( qe - qs ))
   if [ "${qd}" -le "${QUEUE_DEPTH_GROWTH_TOLERANCE}" ]; then
     _pass "Queue '${q}' depth BOUNDED over the window: ${qs} -> ${qe} (delta ${qd} <= ${QUEUE_DEPTH_GROWTH_TOLERANCE} tolerance) — the workers kept up with the steady feed (no backlog trend, ADR-0047 §2 soak)"

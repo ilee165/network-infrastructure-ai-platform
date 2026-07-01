@@ -1165,8 +1165,13 @@ jobs:
         run: |
           set -o pipefail
           PROM_VERSION=2.53.2
+          # Pin the official release digest (prometheus SHA256SUMS) and verify BEFORE
+          # extract/install — a poisoned release asset must not execute as promtool in a
+          # required CI gate. Mirrors the gitleaks download-verify pattern above.
+          PROM_SHA256=60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69
           curl -sSL -o /tmp/prometheus.tar.gz \
             "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          echo "${PROM_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
           tar -xzf /tmp/prometheus.tar.gz -C /tmp
           install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
           promtool --version
@@ -1320,8 +1325,13 @@ jobs:
         run: |
           set -o pipefail
           PROM_VERSION=2.53.2
+          # Pin the official release digest (prometheus SHA256SUMS) and verify BEFORE
+          # extract/install — a poisoned release asset must not execute as promtool in a
+          # required CI gate. Mirrors the gitleaks download-verify pattern above.
+          PROM_SHA256=60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69
           curl -sSL -o /tmp/prometheus.tar.gz \
             "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          echo "${PROM_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
           tar -xzf /tmp/prometheus.tar.gz -C /tmp
           install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
           promtool --version
@@ -1829,8 +1839,13 @@ jobs:
         run: |
           set -o pipefail
           PROM_VERSION=2.53.2
+          # Pin the official release digest (prometheus SHA256SUMS) and verify BEFORE
+          # extract/install — a poisoned release asset must not execute as promtool in a
+          # required CI gate. Mirrors the gitleaks download-verify pattern above.
+          PROM_SHA256=60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69
           curl -sSL -o /tmp/prometheus.tar.gz \
             "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          echo "${PROM_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
           tar -xzf /tmp/prometheus.tar.gz -C /tmp
           install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
           promtool --version

@@ -127,6 +127,9 @@ case "${joined}" in
         # the fake faithful — it accepts the replication-sever statement the real
         # drill now issues in the negative control (a plain psql_super, no stdout
         # read) — so the self-test exercises the SAME call path the live drill runs.
+        # Record that the drill issued the sever so the harness can PROVE the
+        # deterministic-loss mechanism ran (asserted after the negative-control run).
+        : > "${S}/sever_seen"
         exit 0 ;;
       *"last-before-kill"*)
         # The extra committed row is being inserted → record it committed.
@@ -191,6 +194,7 @@ run_scenario() {
   ) >"${log}" 2>&1
   local rc=$?
   LAST_LOG="${log}"
+  LAST_STATE="${state}"   # the fake's state dir persists after the subshell (sever_seen marker)
   return "${rc}"
 }
 
@@ -202,6 +206,14 @@ if [ "${rc_pos}" -eq 0 ]; then
 else
   bad "POSITIVE path FALSE-RED: the happy-path drill exited ${rc_pos} (should be 0) — check ${LAST_LOG}"
   sed 's/^/    | /' "${LAST_LOG}" >&2 || true
+fi
+# The positive (quorum-sync) path must NOT sever walsenders — locks in that the
+# deterministic-loss mechanism is negative-control-ONLY (a happy path that severed
+# replication would itself be a bug).
+if [ -f "${LAST_STATE}/sever_seen" ]; then
+  bad "the POSITIVE path issued a walsender-sever — the deterministic-loss mechanism must be negative-control-only"
+else
+  ok "POSITIVE path did NOT sever walsenders (the deterministic-loss mechanism is negative-control-only)"
 fi
 
 # --- 2. NEGATIVE CONTROL — async last row LOST → RED (the bite) ----------------
@@ -217,6 +229,17 @@ if grep -q "committed-audit LOSS\|was LOST on failover\|MISSING on the promoted 
   ok "negative-control RED is the zero-committed-audit-loss assertion (not an incidental failure)"
 else
   bad "negative-control turned red but NOT via the zero-audit-loss assertion — check the bite is attributable (${LAST_LOG})"
+fi
+# The negative control must have driven the drill to issue the walsender-sever
+# (pg_terminate_backend over pg_stat_replication) — the deterministic-loss mechanism.
+# Without it the LIVE neg-control can FALSE-GREEN (the async row streams to a standby
+# in ms and survives promotion), so prove the drill actually emitted the sever (the
+# fake's LOSE_LAST models the drop independently, so the bite would otherwise pass
+# even if the drill stopped severing).
+if [ -f "${LAST_STATE}/sever_seen" ]; then
+  ok "negative-control drove the drill to SEVER the walsenders (pg_terminate_backend over pg_stat_replication) — the deterministic-loss mechanism was exercised (ADR-0047 §2 / ADR-0042 §2)"
+else
+  bad "FALSE-GREEN RISK: the negative control did NOT issue the walsender-sever — the drill's deterministic async-loss mechanism is missing; a live neg-control could pass while the row survives on a standby (ADR-0047 §2)"
 fi
 
 # --- 3. NO PROMOTION — primary never changes → RED ----------------------------

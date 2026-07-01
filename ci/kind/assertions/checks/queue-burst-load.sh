@@ -171,8 +171,13 @@ echo "   certified-scale G-SCA (500-device <=60min §326; 100-user p95<300ms + 2
 # On a NON-HA / no-KEDA harness run there is nothing to burst-scale. Assert nothing
 # rather than read a missing autoscaler as a pass (a silent no-op is a false-green;
 # the runner also fails an empty log, so we always emit).
-if ! kubectl -n "${NS}" get scaledobject "${FULLNAME}-worker-${BURST_QUEUE}" >/dev/null 2>&1; then
-  echo "SKIP: KEDA ScaledObject '${FULLNAME}-worker-${BURST_QUEUE}' absent in ns '${NS}' — this"
+# The chart renders the ScaledObject name with the queue's "_" replaced by "-", so
+# apply the SAME transform to the burst queue name (default 'discovery' has no
+# underscore, but an override like packet_analysis would otherwise never match — the
+# same defect the sibling loop was fixed for).
+BURST_SO="${FULLNAME}-worker-${BURST_QUEUE//_/-}"
+if ! kubectl -n "${NS}" get scaledobject "${BURST_SO}" >/dev/null 2>&1; then
+  echo "SKIP: KEDA ScaledObject '${BURST_SO}' absent in ns '${NS}' — this"
   echo "      is a non-HA harness run (no KEDA per-queue autoscaling). The queue-burst /"
   echo "      API-load / PgBouncer-budget drill asserts only under HA=1 (the reduced-scale"
   echo "      HA topology). Nothing to drill on this run (loud SKIP, never a false-green pass)."
@@ -192,7 +197,6 @@ scaledobject_target() {  # $1 = scaledobject name; $2 = namespace (default NS)
   kubectl -n "${ns}" get scaledobject "$1" -o jsonpath='{.spec.scaleTargetRef.name}' 2>/dev/null || true
 }
 
-BURST_SO="${FULLNAME}-worker-${BURST_QUEUE}"
 BURST_DEPLOY="$(scaledobject_target "${BURST_SO}")"
 if [ -z "${BURST_DEPLOY}" ]; then
   _fail "ScaledObject ${BURST_SO} has no scaleTargetRef — cannot identify the '${BURST_QUEUE}' worker Deployment to observe"
@@ -252,7 +256,10 @@ register_cleanup cleanup
 redis_cli() {  # $@ = Redis command + args (each a separate word)
   printf '%s' "${REDIS_PW_VALUE}" | kubectl -n "${NS}" exec -i "${REDIS_POD}" -- sh -c '
     IFS= read -r RPW
-    exec redis-cli -p 6379 -a "$RPW" --no-auth-warning -n "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
+    # AUTH via the REDISCLI_AUTH env var (resolves through /proc/<pid>/environ —
+    # owner+root only), NOT -a on argv (world-readable in the pod PID namespace).
+    export REDISCLI_AUTH="$RPW"
+    exec redis-cli -p 6379 --no-auth-warning -n "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
       "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" \
       "${19}" "${20}" "${21}" "${22}" "${23}" "${24}" "${25}" "${26}" "${27}" "${28}" \
       "${29}" "${30}" "${31}" "${32}" "${33}" "${34}" "${35}" "${36}" "${37}" "${38}" \

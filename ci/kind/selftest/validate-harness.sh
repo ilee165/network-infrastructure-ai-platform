@@ -215,7 +215,7 @@ if [ -d "${CHECKS_DIR}" ]; then
   trap_offenders=""
   for _chk in "${CHECKS_DIR}"/*.sh; do
     [ -f "${_chk}" ] || continue
-    if grep -v '^[[:space:]]*#' "${_chk}" | grep -Eq 'trap[[:space:]]+[^[:space:]#]+[[:space:]]+EXIT'; then
+    if grep -v '^[[:space:]]*#' "${_chk}" | grep -Eq 'trap[[:space:]]+([^[:space:]#]+|'"'"'[^'"'"']*'"'"'|"[^"]*")[[:space:]]+EXIT'; then
       trap_offenders="${trap_offenders} ${_chk}"
     fi
   done
@@ -453,7 +453,7 @@ grep_must "${PG_FAILOVER_CHECK}" 'delete pod .*--force .*--grace-period=0' \
   "failover drill force-KILLS the current primary (not a graceful drain) — a real failover trigger"
 grep_must "${PG_FAILOVER_CHECK}" 'KILL_EPOCH=' \
   "failover drill starts the RTO clock (KILL_EPOCH) — the measurement anchor"
-grep_must "${PG_FAILOVER_CHECK}" 'RTO clock starts at kill' \
+grep_must "${PG_FAILOVER_CHECK}" 'KILL_EPOCH="\$\(date \+%s\)"' \
   "failover drill measures RTO FROM THE KILL, not from detection (§316 risk the spec names)"
 grep_must "${PG_FAILOVER_CHECK}" 'currentPrimary' \
   "failover drill reads the CNPG currentPrimary (targets the real primary; detects promotion)"
@@ -504,7 +504,7 @@ grep_must "${PG_FAILOVER_CHECK}" 'set -euo pipefail' \
   "failover drill sets pipefail so a masked in-pod psql exit cannot read green (L5)"
 grep_must "${PG_FAILOVER_CHECK}" 'register_cleanup' \
   "failover drill registers its probe-pod + drill-table teardown via register_cleanup (composes with the assert-exit bite, N1)"
-grep_must_not "${PG_FAILOVER_CHECK}" '^[[:space:]]*trap[[:space:]]+[^#[:space:]]+[[:space:]]+EXIT' \
+grep_must_not "${PG_FAILOVER_CHECK}" '^[[:space:]]*trap[[:space:]]+([^#[:space:]]+|'"'"'[^'"'"']*'"'"'|"[^"]*")[[:space:]]+EXIT' \
   "failover drill installs NO bare 'trap … EXIT' (would clobber lib.sh's assert-exit bite, N1)"
 grep_must "${PG_FAILOVER_CHECK}" 'reduced scale|deferred-accepted' \
   "failover drill STATES its reduced scale + names the deferred certified-scale ceiling (ADR-0047 §1/§4)"
@@ -563,7 +563,7 @@ grep_must "${NEO4J_REBUILD_CHECK}" 'RTO_BUDGET_S' \
   "rebuild drill asserts the rebuild wall-clock against the (reduced-scale) topology-RTO budget"
 grep_must "${NEO4J_REBUILD_CHECK}" 'RTO_S.*-le.*RTO_BUDGET_S|RTO_S" -le "\$\{RTO_BUDGET_S' \
   "rebuild drill PASSES only when RTO <= budget and FAILS when it exceeds it (the RTO bite)"
-grep_must "${NEO4J_REBUILD_CHECK}" 'MEASURED' \
+grep_must "${NEO4J_REBUILD_CHECK}" '\$\(date \+%s\) - DESTROY_EPOCH' \
   "rebuild drill records the MEASURED reduced-scale rebuild time (it becomes the topology-RTO, ADR-0047 §3)"
 # The completeness helper must be REAL-PG only (ADR-0047 §5) — no SQLite path.
 grep_must "${NEO4J_REBUILD_HELPER}" 'requires real PostgreSQL' \
@@ -593,7 +593,7 @@ grep_must "${NEO4J_REBUILD_CHECK}" 'set -euo pipefail' \
   "rebuild drill sets pipefail so a masked in-pod exit cannot read green (L5)"
 grep_must "${NEO4J_REBUILD_CHECK}" 'register_cleanup' \
   "rebuild drill registers its teardown via register_cleanup (composes with the assert-exit bite, N1)"
-grep_must_not "${NEO4J_REBUILD_CHECK}" '^[[:space:]]*trap[[:space:]]+[^#[:space:]]+[[:space:]]+EXIT' \
+grep_must_not "${NEO4J_REBUILD_CHECK}" '^[[:space:]]*trap[[:space:]]+([^#[:space:]]+|'"'"'[^'"'"']*'"'"'|"[^"]*")[[:space:]]+EXIT' \
   "rebuild drill installs NO bare 'trap … EXIT' (would clobber lib.sh's assert-exit bite, N1)"
 grep_must_not "${NEO4J_REBUILD_CHECK}" 'NETOPS_NEO4J_PASSWORD=.*echo|echo.*NETOPS_NEO4J_PASSWORD|echo.*NETOPS_POSTGRES_PASSWORD' \
   "rebuild drill never echoes the Neo4j / Postgres password (secret hygiene)"
@@ -639,7 +639,7 @@ grep_must "${WORKER_KILL_CHECK}" 'SUCCESS_FLOOR' \
   "worker-kill drill asserts the Celery success rate against a floor (≥99%, G-REL §320)"
 grep_must "${WORKER_KILL_CHECK}" 'RATE_PCT.*-ge.*SUCCESS_FLOOR|RATE_PCT" -ge "\$\{SUCCESS_FLOOR' \
   "worker-kill drill PASSES only when success >= 99% and FAILS below it (the ≥99% bite, G-REL §320)"
-grep_must "${WORKER_KILL_CHECK}" 'four-eyes' \
+grep_must "${WORKER_KILL_CHECK}" '\[ "\$\{CR_APPR\}" = "1" \]' \
   "worker-kill drill asserts the CR four-eyes gate (ADR-0020) is not bypassed on retry"
 grep_must "${WORKER_KILL_CHECK}" 'double-execute|double-execut|DOUBLE-EXECUTED' \
   "worker-kill drill asserts the retried CR does NOT double-execute (ADR-0020 / G-REL §319)"
@@ -672,7 +672,7 @@ grep_must "${WORKER_KILL_CHECK}" 'set -euo pipefail' \
   "worker-kill drill sets pipefail so a masked in-pod exit cannot read green (L5)"
 grep_must "${WORKER_KILL_CHECK}" 'register_cleanup' \
   "worker-kill drill registers its teardown via register_cleanup (composes with the assert-exit bite, N1)"
-grep_must_not "${WORKER_KILL_CHECK}" '^[[:space:]]*trap[[:space:]]+[^#[:space:]]+[[:space:]]+EXIT' \
+grep_must_not "${WORKER_KILL_CHECK}" '^[[:space:]]*trap[[:space:]]+([^#[:space:]]+|'"'"'[^'"'"']*'"'"'|"[^"]*")[[:space:]]+EXIT' \
   "worker-kill drill installs NO bare 'trap … EXIT' (would clobber lib.sh's assert-exit bite, N1)"
 grep_must_not "${WORKER_KILL_CHECK}" 'echo.*NETOPS_POSTGRES_PASSWORD|NETOPS_POSTGRES_PASSWORD=.*echo' \
   "worker-kill drill never echoes the Postgres password (secret hygiene)"
@@ -760,7 +760,7 @@ grep_must "${QBL_CHECK}" 'set -euo pipefail' \
   "queue-burst drill sets pipefail so a masked in-pod exit cannot read green (L5)"
 grep_must "${QBL_CHECK}" 'register_cleanup' \
   "queue-burst drill registers its teardown via register_cleanup (composes with the assert-exit bite, N1)"
-grep_must_not "${QBL_CHECK}" '^[[:space:]]*trap[[:space:]]+[^#[:space:]]+[[:space:]]+EXIT' \
+grep_must_not "${QBL_CHECK}" '^[[:space:]]*trap[[:space:]]+([^#[:space:]]+|'"'"'[^'"'"']*'"'"'|"[^"]*")[[:space:]]+EXIT' \
   "queue-burst drill installs NO bare 'trap … EXIT' (would clobber lib.sh's assert-exit bite, N1)"
 grep_must_not "${QBL_CHECK}" 'echo.*REDIS_PW_VALUE|echo.*PGPASSWORD_VALUE|REDIS_PW_VALUE=.*echo|PGPASSWORD_VALUE=.*echo' \
   "queue-burst drill never echoes the Redis/Postgres password (secret hygiene)"
@@ -883,7 +883,7 @@ grep_must "${SOAK_CHECK}" 'set -euo pipefail' \
   "compressed-soak drill sets pipefail so a masked in-pod exit cannot read green (L5)"
 grep_must "${SOAK_CHECK}" 'register_cleanup' \
   "compressed-soak drill registers its teardown via register_cleanup (composes with the assert-exit bite, N1)"
-grep_must_not "${SOAK_CHECK}" '^[[:space:]]*trap[[:space:]]+[^#[:space:]]+[[:space:]]+EXIT' \
+grep_must_not "${SOAK_CHECK}" '^[[:space:]]*trap[[:space:]]+([^#[:space:]]+|'"'"'[^'"'"']*'"'"'|"[^"]*")[[:space:]]+EXIT' \
   "compressed-soak drill installs NO bare 'trap … EXIT' (would clobber lib.sh's assert-exit bite, N1)"
 grep_must_not "${SOAK_CHECK}" 'echo.*REDIS_PW_VALUE|echo.*PGPASSWORD_VALUE|REDIS_PW_VALUE=.*echo|PGPASSWORD_VALUE=.*echo' \
   "compressed-soak drill never echoes the Redis/Postgres password (secret hygiene)"
