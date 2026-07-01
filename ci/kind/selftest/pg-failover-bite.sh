@@ -85,11 +85,14 @@ case "${joined}" in
     printf '%s' "ZHJpbGwtZGV2LXB3"; exit 0 ;;   # base64("drill-dev-pw")
   *"delete pod"*"--force"*|*"delete pod netops-pg"*)
     : > "${S}/killed"
-    # SLOW_RTO: delay the promotion becoming write-able by recording kill time far
-    # in the past is not possible; instead the fake's write-probe stays read-only
-    # until SLOW_RTO_UNTIL passes (handled in the exec branch).
+    # SLOW_RTO: the write-probe stays read-only until writeable_at passes (handled in
+    # the exec branch). Set it a few seconds out — LATER than the (reduced) RTO budget
+    # but WELL within the poll window — so the write DOES restore, at an RTO that
+    # EXCEEDS the budget. That drives the drill's RTO-over-budget branch specifically
+    # (pg-failover.sh ~line 359), NOT the no-promotion branch (which the old +999 value
+    # tripped instead, leaving the RTO-over-budget assertion with zero bite coverage).
     if [ "${SLOW_RTO:-0}" = "1" ]; then
-      echo "$(( $(date +%s) + 999 ))" > "${S}/writeable_at"   # effectively never within budget
+      echo "$(( $(date +%s) + 6 ))" > "${S}/writeable_at"   # restore ~6s > 3s budget, << 30s poll
     fi
     exit 0 ;;
   *"delete pod"*)
@@ -226,12 +229,22 @@ else
 fi
 
 # --- 4. SLOW RTO — write restored but past the budget → RED -------------------
-run_scenario export SLOW_RTO=1
+# Reduce the RTO budget to 3s and widen the poll window to 30s so the write RESTORES
+# (~6s, see writeable_at) but at an RTO that EXCEEDS the budget — exercising the
+# drill's RTO-over-budget assertion specifically, not the no-promotion branch.
+run_scenario export SLOW_RTO=1 PG_FAILOVER_RTO_BUDGET_S=3 PG_FAILOVER_PROMOTE_POLL_S=30
 rc_slow=$?
 if [ "${rc_slow}" -ne 0 ]; then
-  ok "SLOW-RTO path: promotion exceeds the RTO budget → drill RED (exit ${rc_slow}) — the ≤60s RTO assertion bites"
+  ok "SLOW-RTO path: promotion exceeds the RTO budget → drill RED (exit ${rc_slow}) — the RTO-budget assertion bites"
 else
   bad "FALSE-GREEN: an over-budget RTO passed (exit 0) — the RTO assertion does not bite"
+fi
+# The bite must be the RTO-OVER-BUDGET assertion specifically (not the no-promotion
+# branch): assert the RED log carries the drill's over-budget message.
+if grep -q "EXCEEDS the .* budget" "${LAST_LOG}"; then
+  ok "SLOW-RTO RED is the RTO-exceeds-budget assertion specifically (attributable bite)"
+else
+  bad "SLOW-RTO turned red but NOT via the RTO-over-budget assertion — check it is not the no-promotion branch (${LAST_LOG})"
 fi
 
 echo "== pg-failover-bite summary: ${fails} failure(s) =="

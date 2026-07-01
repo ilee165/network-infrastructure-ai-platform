@@ -92,6 +92,19 @@ BURST_QUEUE="${QUEUE_BURST_QUEUE:-discovery}"
 # cluster where those ScaledObjects are not deployed.
 SIBLING_QUEUES="${QUEUE_BURST_SIBLINGS:-config docs packet_capture packet_analysis}"
 
+# packet_capture's ScaledObject + worker Deployment are co-located in the SEPARATE
+# capture namespace (chart captureNamespace, ADR-0031 / ADR-0043 §4); every other
+# queue lives in the release namespace. Resolve each sibling in its OWN namespace so
+# packet_capture is a real isolation witness, not silently skipped (a name/namespace
+# mismatch that dropped a witness would understate §329 per-queue isolation coverage).
+CAPTURE_NS="${CAPTURE_NAMESPACE:-netops-packet-capture}"
+sib_ns() {  # $1 = queue name -> the namespace its ScaledObject/Deployment live in
+  case "$1" in
+    packet_capture) echo "${CAPTURE_NS}" ;;
+    *) echo "${NS}" ;;
+  esac
+}
+
 # The api HPA + Deployment (ADR-0043 §1). HA floor is 2 (never reduced); kind ceiling 4.
 API_HPA="${API_HPA_NAME:-${FULLNAME}-api}"
 API_DEPLOY="${API_DEPLOY_NAME:-${FULLNAME}-api}"
@@ -168,14 +181,15 @@ fi
 
 # --- helper: current replica count of a Deployment ------------------------------
 # Reads .spec.replicas (what KEDA/the HPA set on the Deployment). Empty -> "0".
-deploy_replicas() {  # $1 = deployment name
-  local n
-  n="$(kubectl -n "${NS}" get deploy "$1" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+deploy_replicas() {  # $1 = deployment name; $2 = namespace (default NS)
+  local n ns="${2:-${NS}}"
+  n="$(kubectl -n "${ns}" get deploy "$1" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
   [ -n "${n}" ] && echo "${n}" || echo "0"
 }
-# The Deployment a ScaledObject targets (scaleTargetRef.name).
-scaledobject_target() {  # $1 = scaledobject name
-  kubectl -n "${NS}" get scaledobject "$1" -o jsonpath='{.spec.scaleTargetRef.name}' 2>/dev/null || true
+# The Deployment a ScaledObject targets (scaleTargetRef.name). $2 = namespace (default NS).
+scaledobject_target() {  # $1 = scaledobject name; $2 = namespace (default NS)
+  local ns="${2:-${NS}}"
+  kubectl -n "${ns}" get scaledobject "$1" -o jsonpath='{.spec.scaleTargetRef.name}' 2>/dev/null || true
 }
 
 BURST_SO="${FULLNAME}-worker-${BURST_QUEUE}"
@@ -262,17 +276,23 @@ queue_len() {  # $1 = queue/list name
 # --- 0. baseline: record starting replica counts (burst + siblings) -------------
 echo "recording baseline replica counts (burst + siblings) before the burst"
 BURST_REPLICAS_BEFORE="$(deploy_replicas "${BURST_DEPLOY}")"
-declare -A SIB_DEPLOY SIB_BEFORE
+declare -A SIB_DEPLOY SIB_BEFORE SIB_NS
 for q in ${SIBLING_QUEUES}; do
-  so="${FULLNAME}-worker-${q}"
-  dep="$(scaledobject_target "${so}")"
+  qns="$(sib_ns "${q}")"
+  # The chart renders the ScaledObject name with the queue's "_" replaced by "-"
+  # (keda-scaledobjects.yaml: <fullname>-worker-<qname | replace "_" "-">). Apply the
+  # SAME transform here or packet_capture/packet_analysis never resolve and are
+  # silently dropped as isolation witnesses.
+  so="${FULLNAME}-worker-${q//_/-}"
+  dep="$(scaledobject_target "${so}" "${qns}")"
   if [ -z "${dep}" ]; then
-    echo "note: sibling queue '${q}' has no ScaledObject target — skipping it as an isolation witness"
+    echo "note: sibling queue '${q}' has no ScaledObject '${so}' in ns '${qns}' — skipping it as an isolation witness"
     continue
   fi
   SIB_DEPLOY["${q}"]="${dep}"
-  SIB_BEFORE["${q}"]="$(deploy_replicas "${dep}")"
-  echo "  sibling '${q}' -> ${dep} (baseline replicas=${SIB_BEFORE[${q}]})"
+  SIB_NS["${q}"]="${qns}"
+  SIB_BEFORE["${q}"]="$(deploy_replicas "${dep}" "${qns}")"
+  echo "  sibling '${q}' -> ${qns}/${dep} (baseline replicas=${SIB_BEFORE[${q}]})"
 done
 echo "  burst   '${BURST_QUEUE}' -> ${BURST_DEPLOY} (baseline replicas=${BURST_REPLICAS_BEFORE})"
 
@@ -350,7 +370,7 @@ if [ "${NEG_CONTROL}" = "1" ]; then
          "'${first_sib}': scaling its Deployment (${SIB_DEPLOY[${first_sib}]}) to 0 to reproduce the" \
          "budget-stolen starvation a shared autoscaler produces. The isolation assertion is EXPECTED" \
          "to go RED (proving the drill bites)."
-    kubectl -n "${NS}" scale deploy "${SIB_DEPLOY[${first_sib}]}" --replicas=0 >/dev/null 2>&1 || true
+    kubectl -n "${SIB_NS[${first_sib}]}" scale deploy "${SIB_DEPLOY[${first_sib}]}" --replicas=0 >/dev/null 2>&1 || true
     sleep 5
   fi
 fi
@@ -359,7 +379,7 @@ for q in ${SIBLING_QUEUES}; do
   dep="${SIB_DEPLOY[${q}]:-}"
   [ -n "${dep}" ] || continue
   before="${SIB_BEFORE[${q}]}"
-  now="$(deploy_replicas "${dep}")"
+  now="$(deploy_replicas "${dep}" "${SIB_NS[${q}]}")"
   if [ "${now}" -lt "${before}" ]; then
     STARVED=$(( STARVED + 1 ))
     _fail "sibling queue '${q}' (${dep}) was STARVED by the '${BURST_QUEUE}' burst: replicas ${before} -> ${now} (its per-queue budget was consumed — per-queue isolation VIOLATED, G-SCA §329 / ADR-0043 §3)"
