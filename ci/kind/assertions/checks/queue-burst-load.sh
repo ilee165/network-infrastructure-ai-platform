@@ -113,7 +113,11 @@ SUPERUSER_PW_KEY="${PG_SUPERUSER_PW_KEY:-password}"
 # keyed by the queue name; the KEDA redis-sentinel scaler reads LLEN <listName>. We
 # LPUSH the burst into that same list so KEDA's own signal fires. The Redis password
 # is by-reference from the platform Secret; databaseIndex 0 (values.yaml default).
-REDIS_MASTER_POD_SELECTOR="${REDIS_MASTER_POD_SELECTOR:-app.kubernetes.io/component=redis-sentinel}"
+# Writes MUST target the DATA-tier primary (component=redis, redis-server on 6379) —
+# NOT the Sentinel pods (component=redis-sentinel), which listen on 26379 only and
+# hold no queue data. On a fresh drill cluster the seed primary is netops-redis-0
+# (items[0]); post-failover master-resolution via Sentinel is a shared follow-up.
+REDIS_MASTER_POD_SELECTOR="${REDIS_MASTER_POD_SELECTOR:-app.kubernetes.io/component=redis}"
 PLATFORM_SECRET="${PLATFORM_SECRET:-netops}"
 REDIS_PW_KEY="${REDIS_PW_KEY:-redisPassword}"
 REDIS_DB_INDEX="${REDIS_DB_INDEX:-0}"
@@ -195,7 +199,8 @@ if [ -z "${REDIS_PW_VALUE}" ]; then
 fi
 
 # --- a Redis pod to run redis-cli in (LPUSH the burst into the queue list) -------
-# The Sentinel tier's redis pods carry redis-cli; we exec in the first Running one.
+# The data-tier redis pods (component=redis) carry redis-cli and hold the queue
+# LISTs on 6379; we exec in the first Running one (the seed primary on a fresh run).
 REDIS_POD="$(kubectl -n "${NS}" get pods -l "${REDIS_MASTER_POD_SELECTOR}" \
   --field-selector=status.phase=Running \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
@@ -233,7 +238,7 @@ register_cleanup cleanup
 redis_cli() {  # $@ = Redis command + args (each a separate word)
   printf '%s' "${REDIS_PW_VALUE}" | kubectl -n "${NS}" exec -i "${REDIS_POD}" -- sh -c '
     IFS= read -r RPW
-    exec redis-cli -a "$RPW" --no-auth-warning -n "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
+    exec redis-cli -p 6379 -a "$RPW" --no-auth-warning -n "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
       "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" \
       "${19}" "${20}" "${21}" "${22}" "${23}" "${24}" "${25}" "${26}" "${27}" "${28}" \
       "${29}" "${30}" "${31}" "${32}" "${33}" "${34}" "${35}" "${36}" "${37}" "${38}" \
