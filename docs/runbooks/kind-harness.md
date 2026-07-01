@@ -168,7 +168,22 @@ bite before it is trusted. For the failover drill:
 
 | Positive assertion | Planted negative control (turns it RED) |
 |---|---|
-| primary kill → promote ≤ 60 s; every committed audit row survives, hash-chain-valid, no `seq` gap | **async / non-quorum commit** on the audit path (`PG_FAILOVER_DRILL_NEGATIVE_CONTROL=1` → the last row commits `synchronous_commit=off`) → a just-committed audit row is **lost** on the promoted primary → the zero-loss COUNT + last-row + seq-gap assertions go **RED** |
+| primary kill → promote ≤ 60 s; every committed audit row survives, hash-chain-valid, no `seq` gap | **async / non-quorum commit** on the audit path (`PG_FAILOVER_DRILL_NEGATIVE_CONTROL=1` → the last row commits `synchronous_commit=off`) with a **deterministically engineered loss window** → a just-committed audit row is **lost** on the promoted primary → the zero-loss COUNT + last-row + seq-gap assertions go **RED** |
+
+**Why the live loss is DETERMINISTIC, not timing-dependent.** At this reduced kind
+scale the async WAL for a tiny row can stream to a standby in **milliseconds**, and
+CNPG promotes a standby that already holds the quorum-acked WAL — so a *naive*
+async-commit-then-kill negative control could be **FALSE-GREEN** (the row survives,
+zero-loss passes) whenever streaming happened to win the race. To close that gap the
+negative control **engineers the loss window**: immediately **before** the async
+commit it **terminates the walsender backends** on the current primary
+(`pg_terminate_backend(pid) FROM pg_stat_replication`), severing streaming to every
+standby, then force-kills with **no intervening sleep**. With no walsender attached,
+the `synchronous_commit=off` row is acked by the primary without its WAL reaching
+**any** standby, and the primary is destroyed before a standby can re-attach and
+re-stream that segment — so the row is **provably absent** on the promoted primary.
+The bite is engineered, not lucky. (The positive path is untouched: it commits
+quorum-sync `remote_apply`, which by definition waits for a replica.)
 
 **How the bite is proven WITHOUT a cluster (L1).** The live drill runs only on the
 kind CNPG cluster, which cannot run on the authoring host (Windows, no Docker/Linux
@@ -204,6 +219,18 @@ control, exit **0** on the positive path.
 - **L1 caveat:** the **live** kill/promote/measure path has **not** run on the
   authoring host; it runs live only on the CI ubuntu runner. Do not claim a local
   live failover run.
+- **Live negative-control caveat (W5/GA promotion path).** The ADR-0047 §2
+  proof-it-bites for this drill is the **hardware-free self-test**
+  (`pg-failover-bite.sh`, blocking within `kind-harness-ha`); the **live** run only
+  **corroborates** it. The live negative control now uses an **engineered**
+  deterministic loss window (walsender-terminate), so a green live negative-control
+  run is a real bite rather than a timing coincidence — **but that engineered window
+  has not itself been exercised on the CI CNPG topology** (L1). Therefore, before any
+  **W5/GA promotion of this drill to blocking**, the live negative control **MUST be
+  re-verified on the CI runner** (plant → observe RED → revert → GREEN on the actual
+  cluster). Until that live re-verification, treat a green live negative-control run
+  as **advisory corroboration**, not standalone proof for blocking promotion. This is
+  a named prerequisite on the ADR-0047 §4 promotion path.
 
 ### Reliability (the ADR-0048 §3 Prerequisite A) + L1 caveat
 

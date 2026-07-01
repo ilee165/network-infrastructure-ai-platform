@@ -115,6 +115,16 @@ case "${joined}" in
     if [ -f "${S}/last_committed" ] && [ "${lost}" -eq 0 ]; then committed="$(( SEED + 1 ))"; fi
     sql="${args[${#args[@]}-1]}"
     case "${sql}" in
+      *"pg_terminate_backend"*|*"pg_stat_replication"*)
+        # DETERMINISTIC LOSS WINDOW: the live drill's negative control severs
+        # streaming replication (terminates the walsenders) right before the async
+        # commit so the just-committed row provably reaches no standby. In the fake
+        # there is no real streaming to sever; the loss is modelled directly by
+        # LOSE_LAST=1 (the tail row is dropped after the kill). This branch keeps
+        # the fake faithful — it accepts the replication-sever statement the real
+        # drill now issues in the negative control (a plain psql_super, no stdout
+        # read) — so the self-test exercises the SAME call path the live drill runs.
+        exit 0 ;;
       *"last-before-kill"*)
         # The extra committed row is being inserted → record it committed.
         : > "${S}/last_committed"

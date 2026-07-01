@@ -16,11 +16,18 @@
 # important rule): this drill SHIPS a planted regression that turns the
 # zero-audit-loss assertion RED. With PG_FAILOVER_DRILL_NEGATIVE_CONTROL=1 the
 # last audit row before the kill is committed ASYNC (`SET LOCAL
-# synchronous_commit=off`) instead of quorum-sync — so on a primary kill in the
-# ack-before-replicate window that just-committed row can be LOST on the promoted
-# primary and the survival assertion goes RED. A drill that only ever runs the
-# happy path is not a gate (P1-W4 false-green). See docs/runbooks/kind-harness.md
-# "Postgres failover drill — Prove-it-bites".
+# synchronous_commit=off`) instead of quorum-sync. Crucially, the negative control
+# does NOT rely on async-streaming TIMING to lose the row: at reduced kind scale
+# the WAL for a tiny row can reach a standby in milliseconds, and CNPG promotes a
+# standby that already holds it, so a naive async-commit-then-kill would be
+# FALSE-GREEN (the row survives, zero-loss passes). Instead the negative control
+# ENGINEERS a deterministic loss window — it TERMINATES the walsender backends on
+# the primary (severing streaming to every standby) immediately BEFORE the async
+# commit, then force-kills with no intervening sleep — so the just-committed row
+# provably reaches NO standby and is LOST on the promoted primary, and the survival
+# assertion goes RED regardless of timing. A drill that only ever runs the happy
+# path — or whose negative control only-sometimes bites — is not a gate (P1-W4
+# false-green). See docs/runbooks/kind-harness.md "Postgres failover drill".
 #
 # REDUCED SCALE (ADR-0047 §1/§4 — NAMED, never claimed as certified): this runs on
 # the W4-T1 reduced-scale kind CNPG cluster (1 primary + 2 replicas = instances:3,
@@ -40,6 +47,17 @@
 # and runs LIVE only on the CI ubuntu runner via the `kind-harness-ha` job. That
 # job stays continue-on-error / ABSENT from `all-gates` — promoting the G-REL drill
 # to blocking is a deliberate later step (W5/GA), not W4-T3.
+# LIVE NEGATIVE CONTROL — BITE PROOF vs CORROBORATION (review fix): the ADR-0047 §2
+# proof-it-bites for this drill is the HARDWARE-FREE self-test (pg-failover-bite.sh),
+# which is blocking within `kind-harness-ha` and deterministically exercises the
+# assertion polarity. The LIVE kill/promote/measure path has NOT run on the authoring
+# host (L1) and only CORROBORATES the drill on the CI runner. Because the live loss
+# is now ENGINEERED (walsender-terminate above) rather than timing-dependent, a green
+# live negative-control run is a real bite — but W5/GA MUST re-verify that engineered
+# window on the actual CI CNPG topology BEFORE promoting this drill to blocking; until
+# that live re-verification, treat the live negative-control result as ADVISORY, not
+# as sufficient standalone proof for blocking promotion (see ADR-0047 §4 path +
+# docs/runbooks/kind-harness.md "Postgres failover drill").
 # L3: every value the in-pod psql needs is a POSITIONAL arg to `sh -c` ("$1" …),
 #     never $(VAR) in the exec argv; the DB password is fed over STDIN (never argv).
 # L5: pipefail is on (the runner sets it globally); each captured psql output is
@@ -244,8 +262,30 @@ LAST_SEQ=$(( SEEDED_MAX_SEQ + 1 ))
 if [ "${NEG_CONTROL}" = "1" ]; then
   COMMIT_MODE="off"
   echo "::warning::NEGATIVE CONTROL active — committing the last pre-kill row (seq=${LAST_SEQ})" \
-       "with synchronous_commit=off (ASYNC). This row can be LOST on the promoted" \
-       "primary; the survival assertion is EXPECTED to go RED (proving the drill bites)."
+       "with synchronous_commit=off (ASYNC). This row is EXPECTED to be LOST on the" \
+       "promoted primary; the survival assertion is EXPECTED to go RED (proving the drill bites)."
+  # DETERMINISTIC LOSS WINDOW (review fix — do NOT rely on async streaming timing).
+  # At reduced kind scale the async WAL for a tiny row can stream to a standby in
+  # milliseconds, and CNPG promotes a standby that already holds it — so a naive
+  # async commit + kill can be FALSE-GREEN (the row survives, zero-loss passes).
+  # To make the loss DETERMINISTIC we SEVER streaming replication to every standby
+  # BEFORE the async commit: terminate the live walsender backends on the current
+  # primary (pg_terminate_backend over every pid in pg_stat_replication — that view
+  # lists exactly the active replication/walsender connections). With no walsender
+  # attached the immediately-following
+  # synchronous_commit=off row is acknowledged by the primary without its WAL
+  # reaching ANY standby; the force-kill then follows with no intervening sleep, so
+  # no standby can re-attach and re-stream that segment before it is promoted. The
+  # just-committed row is therefore provably absent on the promoted primary — the
+  # loss is engineered, not timing-dependent. (Positive path is untouched: it
+  # commits quorum-sync remote_apply, which by definition waits for a replica.)
+  echo "negative control: severing streaming replication (terminating walsenders on the primary)" \
+       "so the async row provably does NOT reach any standby before the kill"
+  psql_super "
+    SELECT pg_terminate_backend(pid)
+    FROM pg_stat_replication
+    WHERE pid IS NOT NULL;
+  "
 else
   COMMIT_MODE="remote_apply"
   echo "committing the last pre-kill row (seq=${LAST_SEQ}) quorum-sync (remote_apply)"
