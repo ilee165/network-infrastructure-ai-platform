@@ -65,8 +65,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(pg_stat_database_blk_read_time_seconds_total{datname=\"netops\"}[5m])",
-          "legendFormat": "block read time/s",
+          "expr": "rate(pg_stat_database_blk_read_time_seconds_total{datname=\"netops\"}[5m]) / rate(pg_stat_database_blks_read{datname=\"netops\"}[5m])",
+          "legendFormat": "avg read time/block",
           "refId": "A"
         }
       ]

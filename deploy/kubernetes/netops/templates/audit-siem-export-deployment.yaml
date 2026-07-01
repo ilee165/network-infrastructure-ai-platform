@@ -52,6 +52,13 @@ nothing). Refuse to render instead. */ -}}
 {{- else }}
 {{- fail (printf "audit.export.format=%q is invalid — must be one of syslog|cef|https-json (ADR-0045 §1)." $e.format) }}
 {{- end }}
+{{- /* SINGLE-WRITER by contract: the exporter advances ONE durable `seq` cursor and
+streams at-least-once in `seq` order. TWO exporters would race the cursor -> duplicate
+delivery AND out-of-order/interleaved streams (there is no cursor-claiming/lease yet).
+Refuse to render replicas>1 rather than silently ship a broken multi-writer. */ -}}
+{{- if gt (int $e.replicas) 1 }}
+{{- fail (printf "audit.export.replicas=%d is invalid — the SIEM exporter is a SINGLE-WRITER (advances one durable `seq` cursor; >1 replica dup-delivers and breaks `seq` ordering until cursor-claiming exists). Must be exactly 1 (ADR-0045 §3)." (int $e.replicas)) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -60,7 +67,12 @@ metadata:
   labels:
     {{- include "netops.componentLabels" (dict "ctx" . "component" "audit-siem-export") | nindent 4 }}
 spec:
-  replicas: {{ $e.replicas }}
+  # SINGLETON (validated above): exactly one exporter pod. Recreate (NOT rolling)
+  # so a redeploy tears the old pod down BEFORE the new one starts — never two
+  # exporters racing the `seq` cursor during a rollout (ADR-0045 §3, single-writer).
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "netops.serviceSelector" (dict "ctx" . "component" "audit-siem-export") | nindent 6 }}

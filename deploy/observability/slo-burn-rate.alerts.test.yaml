@@ -105,11 +105,11 @@ tests:
   - interval: 1m
     name: api read p95 fast burn — FIRES when most requests exceed 300ms
     input_series:
-      # per-minute: 100 fast(<=0.1), only +5 by le=0.25 (so 105 of 600 are <=300ms),
+      # per-minute: 100 fast(<=0.1), only +5 by le=0.3 (so 105 of 600 are <=300ms),
       # the rest (495) spill to le=0.5/1.0/+Inf. too_slow_frac = 1 - 105/600 = 0.825.
       - series: 'netops_http_request_duration_seconds_bucket{le="0.1"}'
         values: '0+100x90'
-      - series: 'netops_http_request_duration_seconds_bucket{le="0.25"}'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.3"}'
         values: '0+105x90'
       - series: 'netops_http_request_duration_seconds_bucket{le="0.5"}'
         values: '0+300x90'
@@ -138,7 +138,7 @@ tests:
       # too_slow_frac(p99) = 1 - 500/600 = 0.167 > 14.4*0.01 = 0.144.
       - series: 'netops_http_request_duration_seconds_bucket{le="0.1"}'
         values: '0+400x90'
-      - series: 'netops_http_request_duration_seconds_bucket{le="0.25"}'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.3"}'
         values: '0+450x90'
       - series: 'netops_http_request_duration_seconds_bucket{le="0.5"}'
         values: '0+480x90'
@@ -163,11 +163,11 @@ tests:
   - interval: 1m
     name: api read latency — healthy fast responses do NOT fire p95/p99
     input_series:
-      # 595 of 600/min are <=0.25s; tiny tail. too_slow_frac(p95)=1-595/600=0.0083
+      # 595 of 600/min are <=0.3s; tiny tail. too_slow_frac(p95)=1-595/600=0.0083
       # << 0.72; too_slow_frac(p99)=1-599/600 << 0.144. Both silent.
       - series: 'netops_http_request_duration_seconds_bucket{le="0.1"}'
         values: '0+590x90'
-      - series: 'netops_http_request_duration_seconds_bucket{le="0.25"}'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.3"}'
         values: '0+595x90'
       - series: 'netops_http_request_duration_seconds_bucket{le="0.5"}'
         values: '0+598x90'
@@ -197,7 +197,7 @@ tests:
       # sustained past the 6h leg + for:15m.
       - series: 'netops_http_request_duration_seconds_bucket{le="0.1"}'
         values: '0+400x420'
-      - series: 'netops_http_request_duration_seconds_bucket{le="0.25"}'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.3"}'
         values: '0+450x420'
       - series: 'netops_http_request_duration_seconds_bucket{le="0.5"}'
         values: '0+500x420'
@@ -222,11 +222,11 @@ tests:
   - interval: 1m
     name: api read p95 slow burn — FIRES on a sustained moderate too-slow fraction
     input_series:
-      # 600/min; 400 <=0.25s, 200 spill -> too_slow_frac=0.333 > 6*0.05=0.30,
+      # 600/min; 400 <=0.3s, 200 spill -> too_slow_frac=0.333 > 6*0.05=0.30,
       # sustained past the 6h leg + for:15m.
       - series: 'netops_http_request_duration_seconds_bucket{le="0.1"}'
         values: '0+350x420'
-      - series: 'netops_http_request_duration_seconds_bucket{le="0.25"}'
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.3"}'
         values: '0+400x420'
       - series: 'netops_http_request_duration_seconds_bucket{le="0.5"}'
         values: '0+500x420'
@@ -411,6 +411,30 @@ tests:
             exp_annotations:
               summary: "Discovery success rate burning the budget fast (>=14.4x) — possible queue stall"
               description: "The discovery failed/partial ratio is consuming the 1% per-run error budget at >=14.4x over BOTH 5m and 1h (SLI slo:netops_discovery_success:ratio_rate_run). A sustained drop is the §337 queue-stall MTTD signal."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-discovery-success.md"
+
+  - interval: 1m
+    name: discovery success slow burn — FIRES on a sustained moderate failed/partial rate
+    input_series:
+      # 90/min succeeded + 10/min failed -> error ratio 0.10 > 6*0.01=0.06 over BOTH
+      # the 30m and 6h legs, sustained past the 6h window + the for:15m hold. This is
+      # the FIRING (negative) control [13] the slow-burn alert previously lacked — a
+      # green-at-setup rule that never fires on a real sustained regression FAILS here.
+      - series: 'netops_discovery_runs_total{status="succeeded"}'
+        values: '0+90x420'
+      - series: 'netops_discovery_runs_total{status="failed"}'
+        values: '0+10x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: NetopsDiscoverySuccessSlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: discovery_success
+              tier: slow
+            exp_annotations:
+              summary: "Discovery success rate burning the budget slowly (>=6x)"
+              description: "The discovery failed/partial ratio is consuming the 1% per-run error budget at >=6x over BOTH 30m and 6h."
               runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-discovery-success.md"
 
   - interval: 1m

@@ -35,6 +35,13 @@ allow; disabling the tier is the supported opt-out.
 {{- if not . -}}
 {{- fail "networkPolicy.auditExportEgress.siemCidrs contains an EMPTY CIDR — every entry must be a real SIEM endpoint CIDR, never \"\" (fail-open, ADR-0041 §1 / ADR-0045 §5)." -}}
 {{- end -}}
+{{- /* Reject a WILDCARD /0 mask (0.0.0.0/0, ::/0, or any …/0) — it renders an
+egress ipBlock to the WHOLE internet, defeating the least-privilege audit egress
+this policy exists to enforce. An empty list already fails above; a /0 is the same
+all-destinations allow expressed as a CIDR, so refuse it too (ADR-0041 §1 / §5). */ -}}
+{{- if hasSuffix "/0" (trim .) -}}
+{{- fail (printf "networkPolicy.auditExportEgress.siemCidrs contains a WILDCARD CIDR %q — a /0 mask (0.0.0.0/0, ::/0) allows audit egress to the ENTIRE internet, breaking least-privilege on the audit spine. Set the REAL SIEM endpoint CIDR(s) or disable the tier (fail-open, ADR-0041 §1 / ADR-0045 §5)." .) -}}
+{{- end -}}
 {{- end -}}
 {{- if not $ae.ports -}}
 {{- fail "networkPolicy.auditExportEgress.ports is EMPTY but auditExportEgress.enabled=true — an empty `ports` would ALLOW ALL ports to the SIEM CIDR(s). Set the SIEM ingest port(s) or disable the tier." -}}

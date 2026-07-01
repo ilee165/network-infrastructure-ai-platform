@@ -1409,10 +1409,12 @@ audit:
     # Prometheus /metrics port the exporter exposes the lag gauge on (scraped by the
     # platform). Reuses the worker metrics-server pattern.
     metricsPort: 9808
-    # One replica: the durable `seq` cursor is a single watermark; two exporters would
-    # double-deliver (harmless — SIEM dedups on `seq`) but add no throughput. A
-    # restart resumes from the cursor with no gap, so HA is the SIEM-side dedup, not a
-    # second exporter.
+    # SINGLETON — must be exactly 1 (the template REJECTS replicas>1). The exporter is
+    # a SINGLE-WRITER: it advances ONE durable `seq` cursor and streams at-least-once
+    # in `seq` order. Two exporters would RACE the cursor -> duplicate delivery AND
+    # out-of-order/interleaved streams (no cursor-claiming/lease exists yet). A restart
+    # resumes from the cursor with no gap (Recreate strategy, no rolling overlap), so
+    # availability is restart-resume, NOT a second exporter.
     replicas: 1
     resources:
       requests:

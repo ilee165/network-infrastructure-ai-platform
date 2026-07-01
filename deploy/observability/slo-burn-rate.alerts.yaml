@@ -139,26 +139,26 @@ groups:
   #   Error budget(p95) = 0.05; budget(p99) = 0.01. Burn = too_slow_frac / budget.
   #   PAGE: burn >= 14.4 over 5m AND 1h. TICKET: burn >= 6 over 30m AND 6h.
   #   The fraction-too-slow is read off the SAME _bucket histogram the W3-T2 p95/p99
-  #   recording rule reads (le=0.25 is the bucket boundary <= 300 ms; le=1.0 for 1 s).
+  #   recording rule reads (le=0.3 is the bucket boundary == 300 ms; le=1.0 for 1 s).
   # ===========================================================================
   - name: netops-slo-api-read-latency-burn
     rules:
       - alert: NetopsApiReadLatencyP95FastBurn
         # p95<300ms: budget=0.05 of requests may exceed 0.3s. 14.4x -> 0.72 frac.
-        # too_slow_frac = 1 - (requests <= 0.25s bucket / total). 0.25 is the
-        # histogram bucket boundary at/below the 300ms objective.
+        # too_slow_frac = 1 - (requests <= 0.3s bucket / total). 0.3 is the histogram
+        # bucket boundary AT the 300ms objective (le=0.25 measured the wrong threshold).
         expr: |
           (
             (
               1 -
-              sum(rate(netops_http_request_duration_seconds_bucket{le="0.25"}[5m]))
+              sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[5m]))
               /
               sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[5m]))
             ) > (14.4 * 0.05)
             and
             (
               1 -
-              sum(rate(netops_http_request_duration_seconds_bucket{le="0.25"}[1h]))
+              sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[1h]))
               /
               sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[1h]))
             ) > (14.4 * 0.05)
@@ -177,19 +177,19 @@ groups:
             quantile series: slo:netops_api_read_latency:p95_5m.
           runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
       - alert: NetopsApiReadLatencyP95SlowBurn
-        # p95<300ms TICKET: 6x over 30m AND 6h. budget=0.05 -> 0.30 frac.
+        # p95<300ms TICKET: 6x over 30m AND 6h. budget=0.05 -> 0.30 frac. le=0.3 == 300ms.
         expr: |
           (
             (
               1 -
-              sum(rate(netops_http_request_duration_seconds_bucket{le="0.25"}[30m]))
+              sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[30m]))
               /
               sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[30m]))
             ) > (6 * 0.05)
             and
             (
               1 -
-              sum(rate(netops_http_request_duration_seconds_bucket{le="0.25"}[6h]))
+              sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[6h]))
               /
               sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[6h]))
             ) > (6 * 0.05)

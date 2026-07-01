@@ -84,6 +84,7 @@ RECORDING_RULE_PREFIX = "slo:"
 EXPORTER_SERIES = {
     # postgres_exporter
     "pg_stat_database_blk_read_time_seconds_total",
+    "pg_stat_database_blks_read",
     "pg_stat_database_xact_commit",
     "pg_stat_database_xact_rollback",
     "pg_stat_database_deadlocks",

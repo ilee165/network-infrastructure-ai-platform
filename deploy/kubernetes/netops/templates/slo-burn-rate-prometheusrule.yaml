@@ -111,14 +111,14 @@ spec:
             (
               (
                 1 -
-                sum(rate(netops_http_request_duration_seconds_bucket{le="0.25"}[5m]))
+                sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[5m]))
                 /
                 sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[5m]))
               ) > (14.4 * 0.05)
               and
               (
                 1 -
-                sum(rate(netops_http_request_duration_seconds_bucket{le="0.25"}[1h]))
+                sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[1h]))
                 /
                 sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[1h]))
               ) > (14.4 * 0.05)
@@ -141,14 +141,14 @@ spec:
             (
               (
                 1 -
-                sum(rate(netops_http_request_duration_seconds_bucket{le="0.25"}[30m]))
+                sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[30m]))
                 /
                 sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[30m]))
               ) > (6 * 0.05)
               and
               (
                 1 -
-                sum(rate(netops_http_request_duration_seconds_bucket{le="0.25"}[6h]))
+                sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[6h]))
                 /
                 sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[6h]))
               ) > (6 * 0.05)
