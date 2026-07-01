@@ -47,17 +47,17 @@ docker compose --env-file .env -f deploy/docker/docker-compose.yml --profile loc
 
 The core stack (`api`, `worker`, `frontend`, `postgres`, `redis`, `neo4j`) comes
 up with the commands above. The **`packet-analysis`** pcap-parser worker is
-**opt-in** — gated behind the `packet` compose profile and excluded from the
-default `up`, because its ADR-0031 §3 no-socket seccomp sandbox is incompatible
-with a broker-connected Celery worker (glibc DNS needs a socket; a known,
-documented deferral — see ADR-0031 §3 "Deferred"). Start it only if you need
-packet analysis:
+**not functional in the current release** and is deliberately excluded from the
+default `up`: its ADR-0031 §3 no-socket seccomp sandbox is incompatible with a
+broker-connected Celery worker — glibc's DNS resolver needs a socket, so the
+worker never reaches Redis (see ADR-0031 §3 "Deferred"). The `packet` compose
+profile exists only as the deployment seam for that deferred work; starting it
+(`docker compose … --profile packet up -d`) currently yields a worker that
+**crash-loops on the broker connection**, so do **not** enable it until the
+contradiction is resolved (nested seccomp on the tshark child, or a §3 amendment
+plus the §4 egress NetworkPolicy).
 
-```bash
-docker compose --env-file .env -f deploy/docker/docker-compose.yml --profile packet up -d
-```
-
-Then verify:
+Then verify (core stack):
 
 ```bash
 curl http://localhost:8000/api/v1/health/live    # {"status":"ok"}
