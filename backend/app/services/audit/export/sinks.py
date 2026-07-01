@@ -109,24 +109,44 @@ class TcpTlsSink:
     ``syslog`` and ``cef`` formats (CEF over the syslog TLS transport, ADR-0045 §1).
     """
 
-    def __init__(self, *, host: str, port: int, tls_context: ssl.SSLContext) -> None:
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        tls_context: ssl.SSLContext,
+        timeout_seconds: float = 10.0,
+    ) -> None:
         self._host = host
         self._port = port
         self._tls = tls_context
+        self._timeout = timeout_seconds
 
     async def deliver(self, payloads: list[str]) -> None:
         import asyncio
 
+        # Bound BOTH the TLS connect and the write/drain (same posture as the HTTPS
+        # sink's timeout): a slow/stalled SIEM must not hang the exporter loop forever
+        # (which freezes the lag gauge — no refresh, no alert). A timeout is a delivery
+        # FAILURE, not a stall: convert it to SinkDeliveryError so the batch is retried
+        # next cycle (buffer + retry, never drop — ADR-0045 §3), never a wedged loop.
         try:
-            reader, writer = await asyncio.open_connection(
-                self._host, self._port, ssl=self._tls, server_hostname=self._host
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    self._host, self._port, ssl=self._tls, server_hostname=self._host
+                ),
+                timeout=self._timeout,
             )
+        except TimeoutError as exc:
+            raise SinkDeliveryError("syslog-tls connect timed out") from exc
         except (OSError, ssl.SSLError) as exc:
             raise SinkDeliveryError(f"syslog-tls connect failed: {type(exc).__name__}") from exc
         try:
             for payload in payloads:
                 writer.write(_octet_framed(payload))
-            await writer.drain()
+            await asyncio.wait_for(writer.drain(), timeout=self._timeout)
+        except TimeoutError as exc:
+            raise SinkDeliveryError("syslog-tls write timed out") from exc
         except (OSError, ssl.SSLError) as exc:
             raise SinkDeliveryError(f"syslog-tls write failed: {type(exc).__name__}") from exc
         finally:

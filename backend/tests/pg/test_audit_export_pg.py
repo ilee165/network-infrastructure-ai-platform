@@ -69,8 +69,10 @@ def _settings(batch_size: int = 500) -> Settings:
         audit_export_format="https-json",
         audit_export_endpoint="https://siem.example.test/c",
         audit_export_batch_size=batch_size,
-        audit_export_poll_seconds=0.0,
-        audit_export_retry_backoff_seconds=0.0,
+        # Tiny positive interval (the config validator now rejects non-positive
+        # poll/backoff — busy-spin guard, see config.py).
+        audit_export_poll_seconds=0.001,
+        audit_export_retry_backoff_seconds=0.001,
     )
 
 
@@ -130,6 +132,46 @@ async def test_cursor_resume_no_gap_across_pg_sessions(pg_engine: AsyncEngine) -
     async with maker() as session:
         await export_cycle(session, sink=sink2, fmt="https-json", batch_size=10)
     assert [json.loads(p)["seq"] for p in sink2.delivered] == [4, 5]  # no gap, no re-send
+
+
+async def test_advance_cursor_is_monotonic_no_regress_on_pg(pg_engine: AsyncEngine) -> None:
+    """CR[4]: the PG upsert is forward-only — a STALE write cannot regress the cursor.
+
+    The watermark is advanced to seq=3; a concurrent stale runner then upserts an OLDER
+    seq=1 (a rolling-update overlap re-ACKing a superseded batch). The DB-level
+    ``ON CONFLICT ... WHERE cursor.exported_seq < EXCLUDED.exported_seq`` guard makes
+    that a NO-OP, so the cursor stays at 3 — never moves backward, never PK-collides.
+    """
+    from datetime import UTC, datetime
+
+    from app.services.audit.export.cursor import advance_cursor
+    from app.services.audit.export.record import ExportRecord
+
+    maker = _maker(pg_engine)
+    await _seed(maker, 3)
+    sink = _RecordingSink()
+    async with maker() as session:
+        await export_cycle(session, sink=sink, fmt="https-json", batch_size=10)
+    async with maker() as session:
+        assert await current_exported_seq(session) == 3
+
+    stale = ExportRecord(
+        seq=1,
+        id=uuid.uuid4(),
+        created_at=datetime(2020, 1, 1, 0, 0, 0, tzinfo=UTC),
+        actor="stale-runner",
+        action="legacy.write",
+        target_type="device",
+        target_id="1",
+        request_id=None,
+        reasoning_trace_id=None,
+        detail=None,
+    )
+    async with maker() as session:
+        await advance_cursor(session, last=stale)
+        await session.commit()
+    async with maker() as session:
+        assert await current_exported_seq(session) == 3  # forward-only: no regress
 
 
 async def test_null_seq_pre_chain_row_excluded_on_pg(pg_engine: AsyncEngine) -> None:

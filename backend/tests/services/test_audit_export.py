@@ -113,8 +113,10 @@ def _settings(fmt: str = "https-json", *, batch_size: int = 500) -> Settings:
         audit_export_endpoint="https://siem.example.test/collector",
         audit_export_host="siem.example.test",
         audit_export_batch_size=batch_size,
-        audit_export_poll_seconds=0.0,
-        audit_export_retry_backoff_seconds=0.0,
+        # A tiny positive interval keeps the loop fast without busy-spinning (the
+        # config validator now rejects a non-positive poll/backoff — see config.py).
+        audit_export_poll_seconds=0.001,
+        audit_export_retry_backoff_seconds=0.001,
     )
 
 
@@ -435,6 +437,99 @@ async def test_export_lag_metric_grows_while_sink_is_down(
         result = await export_cycle(session, sink=sink, fmt="https-json", batch_size=10)
     assert result.failed
     assert result.lag_seconds > 60.0  # the stale cursor drives lag past the SLO → alert
+
+
+async def test_export_lag_is_zero_when_caught_up_on_idle_stream(
+    maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """CR[5]: a caught-up idle stream reports lag 0.0, not ``now − old_commit_ts``.
+
+    Deliver a row, back-date the cursor's commit ts far into the past, then run a cycle
+    with NO new rows. Before the fix, the empty-read branch returned ``now − old_ts``
+    → an unbounded, false <60 s SLO breach with ZERO backlog. It must be 0.0.
+    """
+    await _seed_audit_rows(maker, 1)
+    sink = _RecordingSink()
+    async with maker() as session:
+        await export_cycle(session, sink=sink, fmt="https-json", batch_size=10)
+    async with maker() as session:
+        cur = await session.get(AuditExportCursor, AuditExportCursor.SINGLETON_ID)
+        assert cur is not None
+        cur.last_exported_commit_at = datetime(2020, 1, 1, 0, 0, 0, tzinfo=UTC)  # stale
+        await session.commit()
+
+    # No new rows: caught up. Lag must be 0.0 despite the ancient cursor commit ts.
+    async with maker() as session:
+        idle = await export_cycle(session, sink=sink, fmt="https-json", batch_size=10)
+    assert idle.delivered == 0
+    assert idle.lag_seconds == 0.0
+
+
+async def test_export_lag_is_zero_after_non_full_batch_drains_to_head(
+    maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """CR[5]: a non-full successful batch drained to head ⇒ caught up ⇒ lag 0.0."""
+    await _seed_audit_rows(maker, 2)
+    sink = _RecordingSink()
+    async with maker() as session:
+        cur = await session.get(AuditExportCursor, AuditExportCursor.SINGLETON_ID)
+        assert cur is None  # nothing exported yet
+    async with maker() as session:
+        result = await export_cycle(session, sink=sink, fmt="https-json", batch_size=10)
+    assert result.delivered == 2
+    assert result.batch_full is False  # 2 < 10 ⇒ drained to head
+    assert result.lag_seconds == 0.0
+
+
+async def test_advance_cursor_never_regresses_on_stale_write(
+    maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """CR[4]: a stale ACK of an OLDER seq must not move the watermark BACKWARD.
+
+    The unit backend enforces the same forward-only invariant the PG upsert applies at
+    the DB level; the real concurrent-write assertion rides ``tests/pg``.
+    """
+    from app.services.audit.export.cursor import advance_cursor, current_exported_seq
+
+    await _seed_audit_rows(maker, 5)
+    sink = _RecordingSink()
+    async with maker() as session:
+        await export_cycle(session, sink=sink, fmt="https-json", batch_size=10)
+    async with maker() as session:
+        assert await current_exported_seq(session) == 5
+
+    # A stale runner tries to advance to an OLDER seq (seq=2) — must be a no-op.
+    async with maker() as session:
+        stale = _example_record(seq=2)
+        await advance_cursor(session, last=stale)
+        await session.commit()
+    async with maker() as session:
+        assert await current_exported_seq(session) == 5  # never regressed
+
+
+async def test_tcp_tls_sink_deliver_times_out_on_a_stalled_connect() -> None:
+    """CR[6]: a stalled SIEM connect raises SinkDeliveryError (retried), never hangs.
+
+    A never-resolving ``open_connection`` must not wedge the exporter loop: the bounded
+    ``asyncio.wait_for`` converts the timeout into a delivery FAILURE so the batch is
+    retried next cycle (buffer + retry, never a frozen lag gauge).
+    """
+    import asyncio
+
+    from app.services.audit.export.sinks import TcpTlsSink
+
+    async def _never_connects(*_a: Any, **_k: Any) -> Any:
+        await asyncio.Event().wait()  # blocks forever
+
+    ctx = ssl.create_default_context()
+    sink = TcpTlsSink(host="siem.example.test", port=6514, tls_context=ctx, timeout_seconds=0.01)
+    orig = asyncio.open_connection
+    asyncio.open_connection = _never_connects  # type: ignore[assignment]
+    try:
+        with pytest.raises(SinkDeliveryError, match="timed out"):
+            await sink.deliver([format_syslog(_example_record())])
+    finally:
+        asyncio.open_connection = orig  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------

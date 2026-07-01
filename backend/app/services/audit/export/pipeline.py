@@ -111,9 +111,11 @@ async def export_cycle(
     records = await read_unexported(session, after_seq=after_seq, limit=batch_size)
 
     if not records:
-        lag = await _compute_lag_seconds(session)
-        set_audit_export_lag(lag_seconds=lag)
-        return CycleResult(delivered=0, batch_full=False, lag_seconds=lag, failed=False)
+        # Caught up: no backlog ⇒ zero lag. Reporting ``now − last_exported_commit_at``
+        # on an idle stream would climb unbounded with wall-clock and trip a false
+        # <60 s SLO breach with an EMPTY backlog (ADR-0045 §3). Publish 0.0.
+        set_audit_export_lag(lag_seconds=0.0)
+        return CycleResult(delivered=0, batch_full=False, lag_seconds=0.0, failed=False)
 
     payloads = _format_batch(records, fmt=fmt)
     try:
@@ -139,7 +141,12 @@ async def export_cycle(
     await advance_cursor(session, last=last)
     await session.commit()
 
-    lag = await _compute_lag_seconds(session)
+    batch_full = len(records) == batch_size
+    # A non-full batch means we drained to the head of the backlog ⇒ caught up ⇒ zero
+    # lag (do NOT report ``now − last_commit_ts``, which would show residual age on an
+    # otherwise-current stream, ADR-0045 §3). A FULL batch means more backlog remains,
+    # so the real ``now − last_exported_commit_at`` is the meaningful in-flight lag.
+    lag = await _compute_lag_seconds(session) if batch_full else 0.0
     set_audit_export_lag(lag_seconds=lag)
     _logger.info(
         "audit.export.delivered",
@@ -150,7 +157,7 @@ async def export_cycle(
     )
     return CycleResult(
         delivered=len(records),
-        batch_full=len(records) == batch_size,
+        batch_full=batch_full,
         lag_seconds=lag,
         failed=False,
     )

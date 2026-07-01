@@ -89,8 +89,10 @@ __all__ = [
 
 # Latency-histogram buckets in SECONDS, straddling the §6 API/agent SLO targets
 # (API read p95 < 300 ms / p99 < 1 s, first-token p95): fine resolution below 1 s,
-# coarser tail for slow LLM/agent turns so the histogram resolves both objectives.
-_LATENCY_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
+# coarser tail for slow LLM/agent turns so the histogram resolves both objectives. The
+# 0.3 boundary is REQUIRED for the API read-latency SLO (p95 < 300 ms): a burn-rate
+# over le=0.25 would measure the wrong threshold. Keep the tuple sorted ascending.
+_LATENCY_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.3, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
 # Wider buckets (seconds) for discovery-run wall clock and approval latency.
 _RUN_BUCKETS = (1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 1800.0, 3600.0)
 

@@ -101,10 +101,31 @@ def test_offline_sql_creates_audit_export_cursor_table() -> None:
         for line in sql.splitlines()
     ), "exported_seq must carry a 0 server_default (the genesis cursor)"
 
-    # last_exported_commit_at is nullable (no NOT NULL — undefined until first export).
-    for line in sql.splitlines():
-        if "last_exported_commit_at" in line and "ADD" in line.upper():
-            assert "NOT NULL" not in line.upper(), "last_exported_commit_at must be nullable"
+    # last_exported_commit_at is nullable (no NOT NULL — undefined until first export),
+    # while updated_at is NOT NULL. Assert on the actual ``CREATE TABLE`` column lines
+    # (the DDL renders one column per line, e.g. ``<col> TIMESTAMP WITH TIME ZONE,`` —
+    # NOT ``ADD COLUMN``, so the old ``"ADD" in line`` guard never matched and the
+    # nullability assertion never ran). Parse the column lines directly so the
+    # assertion BITES.
+    def _column_line(column: str) -> str:
+        matches = [
+            line
+            for line in sql.splitlines()
+            # The column token followed by its type — the CREATE TABLE body line, not a
+            # comment or the PRIMARY KEY constraint referencing the same name.
+            if line.strip().startswith(column) and "TIMESTAMP" in line.upper()
+        ]
+        assert len(matches) == 1, f"expected exactly one column line for {column!r}, got {matches}"
+        return matches[0]
+
+    assert "NOT NULL" not in _column_line("last_exported_commit_at").upper(), (
+        "last_exported_commit_at must be nullable (NULL until the first export)"
+    )
+    # Positive control: a NOT NULL column DOES render NOT NULL, proving the parse
+    # actually distinguishes nullability (a mis-parse that found nothing would fail).
+    assert "NOT NULL" in _column_line("updated_at").upper(), (
+        "updated_at must be NOT NULL (the parse must distinguish nullability)"
+    )
 
 
 @pytest.mark.usefixtures("_postgres_dialect_env")

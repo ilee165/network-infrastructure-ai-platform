@@ -282,16 +282,20 @@ class Settings(BaseSettings):
 
     #: Bounded read-batch size per export cycle (ADR-0045 §3 — bounded memory). A
     #: long SIEM outage grows the durable audit_log backlog + the lag gauge, never
-    #: unbounded memory: at most this many rows are held in flight per cycle.
-    audit_export_batch_size: int = 500
+    #: unbounded memory: at most this many rows are held in flight per cycle. Must be
+    #: >= 1: a batch size of 0 would ``read_unexported(limit=0)`` → export nothing
+    #: (silent audit loss, no ACK ever advances the cursor).
+    audit_export_batch_size: int = Field(default=500, gt=0)
 
     #: Seconds the exporter sleeps between cycles when caught up (no new rows). A
-    #: short interval keeps the export near-real-time for the p95 < 60 s SLO (§6).
-    audit_export_poll_seconds: float = 2.0
+    #: short interval keeps the export near-real-time for the p95 < 60 s SLO (§6). Must
+    #: be > 0: a non-positive interval busy-spins the caught-up loop (CPU burn, no wait).
+    audit_export_poll_seconds: float = Field(default=2.0, gt=0)
 
     #: Capped backoff (seconds) the exporter waits after a sink failure before
     #: retrying the SAME un-advanced batch (ADR-0045 §3 — buffer + retry, never drop).
-    audit_export_retry_backoff_seconds: float = 5.0
+    #: Must be > 0: a non-positive backoff busy-spins the retry loop against a down sink.
+    audit_export_retry_backoff_seconds: float = Field(default=5.0, gt=0)
 
     #: OIDC / SSO identity federation (ADR-0028). OIDC is opt-in: with no
     #: configured issuer the platform stays local-only (CLAUDE.md local-first).
@@ -402,6 +406,26 @@ class Settings(BaseSettings):
                 "NETOPS_SECRET_KEY must be set to a strong unique value in production "
                 "(NETOPS_ENV=prod or NETOPS_IS_PROD=true)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_https_export_endpoint(self) -> Settings:
+        """TLS-only export (ADR-0045 §1): the HTTPS/JSON endpoint must be ``https://``.
+
+        The exported audit payload + the bearer ``Authorization`` header ride this
+        endpoint; a ``http://`` (or scheme-less) URL would send the audit spine and the
+        token over cleartext. Fail closed at config time so a plaintext SIEM endpoint
+        can never be armed, rather than leaking on the first export cycle.
+        """
+        if self.audit_export_format == "https-json" and self.audit_export_endpoint is not None:
+            scheme = self.audit_export_endpoint.split("://", 1)[0].lower()
+            if scheme != "https":
+                raise ValueError(
+                    "NETOPS_AUDIT_EXPORT_ENDPOINT must be an https:// URL for the "
+                    "'https-json' export format (TLS-only export, ADR-0045 §1) — a "
+                    "non-https endpoint would send the audit payload + bearer token "
+                    "over cleartext"
+                )
         return self
 
 
