@@ -1,0 +1,213 @@
+# netops chart — REDUCED-SCALE HA overlay for the ephemeral in-CI kind cluster
+# (P3 W4-T1, ADR-0047 §1 / ADR-0048 §3 / ADR-0042 / ADR-0043 / ADR-0044).
+#
+# WHAT THIS IS: the values overlay the kind HA harness (`ci/kind/kind-harness.sh`
+# HA path) layers on top of the chart defaults so an EPHEMERAL, reduced-scale HA
+# topology stands up on a single-node kind cluster:
+#   - CloudNativePG Cluster: 1 primary + 2 streaming replicas (ADR-0042 §1)
+#   - Redis Sentinel:        1 primary + 2 replicas, 3 Sentinels, quorum 2 (ADR-0044 §1)
+#   - KEDA per-queue worker ScaledObjects at reduced per-queue ceilings (ADR-0043)
+#   - api HorizontalPodAutoscaler floor 2 (ADR-0043 §1 — HA floor, unchanged)
+#
+# REDUCED-SCALE + NAMED (ADR-0047 §1 posture — the load-bearing honesty rule):
+# this overlay proves the HA *mechanisms* stand up and are wired on kind at a
+# scale a single-node CI runner can host. It does NOT certify a scale point. The
+# exact counts the topology runs at are stated PER TIER below so the reduced scale
+# is on the record next to every bring-up. The certified-scale numbers (500-device
+# discovery, 100 concurrent users, 5,000-device projection, 30-day soak) stay
+# deferred-accepted → GA / customer cluster with the written promotion path in
+# ADR-0047 §4 — never claimed from this overlay.
+#
+# HA-COMPONENT QUORUM MINIMA ARE NOT REDUCED. CNPG instances (3) and the Sentinel
+# replica/quorum (3 replicas / 2-of-3) are the ADR-0042 §1 / ADR-0044 §1 MINIMA
+# for a real failover quorum — lowering them would break the mechanism the W4
+# drills (T3–T8) exercise, not "reduce scale". Only the per-tier resource requests
+# and the elastic ceilings (HPA/KEDA maxReplicas, pooler instances) are pulled down
+# to fit a single kind node.
+#
+# SECURE BY DEFAULT is INHERITED UNCHANGED from values.yaml (ADR-0029 §0): this
+# overlay flips NO hardening control off. It only (a) selects the opt-in HA tiers,
+# (b) enforces the mutual-exclusion contracts (one Postgres tier, one Redis tier),
+# and (c) trims resource requests + elastic ceilings for the kind node.
+#
+# NO SECRET MATERIAL appears here (ADR-0029 §6 / L4). The dev credential Secrets
+# the HA tiers consume are the chart's `lookup` reuse-or-generate dev-fallback
+# (secrets.existingSecret left empty) — reused on `helm upgrade`, never regenerated
+# (a regen severs live DB/broker connections). This overlay references nothing
+# secret; it only selects tiers.
+#
+# USAGE (the harness does this; shown for local reproduction):
+#   helm template netops deploy/kubernetes/netops \
+#     --namespace netops --kube-version 1.29.0 \
+#     -f deploy/kubernetes/netops/values-kind-ha.yaml \
+#     --set mtls.postgres.enabled=true --set mtls.postgres.certManager.enabled=false
+
+# -- CloudNativePG HA Postgres tier (ADR-0042). MUTUALLY EXCLUSIVE with the
+#    single-instance services.postgres StatefulSet — enabling both is a REFUSED
+#    render (_validation.tpl), so services.postgres is turned OFF below.
+cloudNativePg:
+  enabled: true
+  # REDUCED-SCALE COUNT — Postgres instances: 3 (1 primary + 2 streaming replicas).
+  # This is the ADR-0042 §1 quorum MINIMUM (ANY 1 over 2 standbys + CNPG failover
+  # quorum), NOT a reduced number — the failover/zero-audit-loss drill (W4-T3)
+  # needs a real 3-instance quorum to prove promotion loses no committed audit row.
+  instances: 3
+  # Trim per-instance storage + resources to fit a single kind node (the mechanism
+  # does not depend on the GA sizes; the reduced sizes still run pgvector + WAL).
+  storage:
+    size: 1Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # PgBouncer pooler — REDUCED-SCALE COUNT: 1 instance (GA default is 2). One
+  # pooler pod is enough on a single kind node to prove the transaction-mode
+  # connection path + the audit `SET LOCAL` correctness (ADR-0042 §4). poolMode
+  # stays `transaction` (the conftest rule REFUSES session/statement) and the
+  # connection budget is trimmed to the kind primary's small max_connections.
+  pgbouncer:
+    poolMode: transaction
+    instances: 1
+    maxClientConn: 200
+    defaultPoolSize: 10
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+  # Backups off for the ephemeral kind topology — no object store in-cluster; the
+  # backup/DR drill (ADR-0030) is a separate certified-cluster path, not W4-T1.
+  backup:
+    enabled: false
+
+# -- Redis Sentinel HA tier (ADR-0044). MUTUALLY EXCLUSIVE with services.redis —
+#    services.redis is turned OFF below (one Redis tier, never two).
+redisSentinel:
+  enabled: true
+  # REDUCED-SCALE COUNT — Redis: 3 (1 primary + 2 replicas). ADR-0044 §1 minimum
+  # for a meaningful replica set + Sentinel monitoring — not reducible.
+  replicas: 3
+  storage:
+    size: 512Mi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  sentinel:
+    # REDUCED-SCALE COUNT — Sentinels: 3, quorum 2-of-3 (ADR-0044 §1 odd-majority
+    # minimum). A single Sentinel loss still leaves a quorum; a minority cannot
+    # promote a split-brain primary. Not reducible below 3.
+    replicas: 3
+    quorum: 2
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+
+# -- KEDA per-queue worker autoscaling (ADR-0043 §2/§3/§4). Requires the KEDA
+#    operator (installed by the harness) + the Sentinel tier above (the scaler
+#    discovers the primary via Sentinel). Per-queue ceilings are pulled DOWN to
+#    a reduced maxReplicaCount so a queue-burst drill (W4-T6) scales out/in within
+#    a single kind node while STILL proving per-queue isolation (each queue has
+#    its own ScaledObject ⇄ Deployment ⇄ ceiling). The isolation MECHANISM is
+#    structural and unchanged; only the ceilings are reduced.
+workerScaling:
+  enabled: true
+  queues:
+    discovery:
+      # REDUCED-SCALE per-queue ceiling: warm floor 1, ceiling 2 (GA is 10).
+      minReplicaCount: 1
+      maxReplicaCount: 2
+    config:
+      minReplicaCount: 1
+      maxReplicaCount: 2
+    docs:
+      # scale-from-zero preserved (KEDA capability the fallback lacks), ceiling 1.
+      minReplicaCount: 0
+      maxReplicaCount: 1
+    packet_capture:
+      # packet queues STAY sandbox-pinned (sandboxPinned: true in values.yaml is
+      # unchanged) — a reduced ceiling never relaxes the ADR-0043 §4 pool binding.
+      minReplicaCount: 0
+      maxReplicaCount: 1
+    packet_analysis:
+      minReplicaCount: 0
+      maxReplicaCount: 1
+
+# -- Per-service tiers at REDUCED-SCALE for kind ------------------------------
+services:
+  # Single-instance Postgres OFF — CloudNativePG owns Postgres (mutual exclusion).
+  postgres:
+    enabled: false
+  # Single-instance Redis OFF — Sentinel owns Redis (mutual exclusion).
+  redis:
+    enabled: false
+
+  api:
+    # api HPA floor STAYS 2 (ADR-0043 §1 HA floor — the chart REFUSES < 2). The
+    # ceiling is REDUCED to 4 for kind: enough to show the 1→2-replica improvement
+    # the reduced-scale load drill (W4-T6, ADR-0047 §3) asserts without exhausting
+    # a single node. minReplicas is NOT reduced — it is the resilience floor.
+    autoscaling:
+      minReplicas: 2
+      maxReplicas: 4
+      # No Prometheus adapter in the bare kind topology → the request-rate metric
+      # has no series; disable that signal so the HPA does not report
+      # ScalingActive=False on a missing metric (values.yaml documents this exact
+      # opt-out for adapter-less clusters). The CPU signal carries autoscaling.
+      requestRate:
+        enabled: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+
+  worker:
+    # The base shared worker serves the residual topology+system queues (the
+    # scaled general queues move to their own KEDA Deployments). 1 replica on kind.
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+
+  frontend:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi
+
+  neo4j:
+    # Single Neo4j + automated rebuild (ADR-0005 — Community has no clustering; the
+    # re-projection from Postgres IS the recovery story). 1 replica; trimmed sizes.
+    replicas: 1
+    storage:
+      size: 1Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi

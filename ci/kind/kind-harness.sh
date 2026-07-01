@@ -22,10 +22,27 @@
 #
 # Usage:
 #   ci/kind/kind-harness.sh            # full run (bring-up → assert → teardown)
+#   HA=1 ci/kind/kind-harness.sh       # ADD the reduced-scale HA topology (P3 W4-T1):
+#                                      #   install the CNPG operator + KEDA, then apply
+#                                      #   the values-kind-ha.yaml overlay (CNPG 1+2,
+#                                      #   Redis Sentinel 3+3, KEDA per-queue workers,
+#                                      #   api HPA floor 2) and GATE on HA readiness.
+#                                      #   The P2 CNI self-test + mTLS/collector
+#                                      #   assertions run UNCHANGED alongside.
 #   KEEP_CLUSTER=1 ci/kind/kind-harness.sh   # skip teardown for local debugging
 #
 # Requires: kind, kubectl, helm on PATH (the CI job installs them; locally install
 # kind + a Docker/Podman backend first — see the runbook).
+#
+# P3 W4-T1 (ADR-0047 / ADR-0048 §3): the HA path is an ADD-ON composed onto the
+# EXISTING P2 harness — it reuses the SAME Calico bring-up + CNI self-test (does
+# NOT duplicate them) and leaves the P2 mTLS + collector-egress assertions intact.
+# When HA=1 it installs the CNPG operator + KEDA (ci/kind/ha/install-operators.sh,
+# pinned versions), renders the chart WITH the reduced-scale HA overlay, and gates
+# on HA readiness (ci/kind/ha/wait-ha-ready.sh) so a half-up cluster never reads
+# ready (L5). L1: kind cannot run on the Windows authoring host — the HA live path
+# is authored + statically validated here and runs LIVE only on the CI ubuntu
+# runner; its CI job stays continue-on-error until W4-T2 promotes it.
 
 set -euo pipefail
 
@@ -39,6 +56,19 @@ CHART_NS="${CHART_NS:-netops}"
 SELFTEST_NS="${SELFTEST_NS:-cni-selftest}"
 SELFTEST_DIR="${HERE}/cni-selftest"
 ASSERT_RUNNER="${HERE}/assertions/run-assertions.sh"
+
+# --- P3 W4-T1 HA add-on (ADR-0047 / ADR-0048 §3) -----------------------------
+# HA=1 turns on the reduced-scale HA topology: install the CNPG operator + KEDA,
+# render the chart with the values-kind-ha.yaml overlay, gate on HA readiness.
+# Default OFF so the P2 harness behaviour is byte-for-byte unchanged when HA is
+# not requested. These are the SIBLING scripts the HA path composes (the P2 CNI
+# self-test + assertions are untouched).
+HA="${HA:-0}"
+HA_INSTALL_OPERATORS="${HA_INSTALL_OPERATORS:-${HERE}/ha/install-operators.sh}"
+HA_WAIT_READY="${HA_WAIT_READY:-${HERE}/ha/wait-ha-ready.sh}"
+# The reduced-scale HA overlay (CNPG 1+2, Redis Sentinel 3+3, KEDA per-queue
+# workers, api HPA floor 2). Layered ON TOP of the chart defaults via helm -f.
+HA_VALUES="${HA_VALUES:-${CHART_DIR}/values-kind-ha.yaml}"
 
 # Calico manifest (enforcing CNI, ADR-0041 §2). Pinned version — never `latest`.
 CALICO_VERSION="${CALICO_VERSION:-v3.28.2}"
@@ -154,6 +184,16 @@ log "CNI self-test PASSED — NetworkPolicy is enforced; proceeding"
 # Clean the self-test namespace so it cannot interfere with chart assertions.
 kubectl delete namespace "${SELFTEST_NS}" --wait=true
 
+# --- 3a. HA add-on: install the CNPG operator + KEDA (P3 W4-T1) ----------------
+# Only when HA=1. This runs AFTER the CNI self-test proved the CNI enforces (the
+# HA operators + HA overlay do not weaken that guarantee), and BEFORE the chart
+# render/apply so the CNPG Cluster / KEDA ScaledObject CRDs exist when applied.
+# The installer is pinned + idempotent + retried + readiness-gated (L1/L5).
+if [ "${HA}" = "1" ]; then
+  log "HA=1 — installing HA operators (CloudNativePG + KEDA) before chart apply"
+  bash "${HA_INSTALL_OPERATORS}"
+fi
+
 # --- 4. render + apply the chart manifests ------------------------------------
 log "rendering netops chart"
 RENDERED="$(mktemp)"
@@ -167,12 +207,22 @@ MTLS_VALUES=(
   --set mtls.postgres.enabled="${MTLS_ENABLED:-true}"
   --set mtls.postgres.certManager.enabled="${MTLS_CERT_MANAGER:-false}"
 )
+# P3 W4-T1: when HA=1, layer the reduced-scale HA overlay ON TOP of the chart
+# defaults (CNPG 1+2, Redis Sentinel 3+3, KEDA per-queue workers, api HPA floor
+# 2). Passed as a helm `-f` so it composes with (and is overridden by) the
+# --set MTLS flags above — the mTLS path is preserved under HA. Empty when HA off,
+# so the P2 render is byte-for-byte unchanged.
+HA_FILE_ARGS=()
+if [ "${HA}" = "1" ]; then
+  HA_FILE_ARGS=(-f "${HA_VALUES}")
+fi
 # L5: pipefail so a helm-template failure is not masked by the `tr` pipe; CRLF is
 # stripped (matches the `infra` job) and `test -s` guards an empty render.
 set -o pipefail
 helm template netops "${CHART_DIR}" \
   --namespace "${CHART_NS}" \
   --kube-version 1.29.0 \
+  "${HA_FILE_ARGS[@]}" \
   "${MTLS_VALUES[@]}" \
   | tr -d '\r' > "${RENDERED}"
 test -s "${RENDERED}"
@@ -230,6 +280,16 @@ else
   echo "::warning::some chart objects require optional CRDs the scaffold does not" \
        "install (cert-manager / Kyverno) — W4-T4/T5 install their prerequisites." \
        "Only those CRD-missing errors were tolerated; the scaffold continues." >&2
+fi
+
+# --- 4a. HA add-on: gate on HA readiness (P3 W4-T1) ---------------------------
+# Only when HA=1. A half-up HA topology (primary up but replicas Pending, the
+# Sentinel quorum not formed, an unreconciled ScaledObject) must NOT read "ready"
+# and must NOT let the assertions run against it (L5 / ADR-0048 §3 reliability
+# prerequisite). This gate HARD-FAILS the run until every HA workload is healthy.
+if [ "${HA}" = "1" ]; then
+  log "HA=1 — gating on reduced-scale HA topology readiness (CNPG + Sentinel + KEDA)"
+  CHART_NS="${CHART_NS}" bash "${HA_WAIT_READY}"
 fi
 
 # --- 5. run the assertion-runner (W4-T4 + W4-T5 checks) -----------------------

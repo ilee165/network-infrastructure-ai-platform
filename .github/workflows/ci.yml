@@ -801,6 +801,58 @@ jobs:
       - name: Redis Sentinel render-twice L4 idempotency guard
         run: bash ci/redis-sentinel/render-twice.sh
 
+      # W4-T1 (ADR-0047 / ADR-0048 §3) — reduced-scale kind HA overlay render +
+      # policy validation. The ephemeral kind HA topology (CNPG 1+2 + Redis
+      # Sentinel 3+3 + KEDA per-queue workers + api HPA floor 2) is driven by the
+      # values-kind-ha.yaml overlay the HA harness path (HA=1) layers on. This step
+      # renders THAT overlay (the same one the live kind-harness-ha job applies) and
+      # runs kubeconform + kube-linter + conftest + a Trivy IaC scan on it, so the
+      # reduced-scale HA manifests are STATICALLY gated hard here even though the
+      # LIVE bring-up (kind-harness-ha) is continue-on-error until W4-T2 promotes it.
+      # ScaledObject/TriggerAuthentication (KEDA CRDs) + Cluster/Pooler (CNPG CRDs)
+      # have no built-in schema so they are -skip'd for kubeconform (the conftest
+      # cnpg.*/redis-sentinel.*/workerscale.* rules keep them policy-covered). The
+      # static validate-ha-overlay.sh asserts the reduced-scale counts + mutual
+      # exclusion + secure-by-default inheritance so a scale drift BITES.
+      - name: Render + validate reduced-scale kind HA overlay (ADR-0047 / W4-T1)
+        run: |
+          set -o pipefail
+          helm template netops deploy/kubernetes/netops \
+            --namespace netops --kube-version 1.29.0 \
+            -f deploy/kubernetes/netops/values-kind-ha.yaml \
+            --set mtls.postgres.enabled=true \
+            --set mtls.postgres.certManager.enabled=false | tr -d '\r' > rendered-kind-ha.yaml
+          test -s rendered-kind-ha.yaml
+          kubeconform -strict -summary \
+            -kubernetes-version 1.29.0 \
+            -ignore-missing-schemas \
+            -skip ClusterPolicy,Cluster,Pooler,ScaledObject,TriggerAuthentication \
+            rendered-kind-ha.yaml
+          kube-linter lint rendered-kind-ha.yaml --config deploy/kubernetes/.kube-linter.yaml
+          conftest test rendered-kind-ha.yaml \
+            --policy deploy/kubernetes/policy/rego \
+            --all-namespaces
+          # Static HA-overlay invariants (reduced-scale counts stated, mutual
+          # exclusion, mTLS preserved, no :latest) — RED gate, bites on scale drift.
+          bash ci/kind/ha/validate-ha-overlay.sh
+
+      # W4-T1 — Trivy IaC misconfig scan over the reduced-scale HA render. Same
+      # posture as the rendered.yaml / CNPG / Redis-Sentinel / KEDA scans (fixable
+      # HIGH/CRIT, ignore-unfixed, sanctioned-deviation ignorefile) — the HA overlay
+      # is its own object set (reduced counts + resource trims) and must be scanned
+      # so a HIGH/CRITICAL misconfig isolated to it fails CI.
+      - name: Trivy config scan (rendered kind HA overlay)
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
+        with:
+          scan-type: config
+          scan-ref: rendered-kind-ha.yaml
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
       # W2-T3 (ADR-0043 §2/§3/§4) — KEDA per-queue worker ScaledObjects render +
       # policy validation. The ScaledObjects + per-queue worker Deployments +
       # TriggerAuthentications are OPT-IN (workerScaling.enabled, default OFF —
@@ -1058,6 +1110,105 @@ jobs:
             echo "::warning::kind-harness live run did not succeed (outcome=${outcome}) —" \
                  "this job is NON-BLOCKING (L1: not locally validated on the authoring" \
                  "host). Investigate before promoting it to a required gate in W5."
+          fi
+
+  # Ephemeral HA kind topology (P3 W4-T1, ADR-0047 / ADR-0048 §3). This job stands
+  # up the reduced-scale HA substrate the W4 drills (T3–T8) + the gate promotion
+  # (T2) run against: the SAME enforcing-CNI kind harness as the P2 kind-harness
+  # job, EXTENDED (HA=1) with the CloudNativePG operator + KEDA (pinned versions),
+  # then the netops chart applied via the values-kind-ha.yaml overlay at REDUCED
+  # SCALE — CNPG 1 primary + 2 replicas, Redis Sentinel 1+2 with 3 Sentinels (2-of-3
+  # quorum), KEDA per-queue worker ScaledObjects, api HPA floor 2 — and gated on HA
+  # readiness (a half-up topology must NOT read ready, L5 / ADR-0048 §3). The P2
+  # mTLS + collector-egress assertions run UNCHANGED alongside (this job does not
+  # touch the P2 kind-harness job, its continue-on-error, or the all-gates omission).
+  #
+  # NOT YET A BLOCKING GATE — deliberately ABSENT from `all-gates` `needs`, same as
+  # the P2 kind-harness job. P1-W4-LESSONS L1: kind cannot run on the W4-T1 authoring
+  # host (Windows, no Docker/Linux kind), so the LIVE HA bring-up is validated only
+  # on this CI ubuntu runner, not locally. The RELIABILITY of this bring-up is the
+  # explicit ADR-0048 §3 Prerequisite A for W4-T2 gate promotion; until W4-T2 has
+  # exercised it green and dropped continue-on-error, this job runs for SIGNAL only.
+  # The STATIC layers (validate-harness.sh HA invariants + validate-ha-overlay.sh)
+  # need no cluster and are BLOCKING within the job; the live `HA=1 kind-harness.sh`
+  # step is continue-on-error.
+  kind-harness-ha:
+    name: kind-harness-ha (reduced-scale HA topology — CNPG + KEDA + Sentinel, non-blocking live)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Static harness invariants — includes the W4-T1 HA add-on checks (pinned
+      # operators, idempotent+retried install, readiness gating, reduced-scale
+      # counts). No cluster; BITES on a silently weakened HA path. Blocking.
+      - name: Validate harness invariants incl. HA add-on (static, no cluster)
+        run: bash ci/kind/selftest/validate-harness.sh
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL -o /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+
+      - name: Install kube-linter
+        run: |
+          curl -sSL -o /tmp/kube-linter.tar.gz \
+            https://github.com/stackrox/kube-linter/releases/download/v0.7.1/kube-linter-linux.tar.gz
+          tar -xzf /tmp/kube-linter.tar.gz -C /usr/local/bin kube-linter
+
+      - name: Install conftest
+        run: |
+          curl -sSL -o /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+          tar -xzf /tmp/conftest.tar.gz -C /usr/local/bin conftest
+
+      # Static HA-overlay bite — renders the reduced-scale HA overlay + asserts the
+      # stated counts / mutual exclusion / mTLS-preserved / no-:latest. No cluster.
+      # Blocking (a scale drift or a broken overlay fails the job here, before the
+      # live run). Mirrors the `infra` job's HA render step.
+      - name: Validate reduced-scale HA overlay (render + counts, static)
+        run: bash ci/kind/ha/validate-ha-overlay.sh
+
+      # kind brings up the throwaway cluster on the Docker backend the GH runner
+      # provides; the HA harness path installs the CNPG operator + KEDA on top.
+      - name: Install kind
+        uses: helm/kind-action@v1.10.0
+        with:
+          install_only: true
+          version: v0.24.0
+
+      # The LIVE reduced-scale HA bring-up. continue-on-error until W4-T2 exercises
+      # it green on this runner and promotes it (ADR-0048 §3 Prerequisite A; L1 —
+      # not locally validated on the Windows authoring host). Teardown is inside the
+      # harness trap, so a failure here still deletes the cluster (no leak).
+      - name: Run HA kind harness (create → CNI self-test → operators → apply → HA-ready → assert → teardown)
+        id: ha-harness
+        continue-on-error: true
+        env:
+          HA: "1"
+        run: bash ci/kind/kind-harness.sh
+
+      # Surface the live HA-run result in the job summary without flipping any
+      # required aggregator. W4-T2 promotes this: it drops continue-on-error above
+      # and adds this job to the all-gates `needs` list (ADR-0048 §2).
+      - name: Report HA kind harness outcome
+        if: always()
+        run: |
+          set -euo pipefail
+          outcome='${{ steps.ha-harness.outcome }}'
+          echo "kind HA harness live-run outcome: ${outcome}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${outcome}" != "success" ]; then
+            echo "::warning::kind-harness-ha live run did not succeed (outcome=${outcome}) —" \
+                 "this job is NON-BLOCKING (L1: not locally validated on the authoring host;" \
+                 "reduced-scale HA reliability is the ADR-0048 §3 prerequisite for W4-T2" \
+                 "promotion). Investigate before promoting it to a required gate in W4-T2."
           fi
 
   # KMS-emulator integration gate (P1 W6-T2, ADR-0032 §2/§148). The offline
