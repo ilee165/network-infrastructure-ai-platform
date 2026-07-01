@@ -107,7 +107,7 @@ SUPERUSER_PW_KEY="${PG_SUPERUSER_PW_KEY:-password}"
 # LISTs keyed by the queue name (the same keys the workers/KEDA read); the queue
 # LLEN is the queue-depth trend source. Password by-reference from the platform
 # Secret; databaseIndex 0 (values.yaml default).
-REDIS_MASTER_POD_SELECTOR="${REDIS_MASTER_POD_SELECTOR:-app.kubernetes.io/component=redis-sentinel}"
+REDIS_MASTER_POD_SELECTOR="${REDIS_MASTER_POD_SELECTOR:-app.kubernetes.io/component=redis}"
 PLATFORM_SECRET="${PLATFORM_SECRET:-netops}"
 REDIS_PW_KEY="${REDIS_PW_KEY:-redisPassword}"
 REDIS_DB_INDEX="${REDIS_DB_INDEX:-0}"
@@ -235,7 +235,7 @@ register_cleanup cleanup
 redis_cli() {  # $@ = Redis command + args (each a separate word)
   printf '%s' "${REDIS_PW_VALUE}" | kubectl -n "${NS}" exec -i "${REDIS_POD}" -- sh -c '
     IFS= read -r RPW
-    exec redis-cli -a "$RPW" --no-auth-warning -n "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
+    exec redis-cli -p 6379 -a "$RPW" --no-auth-warning -n "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
       "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" \
       "${19}" "${20}" "${21}" "${22}" "${23}" "${24}" "${25}" "${26}" "${27}" "${28}" \
       "${29}" "${30}" "${31}" "${32}" "${33}" "${34}" "${35}" "${36}" "${37}" "${38}"
@@ -378,20 +378,28 @@ run_sample() {  # $1 host $2 port $3 read_path $4 metrics_path $5 vus $6 reqs $7
     p95="$(sort -n "$latf" | sed -n "${idx}p")"
     # Discovery success ratio from the api /metrics scrape (if the counters exist).
     # netops_discovery_runs_total{status="succeeded"} / netops_discovery_runs_total.
+    # NEGATIVE CONTROL: also inject a discovery error rate above the fast-burn budget
+    # (500‰ >> 144‰ threshold) so the discovery SLO assertion goes RED under the
+    # negative control — proving the discovery assertion is NOT a tautological gate
+    # (ADR-0047 §2: every assertion must have a planted regression that turns it RED).
     disc_err="NA"
-    metrics="$(
-      if exec 8<>"/dev/tcp/${HOST}/${PORT}" 2>/dev/null; then
-        printf "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" "${MPATH}" "${HOST}" >&8
-        cat <&8 2>/dev/null || true
-        exec 8<&- 2>/dev/null || true
-        exec 8>&- 2>/dev/null || true
-      fi
-    )"
-    if printf "%s" "${metrics}" | grep -q "netops_discovery_runs_total"; then
-      succ="$(printf "%s" "${metrics}" | awk "/^netops_discovery_runs_total\{.*status=\"succeeded\"/ {s+=\$NF} END{printf \"%d\", s}")"
-      tot="$(printf "%s" "${metrics}" | awk "/^netops_discovery_runs_total\{/ {s+=\$NF} END{printf \"%d\", s}")"
-      if [ "${tot:-0}" -gt 0 ]; then
-        disc_err=$(( (tot - succ) * 1000 / tot ))
+    if [ "${NEG}" = "1" ]; then
+      disc_err=500
+    else
+      metrics="$(
+        if exec 8<>"/dev/tcp/${HOST}/${PORT}" 2>/dev/null; then
+          printf "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" "${MPATH}" "${HOST}" >&8
+          cat <&8 2>/dev/null || true
+          exec 8<&- 2>/dev/null || true
+          exec 8>&- 2>/dev/null || true
+        fi
+      )"
+      if printf "%s" "${metrics}" | grep -q "netops_discovery_runs_total"; then
+        succ="$(printf "%s" "${metrics}" | awk "/^netops_discovery_runs_total\{.*status=\"succeeded\"/ {s+=\$NF} END{printf \"%d\", s}")"
+        tot="$(printf "%s" "${metrics}" | awk "/^netops_discovery_runs_total\{/ {s+=\$NF} END{printf \"%d\", s}")"
+        if [ "${tot:-0}" -gt 0 ]; then
+          disc_err=$(( (tot - succ) * 1000 / tot ))
+        fi
       fi
     fi
     echo "SOAK sample avail_err_permille=${avail_err} slow_frac_permille=${slow_frac} disc_err_permille=${disc_err} p95_ms=${p95} reqs=${total}"
@@ -408,8 +416,18 @@ API_HOST="${API_SVC}.${NS}.svc.cluster.local"
 
 # --- 0. START-of-window resource baseline (the trend anchors) --------------------
 echo "recording START-of-window resource baseline (PgBouncer conns / worker RSS / queue depth)"
-CONN_START="$(pgbouncer_server_conns "${NEG_CONTROL}" || true)"
-RSS_START="$(worker_rss_kb "${NEG_CONTROL}" || true)"
+# Under the negative control the START values are hardcoded to 10/10240 by the END-of-window
+# block (lines below); skip the real probe calls entirely to avoid a pointless kubectl exec
+# that (a) logs a misleading "LEAK" sentinel, (b) could fail if the probe pod is not yet
+# ready, and (c) is silently masked by || true — keeping the log consistent with the
+# arithmetic that follows.
+if [ "${NEG_CONTROL}" = "1" ]; then
+  CONN_START="LEAK"
+  RSS_START="LEAK"
+else
+  CONN_START="$(pgbouncer_server_conns 0 || true)"
+  RSS_START="$(worker_rss_kb 0 || true)"
+fi
 declare -A QDEPTH_START
 for q in ${SOAK_QUEUES}; do
   d="$(queue_len "${q}" || true)"
@@ -437,9 +455,11 @@ soak_deadline=$(( $(date +%s) + SOAK_WINDOW_S ))
 # at least one reading. The deadline is checked AFTER each cycle to end the window.
 while :; do
   # (i) steady queue-job feed (a trickle per queue — NOT a burst).
+  # mapfile captures the generated values into an array without word-splitting (L3:
+  # no $(VAR) in exec argv — a glob or IFS char in output would corrupt unquoted expansion).
   for q in ${SOAK_QUEUES}; do
-    # shellcheck disable=SC2046
-    redis_cli RPUSH "${q}" $(seq 1 "${QUEUE_FEED_PER_CYCLE}" | while read -r i; do printf 'w4t7-soak-%s\n' "$i"; done) >/dev/null 2>&1 || true
+    mapfile -t _soak_vals < <(seq 1 "${QUEUE_FEED_PER_CYCLE}" | while read -r i; do printf 'w4t7-soak-%s\n' "$i"; done)
+    redis_cli RPUSH "${q}" "${_soak_vals[@]}" >/dev/null 2>&1 || true
   done
   # (ii) steady API read load + SLI scrape.
   SAMPLE_OUT="$(run_sample "${API_HOST}" "${API_PORT}" "${API_HEALTH_PATH}" "${API_METRICS_PATH}" "${LOAD_VUS}" "${LOAD_REQUESTS}" "${LATENCY_BOUNDARY_MS}" "${NEG_CONTROL}" || true)"

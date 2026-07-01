@@ -158,9 +158,12 @@ case "${joined}" in
         if [ "${args[$i]}" = "_" ]; then neg="${args[$((i+8))]:-0}"; break; fi
       done
       if [ "${neg}" = "1" ]; then
-        # NEGATIVE CONTROL: the injected SLO regression — availability error ratio
-        # and too-slow fraction breach their fast-burn budgets over the window.
-        echo "SOAK sample avail_err_permille=400 slow_frac_permille=800 disc_err_permille=200 p95_ms=800 reqs=100"
+        # NEGATIVE CONTROL: the injected SLO regression — availability error ratio,
+        # too-slow fraction, AND discovery error rate all breach their fast-burn budgets
+        # over the window (400‰ >> 14‰; 800‰ >> 720‰; 500‰ >> 144‰ for discovery).
+        # disc_err_permille=500 proves the discovery SLO assertion is NOT tautological
+        # (ADR-0047 §2: a planted regression must turn EVERY assertion RED).
+        echo "SOAK sample avail_err_permille=400 slow_frac_permille=800 disc_err_permille=500 p95_ms=800 reqs=100"
       else
         # POSITIVE: every SLI well within budget.
         echo "SOAK sample avail_err_permille=0 slow_frac_permille=0 disc_err_permille=0 p95_ms=120 reqs=100"

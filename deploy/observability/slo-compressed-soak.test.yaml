@@ -160,3 +160,38 @@ tests:
               summary: "API read p95 latency budget burning fast (>=14.4x too-slow fraction)"
               description: "The fraction of read requests exceeding the 300 ms p95 objective is burning the 5% latency budget at >=14.4x over BOTH 5m and 1h. SLI quantile series: slo:netops_api_read_latency:p95_5m."
               runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
+
+  # ===========================================================================
+  # NEGATIVE CONTROL (discovery) — the injected DISCOVERY FAILURE the drill
+  # applies with COMPRESSED_SOAK_DRILL_NEGATIVE_CONTROL=1: a sustained ~50%
+  # discovery failure rate drives the discovery error ratio (0.50) far above
+  # the 14.4*0.01=0.144 page threshold on BOTH the 5m and 1h legs → the
+  # fast-burn discovery alert FIRES (a burn-rate breach → RED). This proves the
+  # NetopsDiscoverySuccessFastBurn assertion is NOT tautological: a drill whose
+  # disc_err stays 'NA' or 0 always passes — this case shows that a real
+  # sustained discovery failure rate DOES turn it RED (ADR-0047 §2).
+  # ===========================================================================
+  - interval: 1m
+    name: compressed soak NEGATIVE CONTROL — injected discovery failure → discovery burn fires
+    input_series:
+      # 50/min succeeded + 50/min failed → error ratio 50/100 = 0.50, far above
+      # the 14.4*0.01=0.144 page threshold; sustained over the window so both the
+      # 5m and 1h fast-burn legs see a full window with the breach. The 1h recording
+      # rule leg (slo:netops_discovery_success:ratio_rate_run) also sees the full
+      # 50% error rate by eval_time=90m, satisfying the AND condition in the alert.
+      - series: 'netops_discovery_runs_total{status="succeeded"}'
+        values: '0+50x180'
+      - series: 'netops_discovery_runs_total{status="failed"}'
+        values: '0+50x180'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: NetopsDiscoverySuccessFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: discovery_success
+              tier: fast
+            exp_annotations:
+              summary: "Discovery success rate burning the budget fast (>=14.4x) — possible queue stall"
+              description: "The discovery failed/partial ratio is consuming the 1% per-run error budget at >=14.4x over BOTH 5m and 1h (SLI slo:netops_discovery_success:ratio_rate_run). A sustained drop is the §337 queue-stall MTTD signal."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-discovery-success.md"

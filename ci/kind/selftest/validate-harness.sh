@@ -844,9 +844,19 @@ grep_must "${SOAK_BITE}" 'FALSE-GREEN' \
   "compressed-soak bite proof fails if the negative control does NOT turn the drill red (the anti-false-green guard)"
 grep_must "${SOAK_BITE}" 'promtool test rules' \
   "compressed-soak bite proof runs a REAL promtool test over the W3-T2/W3-T3 rules (the SLO-held / no-burn-rate-alert assertion bites cluster-free, ADR-0046 §2/§6)"
+# The fake-kubectl in the bite proof must inject disc_err_permille above budget under
+# the negative control — so the discovery SLO assertion is NOT tautological (a drill
+# that always passes discovery because disc_err is NA/0 is not a gate; ADR-0047 §2).
+grep_must "${SOAK_BITE}" 'disc_err_permille=5[0-9][0-9]|disc_err_permille=[2-9][0-9][0-9]' \
+  "compressed-soak bite proof fake-kubectl injects disc_err_permille above the 144‰ discovery budget under the negative control (the discovery SLO assertion is NOT tautological — ADR-0047 §2)"
+# The drill itself must inject disc_err=500 (or >144) under NEG=1 so the real
+# in-pod sample path turns the discovery assertion RED, not just the fake-kubectl.
+grep_must "${SOAK_CHECK}" 'disc_err=5[0-9][0-9]|disc_err=[2-9][0-9][0-9]' \
+  "compressed-soak drill injects a discovery error rate above the fast-burn budget (144‰) when NEG=1 — proving the discovery SLO assertion bites under the negative control (ADR-0047 §2)"
 # The promtool fixture must load the ACTUAL recording rules + burn-rate alerts and
 # carry BOTH a healthy-silent case AND a firing negative control (the anti-false-green
-# alert-as-test control, ADR-0046 §6).
+# alert-as-test control, ADR-0046 §6). It must ADDITIONALLY carry a discovery SLO
+# negative-control case so the NetopsDiscoverySuccessFastBurn alert is proven to bite.
 grep_must "${SOAK_PROMTOOL_TEST}" 'slo-recording.rules.yaml' \
   "compressed-soak promtool fixture loads the W3-T2 recording rules (evaluates the SAME SLI series Prometheus does)"
 grep_must "${SOAK_PROMTOOL_TEST}" 'slo-burn-rate.alerts.yaml' \
@@ -855,6 +865,8 @@ grep_must "${SOAK_PROMTOOL_TEST}" 'exp_alerts: \[\]' \
   "compressed-soak promtool fixture asserts the HEALTHY window fires NO alert (SLOs held — positive path)"
 grep_must "${SOAK_PROMTOOL_TEST}" 'NEGATIVE CONTROL' \
   "compressed-soak promtool fixture carries the NEGATIVE-CONTROL firing case (injected regression → burn-rate alert fires)"
+grep_must "${SOAK_PROMTOOL_TEST}" 'NetopsDiscoverySuccessFastBurn' \
+  "compressed-soak promtool fixture carries a NetopsDiscoverySuccessFastBurn firing case (discovery SLO negative control bites — ADR-0047 §2)"
 # (e) STATE reduced scale + NAME the deferred 30-day calendar soak.
 grep_must "${SOAK_CHECK}" 'reduced scale|deferred-accepted' \
   "compressed-soak drill STATES its reduced (compressed-window) scale + names the deferred 30-day calendar soak (ADR-0047 §1/§4)"
