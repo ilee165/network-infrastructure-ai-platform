@@ -107,11 +107,19 @@ case "${joined}" in
       fi
     done
     # NEGATIVE CONTROL: guard off → the redelivery double-writes. Counts flip 1→2
-    # and the success rate collapses to 0 (every attempt double-writes).
+    # and the success rate collapses to 0 (every attempt double-writes). The backup
+    # counts (started+finished audit pair -> bk_auds, fan-out waves -> bk_waves)
+    # are DERIVED from neg the same way — mirroring the real probe's negative-control
+    # branch (distinct run_id bypasses the dedup guard → a SECOND started/finished
+    # pair + a SECOND fan-out wave) rather than hardcoding a canned FAIL. bk_r2 is
+    # the redelivery's status: "skipped" on the positive path (dedup fired),
+    # "succeeded" on the negative control (guard bypassed).
     if [ "${neg}" = "1" ]; then
       snaps=2; auds=2; trans=2; appr=1; succ=0
+      bk_auds=4; bk_waves=2; bk_r2=succeeded
     else
       snaps=1; auds=1; trans=1; appr=1; succ="${att}"
+      bk_auds=2; bk_waves=1; bk_r2=skipped
     fi
     pct=$(( succ * 100 / att ))
     case "${sub}" in
@@ -127,8 +135,15 @@ case "${joined}" in
         echo "DRILL worker_idem cr-retry snapshots=0 audits=0 transitions=${trans} approvals=${appr} attempts=0 succeeded=0 success_pct=0 result=${r}"
         exit 0 ;;
       backup)
-        r=PASS; [ "${neg}" = "1" ] && r=FAIL
-        echo "DRILL worker_idem backup snapshots=0 audits=2 transitions=0 approvals=0 attempts=1 succeeded=0 success_pct=0 result=${r}"
+        # Mirror the real probe's exactly-once check: one started+finished audit
+        # pair (bk_auds==2) AND one fan-out wave (bk_waves==1) AND the redelivery
+        # skipped. The counts are derived from neg above, so the FAIL on the negative
+        # control comes from the SAME assertion the live probe evaluates — not a
+        # canned r=FAIL. This proves the real bite path (distinct-run_id double-write),
+        # so the self-test's fake no longer DIVERGES from the real probe.
+        r=PASS
+        { [ "${bk_auds}" = "2" ] && [ "${bk_waves}" = "1" ] && [ "${bk_r2}" = "skipped" ]; } || r=FAIL
+        echo "DRILL worker_idem backup snapshots=0 audits=${bk_auds} transitions=0 approvals=0 attempts=${bk_waves} succeeded=0 success_pct=0 result=${r}"
         exit 0 ;;
       rate)
         r=PASS; [ "${pct}" -ge "${floor}" ] || r=FAIL

@@ -216,8 +216,22 @@ async def _purge(sm: Any) -> None:
 
 
 def _drill_backup_run_uuids() -> list[uuid.UUID]:
-    """The stable nightly_backup run-ids the drill uses (so purge targets them)."""
-    return [uuid.UUID("00000000-0000-0000-0000-0000000d4d51")]
+    """The stable nightly_backup run-ids the drill uses (so purge targets them).
+
+    The first is the shared beat-tick id both deliveries carry on the POSITIVE
+    path; the second is the DISTINCT id the NEGATIVE CONTROL drives the redelivery
+    with to bypass the run-uuid dedup guard (see :func:`_cmd_backup`). Both are
+    purged so a re-run — positive or negative — always starts from a clean row set.
+    """
+    return [
+        uuid.UUID("00000000-0000-0000-0000-0000000d4d51"),
+        _drill_backup_neg_run_uuid(),
+    ]
+
+
+def _drill_backup_neg_run_uuid() -> uuid.UUID:
+    """The DISTINCT run-id the negative control uses to bypass the dedup guard."""
+    return uuid.UUID("00000000-0000-0000-0000-0000000d4d52")
 
 
 async def _seed_device(sm: Any) -> uuid.UUID:
@@ -607,8 +621,16 @@ async def _cmd_backup() -> int:
         try:
             run_id = str(_drill_backup_run_uuids()[0])
             r1 = await config_tasks._nightly_backup_core(run_id=run_id)
-            # Redelivery: same run_id (the beat-scheduled id both deliveries carry).
-            r2 = await config_tasks._nightly_backup_core(run_id=run_id)
+            # Redelivery. POSITIVE: the SAME run_id (the beat-scheduled id both
+            # deliveries carry) → the guard classifies it as a terminal duplicate and
+            # `skips` it. NEGATIVE CONTROL (ADR-0047 §2): a DISTINCT run_id bypasses the
+            # run-uuid ON CONFLICT DO NOTHING guard — modelling "remove the idempotency
+            # guard → a re-delivered task double-writes". The second delivery is then
+            # `claimed`, emits a SECOND started+finished audit pair, and fires a SECOND
+            # fan-out wave, so started/finished read 2 and wave_calls==2 → the
+            # exactly-once assertion below goes RED regardless of the guard working.
+            redelivery_run_id = str(_drill_backup_neg_run_uuid()) if _NEG_CONTROL else run_id
+            r2 = await config_tasks._nightly_backup_core(run_id=redelivery_run_id)
         finally:
             config_tasks._session = orig_session
             config_tasks._reachable_device_ids = orig_reach
@@ -641,7 +663,11 @@ async def _cmd_backup() -> int:
         await engine.dispose()
 
     # Exactly-once: one started + one finished audit row, one fan-out wave, and the
-    # redelivery returned "skipped" (the ON CONFLICT DO NOTHING guard).
+    # redelivery returned "skipped" (the ON CONFLICT DO NOTHING guard). On the
+    # NEGATIVE CONTROL the redelivery ran under a DISTINCT run_id (guard bypassed):
+    # r2 is "succeeded" (not "skipped"), a SECOND started/finished pair landed, and a
+    # SECOND fan-out wave fired → started/finished read 2 and len(wave_calls) == 2 →
+    # every clause below fails → ok=False → RED (ADR-0047 §2 bite).
     ok = (
         r1["status"] == "succeeded"
         and r2["status"] == "skipped"
