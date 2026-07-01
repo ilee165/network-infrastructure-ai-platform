@@ -518,6 +518,88 @@ grep_must_not "${PG_FAILOVER_PROBE}" 'image:.*:latest' \
 grep_must "${PG_FAILOVER_PROBE}" 'automountServiceAccountToken: false' \
   "failover drill probe pod drops its API token (least privilege, ADR-0029 §5)"
 
+# --- P3 W4-T4: Neo4j destroy-and-rebuild drill invariants (G-REL §317, -----------
+# --- ADR-0005 D5, ADR-0030 §1, ADR-0047 §2/§3) ----------------------------------
+# The rebuild drill (neo4j-rebuild.sh) plugs into the HA assertion-runner. This
+# validator BITES if the drill is silently weakened: it must (a) actually DESTROY
+# Neo4j (pod + data PVC) and time the rebuild FROM the destroy, (b) rebuild FROM
+# POSTGRES via the W1-T3 auto-rebuild path (NOT a Neo4j dump — the D5 guarantee),
+# (c) assert COMPLETENESS (rebuilt counts == the Postgres source of record) and the
+# MEASURED topology-RTO budget, (d) SKIP loudly on a no-Neo4j run (never
+# false-green), (e) ship + wire the negative-control bite (disabled rebuild →
+# mismatch → red), proven by the self-test, and (f) keep the L3/L5 + secret-hygiene
+# guards. Removing any makes a check below FAIL.
+echo "== validating W4-T4 Neo4j rebuild drill artifacts =="
+
+NEO4J_REBUILD_CHECK="${CHECKS_DIR}/neo4j-rebuild.sh"
+NEO4J_REBUILD_HELPER="${CHECKS_DIR}/topology_counts.py"
+NEO4J_REBUILD_BITE="${HERE}/neo4j-rebuild-bite.sh"
+require_file "${NEO4J_REBUILD_CHECK}"  "W4-T4 Neo4j rebuild drill check"
+require_file "${NEO4J_REBUILD_HELPER}" "W4-T4 topology count helper (pg-source / neo4j-graph / seed)"
+require_file "${NEO4J_REBUILD_BITE}"   "W4-T4 Neo4j rebuild drill negative-control bite proof (self-test)"
+
+# (a) it actually DESTROYS Neo4j (data PVC + pod) and times the rebuild FROM destroy.
+grep_must "${NEO4J_REBUILD_CHECK}" 'delete pvc' \
+  "rebuild drill DESTROYS the Neo4j data PVC (a real projection loss, not a graceful restart)"
+grep_must "${NEO4J_REBUILD_CHECK}" 'delete pod .*--force .*--grace-period=0' \
+  "rebuild drill force-deletes the Neo4j pod so the StatefulSet recreates it EMPTY"
+grep_must "${NEO4J_REBUILD_CHECK}" 'DESTROY_EPOCH=' \
+  "rebuild drill starts the topology-RTO clock at the destroy (the measurement anchor)"
+# (b) it rebuilds FROM POSTGRES via the W1-T3 auto-rebuild path — NOT a Neo4j dump.
+grep_must "${NEO4J_REBUILD_CHECK}" 'app\.engines\.topology\.auto_rebuild' \
+  "rebuild drill re-projects via the W1-T3 auto-rebuild path (app.engines.topology.auto_rebuild → full_rebuild)"
+grep_must "${NEO4J_REBUILD_CHECK}" 'source of record' \
+  "rebuild drill rebuilds FROM the Postgres source of record (D5), not a Neo4j dump"
+grep_must_not "${NEO4J_REBUILD_CHECK}" 'neo4j-admin (dump|restore|load)|\.dump' \
+  "rebuild drill does NOT restore a Neo4j dump — DR is a re-projection from Postgres (ADR-0005 D5)"
+# (c) COMPLETENESS (counts == Postgres source) + the MEASURED topology-RTO budget.
+grep_must "${NEO4J_REBUILD_CHECK}" 'pg-source' \
+  "rebuild drill computes the Postgres source-of-record counts (the completeness obligation, D5)"
+grep_must "${NEO4J_REBUILD_CHECK}" 'neo4j-graph' \
+  "rebuild drill counts the LIVE re-projected Neo4j graph (what the rebuild actually wrote)"
+grep_must "${NEO4J_REBUILD_CHECK}" 'does NOT match the Postgres source|MATCHES the Postgres source' \
+  "rebuild drill asserts the rebuilt counts MATCH the Postgres source (a partial rebuild FAILS — G-REL §317)"
+grep_must "${NEO4J_REBUILD_CHECK}" 'RTO_BUDGET_S' \
+  "rebuild drill asserts the rebuild wall-clock against the (reduced-scale) topology-RTO budget"
+grep_must "${NEO4J_REBUILD_CHECK}" 'RTO_S.*-le.*RTO_BUDGET_S|RTO_S" -le "\$\{RTO_BUDGET_S' \
+  "rebuild drill PASSES only when RTO <= budget and FAILS when it exceeds it (the RTO bite)"
+grep_must "${NEO4J_REBUILD_CHECK}" 'MEASURED' \
+  "rebuild drill records the MEASURED reduced-scale rebuild time (it becomes the topology-RTO, ADR-0047 §3)"
+# The completeness helper must be REAL-PG only (ADR-0047 §5) — no SQLite path.
+grep_must "${NEO4J_REBUILD_HELPER}" 'requires real PostgreSQL' \
+  "topology count helper HARD-FAILS on a non-postgresql URL (real-PG only, ADR-0047 §5)"
+grep_must_not "${NEO4J_REBUILD_HELPER}" 'sqlite://|aiosqlite|:memory:|\.sqlite' \
+  "topology count helper has NO SQLite code path (the rebuild-from-relational-source semantics need real PG, ADR-0047 §5)"
+grep_must "${NEO4J_REBUILD_HELPER}" 'derive_topology' \
+  "topology count helper derives the source counts from Postgres via the real projection derivation (D5)"
+grep_must "${NEO4J_REBUILD_HELPER}" 'PROJECTED_NODE_LABELS' \
+  "topology count helper scopes the live Neo4j count to the projector's label set (comparable to the source)"
+# (d) SKIP loudly on a no-Neo4j run (never false-green).
+grep_must "${NEO4J_REBUILD_CHECK}" 'SKIP:' \
+  "rebuild drill SKIPS LOUDLY when no Neo4j StatefulSet is present (a missing store is never a false-green pass)"
+# (e) the negative control is SHIPPED + wired, and PROVEN to bite by the self-test.
+grep_must "${NEO4J_REBUILD_CHECK}" 'NEO4J_REBUILD_DRILL_NEGATIVE_CONTROL' \
+  "rebuild drill ships the negative control (disabled rebuild) as a toggle (ADR-0047 §2)"
+grep_must "${NEO4J_REBUILD_CHECK}" 'rebuild is DISABLED|the reconcile step is skipped|reconcile skipped' \
+  "rebuild drill's negative control DISABLES the rebuild so the graph is not re-projected (ADR-0047 §2)"
+grep_must "${NEO4J_REBUILD_BITE}" 'NEO4J_REBUILD_DRILL_NEGATIVE_CONTROL=1' \
+  "rebuild bite proof runs the drill WITH the negative control and asserts it goes RED"
+grep_must "${NEO4J_REBUILD_BITE}" 'FALSE-GREEN' \
+  "rebuild bite proof fails if the negative control does NOT turn the drill red (the anti-false-green guard)"
+# (f) secret hygiene + L3/L5 plumbing (topology projection touches DB + Neo4j creds).
+grep_must "${NEO4J_REBUILD_CHECK}" 'sh -c' \
+  "rebuild drill drives in-pod python via sh -c positional args, not \$(VAR) in the exec argv (L3)"
+grep_must "${NEO4J_REBUILD_CHECK}" 'set -euo pipefail' \
+  "rebuild drill sets pipefail so a masked in-pod exit cannot read green (L5)"
+grep_must "${NEO4J_REBUILD_CHECK}" 'register_cleanup' \
+  "rebuild drill registers its teardown via register_cleanup (composes with the assert-exit bite, N1)"
+grep_must_not "${NEO4J_REBUILD_CHECK}" '^[[:space:]]*trap[[:space:]]+[^#[:space:]]+[[:space:]]+EXIT' \
+  "rebuild drill installs NO bare 'trap … EXIT' (would clobber lib.sh's assert-exit bite, N1)"
+grep_must_not "${NEO4J_REBUILD_CHECK}" 'NETOPS_NEO4J_PASSWORD=.*echo|echo.*NETOPS_NEO4J_PASSWORD|echo.*NETOPS_POSTGRES_PASSWORD' \
+  "rebuild drill never echoes the Neo4j / Postgres password (secret hygiene)"
+grep_must "${NEO4J_REBUILD_CHECK}" 'reduced scale|deferred-accepted' \
+  "rebuild drill STATES its reduced scale + names the deferred certified-scale ceiling (ADR-0047 §1/§4)"
+
 echo "== validator summary: ${fails} failure(s) =="
 if [ "${fails}" -ne 0 ]; then
   echo "::error::kind harness validator found ${fails} violation(s)" >&2
