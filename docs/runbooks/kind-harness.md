@@ -30,6 +30,8 @@ Give the two W4 enforcement tasks a deterministic, hardware-free place to BITE: 
 | Failover drill bite proof (P3 W4-T3) | `ci/kind/selftest/pg-failover-bite.sh` (hardware-free negative-control plant→red→revert; runs in `kind-harness-ha`, no cluster) |
 | Worker-kill idempotency drill (P3 W4-T5) | `ci/kind/assertions/checks/worker-kill-idempotency.sh` + `worker_idem_probe.py` (G-REL §319/§320 — runs on the HA path via the assertion-runner; asserts on real PG) |
 | Worker-kill drill bite proof (P3 W4-T5) | `ci/kind/selftest/worker-kill-idempotency-bite.sh` (hardware-free negative-control plant→red→revert; runs in `kind-harness-ha`, no cluster) |
+| Queue-burst + API load + PgBouncer drill (P3 W4-T6) | `ci/kind/assertions/checks/queue-burst-load.sh` + `queue-burst-load-drill-probe.yaml` (G-SCA §326–§330 — runs on the HA path via the assertion-runner) |
+| Queue-burst/load drill bite proof (P3 W4-T6) | `ci/kind/selftest/queue-burst-load-bite.sh` (hardware-free negative-control plant→red→revert; runs in `kind-harness-ha`, no cluster) |
 
 ## How the harness runs (`kind-harness.sh`)
 
@@ -361,6 +363,113 @@ positive path.
   revert → GREEN on the actual cluster) — a named prerequisite on the ADR-0047 §4
   promotion path.
 
+## Queue-burst + API load + PgBouncer budget drill (P3 W4-T6, G-SCA §326–§330)
+
+The HA topology is also the substrate for the **G-SCA scale drill**
+(`ci/kind/assertions/checks/queue-burst-load.sh`). It plugs into the same
+assertion-runner (auto-discovered under `checks/`) and asserts three §11 G-SCA
+mechanisms in one drill.
+
+### §11 criteria + targets (ADR-0043 §2/§3, ADR-0042 §4, ADR-0047 §3)
+
+| Criterion | Target (reduced-scale run) |
+|---|---|
+| Queue-burst isolation (§329) | 10× normal `discovery` depth → KEDA **scale-out** then **scale-in** within the burst-drain SLO; `config`/`docs`/`packet_*` siblings **not starved** (per-queue isolation) |
+| API load p95 + replica delta (§327) | reduced-concurrency load holds **p95** under the reduced-scale budget with the api at its HA floor (2), a **1→2-replica improvement** shown, **zero 5xx** |
+| PgBouncer budget (§330) | concurrent client connections multiplexed through the transaction-mode Pooler with **no connection-exhaustion error** |
+
+### What the drill does
+
+1. **Precondition / SKIP.** If no KEDA `ScaledObject` (`netops-worker-discovery`) is
+   present (a non-HA run) the drill **SKIPs loudly** and asserts nothing — never a
+   false-green pass.
+2. **Burst.** `RPUSH`es `QUEUE_BURST_ITEMS` (default 50 = 10× the `listLength=5`
+   target) placeholder tasks into the **real** Redis list keyed `discovery` — the
+   same key the KEDA `redis-sentinel` scaler reads `LLEN` on, so KEDA's own signal
+   fires. The Redis password is fed over **stdin** (never argv).
+3. **Assert scale-OUT (the replica count ACTUALLY changed).** Polls the discovery
+   worker Deployment's `.spec.replicas` until it **exceeds** its baseline. A burst
+   that never moves the replica count is a **false-green** (the spec's named risk) —
+   this assertion is what makes the scale-out real.
+4. **Assert per-queue isolation.** Seeds a small sibling backlog and asserts each
+   sibling Deployment's replicas did **not** collapse below baseline (its per-queue
+   budget was not stolen) — the structural one-ScaledObject-per-Deployment isolation
+   (ADR-0043 §3).
+5. **Assert scale-IN.** Drains the burst (`DEL discovery`) and asserts the discovery
+   Deployment scales back toward its floor within the scale-in window (KEDA
+   `cooldownPeriod`) — the burst-drain SLO half of §329.
+6. **API load.** Brings up a hardened probe pod and runs a reduced-concurrency HTTP
+   load (`API_LOAD_VUS` VUs / `API_LOAD_REQUESTS` reqs) against the api Service via
+   **bash `/dev/tcp`** (no k6/locust/curl dependency — the pgvector probe image ships
+   bash + psql; each request is a raw HTTP/1.1 GET timed with `EPOCHREALTIME`) at **1
+   replica** and **2 replicas**, asserting **p95 ≤ budget**, a **1→2 improvement**,
+   and **zero 5xx**.
+7. **PgBouncer budget.** Opens `POOL_PROBE_CONNS` concurrent psql connections through
+   the transaction-mode Pooler rw Service and asserts **no connection-exhaustion
+   error** (§330, ADR-0042 §4). The DB password is fed over **stdin** (never argv).
+
+### Reduced scale (STATED) + named ceiling (ADR-0047 §1/§4)
+
+The drill proves the **queue-burst scale-out/in + per-queue isolation + p95/1→2 +
+PgBouncer-budget mechanisms** bite at reduced scale: **burst = 50 pending
+`discovery` tasks** (10× `listLength`), **api floor 2 / ceiling 4**, **~20 VUs /
+400 reqs**, **~40 concurrent pooler connections**. It does **not** certify a scale
+point. The certified-scale G-SCA ceilings — **500-device discovery ≤ 60 min** with
+autoscale (§326), **100 concurrent users at p95 < 300 ms with 2→4-replica
+linearity** (§327), **5,000-device / 100k-interface projection** (§328) — stay
+**deferred-accepted → GA / customer cluster** with the ADR-0047 §4 written promotion
+path; they are **never claimed** from this run.
+
+### Negative control — PROVEN to bite (ADR-0047 §2)
+
+| Positive assertion | Planted negative control (turns it RED) |
+|---|---|
+| 10× `discovery` burst → scale-out then scale-in; siblings not starved; p95 held + 1→2 improvement + zero 5xx; PgBouncer no exhaustion | `QUEUE_BURST_DRILL_NEGATIVE_CONTROL=1` emulates a **shared/misconfigured scaler that STARVES a sibling** (its Deployment is scaled to 0 — the budget-stolen starvation a shared autoscaler produces) **and** overruns the **PgBouncer connection budget** (connection exhaustion + p95 breach) → the per-queue-isolation + §330 + §327 assertions go **RED** |
+
+The negative control emulates the two failures the ADRs forbid **without re-tuning
+the real chart's ScaledObjects/Pooler** (scope: one drill, no unrelated re-tuning) —
+it drives the observable starvation + exhaustion the assertions must catch.
+
+**How the bite is proven WITHOUT a cluster (L1).** The live drill runs only on the
+kind HA cluster, which cannot run on the authoring host (Windows, no Docker/Linux
+kind). `ci/kind/selftest/queue-burst-load-bite.sh` earns the ADR-0047 §2
+plant→red→revert proof **hardware-free**: it runs the **real** `queue-burst-load.sh`
+against a **fake `kubectl`** that simulates the ScaledObjects + Deployment replica
+counts + Redis `LLEN` + the in-pod loadgen / pool probe, and asserts the polarity —
+
+- **POSITIVE** (scale-out/in, no starvation, p95 held + 1→2, no exhaustion) → drill
+  **GREEN** (exit 0) — the revert-to-green;
+- **NEGATIVE CONTROL** (sibling starved + PgBouncer budget overrun) → drill **RED**,
+  and the RED is specifically the isolation / connection-budget assertion;
+- **NO-SCALE-OUT** (the burst never moves the replica count) → **RED** (the
+  "replica count actually changed" assertion bites — the spec's false-green risk).
+
+This self-test is **blocking within the `kind-harness-ha` job** (it needs no cluster)
+and is the recorded evidence the drill is a real gate, not green-at-setup. It was
+**executed on the authoring host**: `bash ci/kind/selftest/queue-burst-load-bite.sh`
+→ `0 failure(s)`; drill exit **4** under the negative control (isolation + §330 +
+§327 assertions), exit **1** on no-scale-out, exit **0** on the positive path. The
+static `validate-harness.sh` W4-T6 invariants were likewise shown to bite (a
+neutered scale-out assertion → RED; reverted → GREEN).
+
+### Gate posture — SIGNAL-ONLY (live), BLOCKING (static bite proof)
+
+- The **live** queue-burst/load drill runs inside the `HA=1` harness in the
+  **`kind-harness-ha`** CI job, which stays **`continue-on-error` / absent from
+  `all-gates`**. Promoting the G-SCA HA drill to **blocking** is a deliberate later
+  step (**W5/GA**), not W4-T6.
+- The **static** negative-control bite proof (`queue-burst-load-bite.sh`) and the
+  `validate-harness.sh` W4-T6 invariants are **blocking within the job** — a silently
+  weakened drill (a burst that never scales out, a dropped isolation/§330/§327
+  assertion, a removed negative control, a SQLite path) fails there, no cluster
+  needed.
+- **L1 caveat:** the **live** burst/scale/load/pool path has **not** run on the
+  authoring host; it runs live only on the CI ubuntu runner. Do not claim a local
+  live queue-burst/load run. Before any W5/GA promotion of this drill to blocking, the
+  live negative control **MUST be re-verified on the CI runner** (plant → RED →
+  revert → GREEN on the actual cluster) — a named prerequisite on the ADR-0047 §4
+  promotion path.
+
 ## Gate status — SIGNAL-ONLY (promotion AUTHORED, HELD pending ADR-0048 §4 bite)
 
 The P2 `kind-harness` live run (steps 1-6) is **not yet a blocking gate**. The
@@ -465,3 +574,9 @@ deliberate later step (W5/GA), not W4-T2.
 | Failover drill: `committed-audit LOSS … zero-loss VIOLATED` / `seq GAP` | A committed audit row did **not** survive promotion — a real G-REL §316 durability regression (or the negative control is active). Check the audit write path is quorum-sync (`SET LOCAL synchronous_commit=remote_apply`, ADR-0042 §2) and the CNPG `synchronous`/`failoverQuorum` config; confirm `PG_FAILOVER_DRILL_NEGATIVE_CONTROL` is **not** set on a real run. |
 | Failover drill: `write service NOT restored within …` or `RTO … EXCEEDS budget` | No automated promotion, or promotion slower than the 60 s RTO. Inspect `kubectl -n netops get cluster -o wide` + the CNPG operator events; a stuck promotion means the HA quorum is not healthy (re-check `wait-ha-ready.sh` passed). |
 | `pg-failover bite proof found N violation(s)` | `pg-failover-bite.sh` (no cluster) found the drill no longer bites correctly — e.g. the negative control stopped turning the drill red, or the happy path went false-red. The drill is not a real gate until this is green; do **not** trust a live green until the bite proof passes. |
+| Queue-burst drill: `SKIP: KEDA ScaledObject … absent` | The drill ran on a **non-HA** harness (no `HA=1`, so no KEDA per-queue autoscaling). Expected on the P2 path — the queue-burst/load drill only asserts under `HA=1`. Not a failure. |
+| Queue-burst drill: `did NOT scale out … no scale-out` | KEDA did not grow the `discovery` worker Deployment under a 10× burst — a real G-SCA §329 regression (or a disabled/misconfigured trigger). Confirm the `netops-worker-discovery` ScaledObject reconciled Ready, the Sentinel is discovered, and `LLEN discovery` actually reached the burst depth; check `kubectl -n netops get scaledobject,hpa -o wide`. |
+| Queue-burst drill: `sibling queue … was STARVED … isolation VIOLATED` | A sibling worker Deployment lost its replica budget to the `discovery` burst — a real per-queue-isolation regression (or the negative control is active). Confirm each queue has its OWN ScaledObject⇄Deployment (no shared scaler); confirm `QUEUE_BURST_DRILL_NEGATIVE_CONTROL` is **not** set on a real run. |
+| Queue-burst drill: `p95 … EXCEEDS the … budget` / `NO 1->2-replica improvement` / `HTTP 5xx` | The api did not hold under the reduced-scale load — a §327 regression. Inspect the api Deployment CPU/limits, the HPA, and the api logs; a p95 that does not improve at 2 replicas points at a shared bottleneck (DB/pooler) rather than api CPU. |
+| Queue-burst drill: `connection-exhaustion error … budget breached` | The transaction-mode PgBouncer Pooler ran out of server connections under load — a §330 / ADR-0042 §4 regression (or the negative control is active). Confirm `pgbouncer.poolMode: transaction` + the `maxClientConn`/`defaultPoolSize` budget vs the primary's `max_connections`; confirm the negative-control flag is **not** set on a real run. |
+| `queue-burst/load bite proof found N violation(s)` | `queue-burst-load-bite.sh` (no cluster) found the drill no longer bites correctly — e.g. the negative control stopped starving a sibling / breaching the budget, or the no-scale-out case passed. The drill is not a real gate until this is green; do **not** trust a live green until the bite proof passes. |

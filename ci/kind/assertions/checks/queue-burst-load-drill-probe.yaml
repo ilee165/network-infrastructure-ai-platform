@@ -1,0 +1,78 @@
+# W4-T6 queue-burst + API load + PgBouncer budget drill PROBE pod
+# (G-SCA §327/§330, ADR-0042 §4 / ADR-0043 / ADR-0047).
+#
+# The queue-burst/load drill (queue-burst-load.sh) execs in this pod to:
+#   1. run a reduced-concurrency HTTP load against the in-cluster api Service using
+#      bash's built-in /dev/tcp (NO curl/k6/locust dependency — the pgvector image
+#      ships bash; each request is a raw HTTP/1.1 GET timed with bash EPOCHREALTIME),
+#      measuring p95 latency + HTTP 5xx at 1 replica and at 2 replicas (the §327
+#      p95-held + 1->2-replica improvement + zero-5xx assertions);
+#   2. open POOL_PROBE_CONNS concurrent psql connections THROUGH the PgBouncer Pooler
+#      rw Service and count connection-exhaustion errors (the §330 / ADR-0042 §4
+#      transaction-mode connection-budget assertion).
+# The pod itself only idles + carries psql + bash; all logic is in the check driving
+# it via `kubectl exec`. The DB password is fed over STDIN (never argv), never mounted.
+#
+# The image is the SAME pgvector/pgvector:pg16 the chart's Postgres / the failover +
+# mTLS probes use (psql + bash present; no new image ref, admission-friendly).
+# Hardened to the cluster's restricted Pod Security baseline (ADR-0029 §3): non-root,
+# drop ALL caps, read-only rootfs, seccomp RuntimeDefault, no privilege escalation,
+# no API token. N12: pinned by sha256 DIGEST so a re-push of the tag cannot swap it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: queue-burst-load-drill-probe
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: queue-burst-load-drill-probe
+spec:
+  # The probe never needs the K8s API; drop its token (least privilege, ADR-0029 §5).
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      # N12: pinned by sha256 DIGEST (tag retained for readability). pgvector carries
+      # psql + bash (/dev/tcp) for the drill; the multi-arch pg16 index digest below
+      # is immutable (a re-push of the tag cannot swap it) — same pin as the failover
+      # + mTLS probes.
+      image: pgvector/pgvector:pg16@sha256:131dcf7ff6a900545df8e7e092c270aa8c6db2f2c818e408cb45ec21316b74e6
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65532
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      env:
+        # libpq home for any per-user files; points at the writable scratch so a
+        # RO rootfs does not break psql.
+        - name: HOME
+          value: /tmp
+      volumeMounts:
+        # Writable scratch for psql temp files + the loadgen's per-worker latency
+        # files (RO rootfs). Sized above the failover probe's since the loadgen
+        # writes one line per request across VUs.
+        - name: tmp
+          mountPath: /tmp
+      resources:
+        requests:
+          cpu: 25m
+          memory: 48Mi
+        limits:
+          cpu: 500m
+          memory: 192Mi
+  volumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi

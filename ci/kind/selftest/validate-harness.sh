@@ -679,6 +679,105 @@ grep_must_not "${WORKER_KILL_CHECK}" 'echo.*NETOPS_POSTGRES_PASSWORD|NETOPS_POST
 grep_must "${WORKER_KILL_CHECK}" 'reduced scale|deferred-accepted' \
   "worker-kill drill STATES its reduced scale + names the deferred certified-scale soak ceiling (ADR-0047 §1/§4)"
 
+# --- P3 W4-T6: queue-burst KEDA + API load + PgBouncer budget drill invariants ---
+# --- (G-SCA §326–§330, ADR-0043 §2/§3, ADR-0042 §4, ADR-0047 §1/§2/§3/§4) --------
+# The queue-burst/load drill (queue-burst-load.sh) plugs into the HA assertion-
+# runner. This validator BITES if the drill is silently weakened: it must (a) drive a
+# 10x `discovery` burst into the REAL Redis list KEDA reads AND assert the burst
+# Deployment's replica count ACTUALLY CHANGED (scale-out) — the spec's false-green
+# risk — then assert scale-IN, (b) assert per-queue ISOLATION (siblings not starved),
+# (c) assert the API load p95 held + a 1->2-replica improvement + zero 5xx (§327),
+# (d) assert the PgBouncer connection budget holds (no exhaustion, §330), (e) SKIP
+# loudly on a no-KEDA run (never false-green), (f) ship + wire the negative-control
+# bite (sibling starvation / connection-budget breach → red), proven by the self-test,
+# and (g) keep the L3/L5 + secret-hygiene guards. Removing any makes a check FAIL.
+echo "== validating W4-T6 queue-burst + API load + PgBouncer budget drill artifacts =="
+
+QBL_CHECK="${CHECKS_DIR}/queue-burst-load.sh"
+QBL_PROBE="${CHECKS_DIR}/queue-burst-load-drill-probe.yaml"
+QBL_BITE="${HERE}/queue-burst-load-bite.sh"
+require_file "${QBL_CHECK}" "W4-T6 queue-burst + API load + PgBouncer budget drill check"
+require_file "${QBL_PROBE}" "W4-T6 queue-burst/load drill probe pod manifest"
+require_file "${QBL_BITE}"  "W4-T6 queue-burst/load drill negative-control bite proof (self-test)"
+
+# (a) it drives a REAL 10x `discovery` burst into the Redis list KEDA reads AND
+#     asserts the replica count ACTUALLY CHANGED (scale-out), then scale-IN.
+grep_must "${QBL_CHECK}" 'RPUSH .*BURST_QUEUE|RPUSH \$\{BURST_QUEUE\}|LPUSH' \
+  "queue-burst drill LPUSHes the burst into the REAL Redis list KEDA reads (its own LLEN signal)"
+grep_must "${QBL_CHECK}" 'the replica count ACTUALLY changed|ACTUALLY CHANGED' \
+  "queue-burst drill asserts the replica count ACTUALLY CHANGED (a burst that never moves a replica is a false-green — the spec risk)"
+grep_must "${QBL_CHECK}" 'SCALED OUT|scale-out observed' \
+  "queue-burst drill asserts KEDA SCALED OUT the burst Deployment under the 10x burst (G-SCA §329)"
+grep_must "${QBL_CHECK}" 'SCALED IN|scale-in observed' \
+  "queue-burst drill asserts KEDA SCALED IN after the burst drained (burst-drain SLO half of G-SCA §329)"
+grep_must "${QBL_CHECK}" 'deploy_replicas' \
+  "queue-burst drill reads the Deployment .spec.replicas (what KEDA/HPA set) — the observable scale signal"
+# (b) per-queue ISOLATION — siblings not starved.
+grep_must "${QBL_CHECK}" 'SIBLING_QUEUES|sibling' \
+  "queue-burst drill witnesses SIBLING queues (config/docs/packet) for the isolation assertion (G-SCA §329)"
+grep_must "${QBL_CHECK}" 'STARVED|not starved|per-queue isolation' \
+  "queue-burst drill asserts the siblings are NOT starved by the burst (per-queue isolation, ADR-0043 §3)"
+# (c) API load p95 held + 1->2-replica improvement + zero 5xx.
+grep_must "${QBL_CHECK}" 'P95_BUDGET_MS' \
+  "queue-burst drill asserts the API p95 against a (reduced-scale) budget (G-SCA §327)"
+grep_must "${QBL_CHECK}" 'P95_2.*-le.*P95_BUDGET_MS|P95_2\}" -le "\$\{P95_BUDGET_MS' \
+  "queue-burst drill PASSES only when p95 <= budget and FAILS when it exceeds it (the p95 bite, §327)"
+grep_must "${QBL_CHECK}" '1->2-replica improvement|2 replicas beat 1' \
+  "queue-burst drill asserts a 1->2-replica improvement (2 replicas beat 1 — the linear scale-out mechanism, §327)"
+grep_must "${QBL_CHECK}" 'P95_2.*-le.*P95_1|P95_2\}" -le "\$\{P95_1' \
+  "queue-burst drill compares the 2-replica p95 against the 1-replica p95 (the actual delta measurement, §327)"
+grep_must "${QBL_CHECK}" 'ZERO 5xx|errors_5xx' \
+  "queue-burst drill asserts ZERO 5xx under the reduced-scale load (§327)"
+# (d) PgBouncer connection budget — no exhaustion.
+grep_must "${QBL_CHECK}" 'POOLER_RW_HOST|PgBouncer|pooler' \
+  "queue-burst drill probes the PgBouncer Pooler rw Service (the connection budget under test, ADR-0042 §4)"
+grep_must "${QBL_CHECK}" 'connection budget HELD|connection-exhaustion|no connection-exhaustion|EXHAUSTION' \
+  "queue-burst drill asserts NO connection exhaustion through the pooler under load (G-SCA §330)"
+grep_must "${QBL_CHECK}" 'transaction-mode' \
+  "queue-burst drill notes the transaction-mode pooling that multiplexes onto a small server pool (ADR-0042 §4)"
+# (e) SKIP loudly on a no-KEDA run (never false-green).
+grep_must "${QBL_CHECK}" 'SKIP:' \
+  "queue-burst drill SKIPS LOUDLY when no KEDA ScaledObject is present (a missing autoscaler is never a false-green pass)"
+# (f) the negative control is SHIPPED + wired, and PROVEN to bite by the self-test.
+grep_must "${QBL_CHECK}" 'QUEUE_BURST_DRILL_NEGATIVE_CONTROL' \
+  "queue-burst drill ships the negative control (shared scaler starvation / connection-budget regression) as a toggle (ADR-0047 §2)"
+grep_must "${QBL_CHECK}" 'shared scaler|SHARED scaler|shared/misconfigured' \
+  "queue-burst drill's negative control emulates a SHARED/misconfigured scaler that starves a sibling (ADR-0043 §Alternatives / §2)"
+grep_must "${QBL_BITE}" 'QUEUE_BURST_DRILL_NEGATIVE_CONTROL=1' \
+  "queue-burst bite proof runs the drill WITH the negative control and asserts it goes RED"
+grep_must "${QBL_BITE}" 'FALSE-GREEN' \
+  "queue-burst bite proof fails if the negative control does NOT turn the drill red (the anti-false-green guard)"
+grep_must "${QBL_BITE}" 'NO_SCALE_OUT' \
+  "queue-burst bite proof also proves a burst that never moves the replica count goes RED (the scale-out step is load-bearing)"
+# (g) secret hygiene + L3/L5 plumbing (the load path touches Redis broker + DB pooler creds).
+grep_must "${QBL_CHECK}" 'exec -i' \
+  "queue-burst drill feeds the Redis/DB password over stdin (kubectl exec -i), not argv (secret hygiene / N11)"
+grep_must "${QBL_CHECK}" 'read -r RPW|read -r PGPW|IFS= read -r RPW|IFS= read -r PGPW' \
+  "queue-burst drill reads the Redis/DB password from stdin inside the pod (never a visible argv arg)"
+grep_must "${QBL_CHECK}" 'sh -c|bash -c' \
+  "queue-burst drill drives in-pod redis-cli/loadgen via sh -c/bash -c positional args, not \$(VAR) in the exec argv (L3)"
+grep_must "${QBL_CHECK}" 'set -euo pipefail' \
+  "queue-burst drill sets pipefail so a masked in-pod exit cannot read green (L5)"
+grep_must "${QBL_CHECK}" 'register_cleanup' \
+  "queue-burst drill registers its teardown via register_cleanup (composes with the assert-exit bite, N1)"
+grep_must_not "${QBL_CHECK}" '^[[:space:]]*trap[[:space:]]+[^#[:space:]]+[[:space:]]+EXIT' \
+  "queue-burst drill installs NO bare 'trap … EXIT' (would clobber lib.sh's assert-exit bite, N1)"
+grep_must_not "${QBL_CHECK}" 'echo.*REDIS_PW_VALUE|echo.*PGPASSWORD_VALUE|REDIS_PW_VALUE=.*echo|PGPASSWORD_VALUE=.*echo' \
+  "queue-burst drill never echoes the Redis/Postgres password (secret hygiene)"
+grep_must "${QBL_CHECK}" 'reduced scale|deferred-accepted' \
+  "queue-burst drill STATES its reduced scale + names the deferred certified-scale G-SCA ceiling (ADR-0047 §1/§4)"
+grep_must_not "${QBL_CHECK}" 'sqlite://|aiosqlite|:memory:|\.sqlite' \
+  "queue-burst drill has NO SQLite code path — the PgBouncer/pool probe runs on the real CNPG cluster (ADR-0047 §5)"
+# probe pod hygiene: non-root, digest-pinned, no :latest, no API token.
+grep_must "${QBL_PROBE}" 'runAsNonRoot: true' \
+  "queue-burst drill probe pod is non-root (restricted PSA admissible, ADR-0029 §3)"
+grep_must "${QBL_PROBE}" 'image:.*@sha256:[0-9a-f]{64}' \
+  "queue-burst drill probe pod pins its image by sha256 digest, not a mutable tag (N12)"
+grep_must_not "${QBL_PROBE}" 'image:.*:latest' \
+  "no :latest image tag in the queue-burst drill probe pod (admission would reject)"
+grep_must "${QBL_PROBE}" 'automountServiceAccountToken: false' \
+  "queue-burst drill probe pod drops its API token (least privilege, ADR-0029 §5)"
+
 echo "== validator summary: ${fails} failure(s) =="
 if [ "${fails}" -ne 0 ]; then
   echo "::error::kind harness validator found ${fails} violation(s)" >&2

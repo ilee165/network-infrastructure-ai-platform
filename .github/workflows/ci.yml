@@ -1230,6 +1230,28 @@ jobs:
       - name: W4-T5 worker-kill idempotency drill negative-control bite proof (static, no cluster)
         run: bash ci/kind/selftest/worker-kill-idempotency-bite.sh
 
+      # W4-T6 queue-burst KEDA + reduced-scale API load + PgBouncer budget drill —
+      # NEGATIVE-CONTROL BITE PROOF (no cluster). ADR-0047 §2 requires every drill's
+      # negative control be SHOWN to bite (plant → red → revert), not merely asserted.
+      # The LIVE queue-burst/load drill runs only on the kind cluster (below,
+      # signal-only), which cannot run on the authoring host (L1) — so this self-test
+      # earns the bite proof WITHOUT a cluster: it runs the REAL queue-burst-load.sh
+      # check against a fake kubectl and asserts the polarity — GREEN when a 10x
+      # `discovery` burst scales the discovery Deployment OUT (its replica count
+      # actually changes) then scales IN, siblings are NOT starved, the API p95 holds
+      # with a 1->2-replica improvement + zero 5xx, and the PgBouncer pooler shows no
+      # connection exhaustion; RED when the negative control emulates a SHARED scaler
+      # that STARVES a sibling and overruns the PgBouncer budget (isolation + §330 +
+      # §327 assertions bite), and RED when the burst never moves the replica count (a
+      # burst that never scales out — the spec's false-green risk). This step is
+      # BLOCKING within the job (it needs no cluster and BITES on a drill that stopped
+      # biting); it is the hardware-free proof the drill is a real gate, not
+      # green-at-setup (P1-W4 false-green; ADR-0043 §3 per-queue isolation; ADR-0042 §4
+      # connection budget). Executed on the authoring host: 0 failure(s), drill exit 4
+      # under the negative control, exit 1 on no-scale-out, exit 0 on the positive path.
+      - name: W4-T6 queue-burst + API load + PgBouncer budget drill negative-control bite proof (static, no cluster)
+        run: bash ci/kind/selftest/queue-burst-load-bite.sh
+
       # kind brings up the throwaway cluster on the Docker backend the GH runner
       # provides; the HA harness path installs the CNPG operator + KEDA on top.
       - name: Install kind
@@ -1288,6 +1310,26 @@ jobs:
       # backend/tests/pg/test_worker_idempotency_pg.py behind the blocking
       # pg-integration job. The certified-scale soak success (30-day calendar window)
       # is NAMED deferred-accepted → GA (ADR-0047 §4).
+      #
+      # W4-T6 (ADR-0043 §2/§3, ADR-0042 §4, ADR-0047 §1/§2/§3/§4, G-SCA §326–§330):
+      # the same assertion-runner also auto-discovers
+      # ci/kind/assertions/checks/queue-burst-load.sh — the live QUEUE-BURST KEDA +
+      # reduced-scale API load + PgBouncer budget drill (LPUSH a 10x-normal `discovery`
+      # depth into the REAL Redis list the KEDA scaler reads → assert the discovery
+      # worker Deployment SCALES OUT (replica count actually changes) then SCALES IN
+      # after the burst drains, WITHOUT starving config/docs/packet siblings (per-queue
+      # isolation, §329); run a reduced-concurrency HTTP load (bash /dev/tcp, no
+      # k6/locust dep) against the api Service and assert p95 held + a 1->2-replica
+      # improvement + zero 5xx (§327); open concurrent connections through the
+      # transaction-mode PgBouncer Pooler and assert NO connection exhaustion (§330,
+      # ADR-0042 §4)). It runs on the kind HA cluster (real KEDA/HPA/PgBouncer), at
+      # REDUCED scale (10x listLength burst, api floor 2/ceiling 4, tens of VUs), and
+      # is part of this SIGNAL-ONLY live run — its blocking-promotion is a deliberate
+      # later step (W5/GA), NOT W4-T6. Its negative control (shared scaler → sibling
+      # starvation / connection-budget breach; a burst that never scales out) is proven
+      # to bite by the W4-T6 static step above. The certified-scale G-SCA numbers
+      # (500-device ≤60 min §326, 100-user p95<300 ms + 2->4 linearity §327, 5,000-device
+      # projection §328) are NAMED deferred-accepted → GA (ADR-0047 §4).
       - name: Run HA kind harness (create → CNI self-test → operators → apply → HA-ready → assert → teardown)
         id: ha-harness
         continue-on-error: true
