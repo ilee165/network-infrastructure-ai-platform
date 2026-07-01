@@ -532,6 +532,45 @@ async def test_tcp_tls_sink_deliver_times_out_on_a_stalled_connect() -> None:
         asyncio.open_connection = orig  # type: ignore[assignment]
 
 
+async def test_tcp_tls_sink_deliver_times_out_on_a_stalled_write() -> None:
+    """CR re-review: a stalled ``writer.drain()`` raises SinkDeliveryError, never hangs.
+
+    ``deliver`` bounds BOTH the connect AND the write/drain under ``wait_for``. This
+    covers the WRITE/DRAIN branch (the connect-stall sibling is above): a connected
+    collector that never drains the socket must convert to a delivery FAILURE (retried
+    next cycle), not wedge the exporter loop and freeze the lag gauge.
+    """
+    import asyncio
+
+    from app.services.audit.export.sinks import TcpTlsSink
+
+    class _StalledWriter:
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            await asyncio.Event().wait()  # blocks forever — the SIEM never drains
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    async def _connects_then_stalls(*_a: Any, **_k: Any) -> Any:
+        return (object(), _StalledWriter())
+
+    ctx = ssl.create_default_context()
+    sink = TcpTlsSink(host="siem.example.test", port=6514, tls_context=ctx, timeout_seconds=0.01)
+    orig = asyncio.open_connection
+    asyncio.open_connection = _connects_then_stalls  # type: ignore[assignment]
+    try:
+        with pytest.raises(SinkDeliveryError, match="syslog-tls write timed out"):
+            await sink.deliver([format_syslog(_example_record())])
+    finally:
+        asyncio.open_connection = orig  # type: ignore[assignment]
+
+
 # ---------------------------------------------------------------------------
 # Ordering by seq (ADR-0045 §2) + never-block-the-write decoupling (§3)
 # ---------------------------------------------------------------------------

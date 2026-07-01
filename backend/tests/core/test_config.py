@@ -114,6 +114,39 @@ def test_syslog_export_endpoint_scheme_not_enforced() -> None:
     assert settings.audit_export_format == "syslog"
 
 
+def test_https_json_export_requires_an_endpoint() -> None:
+    """CR re-review: https-json with NO endpoint must fail closed, not arm silently.
+
+    ``format=https-json`` selects the HTTPS/JSON transport whose only target is
+    ``audit_export_endpoint``; with it unset the exporter would arm with nowhere to
+    POST (silent misconfig). The active-format target is mandatory.
+    """
+    with pytest.raises(ValidationError, match="NETOPS_AUDIT_EXPORT_ENDPOINT"):
+        Settings(_env_file=None, audit_export_format="https-json")
+
+
+def test_syslog_export_requires_a_host() -> None:
+    """CR re-review (sibling): syslog with NO host must fail closed, not arm silently.
+
+    ``format=syslog`` selects the TLS syslog sink whose target is
+    ``audit_export_host``; with it unset the exporter would arm with no collector.
+    """
+    with pytest.raises(ValidationError, match="NETOPS_AUDIT_EXPORT_HOST"):
+        Settings(_env_file=None, audit_export_format="syslog")
+
+
+def test_cef_export_requires_a_host() -> None:
+    """CR re-review (sibling): cef (over the syslog TLS sink) also needs a host."""
+    with pytest.raises(ValidationError, match="NETOPS_AUDIT_EXPORT_HOST"):
+        Settings(_env_file=None, audit_export_format="cef")
+
+
+def test_disabled_export_needs_no_target() -> None:
+    """The exporter is opt-in: format=None (default) stays valid with no target."""
+    settings = Settings(_env_file=None)
+    assert settings.audit_export_format is None
+
+
 def test_export_batch_size_must_be_positive() -> None:
     """CR[3]: batch_size < 1 → read_unexported(limit=0) exports nothing (silent loss)."""
     with pytest.raises(ValidationError):

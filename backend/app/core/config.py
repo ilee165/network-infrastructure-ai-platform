@@ -409,15 +409,29 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _require_https_export_endpoint(self) -> Settings:
-        """TLS-only export (ADR-0045 §1): the HTTPS/JSON endpoint must be ``https://``.
+    def _require_export_target(self) -> Settings:
+        """Fail closed when an ENABLED exporter has no transport target (ADR-0045 §1).
 
-        The exported audit payload + the bearer ``Authorization`` header ride this
-        endpoint; a ``http://`` (or scheme-less) URL would send the audit spine and the
-        token over cleartext. Fail closed at config time so a plaintext SIEM endpoint
-        can never be armed, rather than leaking on the first export cycle.
+        The exporter is opt-in: ``audit_export_format is None`` DISABLES it (a warned
+        no-op), so a deployment with no SIEM needs no target and stays valid. But once a
+        format IS set the exporter arms, and each format has a mandatory target:
+
+        * ``https-json`` POSTs to ``audit_export_endpoint`` — which must be non-None AND
+          an ``https://`` URL. A missing endpoint would arm with nowhere to POST; a
+          ``http://`` (or scheme-less) URL would send the audit payload + bearer token
+          over cleartext (TLS-only export, ADR-0045 §1).
+        * ``syslog``/``cef`` use the TLS syslog sink at ``audit_export_host`` — which
+          must be non-None or the exporter arms with no collector.
+
+        Fail closed at config time so a targetless/cleartext SIEM exporter can never be
+        armed, rather than silently mis-configuring (or leaking on the first cycle).
         """
-        if self.audit_export_format == "https-json" and self.audit_export_endpoint is not None:
+        if self.audit_export_format == "https-json":
+            if self.audit_export_endpoint is None:
+                raise ValueError(
+                    "NETOPS_AUDIT_EXPORT_ENDPOINT must be set for the 'https-json' "
+                    "export format (the HTTPS/JSON collector target, ADR-0045 §1)"
+                )
             scheme = self.audit_export_endpoint.split("://", 1)[0].lower()
             if scheme != "https":
                 raise ValueError(
@@ -426,6 +440,12 @@ class Settings(BaseSettings):
                     "non-https endpoint would send the audit payload + bearer token "
                     "over cleartext"
                 )
+        elif self.audit_export_format in ("syslog", "cef") and self.audit_export_host is None:
+            raise ValueError(
+                "NETOPS_AUDIT_EXPORT_HOST must be set for the "
+                f"'{self.audit_export_format}' export format (the TLS syslog collector "
+                "host, ADR-0045 §1)"
+            )
         return self
 
 
