@@ -285,10 +285,40 @@ async def _pg_source_counts() -> tuple[int, int]:
     engine, sm = await _sessionmaker()
     try:
         async with sm() as session:
-            devices = list((await session.execute(select(Device))).scalars())
-            interfaces = list((await session.execute(select(NormalizedInterfaceRow))).scalars())
-            routes = list((await session.execute(select(NormalizedRouteRow))).scalars())
-            neighbors = list((await session.execute(select(NormalizedNeighborRow))).scalars())
+            # Scoped to the drill's fixed UUIDs (ADR-0047 §1) so the counts are
+            # reproducible on a non-fresh / shared database. A WHERE-less SELECT
+            # would inflate on any pre-existing operator rows and produce spurious
+            # pass/fail on the completeness assertion.
+            devices = list(
+                (await session.execute(select(Device).where(Device.id.in_(_DEVICE_IDS)))).scalars()
+            )
+            interfaces = list(
+                (
+                    await session.execute(
+                        select(NormalizedInterfaceRow).where(
+                            NormalizedInterfaceRow.device_id.in_(_DEVICE_IDS)
+                        )
+                    )
+                ).scalars()
+            )
+            routes = list(
+                (
+                    await session.execute(
+                        select(NormalizedRouteRow).where(
+                            NormalizedRouteRow.device_id.in_(_DEVICE_IDS)
+                        )
+                    )
+                ).scalars()
+            )
+            neighbors = list(
+                (
+                    await session.execute(
+                        select(NormalizedNeighborRow).where(
+                            NormalizedNeighborRow.device_id.in_(_DEVICE_IDS)
+                        )
+                    )
+                ).scalars()
+            )
     finally:
         await engine.dispose()
     derived = derive_topology(devices, interfaces, routes, neighbors)
@@ -313,7 +343,24 @@ async def _neo4j_graph_counts() -> tuple[int, int]:
     """Count projected nodes + edges in the LIVE Neo4j graph (scoped to the
     projector's label / rel-type set, so the number is directly comparable to
     ``pg-source``). A destroyed-then-partially-rebuilt graph reads FEWER than the
-    Postgres source mandates."""
+    Postgres source mandates.
+
+    SCOPING CONSTRAINT: the Cypher queries count ALL nodes/edges that carry the
+    projector's labels / rel-types, not just the drill's seeded rows. This is
+    intentional: the projector writes topology rows without a drill-specific
+    property, so adding a ``drillTag`` filter would require modifying the
+    production projector. Instead this count validates TOTAL-GRAPH completeness
+    against the scoped ``pg-source`` count (which IS now filtered to the drill's
+    fixed UUIDs). The assertion is therefore correct only on a fresh kind cluster
+    that contains exactly the drill's seeded inventory — which is the guaranteed
+    state of the ``kind-harness-ha`` CI job. Any pre-existing graph nodes that
+    happen to carry these labels would inflate the count and produce a spurious
+    PASS; nodes that do not carry these labels are invisible. The kind cluster is
+    always fresh (created per-run), so this constraint is acceptable in CI. A
+    full drill-subset-scoped Neo4j count would require a ``drillTag`` node
+    property written by the seeder and read by the projector — deferred to GA
+    (ADR-0047 §4 promotion path).
+    """
     from app.core.config import get_settings  # noqa: PLC0415
     from app.engines.topology.projector import (  # noqa: PLC0415
         PROJECTED_NODE_LABELS,

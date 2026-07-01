@@ -237,9 +237,18 @@ DESTROY_EPOCH="$(date +%s)"
 kubectl -n "${NS}" delete pvc "${NEO4J_PVC}" --ignore-not-found --wait=false || true
 kubectl -n "${NS}" delete pod "${NEO4J_POD}" --force --grace-period=0 --wait=false || true
 # Wait for the StatefulSet to bring the pod back Ready (empty graph) before rebuild.
+# Failure here means the pod never came back — abort rather than silently proceeding
+# to the reconcile + poll loop (where a 0-count result would be attributed to a
+# rebuild failure rather than a pod-recreate failure, making CI diagnosis impossible).
 echo "waiting for Neo4j to be recreated + Ready (empty graph) before the rebuild"
-kubectl -n "${NS}" rollout status "statefulset/${NEO4J_STS}" --timeout=240s || true
-kubectl -n "${NS}" wait --for=condition=Ready "pod/${NEO4J_POD}" --timeout=240s || true
+if ! kubectl -n "${NS}" rollout status "statefulset/${NEO4J_STS}" --timeout=240s; then
+  _fail "Neo4j StatefulSet did not reach rollout-complete within 240s after destroy — rebuild-precondition not met"
+  exit "$(assert_failures)"
+fi
+if ! kubectl -n "${NS}" wait --for=condition=Ready "pod/${NEO4J_POD}" --timeout=240s; then
+  _fail "Neo4j pod/${NEO4J_POD} did not become Ready within 240s after destroy — cannot run rebuild drill"
+  exit "$(assert_failures)"
+fi
 
 # --- 4. REBUILD FROM POSTGRES (the W1-T3 auto-rebuild path), MEASURE the RTO -----
 # On the POSITIVE path we drive the reconcile (re-project the WHOLE Postgres
