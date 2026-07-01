@@ -600,6 +600,85 @@ grep_must_not "${NEO4J_REBUILD_CHECK}" 'NETOPS_NEO4J_PASSWORD=.*echo|echo.*NETOP
 grep_must "${NEO4J_REBUILD_CHECK}" 'reduced scale|deferred-accepted' \
   "rebuild drill STATES its reduced scale + names the deferred certified-scale ceiling (ADR-0047 §1/§4)"
 
+# --- P3 W4-T5: worker-kill idempotency + Celery ≥99% drill invariants -----------
+# --- (G-REL §319/§320, ADR-0008 acks_late, ADR-0020 four-eyes, ADR-0047 §2/§3/§5) -
+# The worker-kill drill (worker-kill-idempotency.sh) plugs into the HA assertion-
+# runner. This validator BITES if the drill is silently weakened: it must (a)
+# actually KILL a worker pod mid-run (a real node-loss trigger, not a graceful
+# drain), (b) assert EXACTLY-ONCE side effects on the redelivery (1 snapshot / 1
+# audit row / 1 CR execution transition — no duplicate), (c) assert Celery success
+# ≥ 99% over the window AND that the CR four-eyes gate (ADR-0020) is not bypassed on
+# retry, (d) assert on REAL PG only (no SQLite path — ADR-0047 §5), (e) SKIP loudly
+# on a no-worker run (never false-green), (f) ship + wire the negative-control bite
+# (idempotency guard off → double-write → red), proven by the self-test, and (g)
+# keep the L3/L5 + secret-hygiene guards. Removing any makes a check below FAIL.
+echo "== validating W4-T5 worker-kill idempotency drill artifacts =="
+
+WORKER_KILL_CHECK="${CHECKS_DIR}/worker-kill-idempotency.sh"
+WORKER_KILL_HELPER="${CHECKS_DIR}/worker_idem_probe.py"
+WORKER_KILL_BITE="${HERE}/worker-kill-idempotency-bite.sh"
+require_file "${WORKER_KILL_CHECK}"  "W4-T5 worker-kill idempotency drill check"
+require_file "${WORKER_KILL_HELPER}" "W4-T5 worker idempotency probe helper (capture / cr-retry / backup / rate)"
+require_file "${WORKER_KILL_BITE}"   "W4-T5 worker-kill drill negative-control bite proof (self-test)"
+
+# (a) it actually KILLS a worker pod MID-RUN (a real node-loss trigger — acks_late
+#     redelivery, ADR-0008 §5 — not a graceful drain).
+grep_must "${WORKER_KILL_CHECK}" 'delete pod .*--force .*--grace-period=0' \
+  "worker-kill drill force-KILLS a worker pod mid-run (a real node-loss trigger, not a graceful drain)"
+grep_must "${WORKER_KILL_CHECK}" 'acks_late|reject_on_worker_lost|redeliver' \
+  "worker-kill drill exercises the acks_late redelivery (ADR-0008 §5 — a killed worker's task is re-run)"
+# (b) EXACTLY-ONCE side effects on the redelivery (no duplicate DB write / audit row).
+grep_must "${WORKER_KILL_CHECK}" 'EXACTLY-ONCE' \
+  "worker-kill drill asserts the redelivery is EXACTLY-ONCE (no duplicate side effect, G-REL §319)"
+grep_must "${WORKER_KILL_CHECK}" 'DUPLICATED a side effect|no duplicate side effect' \
+  "worker-kill drill FAILS on a duplicated side effect (a double DB write / double audit row — G-REL §319)"
+grep_must "${WORKER_KILL_CHECK}" 'snapshots.*= .1.|CAP_SNAP.*=.*1|= "1" \] && \[ "\$\{CAP_AUD' \
+  "worker-kill drill asserts exactly 1 snapshot row + 1 audit row on the config-capture redelivery"
+# (c) Celery success ≥ 99% AND four-eyes not bypassed / not double-executed.
+grep_must "${WORKER_KILL_CHECK}" 'SUCCESS_FLOOR' \
+  "worker-kill drill asserts the Celery success rate against a floor (≥99%, G-REL §320)"
+grep_must "${WORKER_KILL_CHECK}" 'RATE_PCT.*-ge.*SUCCESS_FLOOR|RATE_PCT" -ge "\$\{SUCCESS_FLOOR' \
+  "worker-kill drill PASSES only when success >= 99% and FAILS below it (the ≥99% bite, G-REL §320)"
+grep_must "${WORKER_KILL_CHECK}" 'four-eyes' \
+  "worker-kill drill asserts the CR four-eyes gate (ADR-0020) is not bypassed on retry"
+grep_must "${WORKER_KILL_CHECK}" 'double-execute|double-execut|DOUBLE-EXECUTED' \
+  "worker-kill drill asserts the retried CR does NOT double-execute (ADR-0020 / G-REL §319)"
+grep_must "${WORKER_KILL_CHECK}" 'cr-retry' \
+  "worker-kill drill drives the CR execution-retry primitive (approved→executing twice)"
+# (d) real-PG only (ADR-0047 §5) — no SQLite CODE path (the driver/URL forms, not
+#     the rationale comment which names SQLite).
+grep_must "${WORKER_KILL_HELPER}" 'requires real PostgreSQL' \
+  "worker idempotency probe HARD-FAILS on a non-postgresql URL (real-PG only, ADR-0047 §5)"
+grep_must_not "${WORKER_KILL_HELPER}" 'sqlite://|aiosqlite|:memory:|\.sqlite' \
+  "worker idempotency probe has NO SQLite code path (the write-lock/isolation semantics need real PG, ADR-0047 §5)"
+grep_must "${WORKER_KILL_HELPER}" 'capture_snapshot|_persist|ChangeRequestService|_nightly_backup_core' \
+  "worker idempotency probe drives the REAL W2-T4 code path (config._persist / ChangeRequestService / nightly_backup)"
+# (e) SKIP loudly on a no-worker run (never false-green).
+grep_must "${WORKER_KILL_CHECK}" 'SKIP:' \
+  "worker-kill drill SKIPS LOUDLY when no worker pod is present (a missing worker tier is never a false-green pass)"
+# (f) the negative control is SHIPPED + wired, and PROVEN to bite by the self-test.
+grep_must "${WORKER_KILL_CHECK}" 'WORKER_KILL_DRILL_NEGATIVE_CONTROL' \
+  "worker-kill drill ships the negative control (idempotency guard off) as a toggle (ADR-0047 §2)"
+grep_must "${WORKER_KILL_HELPER}" 'WORKER_IDEM_NEGATIVE_CONTROL' \
+  "worker idempotency probe honours the negative-control flag (guard bypassed → double-write, ADR-0047 §2)"
+grep_must "${WORKER_KILL_BITE}" 'WORKER_KILL_DRILL_NEGATIVE_CONTROL=1' \
+  "worker-kill bite proof runs the drill WITH the negative control and asserts it goes RED"
+grep_must "${WORKER_KILL_BITE}" 'FALSE-GREEN' \
+  "worker-kill bite proof fails if the negative control does NOT turn the drill red (the anti-false-green guard)"
+# (g) secret hygiene + L3/L5 plumbing (side-effecting tasks touch DB creds + audit spine).
+grep_must "${WORKER_KILL_CHECK}" 'sh -c' \
+  "worker-kill drill drives in-pod python via sh -c positional args, not \$(VAR) in the exec argv (L3)"
+grep_must "${WORKER_KILL_CHECK}" 'set -euo pipefail' \
+  "worker-kill drill sets pipefail so a masked in-pod exit cannot read green (L5)"
+grep_must "${WORKER_KILL_CHECK}" 'register_cleanup' \
+  "worker-kill drill registers its teardown via register_cleanup (composes with the assert-exit bite, N1)"
+grep_must_not "${WORKER_KILL_CHECK}" '^[[:space:]]*trap[[:space:]]+[^#[:space:]]+[[:space:]]+EXIT' \
+  "worker-kill drill installs NO bare 'trap … EXIT' (would clobber lib.sh's assert-exit bite, N1)"
+grep_must_not "${WORKER_KILL_CHECK}" 'echo.*NETOPS_POSTGRES_PASSWORD|NETOPS_POSTGRES_PASSWORD=.*echo' \
+  "worker-kill drill never echoes the Postgres password (secret hygiene)"
+grep_must "${WORKER_KILL_CHECK}" 'reduced scale|deferred-accepted' \
+  "worker-kill drill STATES its reduced scale + names the deferred certified-scale soak ceiling (ADR-0047 §1/§4)"
+
 echo "== validator summary: ${fails} failure(s) =="
 if [ "${fails}" -ne 0 ]; then
   echo "::error::kind harness validator found ${fails} violation(s)" >&2

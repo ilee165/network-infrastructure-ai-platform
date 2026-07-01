@@ -1210,6 +1210,26 @@ jobs:
       - name: W4-T4 Neo4j rebuild drill negative-control bite proof (static, no cluster)
         run: bash ci/kind/selftest/neo4j-rebuild-bite.sh
 
+      # W4-T5 worker-kill idempotency drill — NEGATIVE-CONTROL BITE PROOF (no
+      # cluster). ADR-0047 §2 requires every drill's negative control be SHOWN to
+      # bite (plant → red → revert), not merely asserted. The LIVE worker-kill drill
+      # runs only on the kind cluster (below, signal-only), which cannot run on the
+      # authoring host (L1) — so this self-test earns the bite proof WITHOUT a
+      # cluster: it runs the REAL worker-kill-idempotency.sh check against a fake
+      # kubectl and asserts the polarity — GREEN when a killed worker's task is
+      # redelivered and completes EXACTLY-ONCE (1 snapshot / 1 audit row / 1 CR
+      # transition, success >= 99%), RED when the idempotency guard is DISABLED (the
+      # negative control → the redelivery DOUBLE-WRITES and the success rate
+      # collapses), RED when the four-eyes gate would be bypassed or the CR
+      # double-executes. This step is BLOCKING within the job (it needs no cluster
+      # and BITES on a drill that stopped biting); it is the hardware-free proof the
+      # drill is a real gate, not green-at-setup (P1-W4 false-green; ADR-0008
+      # acks_late; ADR-0020 four-eyes). Real-PG-only exactly-once is corroborated on
+      # the live kind CNPG cluster below (also asserted in backend/tests/pg/ behind
+      # the blocking pg-integration job).
+      - name: W4-T5 worker-kill idempotency drill negative-control bite proof (static, no cluster)
+        run: bash ci/kind/selftest/worker-kill-idempotency-bite.sh
+
       # kind brings up the throwaway cluster on the Docker backend the GH runner
       # provides; the HA harness path installs the CNPG operator + KEDA on top.
       - name: Install kind
@@ -1250,6 +1270,24 @@ jobs:
       # W4-T4. Its negative control (disabled rebuild → topology mismatch) is proven
       # to bite by the W4-T4 static step above. The certified-scale topology-RTO
       # (< 30 min @ 5,000 devices) is NAMED deferred-accepted → GA (ADR-0047 §4).
+      #
+      # W4-T5 (ADR-0008 acks_late, ADR-0043 §6, ADR-0020 four-eyes, ADR-0047
+      # §2/§3/§5, G-REL §319/§320): the same assertion-runner also auto-discovers
+      # ci/kind/assertions/checks/worker-kill-idempotency.sh — the live WORKER-KILL
+      # idempotency + Celery ≥99% drill (seed a fixed drill fixture into Postgres →
+      # force-KILL a worker pod mid-run (acks_late redelivery) → drive the SAME
+      # side-effecting tasks a second time on a surviving worker via the real W2-T4
+      # code path → assert each completes EXACTLY-ONCE with no duplicate side effect
+      # (1 snapshot / 1 audit row / 1 CR execution transition), the CR four-eyes gate
+      # is not bypassed or double-executed, and Celery success ≥ 99% over the
+      # compressed window). It runs on real PG (the kind CNPG cluster), at REDUCED
+      # scale, and is part of this SIGNAL-ONLY live run — its blocking-promotion is a
+      # deliberate later step (W5/GA), NOT W4-T5. Its negative control (idempotency
+      # guard off → double-write / success collapse) is proven to bite by the W4-T5
+      # static step above; the same exactly-once property is asserted on real PG in
+      # backend/tests/pg/test_worker_idempotency_pg.py behind the blocking
+      # pg-integration job. The certified-scale soak success (30-day calendar window)
+      # is NAMED deferred-accepted → GA (ADR-0047 §4).
       - name: Run HA kind harness (create → CNI self-test → operators → apply → HA-ready → assert → teardown)
         id: ha-harness
         continue-on-error: true

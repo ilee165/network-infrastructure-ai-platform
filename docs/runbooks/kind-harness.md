@@ -28,6 +28,8 @@ Give the two W4 enforcement tasks a deterministic, hardware-free place to BITE: 
 | Reduced-scale HA overlay | `deploy/kubernetes/netops/values-kind-ha.yaml` (`HA_VALUES` override) |
 | Postgres failover drill (P3 W4-T3) | `ci/kind/assertions/checks/pg-failover.sh` + `pg-failover-drill-probe.yaml` (G-REL §316 — runs on the HA path via the assertion-runner) |
 | Failover drill bite proof (P3 W4-T3) | `ci/kind/selftest/pg-failover-bite.sh` (hardware-free negative-control plant→red→revert; runs in `kind-harness-ha`, no cluster) |
+| Worker-kill idempotency drill (P3 W4-T5) | `ci/kind/assertions/checks/worker-kill-idempotency.sh` + `worker_idem_probe.py` (G-REL §319/§320 — runs on the HA path via the assertion-runner; asserts on real PG) |
+| Worker-kill drill bite proof (P3 W4-T5) | `ci/kind/selftest/worker-kill-idempotency-bite.sh` (hardware-free negative-control plant→red→revert; runs in `kind-harness-ha`, no cluster) |
 
 ## How the harness runs (`kind-harness.sh`)
 
@@ -254,6 +256,110 @@ runner per L1 — see "Gate status"), so the P2 `kind-harness` job is **also sti
 `continue-on-error` / absent from `all-gates`** for now. Promoting the
 `kind-harness-ha` G-REL/G-SCA drills to blocking is a separate **deliberate later
 step (W5/GA)**, not W4-T2.
+
+## Worker-kill idempotency + Celery ≥99% drill (P3 W4-T5, G-REL §319/§320) — the idempotency drill on this HA topology
+
+The same HA topology is the substrate for the **worker-kill idempotency drill**
+(`ci/kind/assertions/checks/worker-kill-idempotency.sh`). It plugs into the same
+assertion-runner, so on the **HA path** (`HA=1 ci/kind/kind-harness.sh`) it runs
+automatically after the HA-readiness gate — no separate invocation.
+
+### §11 criterion + target (ADR-0008 §5, ADR-0043 §6, ADR-0020, ADR-0047 §3/§5)
+
+| Gate / line | Target (reduced-scale run) |
+|---|---|
+| **G-REL §319** | a worker node **killed mid-run** → each side-effecting job (discovery/config write, CR-gated config op, docs/backup gen) **completes via retry with NO duplicate side effect** — a **single** DB write, a **single** ChangeRequest execution, a **single** audit row (the W2-T4 idempotency under `acks_late` + `reject_on_worker_lost`, ADR-0008 §5). The CR **four-eyes** gate (ADR-0020) is **not bypassed or double-executed** on the retry. Asserted on **real PG** (the kind CNPG cluster), never SQLite (ADR-0047 §5). |
+| **G-REL §320** | **Celery success ≥ 99%** after retries over the window. |
+
+### What the drill does
+
+1. **Precondition / SKIP.** If no worker pod is present (a non-HA run) the drill
+   **SKIPs loudly** (`exit 0`) — a missing worker tier is never a false-green pass.
+2. **Seed.** Runs `worker_idem_probe.py seed` on a worker pod: a fixed drill fixture
+   (1 device + 2 drill users, keyed by fixed ids) in **real Postgres**.
+3. **Kill.** `kubectl delete pod <worker> --force --grace-period=0` — a real
+   node-loss trigger; with `acks_late` + `reject_on_worker_lost` (ADR-0008 §5) an
+   in-flight task on the killed worker is **redelivered**, not lost.
+4. **Drive the redelivery + assert** on a **surviving** worker (or the recreated
+   replacement on a single-worker overlay), via the real W2-T4 code path
+   (`config._persist` / `ChangeRequestService` / `nightly_backup`):
+   - **config capture double-delivery** → exactly **1** `config_snapshots` row + **1**
+     `config.snapshot_captured` audit row (content-addressed dedup + the W2-T4
+     audit-once fix);
+   - **CR execution retry** → **1** `approved_to_executing` transition + **1**
+     approval, the CR stays `executing`, the self-approve is still refused
+     (four-eyes intact, ADR-0020) — the retry is an idempotent `ConflictError` no-op;
+   - **nightly_backup double-delivery** (same `run_id`) → **1** started + **1**
+     finished audit row + **1** fan-out wave (`config_backup_runs` `ON CONFLICT DO
+     NOTHING` guard, ADR-0043 §6);
+   - **success rate** → `ATTEMPTS` redeliveries (default **40**), each must complete
+     exactly-once → **success ≥ 99%** (G-REL §320).
+
+### Reduced scale (STATED) + named ceiling (ADR-0047 §1/§4)
+
+The drill proves the **worker-kill → complete-via-retry → exactly-once mechanism**
+bites at reduced scale: a **1-device / 2-user** fixture and a **compressed
+success-rate window** (40 redeliveries), success floor **99%**. It does **not**
+certify a scale point. The **certified-scale soak success** over a **30-day
+calendar window** (G-REL §315/§320) stays **deferred-accepted → GA** with the
+ADR-0047 §4 written promotion path (a sized cluster; run the calendar soak; assert
+≥ 99% over 30 days) — **never claimed** from this run.
+
+### Real PG, not SQLite (ADR-0047 §5)
+
+The exactly-once + four-eyes checks are meaningless on SQLite (single-writer, no
+true isolation / unique-constraint concurrency). They run against the kind CNPG
+cluster (real Postgres); the in-pod `worker_idem_probe.py` **HARD-FAILS** if
+`database_url` is not a `postgresql` URL — there is no SQLite path. The same
+exactly-once property is also asserted on real PG in
+`backend/tests/pg/test_worker_idempotency_pg.py` behind the **blocking**
+`pg-integration` job.
+
+### Negative control — PROVEN to bite (ADR-0047 §2)
+
+| Positive assertion | Planted negative control (turns it RED) |
+|---|---|
+| worker kill → each redelivery completes exactly-once (1 snapshot / 1 audit / 1 CR transition), success ≥ 99% | **idempotency guard disabled** (`WORKER_KILL_DRILL_NEGATIVE_CONTROL=1` → the probe bypasses the content-addressed dedup / state-machine guard) → the redelivered capture **double-writes** (2 snapshots / 2 audits), the CR **double-executes** (2 transitions), and the success rate **collapses** below the floor → the exactly-once + ≥99% assertions go **RED** |
+
+**How the bite is proven WITHOUT a cluster (L1).** The live drill runs only on the
+kind cluster (Windows authoring host has no Docker/Linux kind).
+`ci/kind/selftest/worker-kill-idempotency-bite.sh` earns the ADR-0047 §2
+plant→red→revert proof **hardware-free**: it runs the **real**
+`worker-kill-idempotency.sh` against a **fake `kubectl`** that simulates the worker
+pods + the in-pod probe, and asserts the polarity —
+
+- **POSITIVE** (a worker is killed; each redelivery exactly-once, success ≥ 99%) →
+  drill **GREEN** (exit 0) — the revert-to-green;
+- **NEGATIVE CONTROL** (guard off → double-write, success collapse) → drill **RED**,
+  and the RED is specifically the **exactly-once / success-rate** assertion
+  (`DUPLICATED a side effect` / `success rate … <` / `G-REL §319/§320 VIOLATED`);
+- **NO-KILL + guard-off** → **RED** (the exactly-once assertion catches the
+  double-write regardless of whether the kill succeeded).
+
+This self-test is **blocking within the `kind-harness-ha` job** (it needs no
+cluster) and is the recorded evidence the drill is a real gate, not green-at-setup.
+It was **executed on the authoring host**: `bash
+ci/kind/selftest/worker-kill-idempotency-bite.sh` → `0 failure(s)`, drill exit **4**
+(four exactly-once/rate assertions) under the negative control, exit **0** on the
+positive path.
+
+### Gate posture — SIGNAL-ONLY (live), BLOCKING (static bite proof)
+
+- The **live** worker-kill drill runs inside the `HA=1` harness in the
+  **`kind-harness-ha`** CI job, which stays **`continue-on-error` / absent from
+  `all-gates`** (same posture as the rest of the HA live run). Promoting this
+  G-REL drill to **blocking** is a deliberate later step (**W5/GA**), not W4-T5.
+- The **static** negative-control bite proof (`worker-kill-idempotency-bite.sh`),
+  the `validate-harness.sh` worker-kill-drill invariants, **and** the real-PG
+  `pg-integration` `test_worker_idempotency_pg.py` are **blocking** — a silently
+  weakened drill (no kill, a dropped exactly-once assertion, a bypassed four-eyes
+  gate, a SQLite path, a removed negative control) fails there, no cluster needed.
+- **L1 caveat:** the **live** kill/redeliver/measure path has **not** run on the
+  authoring host; it runs live only on the CI ubuntu runner. Do not claim a local
+  live worker-kill run. Before any W5/GA promotion of this drill to blocking, the
+  live negative control **MUST be re-verified on the CI runner** (plant → RED →
+  revert → GREEN on the actual cluster) — a named prerequisite on the ADR-0047 §4
+  promotion path.
 
 ## Gate status — SIGNAL-ONLY (promotion AUTHORED, HELD pending ADR-0048 §4 bite)
 
