@@ -1180,6 +1180,20 @@ jobs:
       - name: Validate reduced-scale HA overlay (render + counts, static)
         run: bash ci/kind/ha/validate-ha-overlay.sh
 
+      # W4-T3 Postgres failover drill — NEGATIVE-CONTROL BITE PROOF (no cluster).
+      # ADR-0047 §2 requires every drill's negative control be SHOWN to bite
+      # (plant → red → revert), not merely asserted. The LIVE failover drill runs
+      # only on the kind CNPG cluster (below, signal-only), which cannot run on the
+      # authoring host (L1) — so this self-test earns the bite proof WITHOUT a
+      # cluster: it runs the REAL pg-failover.sh check against a fake kubectl and
+      # asserts the polarity — GREEN when every committed row survives, RED when the
+      # async last row is LOST (the negative control), RED on no-promotion / slow
+      # RTO. This step is BLOCKING within the job (it needs no cluster and BITES on a
+      # drill that stopped biting); it is the hardware-free proof the drill is a real
+      # gate, not green-at-setup (P1-W4 false-green).
+      - name: W4-T3 failover drill negative-control bite proof (static, no cluster)
+        run: bash ci/kind/selftest/pg-failover-bite.sh
+
       # kind brings up the throwaway cluster on the Docker backend the GH runner
       # provides; the HA harness path installs the CNPG operator + KEDA on top.
       - name: Install kind
@@ -1196,6 +1210,17 @@ jobs:
       # not locally validated on the Windows authoring host; runs live only on this
       # runner. Teardown is inside the harness trap, so a failure here still deletes
       # the cluster (no leak).
+      #
+      # W4-T3 (ADR-0042 §2/§3/§7, G-REL §316): the assertion-runner this harness
+      # invokes auto-discovers ci/kind/assertions/checks/pg-failover.sh — the live
+      # Postgres FAILOVER drill (seed hash-chain-valid audit rows → KILL the CNPG
+      # primary → assert AUTOMATED promotion + write service ≤60s from kill + ZERO
+      # committed-audit loss on the promoted primary: COUNT + last-row present + no
+      # seq gap + hash-chain intact). It runs on real PG (the kind CNPG cluster),
+      # at REDUCED scale (CNPG instances=3 quorum minimum, ~25 seeded rows), and is
+      # part of this SIGNAL-ONLY live run — the drill's blocking-promotion to
+      # all-gates is a deliberate later step (W5/GA), NOT W4-T3. Its negative control
+      # is proven to bite by the static step above.
       - name: Run HA kind harness (create → CNI self-test → operators → apply → HA-ready → assert → teardown)
         id: ha-harness
         continue-on-error: true

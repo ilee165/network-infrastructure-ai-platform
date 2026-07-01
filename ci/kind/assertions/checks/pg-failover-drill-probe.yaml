@@ -1,0 +1,73 @@
+# W4-T3 Postgres failover drill PROBE pod (G-REL §316, ADR-0042 / ADR-0047).
+#
+# The failover drill (pg-failover.sh) execs psql in this pod to, against the kind
+# CloudNativePG cluster over the operator-managed `-rw` (read-WRITE) Service:
+#   1. seed audit-shaped rows (seq + prev_hash/entry_hash chain) committed on the
+#      QUORUM-SYNC audit path (`SET LOCAL synchronous_commit=remote_apply`);
+#   2. after the drill KILLS the primary, poll the SAME rw Service until the
+#      AUTOMATED-promoted new primary accepts a write (RTO from kill <= 60 s);
+#   3. verify every committed row survived on the promoted primary — hash-chain
+#      valid, no seq gap (zero committed-audit loss, ADR-0042 §2).
+# The pod itself only idles + carries psql; all logic is in the check driving it
+# via `kubectl exec`. The DB password is fed over STDIN (never argv), never mounted.
+#
+# The image is the SAME pgvector/pgvector:pg16 the chart's Postgres / the mTLS probe
+# use (psql present; no new image ref, admission-friendly). Hardened to the
+# cluster's restricted Pod Security baseline (ADR-0029 §3): non-root, drop ALL caps,
+# read-only rootfs, seccomp RuntimeDefault, no privilege escalation, no API token.
+# N12: pinned by sha256 DIGEST so a re-push of the tag cannot swap the probe image.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pg-failover-drill-probe
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: pg-failover-drill-probe
+spec:
+  # The probe never needs the K8s API; drop its token (least privilege, ADR-0029 §5).
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      # N12: pinned by sha256 DIGEST (tag retained for readability). pgvector
+      # carries psql for the drill; the multi-arch pg16 index digest below is
+      # immutable (a re-push of the tag cannot swap it) — same pin as mtls-probe.
+      image: pgvector/pgvector:pg16@sha256:131dcf7ff6a900545df8e7e092c270aa8c6db2f2c818e408cb45ec21316b74e6
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65532
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      env:
+        # libpq home for any per-user files; points at the writable scratch so a
+        # RO rootfs does not break psql.
+        - name: HOME
+          value: /tmp
+      volumeMounts:
+        # Writable scratch for psql temp files (RO rootfs).
+        - name: tmp
+          mountPath: /tmp
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+  volumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 32Mi

@@ -429,6 +429,95 @@ for _tier in postgres redis; do
   fi
 done
 
+# --- P3 W4-T3: Postgres failover drill invariants (G-REL §316, ADR-0042/0047) --
+# The failover drill (pg-failover.sh) plugs into the HA assertion-runner. This
+# validator BITES if the drill is silently weakened: it must (a) actually KILL the
+# primary and measure the RTO FROM THE KILL (not from detection), (b) assert the
+# ≤60s automated-promotion RTO, (c) assert ZERO committed-audit loss on the
+# promoted primary (COUNT + specific last row + no seq gap + hash-chain valid),
+# (d) SKIP loudly on a non-HA run (never false-green), (e) ship + wire the
+# negative-control bite, and (f) keep the L3/L5 CI-plumbing guards. Removing any
+# makes a check below FAIL.
+echo "== validating W4-T3 Postgres failover drill artifacts =="
+
+PG_FAILOVER_CHECK="${CHECKS_DIR}/pg-failover.sh"
+PG_FAILOVER_PROBE="${CHECKS_DIR}/pg-failover-drill-probe.yaml"
+PG_FAILOVER_BITE="${HERE}/pg-failover-bite.sh"
+require_file "${PG_FAILOVER_CHECK}" "W4-T3 Postgres failover drill check"
+require_file "${PG_FAILOVER_PROBE}" "W4-T3 failover drill probe pod manifest"
+require_file "${PG_FAILOVER_BITE}"  "W4-T3 failover drill negative-control bite proof (self-test)"
+
+# (a) it actually KILLS the primary + starts the RTO clock AT the kill (§316: RTO
+#     from kill, not from detection — the risk the spec calls out).
+grep_must "${PG_FAILOVER_CHECK}" 'delete pod .*--force .*--grace-period=0' \
+  "failover drill force-KILLS the current primary (not a graceful drain) — a real failover trigger"
+grep_must "${PG_FAILOVER_CHECK}" 'KILL_EPOCH=' \
+  "failover drill starts the RTO clock (KILL_EPOCH) — the measurement anchor"
+grep_must "${PG_FAILOVER_CHECK}" 'RTO clock starts at kill' \
+  "failover drill measures RTO FROM THE KILL, not from detection (§316 risk the spec names)"
+grep_must "${PG_FAILOVER_CHECK}" 'currentPrimary' \
+  "failover drill reads the CNPG currentPrimary (targets the real primary; detects promotion)"
+# (b) the ≤60s automated-promotion RTO assertion.
+grep_must "${PG_FAILOVER_CHECK}" 'RTO_BUDGET_S' \
+  "failover drill asserts the write-restore RTO against a budget (≤60s, G-REL §316)"
+grep_must "${PG_FAILOVER_CHECK}" 'RTO_S.*-le.*RTO_BUDGET_S|RTO_S" -le "\$\{RTO_BUDGET_S' \
+  "failover drill PASSES only when RTO <= budget and FAILS when it exceeds it (the RTO bite)"
+grep_must "${PG_FAILOVER_CHECK}" 'now_primary.*!=.*PRIMARY_BEFORE|!= "\$\{PRIMARY_BEFORE' \
+  "failover drill requires an AUTOMATED promotion (new primary differs from the killed pod), not the old one answering"
+# (c) ZERO committed-audit loss on the promoted primary — all four sub-assertions.
+grep_must "${PG_FAILOVER_CHECK}" 'zero-loss VIOLATED|committed-audit LOSS' \
+  "failover drill asserts ZERO committed-audit loss on the promoted primary (G-REL §316)"
+grep_must "${PG_FAILOVER_CHECK}" 'seq GAP' \
+  "failover drill asserts NO seq gap on the promoted primary (no mid-chain committed row lost, ADR-0038 §3)"
+grep_must "${PG_FAILOVER_CHECK}" 'hash-chain BREAK|hash-chain VALID' \
+  "failover drill asserts the surviving audit hash-chain is intact (ADR-0038 §1)"
+grep_must "${PG_FAILOVER_CHECK}" 'last-before-kill' \
+  "failover drill commits + then checks the specific last-before-kill row (the row the negative control loses)"
+# (d) real-PG only + SKIP loudly on a non-HA run (never false-green).
+grep_must "${PG_FAILOVER_CHECK}" 'SKIP:' \
+  "failover drill SKIPS LOUDLY when no CNPG Cluster is present (a missing cluster is never a false-green pass)"
+# Guard against a real SQLite CODE path (a driver / connection string / db file),
+# not the header comment that EXPLAINS why there is none. Match the driver/URL
+# forms an actual SQLite fallback would use, so the ADR-0047 §5 rationale comment
+# (which names "SQLite") does not false-trip this invariant.
+grep_must_not "${PG_FAILOVER_CHECK}" 'sqlite://|aiosqlite|\.sqlite|:memory:|sqlite3 ' \
+  "failover drill has NO SQLite code path — the audit-survival check runs on real PG only (ADR-0047 §5)"
+# (e) the negative control is SHIPPED + wired, and PROVEN to bite by the self-test.
+grep_must "${PG_FAILOVER_CHECK}" 'PG_FAILOVER_DRILL_NEGATIVE_CONTROL' \
+  "failover drill ships the negative control (async/non-quorum commit) as a toggle (ADR-0047 §2)"
+grep_must "${PG_FAILOVER_CHECK}" 'synchronous_commit = off|synchronous_commit=off' \
+  "failover drill's negative control commits the last row ASYNC (synchronous_commit=off) so it can be lost (ADR-0047 §2)"
+grep_must "${PG_FAILOVER_CHECK}" 'synchronous_commit = remote_apply|remote_apply' \
+  "failover drill's positive path commits the audit row QUORUM-SYNC (remote_apply, ADR-0042 §2)"
+grep_must "${PG_FAILOVER_BITE}" 'PG_FAILOVER_DRILL_NEGATIVE_CONTROL=1' \
+  "failover bite proof runs the drill WITH the negative control and asserts it goes RED"
+grep_must "${PG_FAILOVER_BITE}" 'FALSE-GREEN' \
+  "failover bite proof fails if the negative control does NOT turn the drill red (the anti-false-green guard)"
+# (f) secret hygiene + L3/L5 plumbing (audit spine + DB superuser is secret surface).
+grep_must "${PG_FAILOVER_CHECK}" 'exec -i' \
+  "failover drill feeds the DB password over stdin (kubectl exec -i), not argv (secret hygiene / N11)"
+grep_must "${PG_FAILOVER_CHECK}" 'read -r PGPASSWORD|read -r PGPASSWORD' \
+  "failover drill reads PGPASSWORD from stdin inside the pod (never a visible argv arg)"
+grep_must "${PG_FAILOVER_CHECK}" 'sh -c' \
+  "failover drill drives in-pod psql via sh -c positional args, not \$(VAR) in the exec argv (L3)"
+grep_must "${PG_FAILOVER_CHECK}" 'set -euo pipefail' \
+  "failover drill sets pipefail so a masked in-pod psql exit cannot read green (L5)"
+grep_must "${PG_FAILOVER_CHECK}" 'register_cleanup' \
+  "failover drill registers its probe-pod + drill-table teardown via register_cleanup (composes with the assert-exit bite, N1)"
+grep_must_not "${PG_FAILOVER_CHECK}" '^[[:space:]]*trap[[:space:]]+[^#[:space:]]+[[:space:]]+EXIT' \
+  "failover drill installs NO bare 'trap … EXIT' (would clobber lib.sh's assert-exit bite, N1)"
+grep_must "${PG_FAILOVER_CHECK}" 'reduced scale|deferred-accepted' \
+  "failover drill STATES its reduced scale + names the deferred certified-scale ceiling (ADR-0047 §1/§4)"
+# probe pod hygiene: non-root, digest-pinned, no :latest, no API token.
+grep_must "${PG_FAILOVER_PROBE}" 'runAsNonRoot: true' \
+  "failover drill probe pod is non-root (restricted PSA admissible, ADR-0029 §3)"
+grep_must "${PG_FAILOVER_PROBE}" 'image:.*@sha256:[0-9a-f]{64}' \
+  "failover drill probe pod pins its image by sha256 digest, not a mutable tag (N12)"
+grep_must_not "${PG_FAILOVER_PROBE}" 'image:.*:latest' \
+  "no :latest image tag in the failover drill probe pod (admission would reject)"
+grep_must "${PG_FAILOVER_PROBE}" 'automountServiceAccountToken: false' \
+  "failover drill probe pod drops its API token (least privilege, ADR-0029 §5)"
+
 echo "== validator summary: ${fails} failure(s) =="
 if [ "${fails}" -ne 0 ]; then
   echo "::error::kind harness validator found ${fails} violation(s)" >&2

@@ -26,6 +26,8 @@ Give the two W4 enforcement tasks a deterministic, hardware-free place to BITE: 
 | HA readiness gate | `ci/kind/ha/wait-ha-ready.sh` (a half-up topology must NOT read ready — L5) |
 | HA overlay validator | `ci/kind/ha/validate-ha-overlay.sh` (static render + reduced-scale count bite) |
 | Reduced-scale HA overlay | `deploy/kubernetes/netops/values-kind-ha.yaml` (`HA_VALUES` override) |
+| Postgres failover drill (P3 W4-T3) | `ci/kind/assertions/checks/pg-failover.sh` + `pg-failover-drill-probe.yaml` (G-REL §316 — runs on the HA path via the assertion-runner) |
+| Failover drill bite proof (P3 W4-T3) | `ci/kind/selftest/pg-failover-bite.sh` (hardware-free negative-control plant→red→revert; runs in `kind-harness-ha`, no cluster) |
 
 ## How the harness runs (`kind-harness.sh`)
 
@@ -115,6 +117,93 @@ the drills exercise, not "reduce scale".
    the ADR-0048 §3 reliability prerequisite for W4-T2 promotion).
 5. **Assertion-runner + teardown (unchanged):** the P2 mTLS + collector assertions
    run, then the trap tears the cluster down on any exit.
+
+## Postgres failover drill (P3 W4-T3, G-REL §316) — the reliability drill on this HA topology
+
+The HA topology above is the substrate a set of **reliability/scale drills**
+(ADR-0047) run against. **W4-T3** implements the first one: the **Postgres
+failover drill** (`ci/kind/assertions/checks/pg-failover.sh`). It plugs into the
+same assertion-runner, so on the **HA path** (`HA=1 ci/kind/kind-harness.sh`) it
+runs automatically after the HA-readiness gate — no separate invocation.
+
+### §11 criterion + target (ADR-0042 §2/§3/§7, ADR-0047 §3)
+
+| Gate / line | Target (reduced-scale run) |
+|---|---|
+| **G-REL §316** | primary kill → **AUTOMATED promotion, write service restored ≤ 60 s** (RTO measured **from the kill**, not from detection) **AND zero committed-audit-entry loss** — every audit row committed before the kill is present on the promoted primary, **hash-chain-valid, no `seq` gap** (the ADR-0042 §2 quorum-sync audit-write guarantee). Asserted on **real PG** (the kind CNPG cluster), never SQLite (ADR-0047 §5). |
+
+### What the drill does
+
+1. **Precondition / SKIP.** If no CNPG `Cluster` is present (a non-HA run) the drill
+   **SKIPs loudly** (`exit 0`) — a missing cluster is never a false-green pass.
+2. **Seed.** Creates a drill-scoped audit-shaped table (`seq` + `prev_hash`/
+   `entry_hash` chain) and seeds `SEED_ROWS` (default **25**) hash-chain-valid rows,
+   each committed on the **quorum-sync audit path** (`SET LOCAL
+   synchronous_commit=remote_apply`, ADR-0042 §2) through the CNPG **`-rw`** Service.
+   Then commits one **last-before-kill** row (the row the negative control loses).
+3. **Kill.** `kubectl delete pod <currentPrimary> --force --grace-period=0` — the
+   **RTO clock starts at the kill** (§316 measures from the kill, not detection).
+4. **Measure.** Polls the `-rw` Service until a **write** succeeds on a **new**
+   primary (operator-elected, different from the killed pod) → **RTO = restore
+   epoch − kill epoch**; asserts **RTO ≤ 60 s** and that the promotion was automated.
+5. **Zero-loss.** On the promoted primary asserts: row **COUNT** = all committed
+   rows (no loss), the **last-before-kill row present**, **no `seq` gap** (append
+   order contiguous), and the surviving **hash-chain intact** (every `prev_hash`
+   links its predecessor `entry_hash`; genesis first — ADR-0038 §1).
+
+### Reduced scale (STATED) + named ceiling (ADR-0047 §1/§4)
+
+The drill proves the **failover + zero-audit-loss mechanism** bites at reduced
+scale: **CNPG `instances: 3`** (1 primary + 2 replicas — the ADR-0042 §1 quorum
+**minimum**, *not* reduced) and **~25 seeded rows**, RTO budget **60 s** from kill.
+It does **not** certify a scale point. The certified-scale ceilings — a
+**backups-only DR** restore onto a clean cluster (G-REL §318: RPO ≤ 5 min / RTO ≤
+1 h) and the **30-day soak** (G-REL §315) — stay **deferred-accepted → GA** with the
+ADR-0047 §4 written promotion path; they are **never claimed** from this run.
+
+### Negative control — PROVEN to bite (ADR-0047 §2)
+
+Every drill ships a planted regression that turns its assertion **RED**, shown to
+bite before it is trusted. For the failover drill:
+
+| Positive assertion | Planted negative control (turns it RED) |
+|---|---|
+| primary kill → promote ≤ 60 s; every committed audit row survives, hash-chain-valid, no `seq` gap | **async / non-quorum commit** on the audit path (`PG_FAILOVER_DRILL_NEGATIVE_CONTROL=1` → the last row commits `synchronous_commit=off`) → a just-committed audit row is **lost** on the promoted primary → the zero-loss COUNT + last-row + seq-gap assertions go **RED** |
+
+**How the bite is proven WITHOUT a cluster (L1).** The live drill runs only on the
+kind CNPG cluster, which cannot run on the authoring host (Windows, no Docker/Linux
+kind). `ci/kind/selftest/pg-failover-bite.sh` earns the ADR-0047 §2 plant→red→revert
+proof **hardware-free**: it runs the **real** `pg-failover.sh` against a **fake
+`kubectl`** that simulates the CNPG cluster + in-pod psql, and asserts the polarity —
+
+- **POSITIVE** (all rows survive) → drill **GREEN** (exit 0) — the revert-to-green;
+- **NEGATIVE CONTROL** (async last row lost after the kill) → drill **RED**, and the
+  RED is specifically the **zero-committed-audit-loss** assertion (COUNT 6≠7 + last
+  row MISSING + 1 `seq` gap; the surviving prefix's hash-chain stays valid — a
+  faithful model of an async tail-loss);
+- **NO-PROMOTION** (primary never changes) → **RED** (the promotion assertion bites);
+- **SLOW-RTO** (write restored past the budget) → **RED** (the ≤ 60 s RTO bites).
+
+This self-test is **blocking within the `kind-harness-ha` job** (it needs no
+cluster) and is the recorded evidence the drill is a real gate, not green-at-setup.
+It was **executed on the authoring host**: `bash ci/kind/selftest/pg-failover-bite.sh`
+→ `0 failure(s)`, drill exit **3** (three zero-loss assertions) under the negative
+control, exit **0** on the positive path.
+
+### Gate posture — SIGNAL-ONLY (live), BLOCKING (static bite proof)
+
+- The **live** failover drill runs inside the `HA=1` harness in the
+  **`kind-harness-ha`** CI job, which stays **`continue-on-error` / absent from
+  `all-gates`** (same posture as the rest of the HA live run). Promoting the
+  G-REL/G-SCA HA drills to **blocking** is a deliberate later step (**W5/GA**), not
+  W4-T3.
+- The **static** negative-control bite proof (`pg-failover-bite.sh`) and the
+  `validate-harness.sh` failover-drill invariants are **blocking within the job** —
+  a silently weakened drill (RTO-from-detection, a dropped zero-loss assertion, a
+  removed negative control, a SQLite path) fails there, with no cluster needed.
+- **L1 caveat:** the **live** kill/promote/measure path has **not** run on the
+  authoring host; it runs live only on the CI ubuntu runner. Do not claim a local
+  live failover run.
 
 ### Reliability (the ADR-0048 §3 Prerequisite A) + L1 caveat
 
@@ -239,3 +328,7 @@ deliberate later step (W5/GA), not W4-T2.
 | HA: `CNPG Cluster ... NOT ready ... readyInstances` | Fewer than 3 CNPG instances came Ready (replica scheduling / PVC / image pull). A primary-only cluster is NOT the HA quorum the failover drill needs — `wait-ha-ready.sh` correctly HARD-FAILS. Inspect `kubectl -n netops get cluster -o wide` + the CNPG pod events. |
 | HA: `ScaledObject/... Ready NOT ready` | KEDA did not reconcile a `ScaledObject` (bad trigger, unresolved `TriggerAuthentication`, Sentinel not discovered). The per-queue autoscale substrate is not live; do NOT trust a queue-burst drill until this is Ready. |
 | HA: `no KEDA ScaledObjects present` | The KEDA operator installed but the chart's ScaledObjects did not apply (KEDA CRDs not Established before apply, or `workerScaling.enabled` off in the overlay). Confirm the overlay + the CRD-Established wait in `install-operators.sh`. |
+| Failover drill: `SKIP: CNPG Cluster … absent` | The drill ran on a **non-HA** harness (no `HA=1`, so no CNPG operator/Cluster). Expected on the P2 path — the failover drill only asserts under `HA=1`. Not a failure. |
+| Failover drill: `committed-audit LOSS … zero-loss VIOLATED` / `seq GAP` | A committed audit row did **not** survive promotion — a real G-REL §316 durability regression (or the negative control is active). Check the audit write path is quorum-sync (`SET LOCAL synchronous_commit=remote_apply`, ADR-0042 §2) and the CNPG `synchronous`/`failoverQuorum` config; confirm `PG_FAILOVER_DRILL_NEGATIVE_CONTROL` is **not** set on a real run. |
+| Failover drill: `write service NOT restored within …` or `RTO … EXCEEDS budget` | No automated promotion, or promotion slower than the 60 s RTO. Inspect `kubectl -n netops get cluster -o wide` + the CNPG operator events; a stuck promotion means the HA quorum is not healthy (re-check `wait-ha-ready.sh` passed). |
+| `pg-failover bite proof found N violation(s)` | `pg-failover-bite.sh` (no cluster) found the drill no longer bites correctly — e.g. the negative control stopped turning the drill red, or the happy path went false-red. The drill is not a real gate until this is green; do **not** trust a live green until the bite proof passes. |
