@@ -138,23 +138,32 @@ case "${joined}" in
     exit 0 ;;
   *"exec -i"*)
     # In-pod probe: either redis-cli (burst push / LLEN / DEL) or the bash loadgen.
-    # The drill runs redis via `sh -c '… redis-cli -a "$RPW" … -n "$1" $2' _ <db> <cmd>`
+    # The drill runs redis via `sh -c '… redis-cli … -n "$1" "$2" "$3" …' _ <db> <verb> <key> [vals…]`
+    # (L3: each token is a separate positional arg, not word-split from a single string)
     # and the loadgen via `bash -c '…' _ <host> <port> <path> <vus> <reqs> <pool> <neg> …`.
     # Distinguish by scanning the arg vector for the command shape.
     cmd_all="$*"
     if printf '%s' "${cmd_all}" | grep -q 'redis-cli'; then
-      # Find the redis command (positional arg after the `_` sentinel: <db> <cmd>).
-      rediscmd=""
+      # Find the redis command tokens after the `_` sentinel: layout is
+      # `_ <db> <verb> <key> [values…]` (each a separate positional arg — L3 fix).
+      # args[i+0]="_", args[i+1]=db, args[i+2]=verb, args[i+3]=key.
+      redisverb=""
+      rediskey=""
       for i in "${!args[@]}"; do
-        if [ "${args[$i]}" = "_" ]; then rediscmd="${args[$((i+2))]:-}"; break; fi
+        if [ "${args[$i]}" = "_" ]; then
+          redisverb="${args[$((i+2))]:-}"
+          rediskey="${args[$((i+3))]:-}"
+          break
+        fi
       done
+      rediscmd="${redisverb} ${rediskey}"
       case "${rediscmd}" in
-        RPUSH\ discovery*) : > "${S}/burst_pushed"; echo "50" ;;
-        RPUSH\ *)          echo "5" ;;
-        LLEN\ discovery)   if [ -f "${S}/burst_pushed" ] && [ ! -f "${S}/burst_drained" ]; then echo "50"; else echo "0"; fi ;;
-        LLEN\ *)           echo "5" ;;
-        DEL\ discovery)    : > "${S}/burst_drained"; echo "1" ;;
-        DEL\ *)            echo "1" ;;
+        "RPUSH discovery") : > "${S}/burst_pushed"; echo "50" ;;
+        "RPUSH "*)         echo "5" ;;
+        "LLEN discovery")  if [ -f "${S}/burst_pushed" ] && [ ! -f "${S}/burst_drained" ]; then echo "50"; else echo "0"; fi ;;
+        "LLEN "*)          echo "5" ;;
+        "DEL discovery")   : > "${S}/burst_drained"; echo "1" ;;
+        "DEL "*)           echo "1" ;;
         *)                 echo "0" ;;
       esac
       exit 0

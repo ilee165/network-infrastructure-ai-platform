@@ -44,8 +44,23 @@ certified-scale targets (named-deferred); the soak (W4-T7).
 
 ## Contracts / artifacts
 
-- Queue-burst generator + isolation assertions; k6/locust load script + p95/replica
+- Queue-burst generator + isolation assertions; **bash /dev/tcp load loop** (replaces
+  the originally-named k6/locust script — see implementation note below) + p95/replica
   assertions; PgBouncer budget assertion; CI wiring; the named-ceiling note.
+
+> **Implementation note — load generator tool substitution (deliberate spec change):**
+> The original Scope and Contracts sections named "a k6/locust API load run" and
+> "k6/locust load script" as the required artifact. The implementation uses a
+> dependency-free bash `/dev/tcp` loop instead. Rationale: the hardened probe image
+> (digest-pinned `bitnami/pgbouncer`) ships bash + psql but not k6 or locust; adding
+> either binary would widen the image's attack surface and pin a new external download.
+> The bash loop produces the same observable outputs (per-request latency → p95 ms,
+> HTTP status → 5xx count) using `bash EPOCHREALTIME` (microsecond clock) and raw
+> HTTP/1.1 over `/dev/tcp`. The p95/5xx/replica-delta assertions are identical to what
+> a k6 run would exercise. This substitution is formally recorded here (not a silent
+> deviation); the ADR-0043 §1 note (no Prometheus adapter on bare kind) governs the
+> HPA signal type, not the load tool. The `kind-harness-ha` CI job wires the drill
+> as `continue-on-error` / absent from `all-gates` — promotion to blocking is W5/GA.
 
 ## Test & gate plan
 

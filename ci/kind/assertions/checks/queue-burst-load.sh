@@ -87,7 +87,10 @@ FULLNAME="${CHART_FULLNAME:-netops}"
 # The BURST queue and the SIBLING queues whose isolation the drill proves.
 BURST_QUEUE="${QUEUE_BURST_QUEUE:-discovery}"
 # Sibling queues (real WORK_QUEUES per ADR-0043 §2). We assert these are NOT starved.
-SIBLING_QUEUES="${QUEUE_BURST_SIBLINGS:-config docs}"
+# spec §329 names config/docs/packet_capture/packet_analysis; the drill handles absent
+# ScaledObjects gracefully (skips with a note), so adding them here is safe on any
+# cluster where those ScaledObjects are not deployed.
+SIBLING_QUEUES="${QUEUE_BURST_SIBLINGS:-config docs packet_capture packet_analysis}"
 
 # The api HPA + Deployment (ADR-0043 §1). HA floor is 2 (never reduced); kind ceiling 4.
 API_HPA="${API_HPA_NAME:-${FULLNAME}-api}"
@@ -207,11 +210,14 @@ PROBE_POD="queue-burst-load-drill-probe"
 PROBE_MANIFEST="${HERE}/queue-burst-load-drill-probe.yaml"
 
 cleanup() {
-  # Best-effort: drain the drill-pushed queue items + drop the pool probe table, then
-  # delete the probe pod. Never fatal (the pod may already be gone).
-  redis_cli_nofail "DEL netops:w4t6:drill:${BURST_QUEUE}" >/dev/null 2>&1 || true
+  # Best-effort: drain the drill-pushed queue items + delete the probe pod.
+  # DEL the BARE keys that were actually written by the RPUSH calls above
+  # (${BURST_QUEUE} and each sibling ${q}). The previously used
+  # "netops:w4t6:drill:*" prefix was never written, so those DELs were no-ops
+  # that left real burst items in the KEDA-watched lists between runs.
+  redis_cli_nofail DEL "${BURST_QUEUE}" >/dev/null 2>&1 || true
   for q in ${SIBLING_QUEUES}; do
-    redis_cli_nofail "DEL netops:w4t6:drill:${q}" >/dev/null 2>&1 || true
+    redis_cli_nofail DEL "${q}" >/dev/null 2>&1 || true
   done
   kubectl -n "${NS}" delete pod "${PROBE_POD}" --ignore-not-found --wait=false || true
 }
@@ -222,18 +228,30 @@ register_cleanup cleanup
 # --- in-pod redis-cli (password over STDIN — N11; coords positional — L3) --------
 # The burst is LPUSHed into the Redis LIST keyed by the queue name (the SAME key the
 # KEDA redis-sentinel scaler reads LLEN on), so KEDA's own signal fires. The password
-# is fed over stdin; the queue key + count are positional args.
-redis_cli() {  # $1 = redis command string (single arg after the client flags)
+# is fed over stdin; each Redis command token is a SEPARATE positional arg to sh -c
+# ("$2", "$3", …) — never word-split from a single string (L3 compliance).
+redis_cli() {  # $@ = Redis command + args (each a separate word)
   printf '%s' "${REDIS_PW_VALUE}" | kubectl -n "${NS}" exec -i "${REDIS_POD}" -- sh -c '
     IFS= read -r RPW
-    exec redis-cli -a "$RPW" --no-auth-warning -n "$1" $2
-  ' _ "${REDIS_DB_INDEX}" "$1"
+    exec redis-cli -a "$RPW" --no-auth-warning -n "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
+      "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" \
+      "${19}" "${20}" "${21}" "${22}" "${23}" "${24}" "${25}" "${26}" "${27}" "${28}" \
+      "${29}" "${30}" "${31}" "${32}" "${33}" "${34}" "${35}" "${36}" "${37}" "${38}" \
+      "${39}" "${40}" "${41}" "${42}" "${43}" "${44}" "${45}" "${46}" "${47}" "${48}" \
+      "${49}" "${50}" "${51}" "${52}" "${53}" "${54}" "${55}" "${56}" "${57}" "${58}" \
+      "${59}" "${60}" "${61}" "${62}"
+  ' _ "${REDIS_DB_INDEX}" "$@"
 }
 redis_cli_nofail() { redis_cli "$@" 2>/dev/null || return $?; }
 
 # LLEN of a queue list (the scaler's demand signal). Echoes the integer.
+# L5: the redis_cli exit is checked explicitly; a failed exec returns a distinct error
+# rather than silently returning "0" (which would trip the depth guard with a
+# misleading "burst did not land" message when the real failure is the Redis exec).
 queue_len() {  # $1 = queue/list name
-  redis_cli "LLEN $1" 2>/dev/null | tr -d '[:space:]' || echo "0"
+  local out
+  out="$(redis_cli LLEN "$1")" || { echo "QUEUE_LEN_ERR"; return 1; }
+  printf '%s' "${out}" | tr -d '[:space:]'
 }
 
 # --- 0. baseline: record starting replica counts (burst + siblings) -------------
@@ -260,11 +278,13 @@ echo "  burst   '${BURST_QUEUE}' -> ${BURST_DEPLOY} (baseline replicas=${BURST_R
 # OUT. We also seed a SMALL sibling backlog so we can prove the siblings' OWN backlog
 # still drains (isolation: their capacity is not stolen by the discovery burst).
 echo "LPUSHing ${BURST_ITEMS} items into the '${BURST_QUEUE}' Redis list (10x normal depth, KEDA's own signal)"
-BURST_PUSH_OUT="$(redis_cli "RPUSH ${BURST_QUEUE} $(for i in $(seq 1 "${BURST_ITEMS}"); do printf 'w4t6-%s ' "$i"; done)" || true)"
+# Build item list as separate positional args (L3: no word-splitting of a single string).
+# shellcheck disable=SC2046
+BURST_PUSH_OUT="$(redis_cli RPUSH "${BURST_QUEUE}" $(seq 1 "${BURST_ITEMS}" | while read -r i; do printf 'w4t6-%s\n' "$i"; done) || true)"
 echo "  RPUSH result: ${BURST_PUSH_OUT}"
-BURST_DEPTH="$(queue_len "${BURST_QUEUE}")"
+BURST_DEPTH="$(queue_len "${BURST_QUEUE}" || true)"
 echo "  '${BURST_QUEUE}' LLEN after burst = ${BURST_DEPTH}"
-if [ -z "${BURST_DEPTH}" ] || [ "${BURST_DEPTH}" -lt "${BURST_ITEMS}" ]; then
+if [ -z "${BURST_DEPTH}" ] || [ "${BURST_DEPTH}" = "QUEUE_LEN_ERR" ] || [ "${BURST_DEPTH}" -lt "${BURST_ITEMS}" ]; then
   _fail "queue burst did not land ${BURST_ITEMS} items in '${BURST_QUEUE}' (LLEN='${BURST_DEPTH}') — cannot drive KEDA scale-out"
 fi
 
@@ -306,7 +326,8 @@ for q in ${SIBLING_QUEUES}; do
   dep="${SIB_DEPLOY[${q}]:-}"
   [ -n "${dep}" ] || continue
   # Seed a small backlog into the sibling's list so it has its OWN work to drain.
-  redis_cli "RPUSH ${q} $(for i in $(seq 1 5); do printf 'w4t6-sib-%s ' "$i"; done)" >/dev/null 2>&1 || true
+  # L3: each item is a separate positional arg (no word-split of a single string).
+  redis_cli RPUSH "${q}" w4t6-sib-1 w4t6-sib-2 w4t6-sib-3 w4t6-sib-4 w4t6-sib-5 >/dev/null 2>&1 || true
 done
 # NEGATIVE CONTROL: model a shared scaler stealing the sibling budget. We scale a
 # sibling Deployment DOWN to 0 to emulate the starvation a shared/over-broad scaler
@@ -348,7 +369,7 @@ done
 # back IN toward its floor within the scale-in window (KEDA cooldownPeriod). A queue
 # that scales out but never in is a flap/leak (the burst-drain SLO half of §329).
 echo "draining the '${BURST_QUEUE}' burst and polling for scale-IN toward the floor"
-redis_cli "DEL ${BURST_QUEUE}" >/dev/null 2>&1 || true
+redis_cli DEL "${BURST_QUEUE}" >/dev/null 2>&1 || true
 SCALED_IN=0
 in_deadline=$(( $(date +%s) + SCALE_IN_POLL_S ))
 while [ "$(date +%s)" -lt "${in_deadline}" ]; do
