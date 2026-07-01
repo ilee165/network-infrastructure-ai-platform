@@ -1252,6 +1252,50 @@ jobs:
       - name: W4-T6 queue-burst + API load + PgBouncer budget drill negative-control bite proof (static, no cluster)
         run: bash ci/kind/selftest/queue-burst-load-bite.sh
 
+      # promtool — needed by the W4-T7 compressed-soak bite proof below, whose
+      # LOAD-BEARING layer runs a REAL `promtool test rules` over the W3-T2 recording
+      # rules + W3-T3 burn-rate alerts to prove the soak's "§6 SLOs held / no
+      # burn-rate alert fires" assertion bites cluster-free. Same pin as the
+      # `observability` job (2.53.2). pipefail so a masked fetch cannot read green (L5).
+      - name: Install promtool (Prometheus) — for the W4-T7 compressed-soak SLO-held bite
+        run: |
+          set -o pipefail
+          PROM_VERSION=2.53.2
+          curl -sSL -o /tmp/prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp
+          install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version
+
+      # W4-T7 compressed-soak drill — NEGATIVE-CONTROL BITE PROOF (no cluster).
+      # ADR-0047 §2 requires every drill's negative control be SHOWN to bite (plant →
+      # red → revert), not merely asserted. The LIVE soak drill runs only on the kind
+      # HA cluster (below, signal-only), which cannot run on the authoring host (L1) —
+      # so this self-test earns the bite proof WITHOUT a cluster in TWO layers:
+      #  (1) the LOAD-BEARING layer runs a REAL `promtool test rules` over the ACTUAL
+      #      W3-T2 recording rules + W3-T3 burn-rate alerts
+      #      (deploy/observability/slo-compressed-soak.test.yaml): a HEALTHY
+      #      compressed-soak-shaped window fires NO burn-rate alert (the §6 SLOs HELD),
+      #      and the injected error-rate + latency perturbation the drill applies with
+      #      the negative control DOES fire the burn-rate alert (a burn-rate breach →
+      #      RED). This proves the soak's core assertion ("no burn-rate alert fires
+      #      over the window") bites against the same rules Prometheus loads.
+      #  (2) it runs the REAL compressed-soak.sh check against a fake kubectl and
+      #      asserts the polarity — GREEN when the §6 SLIs stay within budget over the
+      #      window + resources bounded, RED when the negative control injects an SLO
+      #      regression (availability + latency budget breach over the window) AND a
+      #      monotone resource leak (connection/RSS/queue-depth trend) → the SLO-held
+      #      + bounded-trend assertions bite.
+      # This step is BLOCKING within the job (it needs no cluster and BITES on a drill
+      # that stopped biting); it is the hardware-free proof the drill is a real gate,
+      # not green-at-setup (P1-W4 false-green; ADR-0046 §2/§6 SLOs/burn-rate; G-REL
+      # §315 compressed). Executed on the authoring host: 0 failure(s) — promtool
+      # SUCCESS (healthy silent + injected regression fires), drill exit 0 positive /
+      # exit 8 under the negative control. The 30-day CALENDAR soak is NAMED
+      # deferred-accepted → GA (ADR-0047 §4).
+      - name: W4-T7 compressed-soak drill negative-control bite proof (real promtool + fake-kubectl, no cluster)
+        run: bash ci/kind/selftest/compressed-soak-bite.sh
+
       # kind brings up the throwaway cluster on the Docker backend the GH runner
       # provides; the HA harness path installs the CNPG operator + KEDA on top.
       - name: Install kind
@@ -1330,6 +1374,30 @@ jobs:
       # to bite by the W4-T6 static step above. The certified-scale G-SCA numbers
       # (500-device ≤60 min §326, 100-user p95<300 ms + 2->4 linearity §327, 5,000-device
       # projection §328) are NAMED deferred-accepted → GA (ADR-0047 §4).
+      #
+      # W4-T7 (ADR-0046 §1/§2/§6 SLOs/burn-rate, ADR-0047 §1/§2/§3/§4, G-REL §315
+      # compressed): the same assertion-runner also auto-discovers
+      # ci/kind/assertions/checks/compressed-soak.sh — the live COMPRESSED-SOAK drill
+      # (drive STEADY mixed synthetic load — API reads via bash /dev/tcp + a steady
+      # discovery/config/docs queue-job trickle — over a COMPRESSED window (minutes,
+      # stated; representative of the SLO-held + no-slow-leak MECHANISM, NOT the 30-day
+      # calendar SLA), sampling the §6 SLIs the W3-T2 recording rules derive MANY times
+      # across the window → assert every SLI stayed WITHIN its error budget over the
+      # SUSTAINED window (so NO W3-T3 burn-rate alert would fire — the SLOs HELD) AND
+      # assert NO slow resource regression (PgBouncer server connections, worker RSS,
+      # and queue depth stay BOUNDED START→END — a leak that would surface over
+      # calendar time shows as a monotone upward trend → fail)). It runs on the kind HA
+      # cluster (real api/workers/PgBouncer/Redis), at REDUCED scale (compressed
+      # window, tens of VUs + a steady queue trickle), and is part of this SIGNAL-ONLY
+      # live run — its blocking-promotion is a deliberate later step (W5/GA), NOT
+      # W4-T7. Its negative control (an injected error-rate + latency perturbation → a
+      # burn-rate breach over the window, plus a monotone resource leak) is proven to
+      # bite by the W4-T7 static step above — which ALSO runs a real `promtool test
+      # rules` over the actual W3-T2/W3-T3 rules (healthy window silent, injected
+      # regression fires). The certified-scale G-REL §315 ceiling (the 30-day CALENDAR
+      # soak meeting all §6 SLOs) is NAMED deferred-accepted → GA (ADR-0047 §4
+      # promotion path: a 30-day staging window on a sized cluster; run the calendar
+      # soak, assert §6 SLOs).
       - name: Run HA kind harness (create → CNI self-test → operators → apply → HA-ready → assert → teardown)
         id: ha-harness
         continue-on-error: true

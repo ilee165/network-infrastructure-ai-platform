@@ -778,6 +778,115 @@ grep_must_not "${QBL_PROBE}" 'image:.*:latest' \
 grep_must "${QBL_PROBE}" 'automountServiceAccountToken: false' \
   "queue-burst drill probe pod drops its API token (least privilege, ADR-0029 §5)"
 
+# --- P3 W4-T7: compressed-soak drill invariants (G-REL §315 compressed, ----------
+# --- ADR-0046 §1/§2/§6 SLOs/burn-rate, ADR-0047 §1/§2/§3/§4) ---------------------
+# The compressed-soak drill (compressed-soak.sh) plugs into the HA assertion-runner.
+# This validator BITES if the drill is silently weakened: it must (a) drive STEADY
+# mixed load over a COMPRESSED WINDOW (stated, sampled MANY times — not one reading)
+# and assert the §6 SLOs stay WITHIN budget over the window (no burn-rate alert would
+# fire), (b) assert NO slow resource regression (PgBouncer conns / worker RSS / queue
+# depth bounded — a trend → fail), (c) SKIP loudly on a no-api run (never
+# false-green), (d) ship + wire the negative-control bite (injected SLO regression +
+# leak → red), proven by the self-test which ADDITIONALLY runs a REAL `promtool test
+# rules` over the W3-T2/W3-T3 rules, (e) STATE its reduced scale + name the deferred
+# 30-day calendar soak, and (f) keep the L3/L5 + secret-hygiene guards. Removing any
+# makes a check FAIL.
+echo "== validating W4-T7 compressed-soak drill artifacts =="
+
+SOAK_CHECK="${CHECKS_DIR}/compressed-soak.sh"
+SOAK_PROBE="${CHECKS_DIR}/compressed-soak-drill-probe.yaml"
+SOAK_BITE="${HERE}/compressed-soak-bite.sh"
+SOAK_PROMTOOL_TEST="$(cd "${KIND_DIR}/../.." && pwd)/deploy/observability/slo-compressed-soak.test.yaml"
+require_file "${SOAK_CHECK}"         "W4-T7 compressed-soak drill check"
+require_file "${SOAK_PROBE}"         "W4-T7 compressed-soak drill probe pod manifest"
+require_file "${SOAK_BITE}"          "W4-T7 compressed-soak drill negative-control bite proof (self-test)"
+require_file "${SOAK_PROMTOOL_TEST}" "W4-T7 compressed-soak SLO-held promtool fixture (real W3-T2/W3-T3 rules)"
+
+# (a) STEADY load over a COMPRESSED WINDOW, sampled MANY times, asserting §6 SLOs
+#     stay WITHIN budget over the window (no burn-rate alert would fire).
+grep_must "${SOAK_CHECK}" 'SOAK_WINDOW_S' \
+  "compressed-soak drill drives load over a stated COMPRESSED WINDOW (SOAK_WINDOW_S — minutes, not the 30-day SLA)"
+grep_must "${SOAK_CHECK}" 'SOAK_SAMPLE_INTERVAL_S|sampling' \
+  "compressed-soak drill SAMPLES the SLIs across the window (many samples — the sustained-window assertion, not one reading)"
+grep_must "${SOAK_CHECK}" 'MAX_AVAIL_ERR|worst.*avail_err|worst-over-window' \
+  "compressed-soak drill tracks the WORST SLI over the window (SLO held only if EVERY sample stayed in budget)"
+grep_must "${SOAK_CHECK}" 'AVAIL_ERR_BUDGET_PERMILLE' \
+  "compressed-soak drill asserts the availability SLI against the fast-burn error budget (§6 row 1, ADR-0046 §2)"
+grep_must "${SOAK_CHECK}" 'MAX_AVAIL_ERR.*-le.*AVAIL_ERR_BUDGET_PERMILLE|MAX_AVAIL_ERR\}" -le "\$\{AVAIL_ERR_BUDGET_PERMILLE' \
+  "compressed-soak drill PASSES only when the window availability error <= budget and FAILS when it exceeds it (the SLO-held bite)"
+grep_must "${SOAK_CHECK}" 'LATENCY_SLOW_FRAC_PERMILLE' \
+  "compressed-soak drill asserts the read-latency too-slow fraction against the fast-burn budget (§6 row 2, ADR-0046 §2)"
+grep_must "${SOAK_CHECK}" 'no.*burn-rate alert.*fire|burn-rate alert WOULD fire|no NetopsApi' \
+  "compressed-soak drill frames the SLO-held assertion as 'no burn-rate alert would fire' (the W3-T3 alert condition, ADR-0046 §2)"
+# (b) NO slow resource regression — bounded connection / memory / queue-depth trends.
+grep_must "${SOAK_CHECK}" 'CONN_START|CONN_END|pgbouncer_server_conns' \
+  "compressed-soak drill samples the PgBouncer server-connection count at window START + END (the connection-leak trend, ADR-0047 §2 soak)"
+grep_must "${SOAK_CHECK}" 'RSS_START|RSS_END|worker_rss_kb' \
+  "compressed-soak drill samples the worker RSS at window START + END (the memory-leak trend, ADR-0047 §2 soak)"
+grep_must "${SOAK_CHECK}" 'QDEPTH_START|QDEPTH_END|queue_len' \
+  "compressed-soak drill samples the queue depth at window START + END (the backlog trend, ADR-0047 §2 soak)"
+grep_must "${SOAK_CHECK}" 'TRENDED UP|BOUNDED' \
+  "compressed-soak drill FAILS on a monotone upward resource TREND and passes when bounded (a leak → a trend → fail, ADR-0047 §2 soak)"
+grep_must "${SOAK_CHECK}" 'GROWTH_TOLERANCE' \
+  "compressed-soak drill compares the END-vs-START delta against a bounded-growth tolerance (a leak beyond noise → fail)"
+# (c) SKIP loudly on a no-api run (never false-green).
+grep_must "${SOAK_CHECK}" 'SKIP:' \
+  "compressed-soak drill SKIPS LOUDLY when no api Deployment is present (a missing target is never a false-green pass)"
+# (d) the negative control is SHIPPED + wired, and PROVEN to bite by the self-test
+#     (which runs the REAL promtool SLO-held fixture too).
+grep_must "${SOAK_CHECK}" 'COMPRESSED_SOAK_DRILL_NEGATIVE_CONTROL' \
+  "compressed-soak drill ships the negative control (injected SLO regression + resource leak) as a toggle (ADR-0047 §2)"
+grep_must "${SOAK_CHECK}" 'error-rate.*latency perturbation|latency perturbation|injected.*SLO regression|SLO regression' \
+  "compressed-soak drill's negative control injects an error-rate + latency perturbation (a burn-rate breach, ADR-0046 §6 / ADR-0047 §2)"
+grep_must "${SOAK_BITE}" 'COMPRESSED_SOAK_DRILL_NEGATIVE_CONTROL=1' \
+  "compressed-soak bite proof runs the drill WITH the negative control and asserts it goes RED"
+grep_must "${SOAK_BITE}" 'FALSE-GREEN' \
+  "compressed-soak bite proof fails if the negative control does NOT turn the drill red (the anti-false-green guard)"
+grep_must "${SOAK_BITE}" 'promtool test rules' \
+  "compressed-soak bite proof runs a REAL promtool test over the W3-T2/W3-T3 rules (the SLO-held / no-burn-rate-alert assertion bites cluster-free, ADR-0046 §2/§6)"
+# The promtool fixture must load the ACTUAL recording rules + burn-rate alerts and
+# carry BOTH a healthy-silent case AND a firing negative control (the anti-false-green
+# alert-as-test control, ADR-0046 §6).
+grep_must "${SOAK_PROMTOOL_TEST}" 'slo-recording.rules.yaml' \
+  "compressed-soak promtool fixture loads the W3-T2 recording rules (evaluates the SAME SLI series Prometheus does)"
+grep_must "${SOAK_PROMTOOL_TEST}" 'slo-burn-rate.alerts.yaml' \
+  "compressed-soak promtool fixture loads the W3-T3 burn-rate alerts (the alerts the soak must NOT trip)"
+grep_must "${SOAK_PROMTOOL_TEST}" 'exp_alerts: \[\]' \
+  "compressed-soak promtool fixture asserts the HEALTHY window fires NO alert (SLOs held — positive path)"
+grep_must "${SOAK_PROMTOOL_TEST}" 'NEGATIVE CONTROL' \
+  "compressed-soak promtool fixture carries the NEGATIVE-CONTROL firing case (injected regression → burn-rate alert fires)"
+# (e) STATE reduced scale + NAME the deferred 30-day calendar soak.
+grep_must "${SOAK_CHECK}" 'reduced scale|deferred-accepted' \
+  "compressed-soak drill STATES its reduced (compressed-window) scale + names the deferred 30-day calendar soak (ADR-0047 §1/§4)"
+grep_must "${SOAK_CHECK}" '30-day' \
+  "compressed-soak drill explicitly names the 30-day CALENDAR soak as the deferred ceiling (never claimed, ADR-0047 §4)"
+# (f) secret hygiene + L3/L5 + N1 plumbing (the load path touches Redis broker + DB pooler creds).
+grep_must "${SOAK_CHECK}" 'exec -i' \
+  "compressed-soak drill feeds the Redis/DB password over stdin (kubectl exec -i), not argv (secret hygiene / N11)"
+grep_must "${SOAK_CHECK}" 'read -r RPW|IFS= read -r RPW|read -r PGPW|IFS= read -r PGPW' \
+  "compressed-soak drill reads the Redis/DB password from stdin inside the pod (never a visible argv arg)"
+grep_must "${SOAK_CHECK}" 'sh -c|bash -c' \
+  "compressed-soak drill drives in-pod redis-cli/loadgen via sh -c/bash -c positional args, not \$(VAR) in the exec argv (L3)"
+grep_must "${SOAK_CHECK}" 'set -euo pipefail' \
+  "compressed-soak drill sets pipefail so a masked in-pod exit cannot read green (L5)"
+grep_must "${SOAK_CHECK}" 'register_cleanup' \
+  "compressed-soak drill registers its teardown via register_cleanup (composes with the assert-exit bite, N1)"
+grep_must_not "${SOAK_CHECK}" '^[[:space:]]*trap[[:space:]]+[^#[:space:]]+[[:space:]]+EXIT' \
+  "compressed-soak drill installs NO bare 'trap … EXIT' (would clobber lib.sh's assert-exit bite, N1)"
+grep_must_not "${SOAK_CHECK}" 'echo.*REDIS_PW_VALUE|echo.*PGPASSWORD_VALUE|REDIS_PW_VALUE=.*echo|PGPASSWORD_VALUE=.*echo' \
+  "compressed-soak drill never echoes the Redis/Postgres password (secret hygiene)"
+grep_must_not "${SOAK_CHECK}" 'sqlite://|aiosqlite|:memory:|\.sqlite' \
+  "compressed-soak drill has NO SQLite code path — the connection/pool probe runs on the real CNPG cluster (ADR-0047 §5)"
+# probe pod hygiene: non-root, digest-pinned, no :latest, no API token.
+grep_must "${SOAK_PROBE}" 'runAsNonRoot: true' \
+  "compressed-soak drill probe pod is non-root (restricted PSA admissible, ADR-0029 §3)"
+grep_must "${SOAK_PROBE}" 'image:.*@sha256:[0-9a-f]{64}' \
+  "compressed-soak drill probe pod pins its image by sha256 digest, not a mutable tag (N12)"
+grep_must_not "${SOAK_PROBE}" 'image:.*:latest' \
+  "no :latest image tag in the compressed-soak drill probe pod (admission would reject)"
+grep_must "${SOAK_PROBE}" 'automountServiceAccountToken: false' \
+  "compressed-soak drill probe pod drops its API token (least privilege, ADR-0029 §5)"
+
 echo "== validator summary: ${fails} failure(s) =="
 if [ "${fails}" -ne 0 ]; then
   echo "::error::kind harness validator found ${fails} violation(s)" >&2

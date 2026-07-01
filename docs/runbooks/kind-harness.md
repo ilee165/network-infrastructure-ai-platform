@@ -32,6 +32,9 @@ Give the two W4 enforcement tasks a deterministic, hardware-free place to BITE: 
 | Worker-kill drill bite proof (P3 W4-T5) | `ci/kind/selftest/worker-kill-idempotency-bite.sh` (hardware-free negative-control plant→red→revert; runs in `kind-harness-ha`, no cluster) |
 | Queue-burst + API load + PgBouncer drill (P3 W4-T6) | `ci/kind/assertions/checks/queue-burst-load.sh` + `queue-burst-load-drill-probe.yaml` (G-SCA §326–§330 — runs on the HA path via the assertion-runner) |
 | Queue-burst/load drill bite proof (P3 W4-T6) | `ci/kind/selftest/queue-burst-load-bite.sh` (hardware-free negative-control plant→red→revert; runs in `kind-harness-ha`, no cluster) |
+| Compressed-soak drill (P3 W4-T7) | `ci/kind/assertions/checks/compressed-soak.sh` + `compressed-soak-drill-probe.yaml` (G-REL §315 compressed — runs on the HA path via the assertion-runner) |
+| Compressed-soak drill bite proof (P3 W4-T7) | `ci/kind/selftest/compressed-soak-bite.sh` (hardware-free — REAL `promtool test rules` over the W3-T2/W3-T3 rules + fake-kubectl drill-flow polarity; runs in `kind-harness-ha`, no cluster) |
+| Compressed-soak SLO-held promtool fixture (P3 W4-T7) | `deploy/observability/slo-compressed-soak.test.yaml` (healthy window silent + injected-regression firing case over the real recording/alert rules) |
 
 ## How the harness runs (`kind-harness.sh`)
 
@@ -469,6 +472,96 @@ neutered scale-out assertion → RED; reverted → GREEN).
   live negative control **MUST be re-verified on the CI runner** (plant → RED →
   revert → GREEN on the actual cluster) — a named prerequisite on the ADR-0047 §4
   promotion path.
+
+## Compressed-soak drill (P3 W4-T7, G-REL §315 compressed) — §6 SLOs hold over the compressed window
+
+The compressed-soak drill (`ci/kind/assertions/checks/compressed-soak.sh`) is
+auto-discovered by the assertion-runner and runs on the `HA=1` path. It proves the
+**§6 SLOs are measurable and HELD over a sustained-but-compressed run** and that no
+resource leaks over that run — the compressed-soak MECHANISM (ADR-0047 §1/§2/§3).
+
+### §11 criterion + target (ADR-0046 §1/§2/§6, ADR-0047 §3)
+
+- **G-REL §315 (compressed):** drive STEADY mixed synthetic load over a compressed
+  window and assert the §6 SLO recording rules (W3-T2) stay **within budget** so **no
+  multi-window burn-rate alert (W3-T3) fires**, and that there is **no slow resource
+  regression** (connections / memory / queue depth stay bounded — a trend → fail).
+
+### What the drill does
+
+1. Records a **START-of-window resource baseline** — PgBouncer server-connection
+   count (via `pg_stat_activity` through the Pooler rw Service), the discovery worker
+   RSS (cgroup `memory.current`), and each soak queue's `LLEN`.
+2. Drives `COMPRESSED_SOAK_WINDOW_S` (default **600 s / 10 min**) of **steady mixed
+   load** — a reduced-concurrency HTTP read load against the api Service (bash
+   `/dev/tcp`, no k6/locust) **plus** a steady discovery/config/docs queue-job
+   trickle — sampling the §6 SLIs every `COMPRESSED_SOAK_SAMPLE_INTERVAL_S`
+   (default **30 s**), so the window carries **many** samples.
+3. Each sample computes the **same SLIs the W3-T2 recording rules derive**: the
+   non-5xx availability error ratio, the fraction of reads exceeding the 300 ms p95
+   boundary, and (from a `/metrics` scrape) the discovery success ratio. The drill
+   tracks the **worst** SLI over the window and asserts each stayed **within the
+   fast-burn budget** (the W3-T3 14.4× thresholds) — i.e. **no burn-rate alert would
+   fire**. The SLO is HELD only if **every** sample stayed in budget.
+4. Records an **END-of-window resource sample** and asserts each resource stayed
+   **BOUNDED** (delta ≤ tolerance) — a monotone rise is a leak that would surface
+   over calendar time → **fail**.
+
+### Reduced scale (STATED) + named ceiling (ADR-0047 §1/§4)
+
+- **Reduced scale ran at:** a **~10-minute compressed window** (default; tunable),
+  ~tens of virtual users + a steady per-queue trickle, on the W4-T1 reduced-scale HA
+  cluster. This proves the SLO-held + no-slow-regression **MECHANISM**, not the
+  calendar SLA.
+- **Named-deferred → GA:** the **30-day CALENDAR soak meeting all §6 SLOs** (G-REL
+  §315) is **deferred-accepted → GA / customer cluster**, **never claimed here**.
+  **Promotion path (ADR-0047 §4):** a 30-day staging window on a sized cluster; run
+  the calendar soak, assert §6 SLOs.
+
+### Negative control — PROVEN to bite (ADR-0047 §2)
+
+`COMPRESSED_SOAK_DRILL_NEGATIVE_CONTROL=1` injects an **SLO regression** (an
+error-rate + latency perturbation on the synthetic load → the availability + latency
+SLIs breach their budget over the window → a burn-rate breach) **and** a **monotone
+resource leak** (connection / RSS / queue-depth trend), so the SLO-held +
+bounded-trend assertions go **RED**. The bite is earned **hardware-free** in two
+layers by `ci/kind/selftest/compressed-soak-bite.sh`:
+
+1. **The load-bearing layer runs a REAL `promtool test rules`** over the ACTUAL
+   W3-T2 recording rules + W3-T3 burn-rate alerts
+   (`deploy/observability/slo-compressed-soak.test.yaml`): a HEALTHY
+   compressed-soak-shaped window fires **NO** alert (SLOs held), and the injected
+   error-rate + latency perturbation **DOES** fire the burn-rate alert (RED). This
+   proves the soak's core assertion ("no burn-rate alert fires over the window")
+   bites against the same rules Prometheus loads.
+2. It runs the real `compressed-soak.sh` against a fake `kubectl` and asserts the
+   polarity — GREEN when the SLIs stay in budget + resources bounded, RED under the
+   negative control.
+
+Executed on the authoring host: **0 failure(s)** — promtool SUCCESS (healthy silent
++ injected regression fires); the drill exits **0** on the positive path and **8**
+under the negative control (the SLO-held + trend assertions bite). The bite proof
+itself has a **negative control on the bite**: flipping the promtool fixture's
+firing case to expect no alert makes `promtool test rules` FAIL with `exp:[] got:[…
+NetopsApiAvailabilityFastBurn …]` — confirming the fire is genuinely asserted.
+
+### Gate posture — SIGNAL-ONLY (live), BLOCKING (static bite proof)
+
+- The **live** soak drill runs inside the `HA=1` harness in the **`kind-harness-ha`**
+  CI job, which stays **`continue-on-error` / absent from `all-gates`**. Promoting
+  the G-REL soak drill to **blocking** is a deliberate later step (**W5/GA**), not
+  W4-T7.
+- The **static** bite proof (`compressed-soak-bite.sh`, incl. the real `promtool`
+  run) and the `validate-harness.sh` W4-T7 invariants are **blocking within the job**
+  — a silently weakened soak (a dropped SLO-held budget check, a removed
+  bounded-trend guard, a removed negative control, a SQLite path) fails there, no
+  cluster needed.
+- **L1 caveat:** the **live** steady-load + SLI-sampling path has **not** run on the
+  authoring host; it runs live only on the CI ubuntu runner. Do not claim a local
+  live soak run. Before any W5/GA promotion of this drill to blocking, the live
+  negative control **MUST be re-verified on the CI runner** (plant → RED → revert →
+  GREEN on the actual cluster) — a named prerequisite on the ADR-0047 §4 promotion
+  path.
 
 ## Gate status — SIGNAL-ONLY (promotion AUTHORED, HELD pending ADR-0048 §4 bite)
 

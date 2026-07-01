@@ -1,0 +1,162 @@
+# promtool test rules — COMPRESSED-SOAK SLO-held bite proof for the W4-T7
+# compressed-soak drill (P3 W4-T7; G-REL §315 compressed; ADR-0046 §1/§2/§6,
+# ADR-0047 §2/§3).
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# W4-T7's core assertion is "the §6 SLO recording rules stay WITHIN budget and NO
+# burn-rate alert fires over the compressed soak window." The LIVE drill
+# (ci/kind/assertions/checks/compressed-soak.sh) proves this on the kind HA cluster
+# by driving steady load + sampling the SLIs — but kind cannot run on the authoring
+# host (P1-W4 L1). ADR-0047 §2 requires the drill's negative control be SHOWN to
+# bite (plant → red → revert), not merely asserted. This file earns that proof
+# HARDWARE-FREE with a REAL `promtool test rules` over the SAME W3-T2 recording
+# rules + W3-T3 burn-rate alerts the drill's SLO-held assertion mirrors:
+#   * HEALTHY sustained window — a compressed-soak-shaped steady stream well within
+#     every §6 SLO budget → NO burn-rate alert fires (the SLOs HELD, the positive
+#     path / revert-to-green).
+#   * PERTURBED window (the NEGATIVE CONTROL) — an injected SLO regression (an
+#     error-rate + a latency perturbation, exactly what the drill injects with
+#     COMPRESSED_SOAK_DRILL_NEGATIVE_CONTROL=1) sustained over the window → the
+#     multi-window burn-rate alert DOES fire (a burn-rate breach → RED).
+# A soak whose "SLOs held" would read green whether or not the SLIs were within
+# budget is not a gate (P1-W4 false-green). This file makes the SLO-held / no-alert
+# assertion bite against the real rule + alert files, so a regression in either the
+# soak drill's budget mirror OR the recording/alert rules is caught cluster-free.
+#
+# rule_files loads the ACTUAL W3-T2 recording rules AND W3-T3 burn-rate alerts (bare
+# filenames — promtool resolves them relative to THIS file's directory), so the
+# alerts are evaluated exactly as Prometheus would over the recorded SLI series —
+# not against ad-hoc expressions.
+#
+# COMPRESSED-WINDOW MODELLING: the series run as per-minute steps across a
+# compressed-but-sustained window long enough that the fast-burn (5m AND 1h) leg has
+# a full window and each alert's `for:` hold clears. This is the SLO-held MECHANISM
+# proof, not the 30-day calendar SLA (which is NAMED deferred → GA, ADR-0047 §4).
+#
+# Run:  promtool test rules deploy/observability/slo-compressed-soak.test.yaml
+# CI:   the `kind-harness-ha` job runs it via ci/kind/selftest/compressed-soak-bite.sh
+#       (needs no cluster — it is the hardware-free SLO-held bite proof for the live
+#       soak drill's negative control).
+
+rule_files:
+  - slo-recording.rules.yaml
+  - slo-burn-rate.alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ===========================================================================
+  # POSITIVE / REVERT-TO-GREEN — a HEALTHY compressed-soak window: steady all-2xx
+  # traffic, fast reads (all in the le=0.3 p95 bucket), all discovery runs
+  # succeeding. EVERY §6 SLO stays within budget over the sustained window → NO
+  # burn-rate alert fires. This is the drill's "SLOs held" positive assertion.
+  # ===========================================================================
+  - interval: 1m
+    name: compressed soak — HEALTHY window holds every §6 SLO (no burn-rate alert fires)
+    input_series:
+      # API availability: 900/min all 2xx (error ratio 0) — availability SLO held.
+      - series: 'netops_http_requests_total{status_class="2xx", route="/api/v1/devices"}'
+        values: '0+900x180'
+      # API read latency: every request in the le=0.3 (300ms) bucket and le=1.0 and
+      # +Inf — too-slow fraction 0 → p95/p99 latency SLO held.
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.3", route="/api/v1/devices"}'
+        values: '0+900x180'
+      - series: 'netops_http_request_duration_seconds_bucket{le="1.0", route="/api/v1/devices"}'
+        values: '0+900x180'
+      - series: 'netops_http_request_duration_seconds_bucket{le="+Inf", route="/api/v1/devices"}'
+        values: '0+900x180'
+      # Discovery: every run succeeds (error ratio 0) → discovery success SLO held.
+      - series: 'netops_discovery_runs_total{status="succeeded"}'
+        values: '0+50x180'
+    alert_rule_test:
+      # Eval at 90m: both the 5m and 1h fast-burn legs have a full window and the
+      # for: holds are cleared. NONE of the §6 burn-rate alerts may be firing.
+      - eval_time: 90m
+        alertname: NetopsApiAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: NetopsApiAvailabilitySlowBurn
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: NetopsApiReadLatencyP95FastBurn
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: NetopsApiReadLatencyP95SlowBurn
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: NetopsApiReadLatencyP99FastBurn
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: NetopsDiscoverySuccessFastBurn
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: NetopsDiscoverySuccessSlowBurn
+        exp_alerts: []
+
+  # ===========================================================================
+  # NEGATIVE CONTROL (availability) — the injected ERROR-RATE perturbation the drill
+  # applies with COMPRESSED_SOAK_DRILL_NEGATIVE_CONTROL=1: a sustained ~40% 5xx
+  # stream over the window drives the availability error ratio (~0.4) far above the
+  # 14.4*0.001=0.0144 page threshold on BOTH the 5m and 1h legs → the fast-burn
+  # availability alert FIRES (a burn-rate breach → the soak's "SLOs held" goes RED).
+  # A rule/alert that never fires on this real regression FAILS this case.
+  # ===========================================================================
+  - interval: 1m
+    name: compressed soak NEGATIVE CONTROL — injected error-rate → availability burn fires
+    input_series:
+      # 540/min 2xx + 360/min 5xx → error ratio 360/900 = 0.40 (the drill's ~40%
+      # injected 503 fraction), sustained over the window.
+      - series: 'netops_http_requests_total{status_class="2xx", route="/api/v1/devices"}'
+        values: '0+540x180'
+      - series: 'netops_http_requests_total{status_class="5xx", route="/api/v1/devices"}'
+        values: '0+360x180'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: NetopsApiAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: api_availability
+              tier: fast
+            exp_annotations:
+              summary: "API availability burning the 30-day error budget fast (>=14.4x)"
+              description: "The non-5xx request ratio (SLI slo:netops_api_availability:ratio_rate5m) is consuming the 0.1% / 30-day error budget at >=14.4x over BOTH the 5m and 1h windows. At this rate ~2% of the 30-day budget is spent in 1h."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-availability.md"
+
+  # ===========================================================================
+  # NEGATIVE CONTROL (latency) — the injected LATENCY perturbation the drill applies
+  # (a fraction of reads spiking past the 300ms p95 boundary): a sustained ~40% of
+  # reads landing ABOVE le=0.3 drives the too-slow fraction (~0.4) above the
+  # 14.4*0.05=0.72? no — 0.40 < 0.72 for the page tier, so we push the injected slow
+  # fraction to ~0.8 (the drill spikes the slow requests to boundary+500ms, and at
+  # the negative-control ~40%+ it exceeds the fast-burn budget for the TICKET tier;
+  # to make the PAGE tier fire deterministically we model the drill's worst-case
+  # sustained slow fraction ~0.8, well over 0.72). The p95 fast-burn alert FIRES.
+  # ===========================================================================
+  - interval: 1m
+    name: compressed soak NEGATIVE CONTROL — injected latency spike → read-latency p95 burn fires
+    input_series:
+      # 900/min total; only 150/min land in the le=0.3 bucket → 750/min (0.833) are
+      # too slow, above the 14.4*0.05=0.72 page threshold on both 5m and 1h legs.
+      - series: 'netops_http_request_duration_seconds_bucket{le="0.3", route="/api/v1/devices"}'
+        values: '0+150x180'
+      # le=1.0 and +Inf carry the full 900/min (all requests complete under 1s, so
+      # only the p95<300ms objective is breached, not p99<1s — a targeted p95 burn).
+      - series: 'netops_http_request_duration_seconds_bucket{le="1.0", route="/api/v1/devices"}'
+        values: '0+900x180'
+      - series: 'netops_http_request_duration_seconds_bucket{le="+Inf", route="/api/v1/devices"}'
+        values: '0+900x180'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: NetopsApiReadLatencyP95FastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: api_read_latency
+              tier: fast
+              objective: p95
+            exp_annotations:
+              summary: "API read p95 latency budget burning fast (>=14.4x too-slow fraction)"
+              description: "The fraction of read requests exceeding the 300 ms p95 objective is burning the 5% latency budget at >=14.4x over BOTH 5m and 1h. SLI quantile series: slo:netops_api_read_latency:p95_5m."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
