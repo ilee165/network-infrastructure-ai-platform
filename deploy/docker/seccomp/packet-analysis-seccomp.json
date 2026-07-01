@@ -179,6 +179,31 @@
       ],
       "action": "SCMP_ACT_ALLOW",
       "comment": "benign process introspection + time + RNG that glibc/Python need at startup. prctl is allowed for PR_SET_NAME/PR_SET_NO_NEW_PRIVS; capset is NOT allowed (the parser drops to zero caps and never re-acquires). Note the absence of socket(), bpf(), ptrace(), mount(), unshare(), setns(), keyctl(), add_key(), request_key(), process_vm_readv/writev(), kexec_load(), init_module(), finit_module(), and personality() — each is a known sandbox-escape or raw-socket primitive and is denied by SCMP_ACT_ERRNO."
+    },
+    {
+      "names": [
+        "fsopen",
+        "fsconfig",
+        "fsmount",
+        "fspick",
+        "open_tree",
+        "move_mount",
+        "mount_setattr",
+        "statfs",
+        "fstatfs",
+        "statfs64",
+        "fstatfs64"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "runc >=1.2 container init (new mount API). fsopen/fsconfig/fsmount/fspick/open_tree/move_mount/mount_setattr are required by runc's safe re-open of /proc/self/fd — the CVE-2024-21626 (\"Leaky Vessels\") mitigation — and statfs/fstatfs verify the reopened handle is really procfs (PROC_SUPER_MAGIC). Without these the analysis container cannot start and crash-loops: 'reopen exec fifo: get safe /proc/thread-self/fd handle: fstatfs fsmount:fscontext:proc: operation not permitted'. These mirror moby's own default hardened profile. They are INERT without CAP_SYS_ADMIN, which this sandbox drops (cap_drop:ALL + no-new-privileges): the unprivileged parser still cannot mount a filesystem, pivot_root, or change namespaces — the classic mount()/unshare()/setns() escape primitives remain denied by the default action (SCMP_ACT_ERRNO)."
+    },
+    {
+      "names": [
+        "link",
+        "linkat"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "celery/billiard POSIX named-semaphore creation: glibc sem_open(O_CREAT) atomically creates /dev/shm/sem.<name> via a temp-file-then-link() dance, so a denied link() crashes the celery prefork worker at boot ('PermissionError: [Errno 1] Operation not permitted' in _billiard.SemLock). link/linkat create hard links only (no new content, same filesystem, write required on the target dir — reachable only inside the writable tmpfs scratch and /dev/shm here); they are NOT a sandbox-escape primitive and are allowed unconditionally by moby's default profile. The pcap is on a read-only mount and cannot be hard-linked out."
     }
   ]
 }

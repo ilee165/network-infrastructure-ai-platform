@@ -56,6 +56,13 @@ spec:
           imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
           command:
             {{- toYaml .Values.packet.analysis.command | nindent 12 }}
+          # readOnlyRootFilesystem leaves no writable default tempdir, so Python/
+          # celery/tshark/pyshark tempfile.gettempdir() fails ("No usable temporary
+          # directory found"). Point them at the one emptyDir scratch — lockstep
+          # with the Compose TMPDIR (ADR-0031 §2).
+          env:
+            - name: TMPDIR
+              value: {{ .Values.packet.analysis.scratch.mountPath | quote }}
           securityContext:
             runAsNonRoot: {{ .Values.packet.analysis.securityContext.runAsNonRoot }}
             runAsUser: {{ .Values.packet.analysis.securityContext.runAsUser }}

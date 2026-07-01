@@ -45,7 +45,19 @@ docker compose --env-file .env -f deploy/docker/docker-compose.yml up -d
 docker compose --env-file .env -f deploy/docker/docker-compose.yml --profile local-llm up -d
 ```
 
-Then verify:
+The core stack (`api`, `worker`, `frontend`, `postgres`, `redis`, `neo4j`) comes
+up with the commands above. The **`packet-analysis`** pcap-parser worker is
+**not functional in the current release** and is deliberately excluded from the
+default `up`: its ADR-0031 §3 no-socket seccomp sandbox is incompatible with a
+broker-connected Celery worker — glibc's DNS resolver needs a socket, so the
+worker never reaches Redis (see ADR-0031 §3 "Deferred"). The `packet` compose
+profile exists only as the deployment seam for that deferred work; starting it
+(`docker compose … --profile packet up -d`) currently yields a worker that
+**crash-loops on the broker connection**, so do **not** enable it until the
+contradiction is resolved (nested seccomp on the tshark child, or a §3 amendment
+plus the §4 egress NetworkPolicy).
+
+Then verify (core stack):
 
 ```bash
 curl http://localhost:8000/api/v1/health/live    # {"status":"ok"}
@@ -163,11 +175,15 @@ from the base file so the platform is reachable only through the TLS edge.
 
 The `packet-analysis` service applies the deny-by-default Localhost seccomp
 profile (ADR-0031 §3), byte-for-byte the same JSON the Helm chart references.
-Docker resolves a `seccomp=` **relative** path against the **client CWD** (not
-the compose-file directory), so the default
-`NETOPS_SECCOMP_PROFILE=./deploy/docker/seccomp/packet-analysis-seccomp.json`
-resolves correctly under the documented **run-from-repository-root** convention.
-If you invoke compose from a different directory (or an air-gapped mirror),
+Docker **Compose** resolves a `seccomp=` **relative** path against the **project
+directory** — the directory of the first `-f` compose file (`deploy/docker/` by
+default), **not** the client CWD (that CWD-relative rule applies to `docker run
+--security-opt`, a different tool). So the default is compose-file-relative and
+resolves correctly from **any** working directory:
+`NETOPS_SECCOMP_PROFILE=./seccomp/packet-analysis-seccomp.json`. Do **not** add a
+`deploy/docker/` prefix — Compose already anchors to that directory, so a
+prefixed value doubles the path (`deploy/docker/deploy/docker/seccomp/...`) and
+fails with "opening seccomp profile ... failed". For an air-gapped mirror,
 override it with an **absolute** path:
 
 ```bash

@@ -167,6 +167,16 @@ IaC misconfig. G-OBS (probes) and G-MNT (lint clean) are continuous-green.
    is documented for other CWDs / air-gapped mirrors (compose README). Kept in
    byte-for-byte lockstep with the chart's Localhost profile (ADR-0031 §3).
 
+   > **Correction (2026-07-01):** the premise above is wrong and this change was
+   > itself a regression. Docker **Compose** resolves a relative `seccomp=` path
+   > against the **project directory** (the first `-f` compose file's dir,
+   > `deploy/docker/`), **not** the client CWD — the CWD rule is `docker run
+   > --security-opt`, a different tool. The `./deploy/docker/seccomp/...` value set
+   > here therefore *doubles* to `deploy/docker/deploy/docker/seccomp/...` and fails
+   > to open. Reverted to the original compose-file-relative
+   > `./seccomp/packet-analysis-seccomp.json`, which resolves correctly from any CWD.
+   > Lockstep with the chart profile is unaffected.
+
 ## Single-replica / non-HA (honest)
 
 P1 GA is **single-replica**: one replica per workload, no HPA/KEDA/operator/PDB.
