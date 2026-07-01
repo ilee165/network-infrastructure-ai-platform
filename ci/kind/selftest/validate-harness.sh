@@ -24,6 +24,12 @@ LIB="${KIND_DIR}/assertions/lib.sh"
 DENY="${KIND_DIR}/cni-selftest/default-deny.yaml"
 PROBE="${KIND_DIR}/cni-selftest/probe.yaml"
 CHECKS_DIR="${KIND_DIR}/assertions/checks"
+# P3 W4-T1 HA add-on artifacts (the reduced-scale HA topology the W4 drills run on).
+HA_DIR="${KIND_DIR}/ha"
+HA_INSTALL="${HA_DIR}/install-operators.sh"
+HA_WAIT="${HA_DIR}/wait-ha-ready.sh"
+HA_VALIDATE="${HA_DIR}/validate-ha-overlay.sh"
+HA_OVERLAY="$(cd "${KIND_DIR}/../.." && pwd)/deploy/kubernetes/netops/values-kind-ha.yaml"
 
 fails=0
 ok()   { echo "PASS: $*"; }
@@ -317,6 +323,109 @@ for f in "${PROBE}" "${MTLS_PROBE}" "${COLLECTOR_PROBE}"; do
   if [ -f "${f}" ]; then
     grep_must "${f}" 'image:.*@sha256:[0-9a-f]{64}' \
       "${f##*/} pins its probe image by sha256 digest, not a mutable tag (N12)"
+  fi
+done
+
+# --- P3 W4-T1: ephemeral HA topology add-on invariants (ADR-0047 / ADR-0048 §3) --
+# The HA path (HA=1) EXTENDS this same harness with the CNPG operator + KEDA + the
+# reduced-scale HA overlay, WITHOUT disturbing the P2 CNI self-test / mTLS /
+# collector assertions above. These static checks assert the HA artifacts exist
+# and carry every load-bearing property (pinned operators, idempotent+retried
+# install, readiness gating so a half-up cluster is not "ready" (L5), and the P2
+# assertions stay composed). Removing any makes a check FAIL — this validator
+# BITES on a silently weakened HA path just as it does on the P2 path.
+echo "== validating W4-T1 HA topology add-on artifacts =="
+
+require_file "${HA_INSTALL}"   "HA operator installer (CNPG + KEDA)"
+require_file "${HA_WAIT}"       "HA readiness gate"
+require_file "${HA_VALIDATE}"   "HA overlay static validator"
+require_file "${HA_OVERLAY}"    "reduced-scale HA values overlay"
+
+# The harness must expose an HA=1 path that COMPOSES the operators + overlay onto
+# the existing P2 run (not a fork). Assert the harness references each HA piece.
+grep_must "${HARNESS}" 'HA="\$\{HA:-0\}"' \
+  "harness gates the HA add-on behind HA=1 (default OFF — P2 behaviour unchanged when off)"
+grep_must "${HARNESS}" 'bash "\$\{HA_INSTALL_OPERATORS\}"' \
+  "harness installs the HA operators (CNPG + KEDA) when HA=1, before the chart apply"
+grep_must "${HARNESS}" 'bash "\$\{HA_WAIT_READY\}"' \
+  "harness gates on HA readiness when HA=1, before running assertions (L5 — no half-up ready)"
+grep_must "${HARNESS}" '\-f "\$\{HA_VALUES\}"' \
+  "harness layers the reduced-scale HA overlay via helm -f when HA=1"
+# The HA operator install must run AFTER the CNI self-test passes (HA does not
+# weaken the enforcing-CNI guarantee) and BEFORE the chart apply (CRDs first).
+selftest_pass_line="$(grep -n 'CNI self-test PASSED' "${HARNESS}" | head -1 | cut -d: -f1 || true)"
+ha_install_line="$(grep -n 'bash "${HA_INSTALL_OPERATORS}"' "${HARNESS}" | head -1 | cut -d: -f1 || true)"
+apply_line="$(grep -n 'rendering netops chart' "${HARNESS}" | head -1 | cut -d: -f1 || true)"
+if [ -n "${selftest_pass_line}" ] && [ -n "${ha_install_line}" ] && [ -n "${apply_line}" ] && \
+   [ "${selftest_pass_line}" -lt "${ha_install_line}" ] && [ "${ha_install_line}" -lt "${apply_line}" ]; then
+  ok "HA operator install runs AFTER the CNI self-test and BEFORE the chart render (CRDs-first ordering)"
+else
+  bad "HA operator install must be between the CNI self-test and the chart render (selftest=${selftest_pass_line:-?} install=${ha_install_line:-?} render=${apply_line:-?})"
+fi
+
+# --- pinned operators, NEVER `latest` (matches the Calico pin discipline) ------
+grep_must "${HA_INSTALL}" 'CNPG_VERSION="\$\{CNPG_VERSION:-[0-9]' \
+  "HA installer pins the CloudNativePG operator version (never latest)"
+grep_must "${HA_INSTALL}" 'KEDA_VERSION="\$\{KEDA_VERSION:-[0-9]' \
+  "HA installer pins the KEDA version (never latest)"
+grep_must_not "${HA_INSTALL}" 'cnpg-latest\.yaml|keda-latest\.yaml|:latest' \
+  "HA installer references NO :latest / -latest operator manifest"
+
+# --- idempotent + retried + fail-closed operator install (L5) -----------------
+grep_must "${HA_INSTALL}" 'apply --server-side --force-conflicts' \
+  "HA installer applies operators server-side (idempotent + re-appliable, --force-conflicts)"
+grep_must "${HA_INSTALL}" 'set -euo pipefail' \
+  "HA installer sets pipefail (a masked fetch/apply exit cannot read green) (L5)"
+grep_must "${HA_INSTALL}" 'test -s "\$\{manifest\}"' \
+  "HA installer guards an EMPTY/truncated operator manifest with test -s (L5 fail-closed)"
+grep_must "${HA_INSTALL}" 'wait --for=condition=Established' \
+  "HA installer waits for the operator CRDs to be Established before any CR is applied (no CRD race)"
+grep_must "${HA_INSTALL}" 'rollout status deployment/cnpg-controller-manager' \
+  "HA installer gates on the CNPG controller being Ready (webhook up) before Cluster apply"
+grep_must "${HA_INSTALL}" 'rollout status deployment/keda-operator' \
+  "HA installer gates on the KEDA operator being Ready before ScaledObject apply"
+
+# --- HA readiness gate: a HALF-UP topology must NOT read ready (L5) ------------
+grep_must "${HA_WAIT}" 'set -euo pipefail' \
+  "HA readiness gate sets pipefail (a masked kubectl read cannot read green) (L5)"
+grep_must "${HA_WAIT}" 'readyInstances' \
+  "HA readiness gate asserts the FULL CNPG instance count is ready (not primary-only) (ADR-0042 §1)"
+grep_must "${HA_WAIT}" 'currentPrimary' \
+  "HA readiness gate requires a CNPG primary to be elected (a writable primary exists)"
+grep_must "${HA_WAIT}" 'rollout status "\$\{sts\}"' \
+  "HA readiness gate waits for the Redis+Sentinel StatefulSets to be fully rolled out"
+grep_must "${HA_WAIT}" 'type=="Ready"' \
+  "HA readiness gate asserts each KEDA ScaledObject reconciled Ready (not a vacuous per-queue substrate)"
+grep_must "${HA_WAIT}" 'must not read ready' \
+  "HA readiness gate HARD-FAILS a half-up topology (the ADR-0048 §3 reliability prerequisite)"
+
+# --- L3: no $(VAR) in an exec argv in the HA scripts (they drive kubectl/helm) --
+# The HA scripts do not exec into pods; assert they contain no `$(VAR)` inside an
+# `sh -c` argv (the L3 hazard). A plain grep for the dangerous form.
+grep_must_not "${HA_INSTALL}" "sh -c '.*\\\$\\(" \
+  "HA installer has no \$(VAR) interpolated into an sh -c exec argv (L3)"
+grep_must_not "${HA_WAIT}" "sh -c '.*\\\$\\(" \
+  "HA readiness gate has no \$(VAR) interpolated into an sh -c exec argv (L3)"
+
+# --- reduced-scale COUNTS are STATED in the overlay (a scale drift BITES) ------
+# The HA overlay must carry the ADR-0047 §1 posture: the reduced counts are named.
+# CNPG 1+2 (instances: 3), Redis+Sentinel 3, api HPA floor 2.
+grep_must "${HA_OVERLAY}" 'instances: 3' \
+  "HA overlay declares CNPG instances: 3 (1 primary + 2 replicas — quorum minimum, ADR-0042 §1)"
+grep_must "${HA_OVERLAY}" 'minReplicas: 2' \
+  "HA overlay keeps the api HPA floor at 2 (HA floor never reduced, ADR-0043 §1)"
+grep_must "${HA_OVERLAY}" 'replicas: 3' \
+  "HA overlay declares Redis/Sentinel replicas: 3 (Sentinel quorum minimum, ADR-0044 §1)"
+# MUTUAL EXCLUSION: the SINGLE-INSTANCE postgres/redis tiers are disabled. Scope to
+# `services.<tier>.enabled` SPECIFICALLY — a bare `grep 'enabled: false'` false-greens
+# on ANY unrelated disabled flag in the overlay (e.g.
+# services.api.autoscaling.requestRate.enabled: false). Match a 2-space `<tier>:`
+# header immediately followed (within 2 lines) by a 4-space `enabled: false`.
+for _tier in postgres redis; do
+  if grep -E "^  ${_tier}:$" -A2 "${HA_OVERLAY}" | grep -Eq '^    enabled: false$'; then
+    ok "HA overlay disables the single-instance ${_tier} tier (services.${_tier}.enabled: false — mutual exclusion)"
+  else
+    bad "HA overlay does NOT set services.${_tier}.enabled: false (mutual exclusion NOT verified)"
   fi
 done
 

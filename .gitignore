@@ -41,3 +41,5 @@ Thumbs.db
 
 # Graphify dev-time codebase graph (regenerable; see .claude/agents/README.md)
 graphify-out/
+
+debug.log
