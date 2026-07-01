@@ -115,8 +115,8 @@ fi
 # Enumerate Running worker pods (sorted, stable). We need at least ONE to run the
 # probe; if there are >= 2 we KILL one mid-run and drive the redelivery on another
 # (a true worker-node-loss trigger). With exactly 1 we still kill it and use the
-# StatefulSet/Deployment-recreated replacement (acks_late redelivers to it), but
-# the ideal reduced-scale HA overlay runs multiple workers.
+# Deployment/ReplicaSet-recreated replacement (a fresh pod name; acks_late redelivers
+# to it), but the ideal reduced-scale HA overlay runs multiple workers.
 mapfile -t WORKER_PODS < <(kubectl -n "${NS}" get pods -l "${WORKER_SELECTOR}" \
   --field-selector=status.phase=Running \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | sort || true)
