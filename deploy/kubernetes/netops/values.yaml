@@ -2142,7 +2142,16 @@ packet:
   # packet-analysis: the hardened parser. UNTRUSTED input (pcap bytes). Zero
   # capabilities, Localhost seccomp, read-only pcap, default-deny egress.
   analysis:
-    enabled: true
+    # OPT-IN / default OFF. The analysis pod runs the ADR-0031 §3 no-socket
+    # Localhost seccomp profile, but a Celery worker must reach the Redis broker
+    # over TCP — the two are mutually exclusive at the container level (glibc
+    # getaddrinfo cannot even open a DNS socket, so the worker never connects), and
+    # tshark is spawned by plain subprocess with no subprocess-level seccomp to
+    # split them. Enable only once that contradiction is resolved — nested seccomp
+    # on the tshark child (worker keeps its socket), or an ADR-0031 §3 amendment
+    # allowing client sockets and relying on the §4 default-deny egress
+    # NetworkPolicy. Mirrors the Compose `packet` opt-in profile.
+    enabled: false
     replicas: 1
     command:
       - celery

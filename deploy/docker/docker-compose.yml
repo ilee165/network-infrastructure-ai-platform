@@ -94,24 +94,48 @@ services:
   #   - pcap volume mounted READ-ONLY (parser cannot alter/delete evidence).
   #   - mem/cpu limits so an adversarial capture is OOM/CPU-bound, not node-exhausting.
   packet-analysis:
+    # OPT-IN (compose profile "packet") — excluded from the default `docker compose
+    # up` so the core quickstart (api/worker/frontend/postgres/redis/neo4j) comes up
+    # clean. Start it explicitly with `docker compose --profile packet up -d`.
+    #
+    # WHY opt-in: the hardened analysis sandbox (ADR-0031 §3) denies socket() by
+    # design — the pcap parser must never open a network path. But this service is
+    # a Celery worker that must reach the Redis broker over TCP, so a container-level
+    # no-socket seccomp profile and a broker-connected worker are mutually exclusive
+    # (glibc getaddrinfo cannot even open a DNS socket → "Temporary failure in name
+    # resolution"), and tshark is spawned by plain subprocess.run with no
+    # subprocess-level seccomp to split the two. Resolving it — nested seccomp on the
+    # tshark child (worker keeps its socket), or an ADR-0031 §3 amendment allowing
+    # client sockets and relying on the §4 default-deny egress NetworkPolicy — is
+    # deferred design work. Everything else in this service (mount-API + link/linkat
+    # seccomp allowances, TMPDIR on the read-only rootfs) is fixed and correct.
+    profiles: ["packet"]
     build:
       context: ../..
       dockerfile: deploy/docker/backend.Dockerfile
     image: netops-backend:dev
     command: celery -A app.workers.celery_app worker -Q packet_analysis
     env_file: ../../.env
+    # read_only rootfs (below) leaves every default tempfile location (/tmp,
+    # /var/tmp, CWD=/srv/netops) unwritable, so Python/celery/tshark/pyshark
+    # tempfile.gettempdir() finds nothing usable and the worker crash-loops
+    # ("No usable temporary directory found"). Point them at the one bounded
+    # tmpfs scratch (ADR-0031 §2). Lockstep with the chart's TMPDIR env.
+    environment:
+      TMPDIR: /tmp/pyshark
     # Seccomp lockstep with the Helm chart (ADR-0031 §3): same JSON, two targets.
-    # Docker resolves a `seccomp=` RELATIVE path against the CLIENT CWD, not this
-    # compose file's directory — so a bare `./seccomp/...` only resolves when the
-    # CWD happens to be deploy/docker/, and BREAKS under the documented
-    # run-from-repository-root convention (README "Run everything from the
-    # repository root"). Anchor it to that documented CWD via an overridable var:
-    # the default resolves correctly from the repo root; invoking from elsewhere
-    # (or an air-gapped mirror) overrides NETOPS_SECCOMP_PROFILE with an ABSOLUTE
-    # path. Keep this byte-for-byte in lockstep with the chart profile.
+    # Compose resolves a `seccomp=` RELATIVE path against the PROJECT DIRECTORY
+    # (the dir of the first `-f` compose file, i.e. deploy/docker/ by default) —
+    # NOT the client CWD (that CWD-relative rule is `docker run --security-opt`,
+    # a different tool). So the value must be compose-file-relative: `./seccomp/...`
+    # resolves to deploy/docker/seccomp/... from ANY CWD, because the project dir
+    # keys off this file's location, not where compose was invoked. Do NOT prefix
+    # it with deploy/docker/ — that doubles the path. An air-gapped mirror can
+    # override NETOPS_SECCOMP_PROFILE with an ABSOLUTE path. Keep the JSON
+    # byte-for-byte in lockstep with the chart profile.
     security_opt:
       - "no-new-privileges:true"
-      - "seccomp=${NETOPS_SECCOMP_PROFILE:-./deploy/docker/seccomp/packet-analysis-seccomp.json}"
+      - "seccomp=${NETOPS_SECCOMP_PROFILE:-./seccomp/packet-analysis-seccomp.json}"
     cap_drop:
       - ALL
     user: "10001:10001"
@@ -121,7 +145,8 @@ services:
       - pcaps:/data/pcaps:ro
     tmpfs:
       # The SINGLE bounded writable scratch — the tshark/pyshark temp path.
-      - /tmp/pyshark:size=512m
+      # mode=1777 so the non-root parser (uid 10001) can create temp files here.
+      - /tmp/pyshark:size=512m,mode=1777
     mem_limit: 1g
     cpus: 2.0
     depends_on:
