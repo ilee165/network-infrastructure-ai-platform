@@ -1,0 +1,82 @@
+# W4-T7 compressed-soak drill PROBE pod
+# (G-REL §315 compressed, ADR-0046 §1/§2 / ADR-0047 §1/§2/§4).
+#
+# The compressed-soak drill (compressed-soak.sh) execs in this pod to:
+#   1. drive a STEADY reduced-concurrency HTTP read load against the in-cluster api
+#      Service over the compressed window using bash's built-in /dev/tcp (NO
+#      curl/k6/locust dependency — the pgvector image ships bash; each request is a
+#      raw HTTP/1.1 GET timed with bash EPOCHREALTIME), measuring the availability
+#      error ratio + the too-slow (> p95 boundary) fraction per sample (the §6 row 1
+#      + row 2 SLIs the W3-T2 recording rules derive);
+#   2. scrape the api /metrics endpoint (same /dev/tcp path) each sample to read the
+#      discovery success counters (§6 row 4 SLI);
+#   3. open ONE psql connection THROUGH the PgBouncer Pooler rw Service to sample the
+#      server-side connection count at the window's start + end (the connection-leak
+#      trend, ADR-0047 §2 soak / ADR-0042 §4).
+# The pod itself only idles + carries psql + bash; all logic is in the check driving
+# it via `kubectl exec`. The DB password is fed over STDIN (never argv), never mounted.
+#
+# The image is the SAME pgvector/pgvector:pg16 the chart's Postgres / the failover +
+# mTLS + queue-burst probes use (psql + bash present; no new image ref,
+# admission-friendly). Hardened to the cluster's restricted Pod Security baseline
+# (ADR-0029 §3): non-root, drop ALL caps, read-only rootfs, seccomp RuntimeDefault,
+# no privilege escalation, no API token. N12: pinned by sha256 DIGEST so a re-push
+# of the tag cannot swap it (same pin as the sibling drill probes).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: compressed-soak-drill-probe
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: compressed-soak-drill-probe
+spec:
+  # The probe never needs the K8s API; drop its token (least privilege, ADR-0029 §5).
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      # N12: pinned by sha256 DIGEST (tag retained for readability). pgvector carries
+      # psql + bash (/dev/tcp) for the soak load + metrics scrape; the multi-arch
+      # pg16 index digest below is immutable (a re-push of the tag cannot swap it) —
+      # same pin as the failover + mTLS + queue-burst probes.
+      image: pgvector/pgvector:pg16@sha256:131dcf7ff6a900545df8e7e092c270aa8c6db2f2c818e408cb45ec21316b74e6
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65532
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      env:
+        # libpq home for any per-user files; points at the writable scratch so a
+        # RO rootfs does not break psql.
+        - name: HOME
+          value: /tmp
+      volumeMounts:
+        # Writable scratch for psql temp files + the loadgen's per-worker latency
+        # files (RO rootfs). Sized for one sample cycle's per-request latency lines
+        # across VUs (the soak reuses the scratch each cycle, not one file per cycle).
+        - name: tmp
+          mountPath: /tmp
+      resources:
+        requests:
+          cpu: 25m
+          memory: 48Mi
+        limits:
+          cpu: 500m
+          memory: 192Mi
+  volumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi

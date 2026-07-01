@@ -1028,20 +1028,25 @@ jobs:
   # assertion-runner (W4-T4 mTLS handshake + W4-T5 egress-deny checks plug in),
   # and tears the cluster down on exit (success OR failure) via a trap.
   #
-  # NOT YET A BLOCKING GATE — deliberately ABSENT from the `all-gates` aggregator
-  # `needs` list below. P1-W4-LESSONS L1: a new gating CI tool must be validated
-  # LOCALLY before it is pushed as a required gate; the kind/CNI live path could
-  # not be run on the W4-T3 authoring host (Windows, no Docker/Linux kind). The W5
-  # release auditor reviewed this and re-deferred promotion to P3-Platform — gating
-  # an enforcing-CNI kind cluster as a required check needs a certified cluster to
-  # run reliably (see P2-RELEASE-READINESS.md G-SEC + docs/runbooks/kind-harness.md).
-  # Until then this job runs for SIGNAL only so a kind/CNI bring-up quirk that only
-  # manifests in CI cannot mask the rest of the suite by flipping the required
-  # aggregator red. The STATIC validator step (validate-harness.sh) needs no cluster
-  # and always runs; the live `kind-harness.sh` step is `continue-on-error` until
-  # promoted in P3-Platform.
+  # NOT YET A BLOCKING GATE — promotion is AUTHORED but HELD pending the ADR-0048 §4
+  # bite proof. This job is deliberately ABSENT from the `all-gates` aggregator
+  # `needs` list below and its live `kind-harness.sh` step stays `continue-on-error`,
+  # so the two live assertions run for SIGNAL only. It was NON-blocking at P2
+  # (P1-W4-LESSONS L1: a new gating CI tool must be validated before it is required,
+  # and the kind/CNI live path could not run on the P2 Windows authoring host — that
+  # is still true on the W4 authoring host). ADR-0048 §4 (Prerequisite B,
+  # "non-negotiable") requires both live assertions be SHOWN to turn the gate RED on
+  # a planted regression, then reverted — on a CI ubuntu runner — BEFORE
+  # `continue-on-error` is dropped and BEFORE this job joins `all-gates`; Alternative
+  # 2 ("Promote without the bite proof") is Rejected. Prerequisite A (the reliable
+  # enforcing-CNI W4-T1 HA topology) IS in place; only Prerequisite B (the EXECUTED
+  # bite) is outstanding — it has NOT run on any runner (L1). Promoting now would be a
+  # false-green blocking gate (the ADR-0048 Risk "worse than continue-on-error"), so
+  # the promotion is held until a runner records the observed red→green. The STATIC
+  # validator step (validate-harness.sh) + the assertion-library self-tests +
+  # extract_secret.py tests stay blocking within the job regardless.
   kind-harness:
-    name: kind-harness (enforcing-CNI self-test + assertions — non-blocking)
+    name: kind-harness (enforcing-CNI self-test + mTLS/collector assertions — signal-only, promotion held pending ADR-0048 §4 bite)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -1088,29 +1093,112 @@ jobs:
           install_only: true
           version: v0.24.0
 
-      # The live enforcement run. continue-on-error until the live path is
-      # validated on a certified enforcing-CNI cluster and promoted to a blocking
-      # gate in P3-Platform (L1; re-deferred from W5 — see P2-RELEASE-READINESS.md).
-      # Teardown is inside the harness trap, so a failure here still deletes the cluster.
+      # The live enforcement run — NOT YET BLOCKING (continue-on-error: true).
+      # W4-T2 was AUTHORED to promote this to blocking, but ADR-0048 §4 (Prerequisite
+      # B, "non-negotiable") requires the two live assertions be SHOWN to turn the
+      # gate RED on a planted regression — plant → red → revert → green — on a CI
+      # ubuntu runner BEFORE `continue-on-error` is dropped and BEFORE this job joins
+      # `all-gates`. Alternative 2 ("Promote without the bite proof") is explicitly
+      # Rejected. Per P1-W4-LESSONS L1, kind CANNOT run on the authoring host (Windows,
+      # no Docker/Linux kind), so that observed red→green run has NOT been executed
+      # yet; until it is (and its run URL / planted→red→reverted commit pair is
+      # recorded in docs/runbooks/kind-harness.md "Prove-it-bites"), promoting to
+      # blocking would be a false-green blocking gate — the exact ADR-0048 Risk
+      # ("worse than continue-on-error"). So this step stays SIGNAL-ONLY.
+      # Prerequisite A (the reliable enforcing-CNI W4-T1 HA topology) IS in place;
+      # only Prerequisite B (the executed bite) is outstanding. The static layers
+      # above stay blocking within the job. Promotion is a deliberate later step once
+      # a runner has produced the observed bite. Teardown is inside the harness trap,
+      # so a failure here still deletes the cluster.
       - name: Run kind harness (create → CNI self-test → apply → assert → teardown)
         id: harness
         continue-on-error: true
         run: bash ci/kind/kind-harness.sh
 
-      # Surface the live-run result in the job summary without flipping the
-      # required aggregator. When the live path is promoted (P3-Platform), drop
-      # continue-on-error above and add this job to the all-gates `needs` list.
+      # Surface the live-run result in the job summary. The harness step is
+      # continue-on-error (SIGNAL-ONLY — not yet blocking, ADR-0048 §4 bite proof
+      # outstanding), so a non-success outcome does NOT fail the job; `if: always()`
+      # keeps the summary line regardless. This step is informational only — it does
+      # not (and must not) re-fail the job, or it would silently re-promote the gate
+      # to blocking without the executed bite.
       - name: Report kind harness outcome
         if: always()
         run: |
           set -euo pipefail
           outcome='${{ steps.harness.outcome }}'
-          echo "kind harness live-run outcome: ${outcome}" >> "$GITHUB_STEP_SUMMARY"
+          echo "kind harness live-run outcome: ${outcome} (SIGNAL-ONLY — not yet blocking, ADR-0048 §4 bite proof pending)" >> "$GITHUB_STEP_SUMMARY"
           if [ "${outcome}" != "success" ]; then
             echo "::warning::kind-harness live run did not succeed (outcome=${outcome}) —" \
-                 "this job is NON-BLOCKING (L1: not locally validated on the authoring" \
-                 "host). Investigate before promoting it to a required gate in W5."
+                 "this is currently SIGNAL-ONLY (not in all-gates needs). Promotion to a" \
+                 "blocking gate awaits the ADR-0048 §4 planted-regression bite proof on a CI runner."
           fi
+
+  # Cluster-free drill NEGATIVE-CONTROL bite proofs — the BLOCKING gate (P3 W4, ADR-0047
+  # §2). Every W4 drill (T3–T7) ships a hardware-free *-bite.sh self-test that runs the
+  # REAL drill against a fake kubectl (+ real promtool for T7) and asserts the negative
+  # control turns it RED (plant → red → revert). These proofs need NO cluster and are
+  # deterministic, so — unlike the live HA bring-up in kind-harness-ha (signal-only for
+  # cluster-reliability reasons, ADR-0048 §3) — nothing prevents them from gating merge.
+  # This job runs them as a REQUIRED check (it is in `all-gates` `needs`) so a drill that
+  # STOPS BITING blocks merge (ADR-0047 §2 regression protection). The SAME steps also
+  # run as a fail-fast guard inside kind-harness-ha before the expensive live kind
+  # bring-up; THIS job is their authoritative merge gate. It promotes NO live drill — the
+  # G-REL/G-SCA LIVE assertions stay signal-only (a deliberate W5/GA step, ADR-0048 §4).
+  drill-bite-proofs:
+    name: drill-bite-proofs (cluster-free negative-control bite proofs — blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # The bite-proof / harness scripts run repo-controlled shell right after
+          # checkout and need no git auth — do NOT persist the token in .git/config
+          # (least privilege; matches the persist-credentials:false job below).
+          persist-credentials: false
+
+      # validate-ha-overlay.sh renders the reduced-scale HA overlay → needs helm.
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+
+      # promtool — the W4-T7 compressed-soak bite runs a REAL `promtool test rules` over
+      # the W3-T2 recording rules + W3-T3 burn-rate alerts (same pin as the observability
+      # job). pipefail so a masked fetch cannot read green (L5).
+      - name: Install promtool (Prometheus) — for the W4-T7 compressed-soak SLO-held bite
+        run: |
+          set -o pipefail
+          PROM_VERSION=2.53.2
+          # Pin the official release digest (prometheus SHA256SUMS) and verify BEFORE
+          # extract/install — a poisoned release asset must not execute as promtool in a
+          # required CI gate. Mirrors the gitleaks download-verify pattern above.
+          PROM_SHA256=60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69
+          curl -sSL -o /tmp/prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          echo "${PROM_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp
+          install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version
+
+      # Static harness invariants + reduced-scale HA overlay render/counts (no cluster).
+      - name: Validate harness invariants incl. HA add-on (static, no cluster)
+        run: bash ci/kind/selftest/validate-harness.sh
+      - name: Validate reduced-scale HA overlay (render + counts, static)
+        run: bash ci/kind/ha/validate-ha-overlay.sh
+
+      # The five W4 drill negative-control bite proofs (plant → red → revert, no cluster).
+      # BLOCKING — a drill that stops biting fails this required gate.
+      - name: W4-T3 failover drill negative-control bite proof
+        run: bash ci/kind/selftest/pg-failover-bite.sh
+      - name: W4-T4 Neo4j rebuild drill negative-control bite proof
+        run: bash ci/kind/selftest/neo4j-rebuild-bite.sh
+      - name: W4-T5 worker-kill idempotency drill negative-control bite proof
+        run: bash ci/kind/selftest/worker-kill-idempotency-bite.sh
+      - name: W4-T6 queue-burst + API load + PgBouncer budget drill negative-control bite proof
+        run: bash ci/kind/selftest/queue-burst-load-bite.sh
+      - name: W4-T7 compressed-soak drill negative-control bite proof (real promtool + fake-kubectl)
+        run: bash ci/kind/selftest/compressed-soak-bite.sh
 
   # Ephemeral HA kind topology (P3 W4-T1, ADR-0047 / ADR-0048 §3). This job stands
   # up the reduced-scale HA substrate the W4 drills (T3–T8) + the gate promotion
@@ -1129,9 +1217,11 @@ jobs:
   # on this CI ubuntu runner, not locally. The RELIABILITY of this bring-up is the
   # explicit ADR-0048 §3 Prerequisite A for W4-T2 gate promotion; until W4-T2 has
   # exercised it green and dropped continue-on-error, this job runs for SIGNAL only.
-  # The STATIC layers (validate-harness.sh HA invariants + validate-ha-overlay.sh)
-  # need no cluster and are BLOCKING within the job; the live `HA=1 kind-harness.sh`
-  # step is continue-on-error.
+  # The STATIC layers (validate-harness.sh HA invariants + validate-ha-overlay.sh) and
+  # the drill negative-control bite proofs need no cluster and are BLOCKING within the
+  # job — a fail-fast guard before the expensive live bring-up. Their AUTHORITATIVE
+  # merge gate is the separate `drill-bite-proofs` job (in all-gates `needs`); the live
+  # `HA=1 kind-harness.sh` step is continue-on-error.
   kind-harness-ha:
     name: kind-harness-ha (reduced-scale HA topology — CNPG + KEDA + Sentinel, non-blocking live)
     runs-on: ubuntu-latest
@@ -1139,6 +1229,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # This job runs the same repo-controlled bite/harness scripts post-checkout
+          # and needs no git auth — do NOT persist the token (least privilege).
+          persist-credentials: false
 
       # Static harness invariants — includes the W4-T1 HA add-on checks (pinned
       # operators, idempotent+retried install, readiness gating, reduced-scale
@@ -1159,6 +1253,127 @@ jobs:
       - name: Validate reduced-scale HA overlay (render + counts, static)
         run: bash ci/kind/ha/validate-ha-overlay.sh
 
+      # W4-T3 Postgres failover drill — NEGATIVE-CONTROL BITE PROOF (no cluster).
+      # ADR-0047 §2 requires every drill's negative control be SHOWN to bite
+      # (plant → red → revert), not merely asserted. The LIVE failover drill runs
+      # only on the kind CNPG cluster (below, signal-only), which cannot run on the
+      # authoring host (L1) — so this self-test earns the bite proof WITHOUT a
+      # cluster: it runs the REAL pg-failover.sh check against a fake kubectl and
+      # asserts the polarity — GREEN when every committed row survives, RED when the
+      # async last row is LOST (the negative control), RED on no-promotion / slow
+      # RTO. This step is BLOCKING within the job (it needs no cluster and BITES on a
+      # drill that stopped biting); it is the hardware-free proof the drill is a real
+      # gate, not green-at-setup (P1-W4 false-green).
+      - name: W4-T3 failover drill negative-control bite proof (static, no cluster)
+        run: bash ci/kind/selftest/pg-failover-bite.sh
+
+      # W4-T4 Neo4j destroy-and-rebuild drill — NEGATIVE-CONTROL BITE PROOF (no
+      # cluster). ADR-0047 §2 requires every drill's negative control be SHOWN to
+      # bite (plant → red → revert), not merely asserted. The LIVE rebuild drill
+      # runs only on the kind cluster (below, signal-only), which cannot run on the
+      # authoring host (L1) — so this self-test earns the bite proof WITHOUT a
+      # cluster: it runs the REAL neo4j-rebuild.sh check against a fake kubectl and
+      # asserts the polarity — GREEN when the destroyed graph is fully re-projected
+      # from Postgres (counts match the source of record), RED when the rebuild is
+      # DISABLED (the negative control → graph never re-projected) or a PARTIAL
+      # projection leaves fewer nodes/edges than Postgres holds. This step is
+      # BLOCKING within the job (it needs no cluster and BITES on a drill that
+      # stopped biting); it is the hardware-free proof the drill is a real gate, not
+      # green-at-setup (P1-W4 false-green; ADR-0005 D5 rebuild-from-Postgres).
+      - name: W4-T4 Neo4j rebuild drill negative-control bite proof (static, no cluster)
+        run: bash ci/kind/selftest/neo4j-rebuild-bite.sh
+
+      # W4-T5 worker-kill idempotency drill — NEGATIVE-CONTROL BITE PROOF (no
+      # cluster). ADR-0047 §2 requires every drill's negative control be SHOWN to
+      # bite (plant → red → revert), not merely asserted. The LIVE worker-kill drill
+      # runs only on the kind cluster (below, signal-only), which cannot run on the
+      # authoring host (L1) — so this self-test earns the bite proof WITHOUT a
+      # cluster: it runs the REAL worker-kill-idempotency.sh check against a fake
+      # kubectl and asserts the polarity — GREEN when a killed worker's task is
+      # redelivered and completes EXACTLY-ONCE (1 snapshot / 1 audit row / 1 CR
+      # transition, success >= 99%), RED when the idempotency guard is DISABLED (the
+      # negative control → the redelivery DOUBLE-WRITES and the success rate
+      # collapses), RED when the four-eyes gate would be bypassed or the CR
+      # double-executes. This step is BLOCKING within the job (it needs no cluster
+      # and BITES on a drill that stopped biting); it is the hardware-free proof the
+      # drill is a real gate, not green-at-setup (P1-W4 false-green; ADR-0008
+      # acks_late; ADR-0020 four-eyes). Real-PG-only exactly-once is corroborated on
+      # the live kind CNPG cluster below (also asserted in backend/tests/pg/ behind
+      # the blocking pg-integration job).
+      - name: W4-T5 worker-kill idempotency drill negative-control bite proof (static, no cluster)
+        run: bash ci/kind/selftest/worker-kill-idempotency-bite.sh
+
+      # W4-T6 queue-burst KEDA + reduced-scale API load + PgBouncer budget drill —
+      # NEGATIVE-CONTROL BITE PROOF (no cluster). ADR-0047 §2 requires every drill's
+      # negative control be SHOWN to bite (plant → red → revert), not merely asserted.
+      # The LIVE queue-burst/load drill runs only on the kind cluster (below,
+      # signal-only), which cannot run on the authoring host (L1) — so this self-test
+      # earns the bite proof WITHOUT a cluster: it runs the REAL queue-burst-load.sh
+      # check against a fake kubectl and asserts the polarity — GREEN when a 10x
+      # `discovery` burst scales the discovery Deployment OUT (its replica count
+      # actually changes) then scales IN, siblings are NOT starved, the API p95 holds
+      # with a 1->2-replica improvement + zero 5xx, and the PgBouncer pooler shows no
+      # connection exhaustion; RED when the negative control emulates a SHARED scaler
+      # that STARVES a sibling and overruns the PgBouncer budget (isolation + §330 +
+      # §327 assertions bite), and RED when the burst never moves the replica count (a
+      # burst that never scales out — the spec's false-green risk). This step is
+      # BLOCKING within the job (it needs no cluster and BITES on a drill that stopped
+      # biting); it is the hardware-free proof the drill is a real gate, not
+      # green-at-setup (P1-W4 false-green; ADR-0043 §3 per-queue isolation; ADR-0042 §4
+      # connection budget). Executed on the authoring host: 0 failure(s), drill exit 4
+      # under the negative control, exit 1 on no-scale-out, exit 0 on the positive path.
+      - name: W4-T6 queue-burst + API load + PgBouncer budget drill negative-control bite proof (static, no cluster)
+        run: bash ci/kind/selftest/queue-burst-load-bite.sh
+
+      # promtool — needed by the W4-T7 compressed-soak bite proof below, whose
+      # LOAD-BEARING layer runs a REAL `promtool test rules` over the W3-T2 recording
+      # rules + W3-T3 burn-rate alerts to prove the soak's "§6 SLOs held / no
+      # burn-rate alert fires" assertion bites cluster-free. Same pin as the
+      # `observability` job (2.53.2). pipefail so a masked fetch cannot read green (L5).
+      - name: Install promtool (Prometheus) — for the W4-T7 compressed-soak SLO-held bite
+        run: |
+          set -o pipefail
+          PROM_VERSION=2.53.2
+          # Pin the official release digest (prometheus SHA256SUMS) and verify BEFORE
+          # extract/install — a poisoned release asset must not execute as promtool in a
+          # required CI gate. Mirrors the gitleaks download-verify pattern above.
+          PROM_SHA256=60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69
+          curl -sSL -o /tmp/prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          echo "${PROM_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp
+          install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version
+
+      # W4-T7 compressed-soak drill — NEGATIVE-CONTROL BITE PROOF (no cluster).
+      # ADR-0047 §2 requires every drill's negative control be SHOWN to bite (plant →
+      # red → revert), not merely asserted. The LIVE soak drill runs only on the kind
+      # HA cluster (below, signal-only), which cannot run on the authoring host (L1) —
+      # so this self-test earns the bite proof WITHOUT a cluster in TWO layers:
+      #  (1) the LOAD-BEARING layer runs a REAL `promtool test rules` over the ACTUAL
+      #      W3-T2 recording rules + W3-T3 burn-rate alerts
+      #      (deploy/observability/slo-compressed-soak.test.yaml): a HEALTHY
+      #      compressed-soak-shaped window fires NO burn-rate alert (the §6 SLOs HELD),
+      #      and the injected error-rate + latency perturbation the drill applies with
+      #      the negative control DOES fire the burn-rate alert (a burn-rate breach →
+      #      RED). This proves the soak's core assertion ("no burn-rate alert fires
+      #      over the window") bites against the same rules Prometheus loads.
+      #  (2) it runs the REAL compressed-soak.sh check against a fake kubectl and
+      #      asserts the polarity — GREEN when the §6 SLIs stay within budget over the
+      #      window + resources bounded, RED when the negative control injects an SLO
+      #      regression (availability + latency budget breach over the window) AND a
+      #      monotone resource leak (connection/RSS/queue-depth trend) → the SLO-held
+      #      + bounded-trend assertions bite.
+      # This step is BLOCKING within the job (it needs no cluster and BITES on a drill
+      # that stopped biting); it is the hardware-free proof the drill is a real gate,
+      # not green-at-setup (P1-W4 false-green; ADR-0046 §2/§6 SLOs/burn-rate; G-REL
+      # §315 compressed). Executed on the authoring host: 0 failure(s) — promtool
+      # SUCCESS (healthy silent + injected regression fires), drill exit 0 positive /
+      # exit 8 under the negative control. The 30-day CALENDAR soak is NAMED
+      # deferred-accepted → GA (ADR-0047 §4).
+      - name: W4-T7 compressed-soak drill negative-control bite proof (real promtool + fake-kubectl, no cluster)
+        run: bash ci/kind/selftest/compressed-soak-bite.sh
+
       # kind brings up the throwaway cluster on the Docker backend the GH runner
       # provides; the HA harness path installs the CNPG operator + KEDA on top.
       - name: Install kind
@@ -1167,10 +1382,100 @@ jobs:
           install_only: true
           version: v0.24.0
 
-      # The LIVE reduced-scale HA bring-up. continue-on-error until W4-T2 exercises
-      # it green on this runner and promotes it (ADR-0048 §3 Prerequisite A; L1 —
-      # not locally validated on the Windows authoring host). Teardown is inside the
-      # harness trap, so a failure here still deletes the cluster (no leak).
+      # The LIVE reduced-scale HA bring-up. Stays continue-on-error / non-blocking:
+      # W4-T2 scopes its (currently HELD) promotion to only the P2 `kind-harness`
+      # G-SEC assertions (mTLS + collector egress), NOT this HA job. The reliable HA
+      # substrate is ADR-0048 §3 Prerequisite A *for that* promotion; promoting these
+      # G-REL/G-SCA HA drills to blocking is a deliberate later step (W5/GA). L1 —
+      # not locally validated on the Windows authoring host; runs live only on this
+      # runner. Teardown is inside the harness trap, so a failure here still deletes
+      # the cluster (no leak).
+      #
+      # W4-T3 (ADR-0042 §2/§3/§7, G-REL §316): the assertion-runner this harness
+      # invokes auto-discovers ci/kind/assertions/checks/pg-failover.sh — the live
+      # Postgres FAILOVER drill (seed hash-chain-valid audit rows → KILL the CNPG
+      # primary → assert AUTOMATED promotion + write service ≤60s from kill + ZERO
+      # committed-audit loss on the promoted primary: COUNT + last-row present + no
+      # seq gap + hash-chain intact). It runs on real PG (the kind CNPG cluster),
+      # at REDUCED scale (CNPG instances=3 quorum minimum, ~25 seeded rows), and is
+      # part of this SIGNAL-ONLY live run — the drill's blocking-promotion to
+      # all-gates is a deliberate later step (W5/GA), NOT W4-T3. Its negative control
+      # is proven to bite by the static step above.
+      #
+      # W4-T4 (ADR-0005 D5/§3, ADR-0030 §1, ADR-0047 §2/§3, G-REL §317): the same
+      # assertion-runner also auto-discovers ci/kind/assertions/checks/neo4j-rebuild.sh
+      # — the live Neo4j DESTROY-and-REBUILD drill (seed a fixed reduced-scale
+      # topology into Postgres → destroy Neo4j pod + data PVC → re-project the WHOLE
+      # inventory FROM POSTGRES via the W1-T3 auto-rebuild path → assert the rebuilt
+      # node/edge counts MATCH the Postgres source of record within the MEASURED
+      # topology-RTO; a partial/disabled rebuild fails). It runs on real PG + real
+      # Neo4j (the kind cluster), at REDUCED scale, and is part of this SIGNAL-ONLY
+      # live run — its blocking-promotion is a deliberate later step (W5/GA), NOT
+      # W4-T4. Its negative control (disabled rebuild → topology mismatch) is proven
+      # to bite by the W4-T4 static step above. The certified-scale topology-RTO
+      # (< 30 min @ 5,000 devices) is NAMED deferred-accepted → GA (ADR-0047 §4).
+      #
+      # W4-T5 (ADR-0008 acks_late, ADR-0043 §6, ADR-0020 four-eyes, ADR-0047
+      # §2/§3/§5, G-REL §319/§320): the same assertion-runner also auto-discovers
+      # ci/kind/assertions/checks/worker-kill-idempotency.sh — the live WORKER-KILL
+      # idempotency + Celery ≥99% drill (seed a fixed drill fixture into Postgres →
+      # force-KILL a worker pod mid-run (acks_late redelivery) → drive the SAME
+      # side-effecting tasks a second time on a surviving worker via the real W2-T4
+      # code path → assert each completes EXACTLY-ONCE with no duplicate side effect
+      # (1 snapshot / 1 audit row / 1 CR execution transition), the CR four-eyes gate
+      # is not bypassed or double-executed, and Celery success ≥ 99% over the
+      # compressed window). It runs on real PG (the kind CNPG cluster), at REDUCED
+      # scale, and is part of this SIGNAL-ONLY live run — its blocking-promotion is a
+      # deliberate later step (W5/GA), NOT W4-T5. Its negative control (idempotency
+      # guard off → double-write / success collapse) is proven to bite by the W4-T5
+      # static step above; the same exactly-once property is asserted on real PG in
+      # backend/tests/pg/test_worker_idempotency_pg.py behind the blocking
+      # pg-integration job. The certified-scale soak success (30-day calendar window)
+      # is NAMED deferred-accepted → GA (ADR-0047 §4).
+      #
+      # W4-T6 (ADR-0043 §2/§3, ADR-0042 §4, ADR-0047 §1/§2/§3/§4, G-SCA §326–§330):
+      # the same assertion-runner also auto-discovers
+      # ci/kind/assertions/checks/queue-burst-load.sh — the live QUEUE-BURST KEDA +
+      # reduced-scale API load + PgBouncer budget drill (LPUSH a 10x-normal `discovery`
+      # depth into the REAL Redis list the KEDA scaler reads → assert the discovery
+      # worker Deployment SCALES OUT (replica count actually changes) then SCALES IN
+      # after the burst drains, WITHOUT starving config/docs/packet siblings (per-queue
+      # isolation, §329); run a reduced-concurrency HTTP load (bash /dev/tcp, no
+      # k6/locust dep) against the api Service and assert p95 held + a 1->2-replica
+      # improvement + zero 5xx (§327); open concurrent connections through the
+      # transaction-mode PgBouncer Pooler and assert NO connection exhaustion (§330,
+      # ADR-0042 §4)). It runs on the kind HA cluster (real KEDA/HPA/PgBouncer), at
+      # REDUCED scale (10x listLength burst, api floor 2/ceiling 4, tens of VUs), and
+      # is part of this SIGNAL-ONLY live run — its blocking-promotion is a deliberate
+      # later step (W5/GA), NOT W4-T6. Its negative control (shared scaler → sibling
+      # starvation / connection-budget breach; a burst that never scales out) is proven
+      # to bite by the W4-T6 static step above. The certified-scale G-SCA numbers
+      # (500-device ≤60 min §326, 100-user p95<300 ms + 2->4 linearity §327, 5,000-device
+      # projection §328) are NAMED deferred-accepted → GA (ADR-0047 §4).
+      #
+      # W4-T7 (ADR-0046 §1/§2/§6 SLOs/burn-rate, ADR-0047 §1/§2/§3/§4, G-REL §315
+      # compressed): the same assertion-runner also auto-discovers
+      # ci/kind/assertions/checks/compressed-soak.sh — the live COMPRESSED-SOAK drill
+      # (drive STEADY mixed synthetic load — API reads via bash /dev/tcp + a steady
+      # discovery/config/docs queue-job trickle — over a COMPRESSED window (minutes,
+      # stated; representative of the SLO-held + no-slow-leak MECHANISM, NOT the 30-day
+      # calendar SLA), sampling the §6 SLIs the W3-T2 recording rules derive MANY times
+      # across the window → assert every SLI stayed WITHIN its error budget over the
+      # SUSTAINED window (so NO W3-T3 burn-rate alert would fire — the SLOs HELD) AND
+      # assert NO slow resource regression (PgBouncer server connections, worker RSS,
+      # and queue depth stay BOUNDED START→END — a leak that would surface over
+      # calendar time shows as a monotone upward trend → fail)). It runs on the kind HA
+      # cluster (real api/workers/PgBouncer/Redis), at REDUCED scale (compressed
+      # window, tens of VUs + a steady queue trickle), and is part of this SIGNAL-ONLY
+      # live run — its blocking-promotion is a deliberate later step (W5/GA), NOT
+      # W4-T7. Its negative control (an injected error-rate + latency perturbation → a
+      # burn-rate breach over the window, plus a monotone resource leak) is proven to
+      # bite by the W4-T7 static step above — which ALSO runs a real `promtool test
+      # rules` over the actual W3-T2/W3-T3 rules (healthy window silent, injected
+      # regression fires). The certified-scale G-REL §315 ceiling (the 30-day CALENDAR
+      # soak meeting all §6 SLOs) is NAMED deferred-accepted → GA (ADR-0047 §4
+      # promotion path: a 30-day staging window on a sized cluster; run the calendar
+      # soak, assert §6 SLOs).
       - name: Run HA kind harness (create → CNI self-test → operators → apply → HA-ready → assert → teardown)
         id: ha-harness
         continue-on-error: true
@@ -1179,8 +1484,9 @@ jobs:
         run: bash ci/kind/kind-harness.sh
 
       # Surface the live HA-run result in the job summary without flipping any
-      # required aggregator. W4-T2 promotes this: it drops continue-on-error above
-      # and adds this job to the all-gates `needs` list (ADR-0048 §2).
+      # required aggregator. This HA job stays non-blocking (W4-T2 scopes its held
+      # promotion to only the P2 kind-harness G-SEC assertions); a future W5/GA step
+      # may drop continue-on-error above and add this job to the all-gates `needs` list.
       - name: Report HA kind harness outcome
         if: always()
         run: |
@@ -1542,8 +1848,13 @@ jobs:
         run: |
           set -o pipefail
           PROM_VERSION=2.53.2
+          # Pin the official release digest (prometheus SHA256SUMS) and verify BEFORE
+          # extract/install — a poisoned release asset must not execute as promtool in a
+          # required CI gate. Mirrors the gitleaks download-verify pattern above.
+          PROM_SHA256=60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69
           curl -sSL -o /tmp/prometheus.tar.gz \
             "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          echo "${PROM_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
           tar -xzf /tmp/prometheus.tar.gz -C /tmp
           install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
           promtool --version
@@ -1661,20 +1972,31 @@ jobs:
   # even when a dependency fails; it then inspects the `needs.*.result` values and
   # FAILS unless every one is "success", so a failed OR skipped gate is a red gate.
   #
-  # DELIBERATE OMISSION (P2 W4-T3): `kind-harness` is NOT in `needs`. Its live
-  # kind/CNI path could not be validated on the W4-T3 authoring host (no
-  # Docker/Linux kind) and is `continue-on-error` until promoted (L1: validate a
-  # new gating tool locally before making it required). Adding it here NOW would
-  # let a CI-only kind/CNI bring-up quirk mask the whole suite by flipping the
-  # required aggregator red on a path nobody has run green. W5 promotes it: once
-  # the live run is exercised, drop `continue-on-error` on the harness step AND
-  # add `kind-harness` to this list (see docs/runbooks/kind-harness.md).
+  # PROMOTION HELD (P3 W4-T2, ADR-0048 §4): `kind-harness` is DELIBERATELY NOT in
+  # `needs` and its live run stays `continue-on-error`. The promotion is authored but
+  # gated behind the ADR-0048 §4 (Prerequisite B, "non-negotiable") planted-regression
+  # bite proof, which must be SHOWN red→green on a CI ubuntu runner BEFORE the gate
+  # joins this aggregator; Alternative 2 ("Promote without the bite proof") is
+  # Rejected. Per P1-W4-LESSONS L1 kind cannot run on the authoring host, so that
+  # observed bite has NOT been executed on any runner yet — adding `kind-harness`
+  # here now would make an UNVERIFIED gate merge-blocking (the ADR-0048 Risk "worse
+  # than continue-on-error"). Add it here (and drop the step's continue-on-error, and
+  # flip the runbook past-tense claims to reflect the real run) only once a runner has
+  # recorded plaintext-allowed→mTLS red→revert green and collector-broadened→deny
+  # red→revert green, with the run URLs cited.
+  #
+  # DELIBERATE OMISSION (P3 W4-T1): `kind-harness-ha` also remains NOT in `needs`. Its
+  # live reduced-scale HA bring-up (CNPG + KEDA + Sentinel) is `continue-on-error`
+  # signal-only; promoting the G-REL/G-SCA HA drills to blocking is a deliberate
+  # later step (W5/GA), not W4-T2. NOTE: only the LIVE bring-up is omitted — the
+  # cluster-free drill negative-control bite proofs (ADR-0047 §2) ARE required via the
+  # `drill-bite-proofs` job below, so a drill that stops biting blocks merge.
   all-gates:
     name: all-gates (required-check aggregator)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile, observability]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile, observability, drill-bite-proofs]
     steps:
       - name: Assert every gate succeeded
         env:

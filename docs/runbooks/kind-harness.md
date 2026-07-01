@@ -1,6 +1,6 @@
 # Runbook — Ephemeral in-CI kind cluster harness (W4-T3)
 
-> Operator/developer procedure for the ADR-0041 §2/§3 + ADR-0039 §6 kind harness: how it brings up a throwaway cluster with an **enforcing CNI**, proves the CNI actually enforces NetworkPolicy (the **CNI self-test bite**), applies the chart, and runs the assertion-runner that **W4-T4 (mTLS handshake)** and **W4-T5 (collector egress deny)** plug their assertions into. Also records why the live kind job is **not yet a blocking gate** and what P3-Platform must do to promote it (re-deferred from W5-T3). Cheap-scope only — handshake + deny; HA/scale/soak are P3-Platform.
+> Operator/developer procedure for the ADR-0041 §2/§3 + ADR-0039 §6 kind harness: how it brings up a throwaway cluster with an **enforcing CNI**, proves the CNI actually enforces NetworkPolicy (the **CNI self-test bite**), applies the chart, and runs the assertion-runner that **W4-T4 (mTLS handshake)** and **W4-T5 (collector egress deny)** plug their assertions into. Records that the P2 live kind job's promotion to a **blocking gate** for the two named G-SEC sub-items (mTLS handshake + collector egress deny) is **AUTHORED but HELD** — per ADR-0048 §4 the promotion is gated behind an EXECUTED plant→red→revert bite on a CI ubuntu runner, which (per P1-W4-LESSONS L1: kind cannot run on the authoring host) has **not run yet**; until it does the live step stays `continue-on-error` and out of `all-gates` (see "Gate status" below). The `kind-harness-ha` HA live job likewise stays non-blocking. Cheap-scope only — handshake + deny; HA/scale/soak are P3-Platform.
 
 ## Objective
 
@@ -19,13 +19,22 @@ Give the two W4 enforcement tasks a deterministic, hardware-free place to BITE: 
 | Assertion helpers | `ci/kind/assertions/lib.sh` (`assert_egress_allowed/blocked`, `assert_handshake_ok/refused`, `run_in_pod`) |
 | T4/T5 plug-in | `ci/kind/assertions/checks/` (T4 drops `mtls-*.sh`, T5 drops `collector-egress*.sh`) |
 | Static validator | `ci/kind/selftest/validate-harness.sh` (no cluster; asserts the harness invariants incl. the W4-T1 HA add-on — the policy-as-test bite) |
-| CI job (P2) | `.github/workflows/ci.yml` job `kind-harness` (**non-blocking** — see "Gate status" below) |
+| CI job (P2) | `.github/workflows/ci.yml` job `kind-harness` (**signal-only / non-blocking live** — promotion AUTHORED but HELD pending the ADR-0048 §4 bite proof; step stays `continue-on-error`, NOT in `all-gates` needs; see "Gate status" below) |
 | CI job (HA, P3 W4-T1) | `.github/workflows/ci.yml` job `kind-harness-ha` (**non-blocking live** — see "HA topology" + "Gate status") |
 | Cluster name | `netops-w4` (`CLUSTER_NAME` override) |
 | HA operator installer | `ci/kind/ha/install-operators.sh` (CloudNativePG `1.29.1` + KEDA `2.16.1`, pinned; `CNPG_VERSION`/`KEDA_VERSION` override) |
 | HA readiness gate | `ci/kind/ha/wait-ha-ready.sh` (a half-up topology must NOT read ready — L5) |
 | HA overlay validator | `ci/kind/ha/validate-ha-overlay.sh` (static render + reduced-scale count bite) |
 | Reduced-scale HA overlay | `deploy/kubernetes/netops/values-kind-ha.yaml` (`HA_VALUES` override) |
+| Postgres failover drill (P3 W4-T3) | `ci/kind/assertions/checks/pg-failover.sh` + `pg-failover-drill-probe.yaml` (G-REL §316 — runs on the HA path via the assertion-runner) |
+| Failover drill bite proof (P3 W4-T3) | `ci/kind/selftest/pg-failover-bite.sh` (hardware-free negative-control plant→red→revert; runs in `kind-harness-ha`, no cluster) |
+| Worker-kill idempotency drill (P3 W4-T5) | `ci/kind/assertions/checks/worker-kill-idempotency.sh` + `worker_idem_probe.py` (G-REL §319/§320 — runs on the HA path via the assertion-runner; asserts on real PG) |
+| Worker-kill drill bite proof (P3 W4-T5) | `ci/kind/selftest/worker-kill-idempotency-bite.sh` (hardware-free negative-control plant→red→revert; runs in `kind-harness-ha`, no cluster) |
+| Queue-burst + API load + PgBouncer drill (P3 W4-T6) | `ci/kind/assertions/checks/queue-burst-load.sh` + `queue-burst-load-drill-probe.yaml` (G-SCA §326–§330 — runs on the HA path via the assertion-runner) |
+| Queue-burst/load drill bite proof (P3 W4-T6) | `ci/kind/selftest/queue-burst-load-bite.sh` (hardware-free negative-control plant→red→revert; runs in `kind-harness-ha`, no cluster) |
+| Compressed-soak drill (P3 W4-T7) | `ci/kind/assertions/checks/compressed-soak.sh` + `compressed-soak-drill-probe.yaml` (G-REL §315 compressed — runs on the HA path via the assertion-runner) |
+| Compressed-soak drill bite proof (P3 W4-T7) | `ci/kind/selftest/compressed-soak-bite.sh` (hardware-free — REAL `promtool test rules` over the W3-T2/W3-T3 rules + fake-kubectl drill-flow polarity; runs in `kind-harness-ha`, no cluster) |
+| Compressed-soak SLO-held promtool fixture (P3 W4-T7) | `deploy/observability/slo-compressed-soak.test.yaml` (healthy window silent + injected-regression firing case over the real recording/alert rules) |
 
 ## How the harness runs (`kind-harness.sh`)
 
@@ -116,6 +125,120 @@ the drills exercise, not "reduce scale".
 5. **Assertion-runner + teardown (unchanged):** the P2 mTLS + collector assertions
    run, then the trap tears the cluster down on any exit.
 
+## Postgres failover drill (P3 W4-T3, G-REL §316) — the reliability drill on this HA topology
+
+The HA topology above is the substrate a set of **reliability/scale drills**
+(ADR-0047) run against. **W4-T3** implements the first one: the **Postgres
+failover drill** (`ci/kind/assertions/checks/pg-failover.sh`). It plugs into the
+same assertion-runner, so on the **HA path** (`HA=1 ci/kind/kind-harness.sh`) it
+runs automatically after the HA-readiness gate — no separate invocation.
+
+### §11 criterion + target (ADR-0042 §2/§3/§7, ADR-0047 §3)
+
+| Gate / line | Target (reduced-scale run) |
+|---|---|
+| **G-REL §316** | primary kill → **AUTOMATED promotion, write service restored ≤ 60 s** (RTO measured **from the kill**, not from detection) **AND zero committed-audit-entry loss** — every audit row committed before the kill is present on the promoted primary, **hash-chain-valid, no `seq` gap** (the ADR-0042 §2 quorum-sync audit-write guarantee). Asserted on **real PG** (the kind CNPG cluster), never SQLite (ADR-0047 §5). |
+
+### What the drill does
+
+1. **Precondition / SKIP.** If no CNPG `Cluster` is present (a non-HA run) the drill
+   **SKIPs loudly** (`exit 0`) — a missing cluster is never a false-green pass.
+2. **Seed.** Creates a drill-scoped audit-shaped table (`seq` + `prev_hash`/
+   `entry_hash` chain) and seeds `SEED_ROWS` (default **25**) hash-chain-valid rows,
+   each committed on the **quorum-sync audit path** (`SET LOCAL
+   synchronous_commit=remote_apply`, ADR-0042 §2) through the CNPG **`-rw`** Service.
+   Then commits one **last-before-kill** row (the row the negative control loses).
+3. **Kill.** `kubectl delete pod <currentPrimary> --force --grace-period=0` — the
+   **RTO clock starts at the kill** (§316 measures from the kill, not detection).
+4. **Measure.** Polls the `-rw` Service until a **write** succeeds on a **new**
+   primary (operator-elected, different from the killed pod) → **RTO = restore
+   epoch − kill epoch**; asserts **RTO ≤ 60 s** and that the promotion was automated.
+5. **Zero-loss.** On the promoted primary asserts: row **COUNT** = all committed
+   rows (no loss), the **last-before-kill row present**, **no `seq` gap** (append
+   order contiguous), and the surviving **hash-chain intact** (every `prev_hash`
+   links its predecessor `entry_hash`; genesis first — ADR-0038 §1).
+
+### Reduced scale (STATED) + named ceiling (ADR-0047 §1/§4)
+
+The drill proves the **failover + zero-audit-loss mechanism** bites at reduced
+scale: **CNPG `instances: 3`** (1 primary + 2 replicas — the ADR-0042 §1 quorum
+**minimum**, *not* reduced) and **~25 seeded rows**, RTO budget **60 s** from kill.
+It does **not** certify a scale point. The certified-scale ceilings — a
+**backups-only DR** restore onto a clean cluster (G-REL §318: RPO ≤ 5 min / RTO ≤
+1 h) and the **30-day soak** (G-REL §315) — stay **deferred-accepted → GA** with the
+ADR-0047 §4 written promotion path; they are **never claimed** from this run.
+
+### Negative control — PROVEN to bite (ADR-0047 §2)
+
+Every drill ships a planted regression that turns its assertion **RED**, shown to
+bite before it is trusted. For the failover drill:
+
+| Positive assertion | Planted negative control (turns it RED) |
+|---|---|
+| primary kill → promote ≤ 60 s; every committed audit row survives, hash-chain-valid, no `seq` gap | **async / non-quorum commit** on the audit path (`PG_FAILOVER_DRILL_NEGATIVE_CONTROL=1` → the last row commits `synchronous_commit=off`) with a **deterministically engineered loss window** → a just-committed audit row is **lost** on the promoted primary → the zero-loss COUNT + last-row + seq-gap assertions go **RED** |
+
+**Why the live loss is DETERMINISTIC, not timing-dependent.** At this reduced kind
+scale the async WAL for a tiny row can stream to a standby in **milliseconds**, and
+CNPG promotes a standby that already holds the quorum-acked WAL — so a *naive*
+async-commit-then-kill negative control could be **FALSE-GREEN** (the row survives,
+zero-loss passes) whenever streaming happened to win the race. To close that gap the
+negative control **engineers the loss window**: immediately **before** the async
+commit it **terminates the walsender backends** on the current primary
+(`pg_terminate_backend(pid) FROM pg_stat_replication`), severing streaming to every
+standby, then force-kills with **no intervening sleep**. With no walsender attached,
+the `synchronous_commit=off` row is acked by the primary without its WAL reaching
+**any** standby, and the primary is destroyed before a standby can re-attach and
+re-stream that segment — so the row is **provably absent** on the promoted primary.
+The bite is engineered, not lucky. (The positive path is untouched: it commits
+quorum-sync `remote_apply`, which by definition waits for a replica.)
+
+**How the bite is proven WITHOUT a cluster (L1).** The live drill runs only on the
+kind CNPG cluster, which cannot run on the authoring host (Windows, no Docker/Linux
+kind). `ci/kind/selftest/pg-failover-bite.sh` earns the ADR-0047 §2 plant→red→revert
+proof **hardware-free**: it runs the **real** `pg-failover.sh` against a **fake
+`kubectl`** that simulates the CNPG cluster + in-pod psql, and asserts the polarity —
+
+- **POSITIVE** (all rows survive) → drill **GREEN** (exit 0) — the revert-to-green;
+- **NEGATIVE CONTROL** (async last row lost after the kill) → drill **RED**, and the
+  RED is specifically the **zero-committed-audit-loss** assertion (COUNT 6≠7 + last
+  row MISSING + 1 `seq` gap; the surviving prefix's hash-chain stays valid — a
+  faithful model of an async tail-loss);
+- **NO-PROMOTION** (primary never changes) → **RED** (the promotion assertion bites);
+- **SLOW-RTO** (write restored past the budget) → **RED** (the ≤ 60 s RTO bites).
+
+This self-test is **blocking within the `kind-harness-ha` job** (it needs no
+cluster) and is the recorded evidence the drill is a real gate, not green-at-setup.
+It was **executed on the authoring host**: `bash ci/kind/selftest/pg-failover-bite.sh`
+→ `0 failure(s)`, drill exit **3** (three zero-loss assertions) under the negative
+control, exit **0** on the positive path.
+
+### Gate posture — SIGNAL-ONLY (live), BLOCKING (static bite proof)
+
+- The **live** failover drill runs inside the `HA=1` harness in the
+  **`kind-harness-ha`** CI job, which stays **`continue-on-error` / absent from
+  `all-gates`** (same posture as the rest of the HA live run). Promoting the
+  G-REL/G-SCA HA drills to **blocking** is a deliberate later step (**W5/GA**), not
+  W4-T3.
+- The **static** negative-control bite proof (`pg-failover-bite.sh`) and the
+  `validate-harness.sh` failover-drill invariants are **blocking within the job** —
+  a silently weakened drill (RTO-from-detection, a dropped zero-loss assertion, a
+  removed negative control, a SQLite path) fails there, with no cluster needed.
+- **L1 caveat:** the **live** kill/promote/measure path has **not** run on the
+  authoring host; it runs live only on the CI ubuntu runner. Do not claim a local
+  live failover run.
+- **Live negative-control caveat (W5/GA promotion path).** The ADR-0047 §2
+  proof-it-bites for this drill is the **hardware-free self-test**
+  (`pg-failover-bite.sh`, blocking within `kind-harness-ha`); the **live** run only
+  **corroborates** it. The live negative control now uses an **engineered**
+  deterministic loss window (walsender-terminate), so a green live negative-control
+  run is a real bite rather than a timing coincidence — **but that engineered window
+  has not itself been exercised on the CI CNPG topology** (L1). Therefore, before any
+  **W5/GA promotion of this drill to blocking**, the live negative control **MUST be
+  re-verified on the CI runner** (plant → observe RED → revert → GREEN on the actual
+  cluster). Until that live re-verification, treat a green live negative-control run
+  as **advisory corroboration**, not standalone proof for blocking promotion. This is
+  a named prerequisite on the ADR-0047 §4 promotion path.
+
 ### Reliability (the ADR-0048 §3 Prerequisite A) + L1 caveat
 
 The HA bring-up is **deterministic** (pinned operator/CNI versions),
@@ -129,22 +252,404 @@ validated** here and runs **live only on the CI ubuntu runner**; no local live
 run happened. The **static** layers (the `validate-harness.sh` HA invariants +
 `validate-ha-overlay.sh` render/count bite + the `infra` job's HA render →
 kubeconform/kube-linter/conftest/Trivy) **gate hard**; the **live**
-`kind-harness-ha` job is **continue-on-error** until **W4-T2** exercises it green
-and promotes it.
+`kind-harness-ha` job stays **continue-on-error** / **non-blocking**. NOTE: W4-T2
+targets the **P2** `kind-harness` job (the G-SEC mTLS + collector-egress live
+assertions — see "Gate status" below), **not** this HA job; the reliable HA
+substrate is the ADR-0048 §3 Prerequisite A *for that promotion*. That promotion is
+**HELD** pending the ADR-0048 §4 executed bite (Prerequisite B, not yet run on any
+runner per L1 — see "Gate status"), so the P2 `kind-harness` job is **also still
+`continue-on-error` / absent from `all-gates`** for now. Promoting the
+`kind-harness-ha` G-REL/G-SCA drills to blocking is a separate **deliberate later
+step (W5/GA)**, not W4-T2.
 
-## Gate status — NON-BLOCKING (CI-only / deferred), and how to promote it
+## Worker-kill idempotency + Celery ≥99% drill (P3 W4-T5, G-REL §319/§320) — the idempotency drill on this HA topology
 
-The live kind path (steps 1-6) is **deliberately not a blocking gate**:
+The same HA topology is the substrate for the **worker-kill idempotency drill**
+(`ci/kind/assertions/checks/worker-kill-idempotency.sh`). It plugs into the same
+assertion-runner, so on the **HA path** (`HA=1 ci/kind/kind-harness.sh`) it runs
+automatically after the HA-readiness gate — no separate invocation.
 
-- The `kind-harness` job is **absent from the `all-gates` required-check aggregator's `needs` list**, and its live `kind-harness.sh` step is `continue-on-error: true`.
-- **Why:** the live kind/CNI path could **not be validated locally on the W4-T3 authoring host** (Windows, no Docker / no Linux kind cluster). P1-W4-LESSONS **L1** is explicit: validate a new gating CI tool LOCALLY before pushing it as required — the local gate set is not the CI gate set, and CNI install / shell quoting often break differently in CI. Making this a required gate now would let a CI-only kind/CNI bring-up quirk mask the entire suite by flipping the required aggregator red on a path nobody has run green.
-- **What IS enforced now:** the static `validate-harness.sh` step runs on every push and is **blocking within the job** (it needs no cluster and reliably bites a silently weakened harness). The static manifest gates (helm lint / kubeconform / kube-linter / conftest) on the chart remain green via the `infra` job.
+### §11 criterion + target (ADR-0008 §5, ADR-0043 §6, ADR-0020, ADR-0047 §3/§5)
 
-**Promotion (re-deferred → P3-Platform):** the W5-T3 release auditor reviewed this and **re-deferred promotion to P3-Platform** — gating an enforcing-CNI kind cluster as a required check needs a certified cluster to run reliably, which this phase's no-hardware host does not have (`P2-RELEASE-READINESS.md` G-SEC). Once the live run is exercised on a Linux/Docker or certified-CNI cluster and the L1 local-validation lesson is satisfied,
-1. drop `continue-on-error: true` from the "Run kind harness" step, and
-2. add `kind-harness` to the `all-gates` `needs` list (`.github/workflows/ci.yml`).
+| Gate / line | Target (reduced-scale run) |
+|---|---|
+| **G-REL §319** | a worker node **killed mid-run** → each side-effecting job (discovery/config write, CR-gated config op, docs/backup gen) **completes via retry with NO duplicate side effect** — a **single** DB write, a **single** ChangeRequest execution, a **single** audit row (the W2-T4 idempotency under `acks_late` + `reject_on_worker_lost`, ADR-0008 §5). The CR **four-eyes** gate (ADR-0020) is **not bypassed or double-executed** on the retry. Asserted on **real PG** (the kind CNPG cluster), never SQLite (ADR-0047 §5). |
+| **G-REL §320** | **Celery success ≥ 99%** after retries over the window. |
 
-This is now a **P3-Platform** readiness item (re-deferred from W5-T3); until then the live kind validation is recorded as **CI-only / deferred-accepted** alongside the project's prior live-lab deferrals (e.g. SpatiumDDI live-lab, M5 live-lab acceptance).
+### What the drill does
+
+1. **Precondition / SKIP.** If no worker pod is present (a non-HA run) the drill
+   **SKIPs loudly** (`exit 0`) — a missing worker tier is never a false-green pass.
+2. **Seed.** Runs `worker_idem_probe.py seed` on a worker pod: a fixed drill fixture
+   (1 device + 2 drill users, keyed by fixed ids) in **real Postgres**.
+3. **Kill.** `kubectl delete pod <worker> --force --grace-period=0` — a real
+   node-loss trigger; with `acks_late` + `reject_on_worker_lost` (ADR-0008 §5) an
+   in-flight task on the killed worker is **redelivered**, not lost.
+4. **Drive the redelivery + assert** on a **surviving** worker (or the recreated
+   replacement on a single-worker overlay), via the real W2-T4 code path
+   (`config._persist` / `ChangeRequestService` / `nightly_backup`):
+   - **config capture double-delivery** → exactly **1** `config_snapshots` row + **1**
+     `config.snapshot_captured` audit row (content-addressed dedup + the W2-T4
+     audit-once fix);
+   - **CR execution retry** → **1** `approved_to_executing` transition + **1**
+     approval, the CR stays `executing`, the self-approve is still refused
+     (four-eyes intact, ADR-0020) — the retry is an idempotent `ConflictError` no-op;
+   - **nightly_backup double-delivery** (same `run_id`) → **1** started + **1**
+     finished audit row + **1** fan-out wave (`config_backup_runs` `ON CONFLICT DO
+     NOTHING` guard, ADR-0043 §6);
+   - **success rate** → `ATTEMPTS` redeliveries (default **40**), each must complete
+     exactly-once → **success ≥ 99%** (G-REL §320).
+
+### Reduced scale (STATED) + named ceiling (ADR-0047 §1/§4)
+
+The drill proves the **worker-kill → complete-via-retry → exactly-once mechanism**
+bites at reduced scale: a **1-device / 2-user** fixture and a **compressed
+success-rate window** (40 redeliveries), success floor **99%**. It does **not**
+certify a scale point. The **certified-scale soak success** over a **30-day
+calendar window** (G-REL §315/§320) stays **deferred-accepted → GA** with the
+ADR-0047 §4 written promotion path (a sized cluster; run the calendar soak; assert
+≥ 99% over 30 days) — **never claimed** from this run.
+
+### Real PG, not SQLite (ADR-0047 §5)
+
+The exactly-once + four-eyes checks are meaningless on SQLite (single-writer, no
+true isolation / unique-constraint concurrency). They run against the kind CNPG
+cluster (real Postgres); the in-pod `worker_idem_probe.py` **HARD-FAILS** if
+`database_url` is not a `postgresql` URL — there is no SQLite path. The same
+exactly-once property is also asserted on real PG in
+`backend/tests/pg/test_worker_idempotency_pg.py` behind the **blocking**
+`pg-integration` job.
+
+### Negative control — PROVEN to bite (ADR-0047 §2)
+
+| Positive assertion | Planted negative control (turns it RED) |
+|---|---|
+| worker kill → each redelivery completes exactly-once (1 snapshot / 1 audit / 1 CR transition), success ≥ 99% | **idempotency guard disabled** (`WORKER_KILL_DRILL_NEGATIVE_CONTROL=1` → the probe bypasses the content-addressed dedup / state-machine guard) → the redelivered capture **double-writes** (2 snapshots / 2 audits), the CR **double-executes** (2 transitions), and the success rate **collapses** below the floor → the exactly-once + ≥99% assertions go **RED** |
+
+**How the bite is proven WITHOUT a cluster (L1).** The live drill runs only on the
+kind cluster (Windows authoring host has no Docker/Linux kind).
+`ci/kind/selftest/worker-kill-idempotency-bite.sh` earns the ADR-0047 §2
+plant→red→revert proof **hardware-free**: it runs the **real**
+`worker-kill-idempotency.sh` against a **fake `kubectl`** that simulates the worker
+pods + the in-pod probe, and asserts the polarity —
+
+- **POSITIVE** (a worker is killed; each redelivery exactly-once, success ≥ 99%) →
+  drill **GREEN** (exit 0) — the revert-to-green;
+- **NEGATIVE CONTROL** (guard off → double-write, success collapse) → drill **RED**,
+  and the RED is specifically the **exactly-once / success-rate** assertion
+  (`DUPLICATED a side effect` / `success rate … <` / `G-REL §319/§320 VIOLATED`);
+- **NO-KILL + guard-off** → **RED** (the exactly-once assertion catches the
+  double-write regardless of whether the kill succeeded).
+
+This self-test is **blocking within the `kind-harness-ha` job** (it needs no
+cluster) and is the recorded evidence the drill is a real gate, not green-at-setup.
+It was **executed on the authoring host**: `bash
+ci/kind/selftest/worker-kill-idempotency-bite.sh` → `0 failure(s)`, drill exit **4**
+(four exactly-once/rate assertions) under the negative control, exit **0** on the
+positive path.
+
+### Gate posture — SIGNAL-ONLY (live), BLOCKING (static bite proof)
+
+- The **live** worker-kill drill runs inside the `HA=1` harness in the
+  **`kind-harness-ha`** CI job, which stays **`continue-on-error` / absent from
+  `all-gates`** (same posture as the rest of the HA live run). Promoting this
+  G-REL drill to **blocking** is a deliberate later step (**W5/GA**), not W4-T5.
+- The **static** negative-control bite proof (`worker-kill-idempotency-bite.sh`),
+  the `validate-harness.sh` worker-kill-drill invariants, **and** the real-PG
+  `pg-integration` `test_worker_idempotency_pg.py` are **blocking** — a silently
+  weakened drill (no kill, a dropped exactly-once assertion, a bypassed four-eyes
+  gate, a SQLite path, a removed negative control) fails there, no cluster needed.
+- **L1 caveat:** the **live** kill/redeliver/measure path has **not** run on the
+  authoring host; it runs live only on the CI ubuntu runner. Do not claim a local
+  live worker-kill run. Before any W5/GA promotion of this drill to blocking, the
+  live negative control **MUST be re-verified on the CI runner** (plant → RED →
+  revert → GREEN on the actual cluster) — a named prerequisite on the ADR-0047 §4
+  promotion path.
+
+## Queue-burst + API load + PgBouncer budget drill (P3 W4-T6, G-SCA §326–§330)
+
+The HA topology is also the substrate for the **G-SCA scale drill**
+(`ci/kind/assertions/checks/queue-burst-load.sh`). It plugs into the same
+assertion-runner (auto-discovered under `checks/`) and asserts three §11 G-SCA
+mechanisms in one drill.
+
+### §11 criteria + targets (ADR-0043 §2/§3, ADR-0042 §4, ADR-0047 §3)
+
+| Criterion | Target (reduced-scale run) |
+|---|---|
+| Queue-burst isolation (§329) | 10× normal `discovery` depth → KEDA **scale-out** then **scale-in** within the burst-drain SLO; `config`/`docs`/`packet_*` siblings **not starved** (per-queue isolation) |
+| API load p95 + replica delta (§327) | reduced-concurrency load holds **p95** under the reduced-scale budget with the api at its HA floor (2), a **1→2-replica improvement** shown, **zero 5xx** |
+| PgBouncer budget (§330) | concurrent client connections multiplexed through the transaction-mode Pooler with **no connection-exhaustion error** |
+
+### What the drill does
+
+1. **Precondition / SKIP.** If no KEDA `ScaledObject` (`netops-worker-discovery`) is
+   present (a non-HA run) the drill **SKIPs loudly** and asserts nothing — never a
+   false-green pass.
+2. **Burst.** `RPUSH`es `QUEUE_BURST_ITEMS` (default 50 = 10× the `listLength=5`
+   target) placeholder tasks into the **real** Redis list keyed `discovery` — the
+   same key the KEDA `redis-sentinel` scaler reads `LLEN` on, so KEDA's own signal
+   fires. The Redis password is fed over **stdin** (never argv).
+3. **Assert scale-OUT (the replica count ACTUALLY changed).** Polls the discovery
+   worker Deployment's `.spec.replicas` until it **exceeds** its baseline. A burst
+   that never moves the replica count is a **false-green** (the spec's named risk) —
+   this assertion is what makes the scale-out real.
+4. **Assert per-queue isolation.** Seeds a small sibling backlog and asserts each
+   sibling Deployment's replicas did **not** collapse below baseline (its per-queue
+   budget was not stolen) — the structural one-ScaledObject-per-Deployment isolation
+   (ADR-0043 §3).
+5. **Assert scale-IN.** Drains the burst (`DEL discovery`) and asserts the discovery
+   Deployment scales back toward its floor within the scale-in window (KEDA
+   `cooldownPeriod`) — the burst-drain SLO half of §329.
+6. **API load.** Brings up a hardened probe pod and runs a reduced-concurrency HTTP
+   load (`API_LOAD_VUS` VUs / `API_LOAD_REQUESTS` reqs) against the api Service via
+   **bash `/dev/tcp`** (no k6/locust/curl dependency — the pgvector probe image ships
+   bash + psql; each request is a raw HTTP/1.1 GET timed with `EPOCHREALTIME`) at **1
+   replica** and **2 replicas**, asserting **p95 ≤ budget**, a **1→2 improvement**,
+   and **zero 5xx**.
+7. **PgBouncer budget.** Opens `POOL_PROBE_CONNS` concurrent psql connections through
+   the transaction-mode Pooler rw Service and asserts **no connection-exhaustion
+   error** (§330, ADR-0042 §4). The DB password is fed over **stdin** (never argv).
+
+### Reduced scale (STATED) + named ceiling (ADR-0047 §1/§4)
+
+The drill proves the **queue-burst scale-out/in + per-queue isolation + p95/1→2 +
+PgBouncer-budget mechanisms** bite at reduced scale: **burst = 50 pending
+`discovery` tasks** (10× `listLength`), **api floor 2 / ceiling 4**, **~20 VUs /
+400 reqs**, **~40 concurrent pooler connections**. It does **not** certify a scale
+point. The certified-scale G-SCA ceilings — **500-device discovery ≤ 60 min** with
+autoscale (§326), **100 concurrent users at p95 < 300 ms with 2→4-replica
+linearity** (§327), **5,000-device / 100k-interface projection** (§328) — stay
+**deferred-accepted → GA / customer cluster** with the ADR-0047 §4 written promotion
+path; they are **never claimed** from this run.
+
+### Negative control — PROVEN to bite (ADR-0047 §2)
+
+| Positive assertion | Planted negative control (turns it RED) |
+|---|---|
+| 10× `discovery` burst → scale-out then scale-in; siblings not starved; p95 held + 1→2 improvement + zero 5xx; PgBouncer no exhaustion | `QUEUE_BURST_DRILL_NEGATIVE_CONTROL=1` emulates a **shared/misconfigured scaler that STARVES a sibling** (its Deployment is scaled to 0 — the budget-stolen starvation a shared autoscaler produces) **and** overruns the **PgBouncer connection budget** (connection exhaustion + p95 breach) → the per-queue-isolation + §330 + §327 assertions go **RED** |
+
+The negative control emulates the two failures the ADRs forbid **without re-tuning
+the real chart's ScaledObjects/Pooler** (scope: one drill, no unrelated re-tuning) —
+it drives the observable starvation + exhaustion the assertions must catch.
+
+**How the bite is proven WITHOUT a cluster (L1).** The live drill runs only on the
+kind HA cluster, which cannot run on the authoring host (Windows, no Docker/Linux
+kind). `ci/kind/selftest/queue-burst-load-bite.sh` earns the ADR-0047 §2
+plant→red→revert proof **hardware-free**: it runs the **real** `queue-burst-load.sh`
+against a **fake `kubectl`** that simulates the ScaledObjects + Deployment replica
+counts + Redis `LLEN` + the in-pod loadgen / pool probe, and asserts the polarity —
+
+- **POSITIVE** (scale-out/in, no starvation, p95 held + 1→2, no exhaustion) → drill
+  **GREEN** (exit 0) — the revert-to-green;
+- **NEGATIVE CONTROL** (sibling starved + PgBouncer budget overrun) → drill **RED**,
+  and the RED is specifically the isolation / connection-budget assertion;
+- **NO-SCALE-OUT** (the burst never moves the replica count) → **RED** (the
+  "replica count actually changed" assertion bites — the spec's false-green risk).
+
+This self-test is **blocking within the `kind-harness-ha` job** (it needs no cluster)
+and is the recorded evidence the drill is a real gate, not green-at-setup. It was
+**executed on the authoring host**: `bash ci/kind/selftest/queue-burst-load-bite.sh`
+→ `0 failure(s)`; drill exit **4** under the negative control (isolation + §330 +
+§327 assertions), exit **1** on no-scale-out, exit **0** on the positive path. The
+static `validate-harness.sh` W4-T6 invariants were likewise shown to bite (a
+neutered scale-out assertion → RED; reverted → GREEN).
+
+### Gate posture — SIGNAL-ONLY (live), BLOCKING (static bite proof)
+
+- The **live** queue-burst/load drill runs inside the `HA=1` harness in the
+  **`kind-harness-ha`** CI job, which stays **`continue-on-error` / absent from
+  `all-gates`**. Promoting the G-SCA HA drill to **blocking** is a deliberate later
+  step (**W5/GA**), not W4-T6.
+- The **static** negative-control bite proof (`queue-burst-load-bite.sh`) and the
+  `validate-harness.sh` W4-T6 invariants are **blocking within the job** — a silently
+  weakened drill (a burst that never scales out, a dropped isolation/§330/§327
+  assertion, a removed negative control, a SQLite path) fails there, no cluster
+  needed.
+- **L1 caveat:** the **live** burst/scale/load/pool path has **not** run on the
+  authoring host; it runs live only on the CI ubuntu runner. Do not claim a local
+  live queue-burst/load run. Before any W5/GA promotion of this drill to blocking, the
+  live negative control **MUST be re-verified on the CI runner** (plant → RED →
+  revert → GREEN on the actual cluster) — a named prerequisite on the ADR-0047 §4
+  promotion path.
+
+## Compressed-soak drill (P3 W4-T7, G-REL §315 compressed) — §6 SLOs hold over the compressed window
+
+The compressed-soak drill (`ci/kind/assertions/checks/compressed-soak.sh`) is
+auto-discovered by the assertion-runner and runs on the `HA=1` path. It proves the
+**§6 SLOs are measurable and HELD over a sustained-but-compressed run** and that no
+resource leaks over that run — the compressed-soak MECHANISM (ADR-0047 §1/§2/§3).
+
+### §11 criterion + target (ADR-0046 §1/§2/§6, ADR-0047 §3)
+
+- **G-REL §315 (compressed):** drive STEADY mixed synthetic load over a compressed
+  window and assert the §6 SLO recording rules (W3-T2) stay **within budget** so **no
+  multi-window burn-rate alert (W3-T3) fires**, and that there is **no slow resource
+  regression** (connections / memory / queue depth stay bounded — a trend → fail).
+
+### What the drill does
+
+1. Records a **START-of-window resource baseline** — PgBouncer server-connection
+   count (via `pg_stat_activity` through the Pooler rw Service), the discovery worker
+   RSS (cgroup `memory.current`), and each soak queue's `LLEN`.
+2. Drives `COMPRESSED_SOAK_WINDOW_S` (default **600 s / 10 min**) of **steady mixed
+   load** — a reduced-concurrency HTTP read load against the api Service (bash
+   `/dev/tcp`, no k6/locust) **plus** a steady discovery/config/docs queue-job
+   trickle — sampling the §6 SLIs every `COMPRESSED_SOAK_SAMPLE_INTERVAL_S`
+   (default **30 s**), so the window carries **many** samples.
+3. Each sample computes the **same SLIs the W3-T2 recording rules derive**: the
+   non-5xx availability error ratio, the fraction of reads exceeding the 300 ms p95
+   boundary, and (from a `/metrics` scrape) the discovery success ratio. The drill
+   tracks the **worst** SLI over the window and asserts each stayed **within the
+   fast-burn budget** (the W3-T3 14.4× thresholds) — i.e. **no burn-rate alert would
+   fire**. The SLO is HELD only if **every** sample stayed in budget.
+4. Records an **END-of-window resource sample** and asserts each resource stayed
+   **BOUNDED** (delta ≤ tolerance) — a monotone rise is a leak that would surface
+   over calendar time → **fail**.
+
+### Reduced scale (STATED) + named ceiling (ADR-0047 §1/§4)
+
+- **Reduced scale ran at:** a **~10-minute compressed window** (default; tunable),
+  ~tens of virtual users + a steady per-queue trickle, on the W4-T1 reduced-scale HA
+  cluster. This proves the SLO-held + no-slow-regression **MECHANISM**, not the
+  calendar SLA.
+- **Named-deferred → GA:** the **30-day CALENDAR soak meeting all §6 SLOs** (G-REL
+  §315) is **deferred-accepted → GA / customer cluster**, **never claimed here**.
+  **Promotion path (ADR-0047 §4):** a 30-day staging window on a sized cluster; run
+  the calendar soak, assert §6 SLOs.
+
+### Negative control — PROVEN to bite (ADR-0047 §2)
+
+`COMPRESSED_SOAK_DRILL_NEGATIVE_CONTROL=1` injects an **SLO regression** (an
+error-rate + latency perturbation on the synthetic load → the availability + latency
+SLIs breach their budget over the window → a burn-rate breach) **and** a **monotone
+resource leak** (connection / RSS / queue-depth trend), so the SLO-held +
+bounded-trend assertions go **RED**. The bite is earned **hardware-free** in two
+layers by `ci/kind/selftest/compressed-soak-bite.sh`:
+
+1. **The load-bearing layer runs a REAL `promtool test rules`** over the ACTUAL
+   W3-T2 recording rules + W3-T3 burn-rate alerts
+   (`deploy/observability/slo-compressed-soak.test.yaml`): a HEALTHY
+   compressed-soak-shaped window fires **NO** alert (SLOs held), and the injected
+   error-rate + latency perturbation **DOES** fire the burn-rate alert (RED). This
+   proves the soak's core assertion ("no burn-rate alert fires over the window")
+   bites against the same rules Prometheus loads.
+2. It runs the real `compressed-soak.sh` against a fake `kubectl` and asserts the
+   polarity — GREEN when the SLIs stay in budget + resources bounded, RED under the
+   negative control.
+
+Executed on the authoring host: **0 failure(s)** — promtool SUCCESS (healthy silent
++ injected regression fires); the drill exits **0** on the positive path and **8**
+under the negative control (the SLO-held + trend assertions bite). The bite proof
+itself has a **negative control on the bite**: flipping the promtool fixture's
+firing case to expect no alert makes `promtool test rules` FAIL with `exp:[] got:[…
+NetopsApiAvailabilityFastBurn …]` — confirming the fire is genuinely asserted.
+
+### Gate posture — SIGNAL-ONLY (live), BLOCKING (static bite proof)
+
+- The **live** soak drill runs inside the `HA=1` harness in the **`kind-harness-ha`**
+  CI job, which stays **`continue-on-error` / absent from `all-gates`**. Promoting
+  the G-REL soak drill to **blocking** is a deliberate later step (**W5/GA**), not
+  W4-T7.
+- The **static** bite proof (`compressed-soak-bite.sh`, incl. the real `promtool`
+  run) and the `validate-harness.sh` W4-T7 invariants are **blocking within the job**
+  — a silently weakened soak (a dropped SLO-held budget check, a removed
+  bounded-trend guard, a removed negative control, a SQLite path) fails there, no
+  cluster needed.
+- **L1 caveat:** the **live** steady-load + SLI-sampling path has **not** run on the
+  authoring host; it runs live only on the CI ubuntu runner. Do not claim a local
+  live soak run. Before any W5/GA promotion of this drill to blocking, the live
+  negative control **MUST be re-verified on the CI runner** (plant → RED → revert →
+  GREEN on the actual cluster) — a named prerequisite on the ADR-0047 §4 promotion
+  path.
+
+## Gate status — SIGNAL-ONLY (promotion AUTHORED, HELD pending ADR-0048 §4 bite)
+
+The P2 `kind-harness` live run (steps 1-6) is **not yet a blocking gate**. The
+promotion to blocking for the two named P2 sub-items — **mTLS api/worker↔postgres
+handshake + plaintext-refused** and **collector default-deny egress** — is
+**authored** (the exact two edits ADR-0048 §2 names) but **deliberately held**
+because the ADR-0048 §4 prerequisite has not been met:
+
+- The live `kind-harness.sh` step (`id: harness`) is **still
+  `continue-on-error: true`**, and the `kind-harness` job is **NOT** in the
+  **`all-gates`** required-check aggregator's `needs` list (`.github/workflows/ci.yml`).
+  So the two live assertions run for **SIGNAL only** — a live regression is surfaced
+  as a warning in the job summary but does **not** block merge yet.
+- **Why held (ADR-0048 §4, Prerequisite B — "non-negotiable"):** a promoted gate
+  that has never been shown to bite is a **false-green blocking gate — worse than
+  `continue-on-error`** (ADR-0048 Risks; Alternative 2 "Promote without the bite
+  proof" is Rejected). Both live assertions must first be SHOWN to turn the gate
+  **red** on a planted regression, then reverted to green, **on a CI ubuntu runner**.
+  Per **P1-W4-LESSONS L1** kind cannot run on the authoring host (Windows, no
+  Docker/Linux kind), so that observed red→green run has **not been executed on any
+  runner yet** — it is authored, not proven (see "Prove-it-bites" below, which is a
+  PROCEDURE to run, not a record of a run that happened).
+- **Prerequisite A (satisfied):** the reliable enforcing-CNI W4-T1 HA topology is in
+  place. **Prerequisite B (outstanding):** the executed bite. Only when a runner
+  records both bites (with run URLs / a planted→red→reverted commit pair cited here)
+  are the two promotion edits applied: drop the step's `continue-on-error` and add
+  `kind-harness` to `all-gates` `needs`.
+- The static `validate-harness.sh` step + the assertion-library self-tests +
+  `extract_secret.py` tests stay **blocking within the job** regardless — the live
+  run is signal-only **on top of** them.
+- **Scope (when promoted):** only the two P2 sub-items above (ADR-0048 §1 / §6). No
+  new security claim; no other live assertion joins `all-gates`.
+
+### Why it can bite (assertions run, do not SKIP)
+
+Both checks SKIP loudly (`exit 0`) if their control object is absent — a missing
+control must never read as a pass. Under the harness apply they are **present**, so
+the checks assert (they do not skip): the harness renders with
+`--set mtls.postgres.enabled=true` (so `netops-db-client-tls` exists →
+`mtls-postgres.sh` asserts) and `networkPolicy.collectorEgress` is default-on (so
+`netops-allow-collector-mgmt-egress` exists → `collector-egress.sh` asserts).
+Verified locally with `helm template netops … --set mtls.postgres.enabled=true
+--set mtls.postgres.certManager.enabled=false` — both objects render.
+
+### Prove-it-bites (ADR-0048 §4 — mandatory before promotion; NOT YET EXECUTED)
+
+A promoted gate that does not bite is a **false-green blocking gate — worse than
+`continue-on-error`**. ADR-0048 §4 therefore makes an EXECUTED plant→red→revert the
+**precondition** for promoting the live run to blocking. **This bite has NOT been
+run on any runner yet** (**L1:** kind cannot run on the authoring host — Windows, no
+Docker/Linux kind — and no CI ubuntu-runner execution has been recorded). The table
+below is the **procedure to execute** to earn the promotion, not a record of a run
+that occurred. Until the observed red→green exists (with run URLs / a
+planted→red→reverted commit pair recorded here), the live step stays
+`continue-on-error` and `kind-harness` stays out of `all-gates` (see "Gate status"
+above).
+
+The two negative controls are **representative** and verified to work *in principle*
+against the rendered manifests (the rendered `pg_hba` contains only
+`hostssl … clientcert=verify-full` with no plaintext `host` line, so adding one makes
+`assert_handshake_refused` fail; the broaden-not-delete collector plant genuinely
+admits `1.1.1.1:53`), but "would work" is **not** "proven to bite" — ADR-0048 §4
+demands the latter before blocking membership.
+
+**Procedure (run on a CI ubuntu runner, then record the evidence here):**
+
+| Control | Planted regression (makes it RED) | Assertion that fails | Revert (back to GREEN) |
+|---|---|---|---|
+| **mTLS handshake** | Add a plaintext `host all all 0.0.0.0/0 md5` line to the Postgres `pg_hba` (or set client `sslmode=disable` acceptance) so a plaintext connection is admitted | `assert_handshake_refused "plaintext (sslmode=disable) client"` in `ci/kind/assertions/checks/mtls-postgres.sh` — the plaintext probe now CONNECTS → refusal assertion fails → check non-zero → `kind-harness` job red (→ `all-gates` red once promoted) | Remove the plaintext `pg_hba` line (restore `hostssl … clientcert=verify-full` only) → plaintext refused again → green |
+| **Collector egress** | Broaden the egress allow-list so the arbitrary external destination `1.1.1.1:53` is admitted while KEEPING the collector policy present (so the check asserts, not SKIPs): e.g. add `1.1.1.1/32` to `networkPolicy.collectorEgress.managementCidrs` and `53` to its ports, or add a live `kubectl patch`/extra allow-all-egress NetworkPolicy selecting the worker-labelled probe. (Deleting the whole floor via `--set networkPolicy.enabled=false` also removes `netops-allow-collector-mgmt-egress`, which makes the check SKIP rather than fail — use the broaden-not-delete plant so the deny assertion actually runs and goes RED.) | `assert_egress_blocked_retry "arbitrary external egress …"` in `ci/kind/assertions/checks/collector-egress.sh` — the external probe now REACHES `1.1.1.1:53` → deny assertion fails → check non-zero → `kind-harness` job red (→ `all-gates` red once promoted) | Remove the broadened allow (restore the narrow mgmt-subnet allow-list on top of the `netops-default-deny-all` floor) → external egress blocked again → green |
+
+**Evidence (to be filled in when the bite is executed):** _not yet run — no CI
+run URL / planted-regression commit pair exists._ When executed, record here the two
+run URLs (or the planted→red→reverted commit SHAs) mirroring the `pg-integration`
+`dd366bd` "proven to bite" precedent (`P2-RELEASE-READINESS.md` §1.1), THEN apply the
+two promotion edits (drop `continue-on-error`; add `kind-harness` to `all-gates`
+`needs`) and flip this section + "Gate status" to past tense.
+
+### The HA live job stays NON-BLOCKING
+
+Only the two G-SEC live assertions above are in scope for promotion (and that
+promotion is itself HELD pending the §4 bite — see "Gate status"). The
+`kind-harness-ha` job (the reduced-scale HA topology — CNPG + KEDA + Sentinel,
+ADR-0047) is a **G-REL/G-SCA** reliability/scale path, not this G-SEC promotion; it
+stays `continue-on-error` and **absent from `all-gates`** (see "HA topology" above
+and the ci.yml DELIBERATE-OMISSION block). Promoting the HA drills to blocking is a
+deliberate later step (W5/GA), not W4-T2.
 
 ## Failure modes
 
@@ -158,3 +663,13 @@ This is now a **P3-Platform** readiness item (re-deferred from W5-T3); until the
 | HA: `CNPG Cluster ... NOT ready ... readyInstances` | Fewer than 3 CNPG instances came Ready (replica scheduling / PVC / image pull). A primary-only cluster is NOT the HA quorum the failover drill needs — `wait-ha-ready.sh` correctly HARD-FAILS. Inspect `kubectl -n netops get cluster -o wide` + the CNPG pod events. |
 | HA: `ScaledObject/... Ready NOT ready` | KEDA did not reconcile a `ScaledObject` (bad trigger, unresolved `TriggerAuthentication`, Sentinel not discovered). The per-queue autoscale substrate is not live; do NOT trust a queue-burst drill until this is Ready. |
 | HA: `no KEDA ScaledObjects present` | The KEDA operator installed but the chart's ScaledObjects did not apply (KEDA CRDs not Established before apply, or `workerScaling.enabled` off in the overlay). Confirm the overlay + the CRD-Established wait in `install-operators.sh`. |
+| Failover drill: `SKIP: CNPG Cluster … absent` | The drill ran on a **non-HA** harness (no `HA=1`, so no CNPG operator/Cluster). Expected on the P2 path — the failover drill only asserts under `HA=1`. Not a failure. |
+| Failover drill: `committed-audit LOSS … zero-loss VIOLATED` / `seq GAP` | A committed audit row did **not** survive promotion — a real G-REL §316 durability regression (or the negative control is active). Check the audit write path is quorum-sync (`SET LOCAL synchronous_commit=remote_apply`, ADR-0042 §2) and the CNPG `synchronous`/`failoverQuorum` config; confirm `PG_FAILOVER_DRILL_NEGATIVE_CONTROL` is **not** set on a real run. |
+| Failover drill: `write service NOT restored within …` or `RTO … EXCEEDS budget` | No automated promotion, or promotion slower than the 60 s RTO. Inspect `kubectl -n netops get cluster -o wide` + the CNPG operator events; a stuck promotion means the HA quorum is not healthy (re-check `wait-ha-ready.sh` passed). |
+| `pg-failover bite proof found N violation(s)` | `pg-failover-bite.sh` (no cluster) found the drill no longer bites correctly — e.g. the negative control stopped turning the drill red, or the happy path went false-red. The drill is not a real gate until this is green; do **not** trust a live green until the bite proof passes. |
+| Queue-burst drill: `SKIP: KEDA ScaledObject … absent` | The drill ran on a **non-HA** harness (no `HA=1`, so no KEDA per-queue autoscaling). Expected on the P2 path — the queue-burst/load drill only asserts under `HA=1`. Not a failure. |
+| Queue-burst drill: `did NOT scale out … no scale-out` | KEDA did not grow the `discovery` worker Deployment under a 10× burst — a real G-SCA §329 regression (or a disabled/misconfigured trigger). Confirm the `netops-worker-discovery` ScaledObject reconciled Ready, the Sentinel is discovered, and `LLEN discovery` actually reached the burst depth; check `kubectl -n netops get scaledobject,hpa -o wide`. |
+| Queue-burst drill: `sibling queue … was STARVED … isolation VIOLATED` | A sibling worker Deployment lost its replica budget to the `discovery` burst — a real per-queue-isolation regression (or the negative control is active). Confirm each queue has its OWN ScaledObject⇄Deployment (no shared scaler); confirm `QUEUE_BURST_DRILL_NEGATIVE_CONTROL` is **not** set on a real run. |
+| Queue-burst drill: `p95 … EXCEEDS the … budget` / `NO 1->2-replica improvement` / `HTTP 5xx` | The api did not hold under the reduced-scale load — a §327 regression. Inspect the api Deployment CPU/limits, the HPA, and the api logs; a p95 that does not improve at 2 replicas points at a shared bottleneck (DB/pooler) rather than api CPU. |
+| Queue-burst drill: `connection-exhaustion error … budget breached` | The transaction-mode PgBouncer Pooler ran out of server connections under load — a §330 / ADR-0042 §4 regression (or the negative control is active). Confirm `pgbouncer.poolMode: transaction` + the `maxClientConn`/`defaultPoolSize` budget vs the primary's `max_connections`; confirm the negative-control flag is **not** set on a real run. |
+| `queue-burst/load bite proof found N violation(s)` | `queue-burst-load-bite.sh` (no cluster) found the drill no longer bites correctly — e.g. the negative control stopped starving a sibling / breaching the budget, or the no-scale-out case passed. The drill is not a real gate until this is green; do **not** trust a live green until the bite proof passes. |
