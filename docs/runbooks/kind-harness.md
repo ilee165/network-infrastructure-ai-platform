@@ -22,7 +22,7 @@ Give the two W4 enforcement tasks a deterministic, hardware-free place to BITE: 
 | CI job (P2) | `.github/workflows/ci.yml` job `kind-harness` (**non-blocking** — see "Gate status" below) |
 | CI job (HA, P3 W4-T1) | `.github/workflows/ci.yml` job `kind-harness-ha` (**non-blocking live** — see "HA topology" + "Gate status") |
 | Cluster name | `netops-w4` (`CLUSTER_NAME` override) |
-| HA operator installer | `ci/kind/ha/install-operators.sh` (CloudNativePG `1.24.1` + KEDA `2.16.1`, pinned; `CNPG_VERSION`/`KEDA_VERSION` override) |
+| HA operator installer | `ci/kind/ha/install-operators.sh` (CloudNativePG `1.29.1` + KEDA `2.16.1`, pinned; `CNPG_VERSION`/`KEDA_VERSION` override) |
 | HA readiness gate | `ci/kind/ha/wait-ha-ready.sh` (a half-up topology must NOT read ready — L5) |
 | HA overlay validator | `ci/kind/ha/validate-ha-overlay.sh` (static render + reduced-scale count bite) |
 | Reduced-scale HA overlay | `deploy/kubernetes/netops/values-kind-ha.yaml` (`HA_VALUES` override) |
@@ -68,7 +68,7 @@ collector assertions (they run unchanged alongside).
 
 | Component | What / where | ADR |
 |---|---|---|
-| **CloudNativePG operator** | installed by `ci/kind/ha/install-operators.sh` (pinned `1.24.1`), so a CNPG `Cluster` (1 primary + 2 replicas) + `Pooler` can run on kind | ADR-0042 |
+| **CloudNativePG operator** | installed by `ci/kind/ha/install-operators.sh` (pinned `1.29.1` — supported release with the CVE-2026-44477 fix; 1.24.x is EOL/unpatched), so a CNPG `Cluster` (1 primary + 2 replicas) + `Pooler` can run on kind | ADR-0042 |
 | **KEDA** | installed by the same script (pinned `2.16.1`), so per-queue worker `ScaledObject`s + `TriggerAuthentication`s resolve | ADR-0043 |
 | **Redis Sentinel** | deployed by the chart via the HA overlay (1 primary + 2 replicas, 3 Sentinels, 2-of-3 quorum, AOF) | ADR-0044 |
 | **Enforcing CNI** | **REUSED** — the existing Calico bring-up + CNI self-test in `kind-harness.sh` (NOT duplicated) | ADR-0041 §2 |

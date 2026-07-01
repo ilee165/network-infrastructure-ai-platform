@@ -45,7 +45,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- pinned operator versions (NEVER `latest` — matches the Calico pin) --------
 # CloudNativePG operator. The release ships a single applyable manifest
 # `cnpg-<version>.yaml`. Pinned; override with CNPG_VERSION for a newer pin.
-CNPG_VERSION="${CNPG_VERSION:-1.24.1}"
+# Pinned to a SUPPORTED release that includes the fix for CVE-2026-44477 /
+# GHSA-423p-g724-fr39 (metrics-exporter privesc/RCE; fixed in 1.29.1+ / 1.28.3+).
+# 1.24.x is EOL and unpatched — never pin below the fixed line.
+CNPG_VERSION="${CNPG_VERSION:-1.29.1}"
 CNPG_MANIFEST="${CNPG_MANIFEST:-https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-${CNPG_VERSION%.*}/releases/cnpg-${CNPG_VERSION}.yaml}"
 CNPG_NAMESPACE="${CNPG_NAMESPACE:-cnpg-system}"
 

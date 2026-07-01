@@ -416,8 +416,18 @@ grep_must "${HA_OVERLAY}" 'minReplicas: 2' \
   "HA overlay keeps the api HPA floor at 2 (HA floor never reduced, ADR-0043 §1)"
 grep_must "${HA_OVERLAY}" 'replicas: 3' \
   "HA overlay declares Redis/Sentinel replicas: 3 (Sentinel quorum minimum, ADR-0044 §1)"
-grep_must "${HA_OVERLAY}" 'enabled: false' \
-  "HA overlay disables the single-instance postgres/redis tiers (mutual exclusion)"
+# MUTUAL EXCLUSION: the SINGLE-INSTANCE postgres/redis tiers are disabled. Scope to
+# `services.<tier>.enabled` SPECIFICALLY — a bare `grep 'enabled: false'` false-greens
+# on ANY unrelated disabled flag in the overlay (e.g.
+# services.api.autoscaling.requestRate.enabled: false). Match a 2-space `<tier>:`
+# header immediately followed (within 2 lines) by a 4-space `enabled: false`.
+for _tier in postgres redis; do
+  if grep -E "^  ${_tier}:$" -A2 "${HA_OVERLAY}" | grep -Eq '^    enabled: false$'; then
+    ok "HA overlay disables the single-instance ${_tier} tier (services.${_tier}.enabled: false — mutual exclusion)"
+  else
+    bad "HA overlay does NOT set services.${_tier}.enabled: false (mutual exclusion NOT verified)"
+  fi
+done
 
 echo "== validator summary: ${fails} failure(s) =="
 if [ "${fails}" -ne 0 ]; then
