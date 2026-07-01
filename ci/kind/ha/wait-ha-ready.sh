@@ -80,8 +80,16 @@ group "Redis Sentinel readiness (3 Redis + 3 Sentinel, ADR-0044 §1)"
 # Both StatefulSets must have every replica Ready — a Sentinel quorum that has not
 # formed (Sentinels Pending) cannot perform failover, so the shard is not HA.
 # `rollout status statefulset` blocks until .status.readyReplicas == .spec.replicas.
-for sts in $(kubectl -n "${CHART_NS}" get statefulset \
-    -l app.kubernetes.io/name=netops -o name 2>/dev/null || true); do
+# Defense-in-depth: guard against an empty list so a namespace mishap or partial
+# apply that dropped all StatefulSets does not silently pass this section (L5).
+sts_list=$(kubectl -n "${CHART_NS}" get statefulset \
+    -l app.kubernetes.io/name=netops -o name 2>/dev/null || true)
+if [ -z "${sts_list}" ]; then
+  echo "::error::no StatefulSets found in ${CHART_NS} — Redis/Sentinel did not render/apply." >&2
+  endgroup
+  exit 1
+fi
+for sts in ${sts_list}; do
   echo "waiting for ${sts} rollout"
   kubectl -n "${CHART_NS}" rollout status "${sts}" --timeout="${WORKLOAD_READY_TIMEOUT}"
 done
@@ -93,7 +101,16 @@ group "api + worker Deployments availability (api HPA floor 2, KEDA per-queue)"
 # (HPA floor 2), the base worker, the frontend, and the KEDA-owned per-queue
 # worker Deployments. A per-queue worker stuck Pending means KEDA's scale target
 # is not schedulable and a queue-burst drill would false-green.
-for dep in $(kubectl -n "${CHART_NS}" get deployment -o name 2>/dev/null || true); do
+# L5 / ADR-0048 §3: capture the list first; an empty list means no Deployments
+# landed (partial apply, wrong namespace) — that MUST hard-fail, not silently
+# skip the loop body and return 0 (false-green on a zero-Deployment cluster).
+dep_list=$(kubectl -n "${CHART_NS}" get deployment -o name 2>/dev/null || true)
+if [ -z "${dep_list}" ]; then
+  echo "::error::no Deployments found in ${CHART_NS} — api/worker/frontend did not render/apply." >&2
+  endgroup
+  exit 1
+fi
+for dep in ${dep_list}; do
   echo "waiting for ${dep} rollout"
   kubectl -n "${CHART_NS}" rollout status "${dep}" --timeout="${WORKLOAD_READY_TIMEOUT}"
 done
