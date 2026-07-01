@@ -145,6 +145,12 @@ secrets:
     # lookup, L4); production supplies them via existingSecret / external-secrets.
     pcapSnapshotS3Key: pcap-snapshot-s3-key
     pcapSnapshotS3KeySecret: pcap-snapshot-s3-key-secret
+    # OPTIONAL audit->SIEM export bearer token (W3-T1, ADR-0045 §1). The HTTPS/JSON
+    # sink's Authorization: Bearer token. EMPTY by default — the exporter then sends
+    # no Authorization header (mTLS-only or unauthenticated collector). REFERENCE key
+    # NAME only; set it (and add the key to existingSecret / external-secrets) to
+    # enable bearer auth. NEVER the value — the token is a secretKeyRef, never inlined.
+    auditExportBearerToken: ""
     # pgBackRest TLS-server mTLS material (W5-T1, ADR-0030 §1/§4). The scheduled
     # CronJob reaches the in-postgres `pgbackrest server` over TLS (it has no
     # PGDATA volume of its own), so a CA + server cert/key + client cert/key are
@@ -1369,6 +1375,98 @@ audit:
       # contend; the full scan is heavier but infrequent).
       schedule: "30 3 * * 0"
 
+  # -- AUDIT -> SIEM EXPORT pipeline (W3-T1, ADR-0045). A dedicated LONG-RUNNING
+  #    Deployment (NOT a CronJob — the export is continuous near-real-time streaming)
+  #    that streams every committed audit_log row to the customer SIEM at-least-once,
+  #    in ADR-0038 `seq` order, over a vendor-neutral transport (RFC5424 syslog or
+  #    ArcSight CEF over TLS, or generic HTTPS/JSON), driven by a DURABLE `seq` cursor
+  #    (gap-free across restarts) with a bounded buffer + retry on sink outage (never
+  #    drops a row, never blocks the audit write) and an `audit_export_lag_seconds`
+  #    gauge (the §6 p95<60s SLI W3-T3 alerts on). It runs the same Python-bearing
+  #    backend image (it imports app.services.audit.export) and is READ-ONLY against
+  #    audit_log + advances only its own cursor row.
+  export:
+    # DISABLED by default (opt-in): a deployment with no customer SIEM is unchanged.
+    # Enabling renders the Deployment + (with networkPolicy on) the default-deny-to-
+    # SIEM-only egress policy. The exporter REQUIRES a format + endpoint when enabled
+    # (the template fails closed on an empty endpoint — never a silent no-export).
+    enabled: false
+    # The export transport (ADR-0045 §1): syslog | cef | https-json. `syslog`/`cef`
+    # ride the RFC5425 TLS syslog sink (host+port below); `https-json` POSTs to the
+    # endpoint below. All over TLS (no cleartext export of the audit spine).
+    format: https-json
+    # SIEM syslog/CEF collector (the `syslog`/`cef` formats). host REQUIRED for those.
+    syslogHost: ""
+    syslogPort: 6514
+    # SIEM HTTPS/JSON collector URL (the `https-json` format). REQUIRED for that format.
+    httpsEndpoint: ""
+    # Bounded read-batch per cycle (ADR-0045 §3 — bounded memory; a long outage grows
+    # the durable backlog + the lag gauge, never unbounded memory).
+    batchSize: 500
+    # Poll interval (s) when caught up, and capped retry backoff (s) after a sink fail.
+    pollSeconds: 2
+    retryBackoffSeconds: 5
+    # Prometheus /metrics port the exporter exposes the lag gauge on (scraped by the
+    # platform). Reuses the worker metrics-server pattern.
+    metricsPort: 9808
+    # SINGLETON — must be exactly 1 (the template REJECTS replicas>1). The exporter is
+    # a SINGLE-WRITER: it advances ONE durable `seq` cursor and streams at-least-once
+    # in `seq` order. Two exporters would RACE the cursor -> duplicate delivery AND
+    # out-of-order/interleaved streams (no cursor-claiming/lease exists yet). A restart
+    # resumes from the cursor with no gap (Recreate strategy, no rolling overlap), so
+    # availability is restart-resume, NOT a second exporter.
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+
+# -- OBSERVABILITY / SLO enforcement (W3-T2, ADR-0046 §1; PRODUCTION.md §6 / §11
+#    G-OBS). The SLO RECORDING-RULE layer: one Prometheus recording rule per §6 SLI
+#    (the canonical `slo:<sli>:<op>` series the W3-T3 burn-rate alerts and the W3-T4
+#    dashboards read). Rendered as a prometheus-operator PrometheusRule
+#    (monitoring.coreos.com/v1) so an operator running kube-prometheus picks the
+#    recording groups up by selector.
+#
+#    EXPOSE-DON'T-BUNDLE (ADR-0015 alt.1 / ADR-0046 §4): DISABLED by default — the
+#    platform exposes the `netops_*` / `audit_export_lag_seconds` /
+#    `topology_graph_age_seconds` series on /metrics; shipping the recording rules
+#    as opt-in CODE does NOT bundle a Prometheus/operator stack into the default
+#    install. An operator with kube-prometheus enables this to register the SLI
+#    series. The rule BODY is the single source of truth checked by `promtool` in
+#    deploy/observability/slo-recording.rules.yaml; this template renders that same
+#    rule set as an operator object (a renamed base metric breaks BOTH, by design).
+observability:
+  prometheusRule:
+    # Opt-in: render the PrometheusRule only on a cluster running the
+    # prometheus-operator CRD (monitoring.coreos.com/v1). Off by default.
+    enabled: false
+    # Extra labels merged onto the PrometheusRule metadata so an operator's
+    # ruleSelector (e.g. `release: kube-prometheus-stack`) matches it. Keep empty
+    # for the default operator discovery; set per your operator's selector.
+    labels: {}
+  # -- Golden-signal Grafana dashboards-as-code (W3-T4, ADR-0046 §4; §335). The
+  #    in-repo dashboards (deploy/observability/dashboards/*.json, vendored to the
+  #    chart at dashboards/) ship as a sidecar-discoverable ConfigMap. OFF by
+  #    default (expose-don't-bundle, ADR-0015): the platform exposes the series;
+  #    provisioning the dashboards is the operator's opt-in choice. Enable on a
+  #    cluster running Grafana with the dashboard sidecar (kube-prometheus-stack).
+  grafanaDashboards:
+    enabled: false
+    # The label the Grafana dashboard sidecar selects on. The kube-prometheus-stack
+    # default is `grafana_dashboard: "1"`; override if your sidecar watches another.
+    sidecarLabel:
+      key: grafana_dashboard
+      value: "1"
+    # Extra labels / annotations merged onto the ConfigMap (e.g. a folder
+    # annotation `grafana_folder: NetOps` the sidecar honours). Keep empty for the
+    # default flat provisioning.
+    labels: {}
+    annotations: {}
+
 # -- Device-credential ROTATION (W4-T2, ADR-0040 §1/§3; ADR-0015). A scheduled
 #    CronJob runs the confirm-then-swap, fail-closed device-secret rotation pass:
 #    for each credential due, it STAGES a fresh KMS-wrapped DEK (via the EXISTING
@@ -1974,6 +2072,30 @@ networkPolicy:
       - port: 443
         protocol: TCP
       - port: 830
+        protocol: TCP
+
+  # -- AUDIT -> SIEM EXPORTER egress (W3-T1, ADR-0045 §5 / ADR-0041 posture). The
+  #    exporter reaches OUT of the cluster to the SIEM endpoint, so its egress is a
+  #    segmentation surface: a compromised exporter must NOT exfiltrate the audit
+  #    spine to an arbitrary destination. Under the default-deny floor this re-permits
+  #    ONLY the configured SIEM endpoint CIDR(s) on the configured port(s) — mirroring
+  #    the collectorEgress allow-list pattern. Fail-closed: an empty CIDR/port list is
+  #    refused (an empty `to`/`ports` is an all-destinations ALLOW). Renders only when
+  #    networkPolicy.enabled AND auditExportEgress.enabled AND audit.export.enabled.
+  auditExportEgress:
+    enabled: true
+    # The SIEM endpoint CIDR(s) the exporter may reach — the ONLY external egress
+    # permitted. `ipBlock` ONLY (a NetworkPolicy selector cannot express an external
+    # CIDR; ADR-0041 §1). Operators MUST set their REAL SIEM CIDR(s); the placeholder
+    # below renders so the chart works out of the box but is NOT a production allow.
+    siemCidrs:
+      - 10.0.0.0/8
+    # The SIEM ingest port(s) (ADR-0045 §1): syslog/CEF over TLS (6514/TCP, RFC5425)
+    # and/or HTTPS/JSON (443/TCP). Confined to the SIEM ingest set — NOT "any port".
+    ports:
+      - port: 6514
+        protocol: TCP
+      - port: 443
         protocol: TCP
 
 # -- Dedicated packet node pool (ADR-0031 §5). Taint + matching toleration so

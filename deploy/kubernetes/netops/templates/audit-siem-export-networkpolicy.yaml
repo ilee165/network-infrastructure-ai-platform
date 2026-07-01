@@ -1,0 +1,119 @@
+{{- /*
+AUDIT -> SIEM EXPORTER egress NetworkPolicy (W3-T1, ADR-0045 §5 / ADR-0041 §1).
+
+The exporter reaches OUT of the cluster to the customer SIEM endpoint, so its egress
+is a segmentation surface: a compromised exporter must NOT be able to exfiltrate the
+audit spine (or pivot) to an arbitrary destination. Under the default-deny floor in
+networkpolicies.yaml (-default-deny-all + -allow-dns-egress), this file emits TWO
+confined egress allows for the exporter: (1) this policy re-permits the ONE external
+destination the exporter legitimately reaches — the configured SIEM endpoint CIDR(s)
+on the SIEM ingest port(s) — expressed as `ipBlock` CIDR(s) (a NetworkPolicy selector
+CANNOT express an external CIDR; ADR-0041 §1); and (2) the companion
+-allow-audit-siem-export-postgres-egress policy below grants the in-cluster
+postgres:5432 read path. The §2 data-store allows in networkpolicies.yaml are scoped
+by component (-allow-worker-egress -> worker, -allow-audit-egress -> audit, ...) and do
+NOT cover component=audit-siem-export, so the exporter needs its OWN Postgres allow.
+Everything else stays denied.
+
+As with ADR-0041, NetworkPolicy enforcement REQUIRES an enforcing CNI (kind's default
+does not enforce it); the W4-T1 harness installs Calico/Cilium and any kind assertion
+of the exporter deny rides that cluster (named for the build — design+manifest here).
+
+SECURE-BY-DEFAULT, OPT-OUT NEVER OPT-IN: renders whenever networkPolicy.enabled AND
+networkPolicy.auditExportEgress.enabled AND audit.export.enabled. FAIL CLOSED: an
+EMPTY siemCidrs would render `to:` empty with `ports:` set — which a NetworkPolicy
+interprets as ALLOW egress to ALL destinations on those ports (the exact exfiltration
+path this closes). Refuse to render rather than emit an empty-`to`/empty-`ports`
+allow; disabling the tier is the supported opt-out.
+*/ -}}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.auditExportEgress.enabled .Values.audit.export.enabled }}
+{{- $ae := .Values.networkPolicy.auditExportEgress -}}
+{{- if not $ae.siemCidrs -}}
+{{- fail "networkPolicy.auditExportEgress.siemCidrs is EMPTY but auditExportEgress.enabled=true — an empty `to` would ALLOW egress to ALL destinations on the SIEM ports (fail-open, ADR-0041 §1 / ADR-0045 §5). Set the SIEM endpoint CIDR(s) or disable the tier (auditExportEgress.enabled=false)." -}}
+{{- end -}}
+{{- range $ae.siemCidrs -}}
+{{- if not . -}}
+{{- fail "networkPolicy.auditExportEgress.siemCidrs contains an EMPTY CIDR — every entry must be a real SIEM endpoint CIDR, never \"\" (fail-open, ADR-0041 §1 / ADR-0045 §5)." -}}
+{{- end -}}
+{{- /* Reject a WILDCARD /0 mask (0.0.0.0/0, ::/0, or any …/0) — it renders an
+egress ipBlock to the WHOLE internet, defeating the least-privilege audit egress
+this policy exists to enforce. An empty list already fails above; a /0 is the same
+all-destinations allow expressed as a CIDR, so refuse it too (ADR-0041 §1 / §5). */ -}}
+{{- if hasSuffix "/0" (trim .) -}}
+{{- fail (printf "networkPolicy.auditExportEgress.siemCidrs contains a WILDCARD CIDR %q — a /0 mask (0.0.0.0/0, ::/0) allows audit egress to the ENTIRE internet, breaking least-privilege on the audit spine. Set the REAL SIEM endpoint CIDR(s) or disable the tier (fail-open, ADR-0041 §1 / ADR-0045 §5)." .) -}}
+{{- end -}}
+{{- end -}}
+{{- if not $ae.ports -}}
+{{- fail "networkPolicy.auditExportEgress.ports is EMPTY but auditExportEgress.enabled=true — an empty `ports` would ALLOW ALL ports to the SIEM CIDR(s). Set the SIEM ingest port(s) or disable the tier." -}}
+{{- end -}}
+{{- $fullname := include "netops.fullname" . }}
+{{- $ns := .Release.Namespace }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-audit-siem-export-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    # The policy's IDENTITY label; the podSelector below binds the exporter pods.
+    app.kubernetes.io/component: audit-siem-export-egress
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "audit-siem-export") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # The configured SIEM endpoint(s) ONLY — the exporter's sole external egress.
+    # Confined to these ipBlock CIDR(s) on the SIEM ingest port set. NEVER an
+    # empty-`to` rule; NEVER 0.0.0.0/0 (ADR-0041 §1 / ADR-0045 §5).
+    - to:
+        {{- range $ae.siemCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        {{- range $ae.ports }}
+        - protocol: {{ .protocol | default "TCP" }}
+          port: {{ .port }}
+        {{- end }}
+---
+# ---------------------------------------------------------------------------
+# allow-audit-siem-export-postgres-egress (W3-T1, ADR-0045 §5 / ADR-0041 §1) — the
+# exporter is READ-only against audit_log and advances its own audit_export_cursor
+# row, so it MUST reach in-cluster postgres:5432. Under the default-deny floor in
+# networkpolicies.yaml the exporter gets ONLY cluster-wide DNS (allow-dns-egress) +
+# the SIEM-CIDR external allow above; the §2 data-store allows are scoped by
+# component (allow-worker-egress → worker, allow-audit-egress → audit, …) and OMIT
+# component=audit-siem-export — so without this allow the exporter cannot read
+# audit_log or advance its cursor and exports NOTHING (the same default-deny gap
+# already fixed for the audit-verify / credential-rotation / neo4j-rebuild jobs).
+# Mirrors allow-audit-egress, scoped to Postgres only. No empty-`to` rule. Renders
+# under the same guard as the SIEM-egress policy above (networkPolicy.enabled AND
+# auditExportEgress.enabled AND audit.export.enabled); when CNPG is enabled the
+# matching pooler-ingress allow lives in allow-cnpg-pooler-ingress.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-audit-siem-export-postgres-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: audit-siem-export
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "audit-siem-export") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # audit-siem-export → postgres:5432 (READ audit_log + advance audit_export_cursor).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.postgres.podSelectorLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+{{- end }}

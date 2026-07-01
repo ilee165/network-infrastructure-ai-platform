@@ -49,6 +49,7 @@ from app.api.deps import (
     get_sessionmaker,
     require_role,
 )
+from app.core import metrics
 from app.core.config import Settings
 from app.core.errors import (
     AuthError,
@@ -56,6 +57,7 @@ from app.core.errors import (
     NotFoundError,
     UnprocessableEntityError,
 )
+from app.core.logging import get_logger
 from app.core.security import Role, decode_access_token
 from app.engines.packet import (
     PacketFindings,
@@ -107,6 +109,8 @@ from app.services.change_requests import ChangeRequestService
 from app.workers.celery_app import QUEUE_PACKET_CAPTURE, celery_app
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+_logger = get_logger(__name__)
 
 #: W6-T6 per-principal/per-token API budget (PRODUCTION.md §5). Applied PER HTTP
 #: ROUTE here rather than as a router-level dependency, because this router also
@@ -376,6 +380,25 @@ def _step_read(step: TraceStep) -> AgentTraceStepRead:
     )
 
 
+def _first_token_seconds(traces: list[ReasoningTrace]) -> float | None:
+    """Seconds from the first trace's start to its first persisted step, or None.
+
+    The agent run is step-granular (no per-token stream at this layer), so the
+    first persisted reasoning step is the earliest user-visible output — the
+    operational first-token signal for the §6 first-token-latency SLI
+    (ADR-0046 §1). Both timestamps are UTC wall-clock; a run with no recorded step
+    yields ``None`` (nothing to observe). Clamped at ``0.0`` so clock skew between
+    the trace-start stamp and a step stamp can never record a negative latency.
+    """
+    if not traces:
+        return None
+    first = traces[0]
+    if not first.steps:
+        return None
+    delta = (first.steps[0].occurred_at - first.started_at).total_seconds()
+    return max(delta, 0.0)
+
+
 def _answer_of(state: SupervisorState) -> str:
     """Extract the final synthesized answer text from a finished run state."""
     messages = state.get("messages") or []
@@ -469,6 +492,24 @@ async def start_session(
 
     finished = await service.get(run_session.id)
     traces = await _load_traces(sessionmaker, run_session.id)
+    # Agent first-token latency SLI (ADR-0046 §1): observe time-to-first-persisted
+    # step, labelled by the resolved reasoning profile. Post-hoc over the loaded
+    # traces — no cost on the run hot path; skipped when the run produced no step.
+    first_token = _first_token_seconds(traces)
+    if first_token is not None:
+        # BEST-EFFORT: an observability metric must NEVER break the audit path. This
+        # block opens its OWN DB session (effective_profile_for_role) BEFORE the
+        # AGENT_TRACE_RECORDED / AGENT_SESSION_COMPLETED audit writes below; a
+        # transient DB error here must not abort the request and drop the completed
+        # run's audit trail. Swallow + log so the metric is skipped, not fatal.
+        try:
+            async with sessionmaker() as profile_session:
+                profile = await effective_profile_for_role(profile_session, "reasoning", settings)
+            metrics.observe_agent_first_token(profile=profile, seconds=first_token)
+        except Exception:  # noqa: BLE001 — metric is best-effort; audit path must proceed
+            _logger.warning(
+                "agent.first_token_metric_failed", session_id=str(run_session.id), exc_info=True
+            )
     for trace in traces:
         await _audit(
             sessionmaker,

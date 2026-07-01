@@ -691,3 +691,85 @@ def test_change_request_action_constants() -> None:
     assert (
         audit_service.CHANGE_REQUEST_FAILED_TO_ROLLED_BACK == "change_request.failed_to_rolled_back"
     )
+
+
+# ---------------------------------------------------------------------------
+# W3-T0: ChangeRequest workflow-health metric emitted at the transition site
+# ---------------------------------------------------------------------------
+
+
+class TestChangeRequestMetrics:
+    """Every lifecycle transition increments ``netops_change_requests_total{state}``."""
+
+    @staticmethod
+    def _state_count(state: str) -> float:
+        from app.core import metrics
+
+        return metrics.CHANGE_REQUESTS_TOTAL.labels(state=state)._value.get()  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _approval_latency_count() -> int:
+        """Return the current observation count on the approval-latency histogram."""
+        from app.core import metrics
+
+        for metric_family in metrics.CHANGE_REQUEST_APPROVAL_LATENCY_SECONDS.collect():
+            for sample in metric_family.samples:
+                if sample.name.endswith("_count"):
+                    return int(sample.value)
+        return 0
+
+    async def test_create_and_submit_count_their_states(
+        self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        before_draft = self._state_count("draft")
+        before_pending = self._state_count("pending_approval")
+        requester = await _seed_user(sessionmaker, role_name="engineer")
+        cr = await service.create_draft(
+            requester_id=requester,
+            actor_role=Role.ENGINEER,
+            kind=ChangeRequestKind.CONFIG,
+            payload={"diff": "x"},
+        )
+        # The initial draft entry counted.
+        assert self._state_count("draft") == before_draft + 1
+        await service.submit(cr.id, actor_role=Role.ENGINEER, actor_id=requester)
+        # The submit transition counted the entered state.
+        assert self._state_count("pending_approval") == before_pending + 1
+
+    async def test_approve_observes_approval_latency_histogram(
+        self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """approve() must observe the approval-wait duration on the latency histogram.
+
+        Verifies the ADR-0046 §1 approval-latency SLI series is populated on
+        the approve edge (finding: histogram was registered but never populated).
+        """
+        requester = await _seed_user(sessionmaker, role_name="engineer")
+        approver = await _seed_user(sessionmaker, role_name="engineer")
+        cr = await service.create_draft(
+            requester_id=requester, actor_role=Role.ENGINEER, kind=ChangeRequestKind.CONFIG
+        )
+        await service.submit(cr.id, actor_id=requester, actor_role=Role.ENGINEER)
+        before_count = self._approval_latency_count()
+        await service.approve(cr.id, actor_id=approver, actor_role=Role.ENGINEER)
+        # Exactly one new histogram observation must have been recorded.
+        assert self._approval_latency_count() == before_count + 1
+
+    async def test_reject_observes_approval_latency_histogram(
+        self, service: ChangeRequestService, sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """reject() must observe the approval-wait duration on the latency histogram.
+
+        Verifies the ADR-0046 §1 approval-latency SLI series is populated on
+        the reject edge (finding: histogram was registered but never populated).
+        """
+        requester = await _seed_user(sessionmaker, role_name="engineer")
+        reviewer = await _seed_user(sessionmaker, role_name="engineer")
+        cr = await service.create_draft(
+            requester_id=requester, actor_role=Role.ENGINEER, kind=ChangeRequestKind.CONFIG
+        )
+        await service.submit(cr.id, actor_id=requester, actor_role=Role.ENGINEER)
+        before_count = self._approval_latency_count()
+        await service.reject(cr.id, actor_id=reviewer, actor_role=Role.ENGINEER)
+        # Exactly one new histogram observation must have been recorded.
+        assert self._approval_latency_count() == before_count + 1

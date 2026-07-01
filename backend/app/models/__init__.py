@@ -12,7 +12,7 @@ from app.models.agents import (
     ReasoningTraceStep,
     TraceStepKind,
 )
-from app.models.audit import AuditChainCheckpoint, AuditLog
+from app.models.audit import AuditChainCheckpoint, AuditExportCursor, AuditLog
 from app.models.base import Base
 from app.models.change_requests import (
     Approval,
@@ -56,6 +56,7 @@ __all__ = [
     "Approval",
     "ApprovalDecision",
     "AuditChainCheckpoint",
+    "AuditExportCursor",
     "AuditLog",
     "Base",
     "ChangeRequest",

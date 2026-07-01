@@ -1,0 +1,209 @@
+{
+  "uid": "netops-api",
+  "title": "NetOps — API golden signals",
+  "netopsSubject": "api",
+  "description": "Golden-signal dashboard for the api component (ADR-0046 §4, §335). Latency + errors read the W3-T2 §1 recording-rule slo: series so this dashboard and the W3-T3 burn-rate alert never diverge. Per-replica CPU/memory saturation is provided by the operator's container/kubelet exporter (not bundled — expose-don't-bundle, ADR-0015).",
+  "tags": [
+    "netops",
+    "golden-signals",
+    "slo",
+    "api"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Prometheus",
+        "hide": 0,
+        "current": {},
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Latency — read p95 / p99 (SLO p95<300ms, p99<1s)",
+      "netopsGoldenSignal": "latency",
+      "description": "Reads the W3-T2 recording rules slo:netops_api_read_latency:p95_5m / :p99_5m (§6 row 2).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "slo:netops_api_read_latency:p95_5m",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "slo:netops_api_read_latency:p99_5m",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Traffic — request rate by status class",
+      "netopsGoldenSignal": "traffic",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (status_class) (rate(netops_http_requests_total[5m]))",
+          "legendFormat": "{{status_class}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Errors — 5xx ratio vs availability SLO budget (>=99.9%)",
+      "netopsGoldenSignal": "errors",
+      "description": "1 - slo:netops_api_availability:ratio_rate5m — the same non-5xx SLI the W3-T3 burn-rate alert reads (§6 row 1).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "1 - slo:netops_api_availability:ratio_rate5m",
+          "legendFormat": "5xx error ratio",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Saturation — in-flight / request concurrency proxy",
+      "netopsGoldenSignal": "saturation",
+      "description": "Request build-up proxy: total request rate normalised by replica count is the api saturation signal (the HPA scales on this; ADR-0043 §1). Per-replica CPU saturation comes from the kubelet/container exporter (operator-provided).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(rate(netops_http_requests_total[1m]))",
+          "legendFormat": "req/s (cluster)",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "netopsProvenance": {
+    "task": "W3-T4",
+    "adr": "ADR-0046 §4",
+    "production": "PRODUCTION.md §6 / §11 G-OBS §335"
+  }
+}

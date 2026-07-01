@@ -52,9 +52,34 @@ dashboards (W3-T4).
 
 ## Exit criteria
 
-- [ ] Harness drives DB-down / queue-stall / LLM-failure synthetic series.
-- [ ] Each fires its alert within **MTTD < 5 min**; healthy series does not fire (negative control).
-- [ ] Runs deterministically in CI; live-cluster MTTD named-deferred; one atomic commit.
+- [x] Harness drives DB-down / queue-stall / LLM-failure synthetic series.
+      (`deploy/observability/slo-mttd.faultinjection.test.yaml`: DB down →
+      `NetopsApiAvailabilityFastBurn` (5xx spike); queue stall →
+      `NetopsDiscoverySuccessFastBurn` (success-ratio drop, ADR-0046 §5); LLM-
+      provider failure → `NetopsAgentFirstTokenExternalFastBurn` (first-token
+      spill past the 3 s objective — the operator-visible symptom; see flag).)
+- [x] Each fires its alert within **MTTD < 5 min** (DB ≤ 4 m, queue ≤ 4 m, LLM
+      3 m — the firing eval_time is the simulated MTTD, asserted strictly < 5 m,
+      the window IS the assertion); healthy series does not fire (a negative
+      control per scenario, silent at 5 m).
+- [x] Runs deterministically in CI (wired into the `observability` job as
+      `promtool test rules` + a `run-mttd-bite.sh` BITE proof — a fast alert
+      slowed past the budget fails the MTTD assertions); live-cluster MTTD
+      **named-deferred** to W4/W5 (no real cluster on host, ADR-0046 §0/§5); one
+      atomic commit.
+
+### Flagged (not fabricated)
+
+- **No dedicated LLM-error-ratio SLO/alert exists in §6** — the §6 table has no
+  LLM-availability row, and `netops_llm_requests_total` carries no error/status
+  label, so a provider failure is detected via its breach of the existing §6
+  first-token-latency SLO (`NetopsAgentFirstTokenExternalFastBurn`), not a
+  fabricated `netops_llm_*` alert. A dedicated LLM-error-ratio SLO would be a NEW
+  §6 row + NEW W3-T3 alert (out of W3-T5 scope). FLAGGED to the §6/W3-T3 owners.
+- **Basis = synthetic, simulated budget.** The in-CI proof is `promtool` over
+  synthetic series at compressed timestamps. The live-cluster MTTD (real injected
+  fault on the W4-T1 kind cluster + 30-day soak) is the W4/W5 drill proof,
+  named-deferred — never silently claimed as a live observation.
 
 ## Workflow
 

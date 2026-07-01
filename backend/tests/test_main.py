@@ -28,6 +28,29 @@ async def test_response_carries_generated_request_id(client: httpx.AsyncClient) 
     assert response.headers.get("X-Request-ID")
 
 
+async def test_metrics_endpoint_served_on_api(client: httpx.AsyncClient) -> None:
+    """W3-T0: the api serves the default-REGISTRY series on a root ``/metrics``."""
+    # Drive one request so the HTTP series has a sample, then scrape.
+    await client.get("/api/v1/health/live")
+    response = await client.get("/metrics")
+    assert response.status_code == 200
+    body = response.text
+    assert "netops_http_requests_total" in body
+    # The templated route is what is labelled (the /metrics scrape itself or the
+    # health probe), never a raw id (cardinality discipline, ADR-0046 §1).
+    assert 'route="/api/v1/health/live"' in body
+
+
+async def test_metrics_route_label_is_templated_not_raw(client: httpx.AsyncClient) -> None:
+    """A request to a parametrized route records the TEMPLATED pattern, not the id."""
+    # Hit a known templated API route with a concrete id; 401/404 is fine — the
+    # middleware still records the matched route template.
+    await client.get("/api/v1/agents/00000000-0000-0000-0000-000000000000")
+    body = (await client.get("/metrics")).text
+    assert "00000000-0000-0000-0000-000000000000" not in body
+    assert 'route="/api/v1/agents/{session_id}"' in body
+
+
 async def test_inbound_request_id_is_preserved(client: httpx.AsyncClient) -> None:
     response = await client.get("/api/v1/health/live", headers={"X-Request-ID": "trace-me-12345"})
     assert response.headers["X-Request-ID"] == "trace-me-12345"

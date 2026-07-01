@@ -1,0 +1,561 @@
+# SLO burn-rate alert rules — one MULTI-WINDOW multi-burn-rate alert per
+# PRODUCTION.md §6 SLO (P3 W3-T3, ADR-0046 §2/§3; PRODUCTION.md §6 / §11 G-OBS §385).
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# §11 G-OBS §385 makes each §6 SLO a release criterion: a recording rule (W3-T2,
+# slo-recording.rules.yaml) AND a multi-window burn-rate alert (THIS file) AND a
+# runbook link. ADR-0046 §2 fixes the methodology: every §6 SLO is alerted with a
+# multi-window multi-burn-rate rule (a FAST burn + SLOW confirmation window pair,
+# the Google SRE method), NOT a single static threshold — single-threshold trips
+# are DISALLOWED (ADR-0046 §2 §112, alternative 1). The fast window pages quickly on
+# a real fast burn; the slow window resists single-spike flapping (alternative 2).
+#
+# WHAT EACH ALERT READS (ADR-0046 §1/§3 — the SAME derived SLI, no divergent PromQL)
+# ---------------------------------------------------------------------------------
+# Each alert reads the W3-T2 §1 recording-rule SLI series, never a second ad-hoc
+# definition of the "same" SLI (ADR-0046 §1, alternative 3). Concretely:
+#   * GAUGE SLOs (topology projection lag, audit->SIEM export lag) read the recorded
+#     `slo:*:seconds` gauge DIRECTLY and require it breach the objective over BOTH a
+#     fast and a slow window (ADR-0046 §2 §119: "lag/freshness SLOs are alerted on
+#     the §1 lag/freshness recording rule breaching the objective over the fast+slow
+#     window pair").
+#   * RATIO SLOs (API availability, discovery success) burn on the ERROR ratio
+#     (`1 - good_ratio`) relative to the error budget. The 5 m window reads the
+#     recorded `slo:*:ratio_rate5m` SLI; the longer confirmation windows use the
+#     IDENTICAL SLI numerator/denominator over a longer `[range]` (the same series
+#     definition — multi-window is INHERENTLY multiple ranges of one SLI, not a
+#     divergent SLI). A renamed base `netops_*` metric breaks BOTH the recording
+#     rule and this alert, by design.
+#   * LATENCY SLOs (API read p95/p99, agent first-token p95) are alerted as a
+#     burn-rate over the FRACTION OF REQUESTS EXCEEDING the objective threshold
+#     (ADR-0046 §2 §118) — NOT a quantile-over-static-threshold trip (that is the
+#     disallowed single-threshold form). The fraction-too-slow is computed from the
+#     SAME `_bucket` histogram the W3-T2 p95/p99 recording rule reads.
+#
+# BURN-RATE MATH (the standard Google-SRE budget-consumption tiers)
+# ----------------------------------------------------------------
+# For an SLO with target T over a 30-day window, error budget = 1 - T. The two tiers:
+#   * PAGE   — burn rate ~14.4x over a 5 m AND 1 h window pair (consumes ~2 % of a
+#              30-day budget in 1 h). Both windows must burn -> fast + confirmed.
+#   * TICKET — burn rate ~6x over a 30 m AND 6 h window pair (consumes ~5 % in 6 h).
+# Each alert states its SLO target, error budget, and the window/factor pair it
+# trips on, in the rule comment (ADR-0046 §2 §104 reviewability requirement).
+#
+# RUNBOOK LINK MANDATORY (ADR-0046 §3; G-OBS §385/§336)
+# ----------------------------------------------------
+# Every alert annotates a `runbook_url` resolving to an in-repo runbook under
+# docs/runbooks/ (freshness <= 90 days). An alert with no runbook is INCOMPLETE
+# (§385). Runbook STUBS were created for each SLO (W3-T3 scope); the prose is the
+# Documentation Agent's (ADR-0019 §2 dogfooding) — this file fixes the LINK.
+#
+# ALERT-AS-TEST (THE phase risk, ADR-0046 §6; P1-W4 false-green)
+# -------------------------------------------------------------
+# Every alert ships a `promtool` FIRING case (a perturbed series that breaches the
+# burn condition fires within the window) AND a healthy not-firing case, in
+# slo-burn-rate.alerts.test.yaml. A rule green-at-setup that never fires on a real
+# regression FAILS that test (it is the anti-false-green gate). The `promtool` gate
+# (check + test) is wired into CI (observability job) and PROVEN TO BITE.
+#
+# GATE
+# ----
+# `promtool check rules slo-burn-rate.alerts.yaml` (with the recording rules it
+# depends on) + `promtool test rules slo-burn-rate.alerts.test.yaml`.
+
+groups:
+  # ===========================================================================
+  # §6 row 1 — API availability (non-5xx on /api/v1/*), SLO >=99.9% / 30 days.
+  #   Error budget = 1 - 0.999 = 0.001 (0.1 % of requests).
+  #   SLI: slo:netops_api_availability:ratio_rate5m (good = non-5xx ratio).
+  #   Error ratio = 1 - good_ratio. Burn rate = error_ratio / budget.
+  #   PAGE   : burn >= 14.4 over BOTH 5 m and 1 h  (~2 % of 30-day budget in 1 h).
+  #   TICKET : burn >=  6   over BOTH 30 m and 6 h (~5 % in 6 h).
+  # The 5 m leg reads the W3-T2 recording rule; the longer legs use the IDENTICAL
+  # non-5xx ratio over a longer range (same SLI definition, not a divergent one).
+  # ===========================================================================
+  - name: netops-slo-api-availability-burn
+    rules:
+      - alert: NetopsApiAvailabilityFastBurn
+        # PAGE tier: 14.4x burn over 5m AND 1h. budget=0.001, threshold=0.0144.
+        expr: |
+          (
+            (1 - slo:netops_api_availability:ratio_rate5m) > (14.4 * 0.001)
+            and
+            (
+              1 -
+              sum(rate(netops_http_requests_total{status_class!="5xx"}[1h]))
+              /
+              sum(rate(netops_http_requests_total[1h]))
+            ) > (14.4 * 0.001)
+          )
+        for: 2m
+        labels:
+          severity: page
+          slo: api_availability
+          tier: fast
+        annotations:
+          summary: "API availability burning the 30-day error budget fast (>=14.4x)"
+          description: >-
+            The non-5xx request ratio (SLI slo:netops_api_availability:ratio_rate5m)
+            is consuming the 0.1% / 30-day error budget at >=14.4x over BOTH the 5m
+            and 1h windows. At this rate ~2% of the 30-day budget is spent in 1h.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-availability.md"
+      - alert: NetopsApiAvailabilitySlowBurn
+        # TICKET tier: 6x burn over 30m AND 6h. budget=0.001, threshold=0.006.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_http_requests_total{status_class!="5xx"}[30m]))
+              /
+              sum(rate(netops_http_requests_total[30m]))
+            ) > (6 * 0.001)
+            and
+            (
+              1 -
+              sum(rate(netops_http_requests_total{status_class!="5xx"}[6h]))
+              /
+              sum(rate(netops_http_requests_total[6h]))
+            ) > (6 * 0.001)
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          slo: api_availability
+          tier: slow
+        annotations:
+          summary: "API availability burning the 30-day error budget slowly (>=6x)"
+          description: >-
+            The non-5xx request ratio is consuming the 0.1% / 30-day budget at >=6x
+            over BOTH the 30m and 6h windows (~5% of the 30-day budget in 6h).
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-availability.md"
+
+  # ===========================================================================
+  # §6 row 2 — API read latency, SLO p95 < 300 ms AND p99 < 1 s.
+  #   Latency SLO -> burn on the FRACTION OF REQUESTS EXCEEDING the objective
+  #   (ADR-0046 §2 §118), NOT a quantile-over-static-threshold trip. The p95<300ms
+  #   objective implies <=5% of requests may exceed 300 ms (the 95th percentile is
+  #   the budget boundary); the p99<1s objective implies <=1% may exceed 1 s.
+  #   Error budget(p95) = 0.05; budget(p99) = 0.01. Burn = too_slow_frac / budget.
+  #   PAGE: burn >= 14.4 over 5m AND 1h. TICKET: burn >= 6 over 30m AND 6h.
+  #   The fraction-too-slow is read off the SAME _bucket histogram the W3-T2 p95/p99
+  #   recording rule reads (le=0.3 is the bucket boundary == 300 ms; le=1.0 for 1 s).
+  # ===========================================================================
+  - name: netops-slo-api-read-latency-burn
+    rules:
+      - alert: NetopsApiReadLatencyP95FastBurn
+        # p95<300ms: budget=0.05 of requests may exceed 0.3s. 14.4x -> 0.72 frac.
+        # too_slow_frac = 1 - (requests <= 0.3s bucket / total). 0.3 is the histogram
+        # bucket boundary AT the 300ms objective (le=0.25 measured the wrong threshold).
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[5m]))
+              /
+              sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[5m]))
+            ) > (14.4 * 0.05)
+            and
+            (
+              1 -
+              sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[1h]))
+              /
+              sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[1h]))
+            ) > (14.4 * 0.05)
+          )
+        for: 2m
+        labels:
+          severity: page
+          slo: api_read_latency
+          tier: fast
+          objective: p95
+        annotations:
+          summary: "API read p95 latency budget burning fast (>=14.4x too-slow fraction)"
+          description: >-
+            The fraction of read requests exceeding the 300 ms p95 objective is
+            burning the 5% latency budget at >=14.4x over BOTH 5m and 1h. SLI
+            quantile series: slo:netops_api_read_latency:p95_5m.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
+      - alert: NetopsApiReadLatencyP95SlowBurn
+        # p95<300ms TICKET: 6x over 30m AND 6h. budget=0.05 -> 0.30 frac. le=0.3 == 300ms.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[30m]))
+              /
+              sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[30m]))
+            ) > (6 * 0.05)
+            and
+            (
+              1 -
+              sum(rate(netops_http_request_duration_seconds_bucket{le="0.3"}[6h]))
+              /
+              sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[6h]))
+            ) > (6 * 0.05)
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          slo: api_read_latency
+          tier: slow
+          objective: p95
+        annotations:
+          summary: "API read p95 latency budget burning slowly (>=6x too-slow fraction)"
+          description: >-
+            The fraction of read requests exceeding the 300 ms p95 objective is
+            burning the 5% latency budget at >=6x over BOTH 30m and 6h.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
+      - alert: NetopsApiReadLatencyP99FastBurn
+        # p99<1s: budget=0.01 of requests may exceed 1s. 14.4x -> 0.144 frac.
+        # too_slow_frac = 1 - (requests <= 1.0s bucket / total).
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_http_request_duration_seconds_bucket{le="1.0"}[5m]))
+              /
+              sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[5m]))
+            ) > (14.4 * 0.01)
+            and
+            (
+              1 -
+              sum(rate(netops_http_request_duration_seconds_bucket{le="1.0"}[1h]))
+              /
+              sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[1h]))
+            ) > (14.4 * 0.01)
+          )
+        for: 2m
+        labels:
+          severity: page
+          slo: api_read_latency
+          tier: fast
+          objective: p99
+        annotations:
+          summary: "API read p99 latency budget burning fast (>=14.4x too-slow fraction)"
+          description: >-
+            The fraction of read requests exceeding the 1 s p99 objective is burning
+            the 1% latency budget at >=14.4x over BOTH 5m and 1h. SLI quantile
+            series: slo:netops_api_read_latency:p99_5m.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
+      - alert: NetopsApiReadLatencyP99SlowBurn
+        # p99<1s TICKET: 6x burn over 30m AND 6h. budget=0.01 -> 0.06 frac.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_http_request_duration_seconds_bucket{le="1.0"}[30m]))
+              /
+              sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[30m]))
+            ) > (6 * 0.01)
+            and
+            (
+              1 -
+              sum(rate(netops_http_request_duration_seconds_bucket{le="1.0"}[6h]))
+              /
+              sum(rate(netops_http_request_duration_seconds_bucket{le="+Inf"}[6h]))
+            ) > (6 * 0.01)
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          slo: api_read_latency
+          tier: slow
+          objective: p99
+        annotations:
+          summary: "API read p99 latency budget burning slowly (>=6x too-slow fraction)"
+          description: >-
+            The fraction of read requests exceeding the 1 s p99 objective is burning
+            the 1% latency budget at >=6x over BOTH 30m and 6h (~5% of the 30-day
+            budget in 6h).
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-api-read-latency.md"
+
+  # ===========================================================================
+  # §6 row 3 — Agent chat first-token latency, SLO p95 < 5 s (local profile) /
+  #   < 3 s (external). Objective differs BY PROFILE, so the alert is kept
+  #   per-`profile` (the SLO reporting dimension). Latency SLO -> burn on the
+  #   fraction of first-token events exceeding the per-profile objective.
+  #   Budget = 0.05 (the p95 boundary). PAGE: 14.4x over 5m AND 1h.
+  #   local uses the le="5.0" bucket boundary; external uses le="3.0".
+  # ===========================================================================
+  - name: netops-slo-agent-first-token-latency-burn
+    rules:
+      - alert: NetopsAgentFirstTokenLocalFastBurn
+        # local p95<5s: budget=0.05. 14.4x -> 0.72 frac over le=5.0 boundary.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="5.0"}[5m]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="+Inf"}[5m]))
+            ) > (14.4 * 0.05)
+            and
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="5.0"}[1h]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="+Inf"}[1h]))
+            ) > (14.4 * 0.05)
+          )
+        for: 2m
+        labels:
+          severity: page
+          slo: agent_first_token_latency
+          tier: fast
+          profile: local
+        annotations:
+          summary: "Agent first-token p95 (local profile) latency budget burning fast"
+          description: >-
+            The fraction of local-profile first-token events exceeding the 5 s p95
+            objective is burning the 5% budget at >=14.4x over BOTH 5m and 1h. SLI:
+            slo:netops_agent_first_token_latency:p95_5m{profile="local"}.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
+      - alert: NetopsAgentFirstTokenExternalFastBurn
+        # external p95<3s: budget=0.05. 14.4x -> 0.72 frac over le=3.0 boundary.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="3.0"}[5m]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}[5m]))
+            ) > (14.4 * 0.05)
+            and
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="3.0"}[1h]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}[1h]))
+            ) > (14.4 * 0.05)
+          )
+        for: 2m
+        labels:
+          severity: page
+          slo: agent_first_token_latency
+          tier: fast
+          profile: external
+        annotations:
+          summary: "Agent first-token p95 (external profile) latency budget burning fast"
+          description: >-
+            The fraction of external-profile first-token events exceeding the 3 s p95
+            objective is burning the 5% budget at >=14.4x over BOTH 5m and 1h. SLI:
+            slo:netops_agent_first_token_latency:p95_5m{profile="external"}.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
+      - alert: NetopsAgentFirstTokenLocalSlowBurn
+        # local p95<5s TICKET: 6x burn over 30m AND 6h. budget=0.05 -> 0.30 frac.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="5.0"}[30m]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="+Inf"}[30m]))
+            ) > (6 * 0.05)
+            and
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="5.0"}[6h]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="local", le="+Inf"}[6h]))
+            ) > (6 * 0.05)
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          slo: agent_first_token_latency
+          tier: slow
+          profile: local
+        annotations:
+          summary: "Agent first-token p95 (local profile) latency budget burning slowly (>=6x)"
+          description: >-
+            The fraction of local-profile first-token events exceeding the 5 s p95
+            objective is burning the 5% budget at >=6x over BOTH 30m and 6h (~5% of
+            the 30-day budget in 6h).
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
+      - alert: NetopsAgentFirstTokenExternalSlowBurn
+        # external p95<3s TICKET: 6x burn over 30m AND 6h. budget=0.05 -> 0.30 frac.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="3.0"}[30m]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}[30m]))
+            ) > (6 * 0.05)
+            and
+            (
+              1 -
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="3.0"}[6h]))
+              /
+              sum(rate(netops_agent_first_token_seconds_bucket{profile="external", le="+Inf"}[6h]))
+            ) > (6 * 0.05)
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          slo: agent_first_token_latency
+          tier: slow
+          profile: external
+        annotations:
+          summary: "Agent first-token p95 (external profile) latency budget burning slowly (>=6x)"
+          description: >-
+            The fraction of external-profile first-token events exceeding the 3 s p95
+            objective is burning the 5% budget at >=6x over BOTH 30m and 6h (~5% of
+            the 30-day budget in 6h).
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-agent-first-token-latency.md"
+
+  # ===========================================================================
+  # §6 row 4 — Discovery job success rate, SLO >=99% of device tasks succeed per
+  #   run. Error budget = 1 - 0.99 = 0.01 (1 %). SLI:
+  #   slo:netops_discovery_success:ratio_rate_run (succeeded / total over 1h).
+  #   Error ratio = 1 - success_ratio. Burn = error_ratio / budget.
+  #   PAGE: 14.4x over 5m AND 1h (the recorded SLI is a 1h ratio; the 5m leg uses
+  #   the identical success ratio over 5m). TICKET: 6x over 30m AND 6h.
+  #   Discovery is a QUEUE-STALL detector (ADR-0046 §5: queue stall -> success
+  #   ratio drops); this alert is the §337 queue-stall MTTD signal in W3-T5.
+  # ===========================================================================
+  - name: netops-slo-discovery-success-burn
+    rules:
+      - alert: NetopsDiscoverySuccessFastBurn
+        # PAGE: 14.4x burn over 5m AND 1h. budget=0.01, threshold=0.144.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_discovery_runs_total{status="succeeded"}[5m]))
+              /
+              sum(rate(netops_discovery_runs_total[5m]))
+            ) > (14.4 * 0.01)
+            and
+            (1 - slo:netops_discovery_success:ratio_rate_run) > (14.4 * 0.01)
+          )
+        for: 2m
+        labels:
+          severity: page
+          slo: discovery_success
+          tier: fast
+        annotations:
+          summary: "Discovery success rate burning the budget fast (>=14.4x) — possible queue stall"
+          description: >-
+            The discovery failed/partial ratio is consuming the 1% per-run error
+            budget at >=14.4x over BOTH 5m and 1h (SLI
+            slo:netops_discovery_success:ratio_rate_run). A sustained drop is the
+            §337 queue-stall MTTD signal.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-discovery-success.md"
+      - alert: NetopsDiscoverySuccessSlowBurn
+        # TICKET: 6x burn over 30m AND 6h. budget=0.01, threshold=0.06.
+        expr: |
+          (
+            (
+              1 -
+              sum(rate(netops_discovery_runs_total{status="succeeded"}[30m]))
+              /
+              sum(rate(netops_discovery_runs_total[30m]))
+            ) > (6 * 0.01)
+            and
+            (
+              1 -
+              sum(rate(netops_discovery_runs_total{status="succeeded"}[6h]))
+              /
+              sum(rate(netops_discovery_runs_total[6h]))
+            ) > (6 * 0.01)
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          slo: discovery_success
+          tier: slow
+        annotations:
+          summary: "Discovery success rate burning the budget slowly (>=6x)"
+          description: >-
+            The discovery failed/partial ratio is consuming the 1% per-run error
+            budget at >=6x over BOTH 30m and 6h.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-discovery-success.md"
+
+  # ===========================================================================
+  # §6 row 7 — Topology projection freshness, SLO projection lag after a discovery
+  #   run < 5 min (300 s). GAUGE SLO -> alert on the §1 recorded lag gauge breaching
+  #   the objective over a fast + slow window pair (ADR-0046 §2 §119). The gauge is
+  #   slo:netops_topology_projection_lag:seconds. FAST: lag > 300 s sustained over
+  #   a short window (max over 5m) — pages on a real stall. SLOW: lag > 300 s
+  #   sustained over a longer confirmation (min over 30m, i.e. NEVER recovered) —
+  #   resists a single transient rebuild spike (the multi-window discipline for a
+  #   gauge: fast pages, slow confirms it is not a blip).
+  # ===========================================================================
+  - name: netops-slo-topology-projection-lag-burn
+    rules:
+      - alert: NetopsTopologyProjectionLagFastBreach
+        # FAST: the freshness gauge exceeds the 300 s objective over a 5m window.
+        expr: max_over_time(slo:netops_topology_projection_lag:seconds[5m]) > 300
+        for: 2m
+        labels:
+          severity: page
+          slo: topology_projection_lag
+          tier: fast
+        annotations:
+          summary: "Topology projection lag breached the 5 min freshness objective (fast)"
+          description: >-
+            slo:netops_topology_projection_lag:seconds exceeded 300 s (the < 5 min
+            §6 objective) across the last 5m. The Neo4j projection is stale relative
+            to the latest discovery run.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-topology-projection-lag.md"
+      - alert: NetopsTopologyProjectionLagSlowBreach
+        # SLOW confirmation: lag stayed above 300 s for the ENTIRE 30m window
+        # (min_over_time > 300 -> never dropped below objective) -> a sustained
+        # staleness, not a single rebuild spike.
+        expr: min_over_time(slo:netops_topology_projection_lag:seconds[30m]) > 300
+        for: 10m
+        labels:
+          severity: ticket
+          slo: topology_projection_lag
+          tier: slow
+        annotations:
+          summary: "Topology projection lag sustained above the 5 min objective (slow)"
+          description: >-
+            slo:netops_topology_projection_lag:seconds stayed above 300 s for the
+            entire 30m window — a sustained projection-freshness breach, not a
+            transient rebuild spike.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-topology-projection-lag.md"
+
+  # ===========================================================================
+  # §6 row 8 — Audit -> SIEM export lag, SLO p95 < 60 s (ADR-0045 §3). GAUGE SLO ->
+  #   alert on the §1 recorded export-lag gauge breaching the 60 s objective over a
+  #   fast + slow window pair (ADR-0046 §2 §119). Gauge:
+  #   slo:netops_audit_siem_export_lag:seconds. FAST: lag > 60 s over a 5m window
+  #   (max) — pages on a held-down SIEM. SLOW: lag > 60 s for the entire 30m window
+  #   (min) — confirms a sustained backlog, not a single export-cycle spike. This
+  #   completes the ADR-0045 §6 build-task contract (its lag SLO's alert lives here).
+  # ===========================================================================
+  - name: netops-slo-audit-siem-export-lag-burn
+    rules:
+      - alert: NetopsAuditSiemExportLagFastBreach
+        # FAST: export lag exceeds the 60 s p95 objective over a 5m window.
+        expr: max_over_time(slo:netops_audit_siem_export_lag:seconds[5m]) > 60
+        for: 2m
+        labels:
+          severity: page
+          slo: audit_siem_export_lag
+          tier: fast
+        annotations:
+          summary: "Audit->SIEM export lag breached the 60 s objective (fast)"
+          description: >-
+            slo:netops_audit_siem_export_lag:seconds exceeded 60 s (the p95 < 60 s
+            §6 / ADR-0045 §3 objective) across the last 5m. Audit events are not
+            reaching the customer SIEM within the lag SLO.
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-audit-siem-export-lag.md"
+      - alert: NetopsAuditSiemExportLagSlowBreach
+        # SLOW confirmation: lag stayed above 60 s for the entire 30m window.
+        expr: min_over_time(slo:netops_audit_siem_export_lag:seconds[30m]) > 60
+        for: 10m
+        labels:
+          severity: ticket
+          slo: audit_siem_export_lag
+          tier: slow
+        annotations:
+          summary: "Audit->SIEM export lag sustained above the 60 s objective (slow)"
+          description: >-
+            slo:netops_audit_siem_export_lag:seconds stayed above 60 s for the entire
+            30m window — a sustained SIEM export backlog (§388 G-OBS: export operating
+            outside the lag SLO).
+          runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-audit-siem-export-lag.md"

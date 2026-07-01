@@ -643,3 +643,28 @@ def test_collect_device_permanent_failure_returns_not_ok_without_retry(
     assert fakes.ssh_attempts["10.0.0.1"] == 1  # no pointless retries
     # The secret never leaks into the reported error.
     assert "hunter2-secret" not in str(payload)
+
+
+# ---------------------------------------------------------------------------
+# W3-T0: discovery success-rate metric emitted at the run terminal-state site
+# ---------------------------------------------------------------------------
+
+
+def test_run_increments_discovery_runs_total_succeeded(
+    eager_celery: None, fakes: FakeEnv, db_url: str
+) -> None:
+    """A terminal SUCCEEDED run increments ``netops_discovery_runs_total{status}``."""
+    from app.core import metrics
+
+    fakes.topology = {"10.0.0.1": []}
+    run_id = _seed_run(
+        db_url,
+        seeds=["10.0.0.1"],
+        hop_limit=0,
+        allowlist=["10.0.0.0/24"],
+        credentials=[SSH_CRED],
+    )
+    before = metrics.DISCOVERY_RUNS_TOTAL.labels(status="succeeded")._value.get()  # type: ignore[attr-defined]
+    tasks.run_discovery.apply(args=[str(run_id)]).get()
+    after = metrics.DISCOVERY_RUNS_TOTAL.labels(status="succeeded")._value.get()  # type: ignore[attr-defined]
+    assert after == before + 1

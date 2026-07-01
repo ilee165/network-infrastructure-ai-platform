@@ -19,6 +19,7 @@ Covers the task's security exit criteria:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 
@@ -531,6 +532,43 @@ async def _await_subscriber(bus: Any, channel: str, *, timeout: float = 3.0) -> 
     raise AssertionError(f"no subscriber attached to {channel} within {timeout}s")
 
 
+async def _await_handler_terminal(handler: asyncio.Task[None]) -> None:
+    """Await the streaming handler's return once its session has reached a terminal state.
+
+    The caller has already set the session's status to a terminal value (COMPLETED)
+    in the DB, so the handler's poll loop *will* observe it and return; this waits
+    for that real terminal condition — the handler task finishing — rather than
+    betting a fixed wall clock that it happens within N seconds. A prior version
+    used ``asyncio.wait_for(handler, timeout=5.0)``; that 5s bet lost whenever CI
+    CPU contention dilated the handler's per-poll aiosqlite I/O past the budget,
+    surfacing as a spurious ``TimeoutError`` (the flake this replaces).
+
+    Determinism comes from bounding the wait by the handler's OWN termination
+    contract — ``_STREAM_MAX_POLLS`` iterations, each at most ``_STREAM_POLL_SECONDS``
+    plus real DB I/O — not by a magic constant. We scale the ceiling to that
+    contract with slack for I/O so it tracks the code, and a genuine wedged handler
+    (never returning) still fails fast rather than hanging the suite. On timeout the
+    handler is cancelled so it cannot leak into teardown.
+    """
+    # The handler's worst case is _STREAM_MAX_POLLS iterations; give each generous
+    # slack for per-poll DB I/O under load. This is a safety ceiling for a truly
+    # wedged handler, NOT a bet on normal completion time (which returns as soon as
+    # the terminal status is polled). Bounded so a real hang fails fast.
+    per_poll_ceiling = max(agents_router._STREAM_POLL_SECONDS, 0.05) + 0.05
+    ceiling = agents_router._STREAM_MAX_POLLS * per_poll_ceiling
+    try:
+        await asyncio.wait_for(asyncio.shield(handler), timeout=ceiling)
+    except TimeoutError:  # pragma: no cover - only a genuinely wedged handler
+        handler.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await handler
+        raise AssertionError(
+            "streaming handler did not return after its session reached a terminal "
+            f"status within its own poll-budget ceiling ({ceiling:.1f}s); the handler "
+            "is wedged, not merely slow"
+        ) from None
+
+
 class TestWebSocketFanout:
     async def test_production_run_path_fans_recorded_steps_onto_the_channel(
         self,
@@ -679,7 +717,7 @@ class TestWebSocketFanout:
             assert row is not None
             row.status = AgentSessionStatus.COMPLETED
             await db.commit()
-        await asyncio.wait_for(handler, timeout=5.0)
+        await _await_handler_terminal(handler)
 
         # The live frame's content (data) was relayed to the peer.
         relayed = [f for f in fake_ws.sent if f.get("kind") == "tool_call"]
@@ -760,7 +798,7 @@ class TestWebSocketFanout:
             assert row is not None
             row.status = AgentSessionStatus.COMPLETED
             await db.commit()
-        await asyncio.wait_for(handler, timeout=5.0)
+        await _await_handler_terminal(handler)
 
         assert published, "the producer published at least one frame onto the channel"
         for payload in published:
@@ -851,7 +889,7 @@ class TestWebSocketFanout:
             assert row is not None
             row.status = AgentSessionStatus.COMPLETED
             await db.commit()
-        await asyncio.wait_for(handler, timeout=5.0)
+        await _await_handler_terminal(handler)
 
         # The step's content is on the wire exactly ONCE despite both sources seeing it.
         step_frames = [
@@ -913,3 +951,37 @@ class TestWebSocketFanout:
             "a budget-exhausted still-RUNNING socket must close gracefully (1000), not "
             f"via an early {agents_router._WS_POLICY_VIOLATION} rejection; got {fake_ws.close_code}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# W3-T0: agent first-token latency observed after a started run.
+# --------------------------------------------------------------------------- #
+class TestFirstTokenMetric:
+    @staticmethod
+    def _first_token_count() -> float:
+        """Read the per-``local``-profile histogram sample count off the registry."""
+        from prometheus_client import generate_latest
+
+        target = 'netops_agent_first_token_seconds_count{profile="local"}'
+        for line in generate_latest().decode().splitlines():
+            if line.startswith(target):
+                return float(line.rsplit(" ", 1)[1])
+        return 0.0
+
+    async def test_start_observes_first_token_latency(
+        self, client: httpx.AsyncClient, token_for: Callable[[str], str]
+    ) -> None:
+        """A run that persists a reasoning step records ONE first-token sample.
+
+        The profile label resolves from the reasoning-role profile (default
+        ``local`` in the unit settings). The histogram's per-profile sample COUNT
+        must advance by exactly one across the request (ADR-0046 §1).
+        """
+        before = self._first_token_count()
+        resp = await client.post(
+            "/api/v1/agents",
+            json={"intent": "why is bgp down?"},
+            headers={"Authorization": f"Bearer {token_for('viewer')}"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert self._first_token_count() == before + 1

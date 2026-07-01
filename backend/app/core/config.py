@@ -100,6 +100,18 @@ class Settings(BaseSettings):
     #: Celery broker/result backend + cache (ADR-0008).
     redis_url: str = "redis://redis:6379/0"
 
+    #: TCP port the worker exposes its Prometheus ``/metrics`` exposition on
+    #: (W3-T0, ADR-0015 §2). The Celery worker has no HTTP server, so a tiny
+    #: ``prometheus_client`` HTTP server is started in the worker process at boot
+    #: (``app.workers.celery_app``) to serve the same default-REGISTRY series the
+    #: api ``/metrics`` route exposes. The K8s worker Deployments scrape this port.
+    worker_metrics_port: int = 9808
+
+    #: Celery-beat interval (seconds) for the ``system.sample_queue_depths`` task
+    #: that refreshes the ``netops_celery_queue_depth`` saturation gauge from each
+    #: work queue's Redis backlog (W3-T0, ADR-0015 §2 / ADR-0046 §1/§5).
+    queue_depth_sample_seconds: float = 15.0
+
     #: Neo4j topology/knowledge graph (ADR-0005).
     neo4j_uri: str = "bolt://neo4j:7687"
     neo4j_user: str = "neo4j"
@@ -234,6 +246,57 @@ class Settings(BaseSettings):
     raw_artifact_retention_hour: int = 4
     raw_artifact_retention_minute: int = 0
 
+    # -- Audit -> SIEM export pipeline (P3 W3-T1, ADR-0045) ---------------------
+    # The export streams every committed audit_log row to the customer SIEM
+    # at-least-once, in seq order, over a vendor-neutral transport (syslog/CEF over
+    # TLS or HTTPS/JSON). Opt-in: with no ``audit_export_format`` the exporter is a
+    # warned no-op (a deployment with no SIEM is unchanged). All transports are
+    # TLS-only (ADR-0045 §1); the endpoint credential is a token, never logged.
+    # --------------------------------------------------------------------------
+
+    #: Active SIEM export transport (ADR-0045 §1). ``syslog``/``cef`` use the
+    #: RFC5425 TLS syslog sink (``audit_export_host``/``_port``); ``https-json`` POSTs
+    #: to ``audit_export_endpoint``. ``None`` (default) DISABLES the exporter so a
+    #: deployment with no SIEM is unchanged (a warned no-op, never a silent drop).
+    audit_export_format: Literal["syslog", "cef", "https-json"] | None = None
+
+    #: SIEM syslog/CEF collector host + port for the TLS syslog sink (``syslog``/
+    #: ``cef`` formats). Required when the format is ``syslog`` or ``cef``.
+    audit_export_host: str | None = None
+    audit_export_port: int = 6514
+
+    #: SIEM HTTPS/JSON collector endpoint (the ``https-json`` format). Required when
+    #: the format is ``https-json``; an ``https://`` URL (TLS-only, ADR-0045 §1).
+    audit_export_endpoint: str | None = None
+
+    #: Vault credential_ref / bearer token for the HTTPS sink Authorization header.
+    #: A ``SecretStr`` so it never appears in a repr/log; only the sink reads it.
+    audit_export_bearer_token: SecretStr | None = None
+
+    #: TLS material for the export egress (ADR-0045 §1 — TLS-only). The CA bundle
+    #: verifying the SIEM server cert (system trust when None); an optional client
+    #: cert/key pair for mutual TLS (both-or-neither — fail-closed, ADR-0039 §4).
+    audit_export_ca_cert: Path | None = None
+    audit_export_client_cert: Path | None = None
+    audit_export_client_key: Path | None = None
+
+    #: Bounded read-batch size per export cycle (ADR-0045 §3 — bounded memory). A
+    #: long SIEM outage grows the durable audit_log backlog + the lag gauge, never
+    #: unbounded memory: at most this many rows are held in flight per cycle. Must be
+    #: >= 1: a batch size of 0 would ``read_unexported(limit=0)`` → export nothing
+    #: (silent audit loss, no ACK ever advances the cursor).
+    audit_export_batch_size: int = Field(default=500, gt=0)
+
+    #: Seconds the exporter sleeps between cycles when caught up (no new rows). A
+    #: short interval keeps the export near-real-time for the p95 < 60 s SLO (§6). Must
+    #: be > 0: a non-positive interval busy-spins the caught-up loop (CPU burn, no wait).
+    audit_export_poll_seconds: float = Field(default=2.0, gt=0)
+
+    #: Capped backoff (seconds) the exporter waits after a sink failure before
+    #: retrying the SAME un-advanced batch (ADR-0045 §3 — buffer + retry, never drop).
+    #: Must be > 0: a non-positive backoff busy-spins the retry loop against a down sink.
+    audit_export_retry_backoff_seconds: float = Field(default=5.0, gt=0)
+
     #: OIDC / SSO identity federation (ADR-0028). OIDC is opt-in: with no
     #: configured issuer the platform stays local-only (CLAUDE.md local-first).
     #: Enabling it (a non-empty ``oidc_issuer``) fences the local-login path to
@@ -342,6 +405,46 @@ class Settings(BaseSettings):
             raise ValueError(
                 "NETOPS_SECRET_KEY must be set to a strong unique value in production "
                 "(NETOPS_ENV=prod or NETOPS_IS_PROD=true)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_export_target(self) -> Settings:
+        """Fail closed when an ENABLED exporter has no transport target (ADR-0045 §1).
+
+        The exporter is opt-in: ``audit_export_format is None`` DISABLES it (a warned
+        no-op), so a deployment with no SIEM needs no target and stays valid. But once a
+        format IS set the exporter arms, and each format has a mandatory target:
+
+        * ``https-json`` POSTs to ``audit_export_endpoint`` — which must be non-None AND
+          an ``https://`` URL. A missing endpoint would arm with nowhere to POST; a
+          ``http://`` (or scheme-less) URL would send the audit payload + bearer token
+          over cleartext (TLS-only export, ADR-0045 §1).
+        * ``syslog``/``cef`` use the TLS syslog sink at ``audit_export_host`` — which
+          must be non-None or the exporter arms with no collector.
+
+        Fail closed at config time so a targetless/cleartext SIEM exporter can never be
+        armed, rather than silently mis-configuring (or leaking on the first cycle).
+        """
+        if self.audit_export_format == "https-json":
+            if self.audit_export_endpoint is None:
+                raise ValueError(
+                    "NETOPS_AUDIT_EXPORT_ENDPOINT must be set for the 'https-json' "
+                    "export format (the HTTPS/JSON collector target, ADR-0045 §1)"
+                )
+            scheme = self.audit_export_endpoint.split("://", 1)[0].lower()
+            if scheme != "https":
+                raise ValueError(
+                    "NETOPS_AUDIT_EXPORT_ENDPOINT must be an https:// URL for the "
+                    "'https-json' export format (TLS-only export, ADR-0045 §1) — a "
+                    "non-https endpoint would send the audit payload + bearer token "
+                    "over cleartext"
+                )
+        elif self.audit_export_format in ("syslog", "cef") and self.audit_export_host is None:
+            raise ValueError(
+                "NETOPS_AUDIT_EXPORT_HOST must be set for the "
+                f"'{self.audit_export_format}' export format (the TLS syslog collector "
+                "host, ADR-0045 §1)"
             )
         return self
 

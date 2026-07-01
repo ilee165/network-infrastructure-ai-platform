@@ -29,6 +29,7 @@ from app.core.logging import (
     new_request_id,
     reset_request_id,
 )
+from app.core.metrics_asgi import add_metrics_route, metrics_middleware
 
 API_V1_PREFIX = "/api/v1"
 
@@ -178,6 +179,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reset_request_id(token)
         response.headers["X-Request-ID"] = request_id
         return response
+
+    # W3-T0 (ADR-0015 §2, ADR-0046 §1): time every request into the
+    # ``netops_http_*`` SLI series (availability + read-latency), labelled by the
+    # TEMPLATED route only, and serve the default REGISTRY on ``/metrics`` (the
+    # api-tier scrape target + the api-HPA request-rate base, ADR-0043 §1).
+    app.middleware("http")(metrics_middleware)
+    add_metrics_route(app)
 
     register_exception_handlers(app)
     app.include_router(api_router, prefix=API_V1_PREFIX)

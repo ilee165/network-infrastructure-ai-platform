@@ -1,0 +1,177 @@
+{{- /*
+AUDIT -> SIEM EXPORT Deployment (W3-T1, ADR-0045; ADR-0041 §1 egress; ADR-0015).
+
+A dedicated LONG-RUNNING Deployment (NOT a CronJob — the export is continuous
+near-real-time streaming) that runs
+
+    python -m app.services.audit.export
+
+on the SAME Python-bearing backend image as the api/worker (it imports
+app.services.audit.export). It streams every committed audit_log row to the customer
+SIEM at-least-once, in ADR-0038 `seq` order, over a vendor-neutral transport
+(RFC5424 syslog / ArcSight CEF over TLS, or HTTPS/JSON), driven by a DURABLE `seq`
+cursor (gap-free across restarts) with a bounded buffer + retry on sink outage (never
+drops a row, never blocks the audit write), exposing an `audit_export_lag_seconds`
+gauge on the metrics port (the §6 p95<60s SLI W3-T3 alerts on).
+
+It is READ-only against audit_log + advances ONLY its own audit_export_cursor row;
+the 0001 audit_log REVOKE / 0011 chain controls are untouched.
+
+W4-LESSON guards:
+  L3 — env-var $(VAR) substitution is NOT used in the exec argv. The exporter reads
+       its DSN + SIEM config from ENV VALUES (where K8s DOES expand $(VAR)); the
+       command is a literal `python -m ...` with no $(VAR), so the L3 exec-argv
+       footgun does not apply. The by-reference Postgres password + the optional SIEM
+       bearer token are secretKeyRef env, NEVER inlined in the manifest.
+  egress — the companion audit-siem-export-networkpolicy.yaml confines this pod's
+       egress to TWO destinations only (ADR-0045 §5 / ADR-0041 posture): the
+       configured external SIEM endpoint CIDR(s), and the in-cluster postgres:5432
+       read path (the §2 -allow-worker-egress is component-scoped to the worker and
+       does NOT cover this exporter, so it gets its OWN Postgres egress allow). DNS is
+       cluster-wide via -allow-dns-egress. Everything else stays default-denied.
+
+SECURE-BY-DEFAULT, OPT-IN: renders only when audit.export.enabled (a deployment with
+no customer SIEM is unchanged). FAIL CLOSED on a misconfigured endpoint: an enabled
+exporter with no host/endpoint for its format refuses to render (never a silent
+no-export).
+*/ -}}
+{{- if .Values.audit.export.enabled }}
+{{- $e := .Values.audit.export -}}
+{{- $fullname := include "netops.fullname" . -}}
+{{- /* Fail closed on a format with no destination — an enabled-but-unconfigured
+exporter would start, find no endpoint, and crash-loop (or worse, silently export
+nothing). Refuse to render instead. */ -}}
+{{- if or (eq $e.format "syslog") (eq $e.format "cef") }}
+{{- if not $e.syslogHost }}
+{{- fail "audit.export.enabled=true with format=syslog|cef but audit.export.syslogHost is EMPTY — set the SIEM syslog/CEF collector host (ADR-0045 §1) or disable the exporter (audit.export.enabled=false)." }}
+{{- end }}
+{{- else if eq $e.format "https-json" }}
+{{- if not $e.httpsEndpoint }}
+{{- fail "audit.export.enabled=true with format=https-json but audit.export.httpsEndpoint is EMPTY — set the SIEM HTTPS/JSON collector URL (ADR-0045 §1) or disable the exporter (audit.export.enabled=false)." }}
+{{- end }}
+{{- else }}
+{{- fail (printf "audit.export.format=%q is invalid — must be one of syslog|cef|https-json (ADR-0045 §1)." $e.format) }}
+{{- end }}
+{{- /* SINGLE-WRITER by contract: the exporter advances ONE durable `seq` cursor and
+streams at-least-once in `seq` order. TWO exporters would race the cursor -> duplicate
+delivery AND out-of-order/interleaved streams (there is no cursor-claiming/lease yet).
+Refuse to render replicas>1 rather than silently ship a broken multi-writer. */ -}}
+{{- if gt (int $e.replicas) 1 }}
+{{- fail (printf "audit.export.replicas=%d is invalid — the SIEM exporter is a SINGLE-WRITER (advances one durable `seq` cursor; >1 replica dup-delivers and breaks `seq` ordering until cursor-claiming exists). Must be exactly 1 (ADR-0045 §3)." (int $e.replicas)) }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-audit-siem-export
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "audit-siem-export") | nindent 4 }}
+spec:
+  # SINGLETON (validated above): exactly one exporter pod. Recreate (NOT rolling)
+  # so a redeploy tears the old pod down BEFORE the new one starts — never two
+  # exporters racing the `seq` cursor during a rollout (ADR-0045 §3, single-writer).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "netops.serviceSelector" (dict "ctx" . "component" "audit-siem-export") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "audit-siem-export") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountServiceAccountToken }}
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: audit-siem-export
+          image: {{ include "netops.backendImage" . }}
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          # Literal argv — NO $(VAR) substitution here (L3): all config is read from
+          # the env VALUES below (where K8s DOES expand dependent-env $(VAR)).
+          command:
+            - python
+            - -m
+            - app.services.audit.export
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ $fullname }}-config
+          env:
+            # By-reference Postgres password (NEVER inlined; ADR-0029 §6). The DSN is
+            # built from the ConfigMap host/port/db/user + this password by app.db.
+            {{- if .Values.secrets.existingSecret }}
+            - name: NETOPS_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: {{ .Values.secrets.keys.postgresPassword }}
+            {{- else }}
+            - name: NETOPS_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-dev-secrets
+                  key: {{ .Values.secrets.keys.postgresPassword }}
+            {{- end }}
+            # Export transport config (ADR-0045 §1) — the format + the destination
+            # for that format. app.core.config reads these (NETOPS_ prefix).
+            - name: NETOPS_AUDIT_EXPORT_FORMAT
+              value: {{ $e.format | quote }}
+            {{- if or (eq $e.format "syslog") (eq $e.format "cef") }}
+            - name: NETOPS_AUDIT_EXPORT_HOST
+              value: {{ $e.syslogHost | quote }}
+            - name: NETOPS_AUDIT_EXPORT_PORT
+              value: {{ $e.syslogPort | quote }}
+            {{- else }}
+            - name: NETOPS_AUDIT_EXPORT_ENDPOINT
+              value: {{ $e.httpsEndpoint | quote }}
+            {{- /* Optional SIEM bearer token — secretKeyRef ONLY, never inlined. Renders
+            only when the operator wired a token key into the platform Secret. */ -}}
+            {{- if .Values.secrets.keys.auditExportBearerToken }}
+            - name: NETOPS_AUDIT_EXPORT_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.secrets.existingSecret }}
+                  name: {{ .Values.secrets.existingSecret }}
+                  {{- else }}
+                  name: {{ $fullname }}-dev-secrets
+                  {{- end }}
+                  key: {{ .Values.secrets.keys.auditExportBearerToken }}
+            {{- end }}
+            {{- end }}
+            - name: NETOPS_AUDIT_EXPORT_BATCH_SIZE
+              value: {{ $e.batchSize | quote }}
+            - name: NETOPS_AUDIT_EXPORT_POLL_SECONDS
+              value: {{ $e.pollSeconds | quote }}
+            - name: NETOPS_AUDIT_EXPORT_RETRY_BACKOFF_SECONDS
+              value: {{ $e.retryBackoffSeconds | quote }}
+            - name: NETOPS_WORKER_METRICS_PORT
+              value: {{ $e.metricsPort | quote }}
+            {{- /* api/worker -> Postgres mTLS client env (ADR-0039 §4); renders
+            nothing when mTLS is off. The exporter's DB link is secured like the rest. */ -}}
+            {{- include "netops.dbClientTlsEnv" . | nindent 12 }}
+          ports:
+            - name: metrics
+              containerPort: {{ $e.metricsPort }}
+          resources:
+            {{- toYaml $e.resources | nindent 12 }}
+          # Liveness: the metrics port is bound once the export loop is up; a TCP
+          # probe on it is a cheap "process alive + serving" signal (ADR-0015 §4).
+          livenessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- include "netops.dbClientTlsVolumeMount" . | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- include "netops.dbClientTlsVolume" . | nindent 8 }}
+{{- end }}

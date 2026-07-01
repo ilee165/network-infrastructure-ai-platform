@@ -1358,6 +1358,139 @@ jobs:
           fi
           echo "frontend lockfile: in sync."
 
+  # Observability SLO gate (P3 W3-T3, ADR-0046 §6; PRODUCTION.md §11 G-OBS §385).
+  # Validates the SLO recording rules (W3-T2) AND the multi-window burn-rate alert
+  # rules (W3-T3) with `promtool check rules`, runs the `promtool test rules` cases
+  # (recording-rule semantics + the alert FIRING/healthy alert-as-test), and runs
+  # the alert-as-test BITE proof (a muted, never-firing alert MUST fail its firing
+  # test — the anti-false-green control). Cluster-free: promtool over synthetic
+  # series, so it bites on every PR (ADR-0046 §0/§6). L5 (pipefail) + `test -s` so a
+  # piped promtool invocation cannot mask a non-zero exit (the P1-W4 pipe-masks-exit
+  # trap). This job is in the `all-gates` needs list below — a red promtool gate
+  # blocks merge.
+  observability:
+    name: observability (promtool check + test + alert-as-test bite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install promtool (Prometheus)
+        run: |
+          set -o pipefail
+          PROM_VERSION=2.53.2
+          curl -sSL -o /tmp/prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp
+          install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version
+
+      # `promtool check rules` validates the rule files load (syntax + PromQL parse)
+      # for BOTH the W3-T2 recording rules and the W3-T3 burn-rate alerts. pipefail +
+      # `test -s` guard so a piped/empty result cannot pass green.
+      - name: promtool check rules (recording + burn-rate alerts)
+        run: |
+          set -o pipefail
+          promtool check rules \
+            deploy/observability/slo-recording.rules.yaml \
+            deploy/observability/api-request-rate.rules.yaml \
+            deploy/observability/slo-burn-rate.alerts.yaml | tee /tmp/promtool-check.out
+          test -s /tmp/promtool-check.out
+
+      # `promtool test rules` runs the semantic cases: the W3-T2 recording-rule
+      # tests (the SLI computes the expected value on healthy + regressed series) and
+      # the W3-T3 alert-as-test cases (each alert FIRES on a perturbed series and
+      # stays SILENT on a healthy one). A green-at-setup alert that never fires fails
+      # here (ADR-0046 §6).
+      - name: promtool test rules (recording-rule semantics + alert firing/healthy)
+        run: |
+          set -o pipefail
+          promtool test rules deploy/observability/slo-recording.rules.test.yaml | tee /tmp/promtool-rec.out
+          test -s /tmp/promtool-rec.out
+          promtool test rules deploy/observability/slo-burn-rate.alerts.test.yaml | tee /tmp/promtool-alert.out
+          test -s /tmp/promtool-alert.out
+
+      # BITE proof: the clean rules pass AND a MUTED (never-firing) alert fails its
+      # firing test — proves the alert-as-test gate actually catches a false-green
+      # alert before it is relied on (ADR-0046 §6; the carry-forward run-and-bite
+      # rule). The mutation is on a temp copy; committed rules are untouched.
+      - name: promtool alert-as-test bite proof
+        run: bash deploy/observability/run-promtool-bite.sh
+
+      # W3-T5 fault-injection MTTD harness (ADR-0046 §5; §386). Drives the three
+      # synthetic §386 faults (DB down -> 5xx spike, queue stall -> discovery
+      # success drop, LLM-provider failure -> first-token spill) and asserts the
+      # corresponding fast/PAGE alert FIRES within MTTD < 5 min (firing at 3 m,
+      # strictly < the budget), plus a healthy negative control per scenario that
+      # stays silent. The window IS the assertion — not just "fires eventually".
+      # Cluster-free: promtool over synthetic series at compressed timestamps; the
+      # live-cluster MTTD run is named-deferred to W4/W5 (ADR-0046 §0/§5).
+      - name: promtool fault-injection MTTD harness (< 5 min, 3 scenarios + neg controls)
+        run: |
+          set -o pipefail
+          promtool test rules deploy/observability/slo-mttd.faultinjection.test.yaml | tee /tmp/promtool-mttd.out
+          test -s /tmp/promtool-mttd.out
+
+      # BITE proof for the MTTD gate (the run-and-bite rule for a NEW gate,
+      # ADR-0046 §6): the clean rules detect each fault < 5 min AND fast alerts
+      # SLOWED past the budget (for:2m -> for:6m) MUST fail the MTTD assertions —
+      # proving the window is load-bearing, not a vacuous "fires eventually" check.
+      # Mutation is on a temp copy; committed rules are untouched.
+      - name: promtool fault-injection MTTD bite proof
+        run: bash deploy/observability/run-mttd-bite.sh
+
+      # W3-T4 golden-signal dashboards-as-code (ADR-0046 §4; §335). Visual
+      # rendering is named-deferred (no live Grafana on the host) — the BITING
+      # layer is this structural/coverage lint + the provisioning-ConfigMap
+      # kubeconform below. The lint asserts all 9 §335 subjects × 4 golden
+      # signals exist and every panel target binds to a known slo:/netops_*/
+      # exporter series (a renamed base metric breaks the lint, ADR-0046 §4).
+      - name: dashboard structural + coverage lint
+        run: |
+          set -o pipefail
+          python3 deploy/observability/dashboards/lint_dashboards.py | tee /tmp/dash-lint.out
+          test -s /tmp/dash-lint.out
+
+      # BITE proof for the dashboard gate (the run-and-bite rule for a NEW gate):
+      # the committed dashboards pass AND each of {missing golden signal, renamed
+      # metric, dropped §335 subject} fails the lint, AND the canonical source ==
+      # the chart-vendored copy (no embed drift). Mutations are on a temp copy.
+      - name: dashboard-lint bite proof (+ vendor sync)
+        run: bash deploy/observability/dashboards/run-dashboard-lint-bite.sh
+
+      # The dashboards provision via the chart as a Grafana-sidecar ConfigMap and
+      # are OFF by default (expose-don't-bundle), so the infra job's default render
+      # does NOT cover them. Render WITH the flag on and kubeconform-validate the
+      # provisioning ConfigMap here (the as-code provisioning is the biting layer,
+      # not a live Grafana). pipefail + `test -s` guard a piped/empty render.
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL -o /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      - name: Render + kubeconform the dashboards provisioning ConfigMap
+        run: |
+          set -o pipefail
+          helm template netops deploy/kubernetes/netops \
+            --namespace netops --kube-version 1.29.0 \
+            --set observability.grafanaDashboards.enabled=true \
+            | tr -d '\r' > /tmp/rendered-dashboards.yaml
+          test -s /tmp/rendered-dashboards.yaml
+          grep -q 'name: netops-grafana-dashboards' /tmp/rendered-dashboards.yaml
+          kubeconform -strict -summary \
+            -kubernetes-version 1.29.0 \
+            -ignore-missing-schemas \
+            -skip ClusterPolicy,Cluster,Pooler \
+            /tmp/rendered-dashboards.yaml
+
   # Single required-check aggregator (P1 W6-T4). Branch protection should require
   # ONLY this job; it transitively depends on every gate, so a failure or skip of
   # ANY upstream job (dependency audits, secret scan, image/Trivy, chart/policy)
@@ -1379,7 +1512,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile, observability]
     steps:
       - name: Assert every gate succeeded
         env:

@@ -191,3 +191,50 @@ class AuditChainCheckpoint(Base):
     entry_created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     entry_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     verified_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False, default=utcnow)
+
+
+class AuditExportCursor(Base):
+    """Durable last-exported watermark for the audit→SIEM export (ADR-0045 §2).
+
+    A single-row table holding the highest ``seq`` the exporter has confirmed
+    delivered to (ACKed by) the SIEM sink, plus the exported row's commit timestamp
+    (the basis of the ``export_lag_seconds`` SLI, ADR-0045 §3). The exporter reads
+    committed ``audit_log`` rows with ``seq > exported_seq`` ordered by ``seq``,
+    delivers them, and advances the watermark **only after the sink ACKs** — so a
+    crash between "sink received" and "cursor persisted" re-exports the un-advanced
+    rows on restart (**at-least-once, never at-most-once**, ADR-0045 §2): no
+    committed row is ever skipped, ordering is the ADR-0038 ``seq`` append order,
+    and a restart resumes from the persisted ``seq`` with **no gap** (only bounded
+    duplication of the in-flight batch, which the SIEM deduplicates on the per-row
+    ``seq`` key).
+
+    This is strictly DOWNSTREAM of the audit DB commit (ADR-0045 §3): advancing the
+    cursor is a separate transaction in the exporter process; it never holds open or
+    rolls back the action transaction that wrote the audit row, so a SIEM outage
+    grows the backlog in the durable ``audit_log`` table and the lag gauge — never in
+    lost rows and never as backpressure on the audit write path.
+
+    Mirrors the :class:`AuditChainCheckpoint` singleton/upsert pattern (ADR-0038 §4).
+    The fixed ``id`` (:data:`SINGLETON_ID`) makes this the one watermark per
+    deployment. ``exported_seq`` is ``0`` before the first export (the genesis
+    cursor: ``seq > 0`` selects the whole chain, ``seq`` starts at 1).
+    """
+
+    __tablename__ = "audit_export_cursor"
+
+    #: The fixed primary key of the singleton export-cursor row (one per deployment).
+    #: Distinct from the chain-checkpoint singleton; the ``e`` tail flags "export".
+    SINGLETON_ID: uuid.UUID = uuid.UUID("00000000-0000-0000-0000-0000000a0d4e")
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, default=lambda: AuditExportCursor.SINGLETON_ID
+    )
+    #: Highest ``audit_log.seq`` confirmed delivered to the SIEM. ``0`` = nothing
+    #: exported yet (``seq > 0`` selects the whole chain; the writer assigns ``seq``
+    #: from 1). Advanced only on sink ACK — never over an unacknowledged row.
+    exported_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    #: Commit/``created_at`` timestamp of the audit row at ``exported_seq`` — the
+    #: basis for ``export_lag_seconds = now − last_exported_commit_ts`` (ADR-0045 §3).
+    #: ``None`` until the first row is exported (lag is then undefined → reported 0).
+    last_exported_commit_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False, default=utcnow)

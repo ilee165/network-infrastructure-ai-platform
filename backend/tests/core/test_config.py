@@ -76,3 +76,90 @@ def test_is_prod_false_overrides_env_prod_and_allows_default_secret() -> None:
     """Explicit NETOPS_IS_PROD=false declares non-prod even with NETOPS_ENV=prod."""
     settings = Settings(_env_file=None, env="prod", is_prod=False)
     assert settings.production is False
+
+
+# ---------------------------------------------------------------------------
+# Audit→SIEM export knobs (ADR-0045) — TLS-only endpoint + bounded/positive cycle
+# ---------------------------------------------------------------------------
+
+
+def test_https_json_export_rejects_non_https_endpoint() -> None:
+    """CR[2]: a http:// endpoint for https-json is refused (no cleartext audit/token)."""
+    with pytest.raises(ValidationError, match="https://"):
+        Settings(
+            _env_file=None,
+            audit_export_format="https-json",
+            audit_export_endpoint="http://siem.example.test/collector",
+        )
+
+
+def test_https_json_export_accepts_https_endpoint() -> None:
+    settings = Settings(
+        _env_file=None,
+        audit_export_format="https-json",
+        audit_export_endpoint="https://siem.example.test/collector",
+    )
+    assert settings.audit_export_endpoint == "https://siem.example.test/collector"
+
+
+def test_syslog_export_endpoint_scheme_not_enforced() -> None:
+    """The https-only guard applies ONLY to the https-json format (syslog uses host)."""
+    settings = Settings(
+        _env_file=None,
+        audit_export_format="syslog",
+        audit_export_host="siem.example.test",
+        # An endpoint value is irrelevant for syslog; the https guard must not fire.
+        audit_export_endpoint="http://ignored.example.test",
+    )
+    assert settings.audit_export_format == "syslog"
+
+
+def test_https_json_export_requires_an_endpoint() -> None:
+    """CR re-review: https-json with NO endpoint must fail closed, not arm silently.
+
+    ``format=https-json`` selects the HTTPS/JSON transport whose only target is
+    ``audit_export_endpoint``; with it unset the exporter would arm with nowhere to
+    POST (silent misconfig). The active-format target is mandatory.
+    """
+    with pytest.raises(ValidationError, match="NETOPS_AUDIT_EXPORT_ENDPOINT"):
+        Settings(_env_file=None, audit_export_format="https-json")
+
+
+def test_syslog_export_requires_a_host() -> None:
+    """CR re-review (sibling): syslog with NO host must fail closed, not arm silently.
+
+    ``format=syslog`` selects the TLS syslog sink whose target is
+    ``audit_export_host``; with it unset the exporter would arm with no collector.
+    """
+    with pytest.raises(ValidationError, match="NETOPS_AUDIT_EXPORT_HOST"):
+        Settings(_env_file=None, audit_export_format="syslog")
+
+
+def test_cef_export_requires_a_host() -> None:
+    """CR re-review (sibling): cef (over the syslog TLS sink) also needs a host."""
+    with pytest.raises(ValidationError, match="NETOPS_AUDIT_EXPORT_HOST"):
+        Settings(_env_file=None, audit_export_format="cef")
+
+
+def test_disabled_export_needs_no_target() -> None:
+    """The exporter is opt-in: format=None (default) stays valid with no target."""
+    settings = Settings(_env_file=None)
+    assert settings.audit_export_format is None
+
+
+def test_export_batch_size_must_be_positive() -> None:
+    """CR[3]: batch_size < 1 → read_unexported(limit=0) exports nothing (silent loss)."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, audit_export_batch_size=0)
+
+
+def test_export_poll_seconds_must_be_positive() -> None:
+    """CR[3]: a non-positive poll interval busy-spins the caught-up loop."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, audit_export_poll_seconds=0.0)
+
+
+def test_export_retry_backoff_must_be_positive() -> None:
+    """CR[3]: a non-positive backoff busy-spins the retry loop against a down sink."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, audit_export_retry_backoff_seconds=-1.0)
