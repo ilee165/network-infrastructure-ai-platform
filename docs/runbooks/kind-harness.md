@@ -1,6 +1,6 @@
 # Runbook — Ephemeral in-CI kind cluster harness (W4-T3)
 
-> Operator/developer procedure for the ADR-0041 §2/§3 + ADR-0039 §6 kind harness: how it brings up a throwaway cluster with an **enforcing CNI**, proves the CNI actually enforces NetworkPolicy (the **CNI self-test bite**), applies the chart, and runs the assertion-runner that **W4-T4 (mTLS handshake)** and **W4-T5 (collector egress deny)** plug their assertions into. Also records why the live kind job is **not yet a blocking gate** and what P3-Platform must do to promote it (re-deferred from W5-T3). Cheap-scope only — handshake + deny; HA/scale/soak are P3-Platform.
+> Operator/developer procedure for the ADR-0041 §2/§3 + ADR-0039 §6 kind harness: how it brings up a throwaway cluster with an **enforcing CNI**, proves the CNI actually enforces NetworkPolicy (the **CNI self-test bite**), applies the chart, and runs the assertion-runner that **W4-T4 (mTLS handshake)** and **W4-T5 (collector egress deny)** plug their assertions into. Also records that the P2 live kind job is **now a blocking gate** for the two named G-SEC sub-items (mTLS handshake + collector egress deny) — **promoted in P3 W4-T2 per ADR-0048** (see "Gate status" below) — while the `kind-harness-ha` HA live job stays non-blocking. Cheap-scope only — handshake + deny; HA/scale/soak are P3-Platform.
 
 ## Objective
 
@@ -19,7 +19,7 @@ Give the two W4 enforcement tasks a deterministic, hardware-free place to BITE: 
 | Assertion helpers | `ci/kind/assertions/lib.sh` (`assert_egress_allowed/blocked`, `assert_handshake_ok/refused`, `run_in_pod`) |
 | T4/T5 plug-in | `ci/kind/assertions/checks/` (T4 drops `mtls-*.sh`, T5 drops `collector-egress*.sh`) |
 | Static validator | `ci/kind/selftest/validate-harness.sh` (no cluster; asserts the harness invariants incl. the W4-T1 HA add-on — the policy-as-test bite) |
-| CI job (P2) | `.github/workflows/ci.yml` job `kind-harness` (**non-blocking** — see "Gate status" below) |
+| CI job (P2) | `.github/workflows/ci.yml` job `kind-harness` (**BLOCKING** — promoted P3 W4-T2 / ADR-0048; in `all-gates` needs; see "Gate status" below) |
 | CI job (HA, P3 W4-T1) | `.github/workflows/ci.yml` job `kind-harness-ha` (**non-blocking live** — see "HA topology" + "Gate status") |
 | Cluster name | `netops-w4` (`CLUSTER_NAME` override) |
 | HA operator installer | `ci/kind/ha/install-operators.sh` (CloudNativePG `1.29.1` + KEDA `2.16.1`, pinned; `CNPG_VERSION`/`KEDA_VERSION` override) |
@@ -129,22 +129,67 @@ validated** here and runs **live only on the CI ubuntu runner**; no local live
 run happened. The **static** layers (the `validate-harness.sh` HA invariants +
 `validate-ha-overlay.sh` render/count bite + the `infra` job's HA render →
 kubeconform/kube-linter/conftest/Trivy) **gate hard**; the **live**
-`kind-harness-ha` job is **continue-on-error** until **W4-T2** exercises it green
-and promotes it.
+`kind-harness-ha` job stays **continue-on-error** / **non-blocking**. NOTE: W4-T2
+promoted the **P2** `kind-harness` job (the G-SEC mTLS + collector-egress live
+assertions — see "Gate status" below), **not** this HA job; the reliable HA
+substrate is the ADR-0048 §3 Prerequisite A *for that promotion*. Promoting the
+`kind-harness-ha` G-REL/G-SCA drills to blocking is a **deliberate later step
+(W5/GA)**, not W4-T2.
 
-## Gate status — NON-BLOCKING (CI-only / deferred), and how to promote it
+## Gate status — BLOCKING (PROMOTED, P3 W4-T2, ADR-0048)
 
-The live kind path (steps 1-6) is **deliberately not a blocking gate**:
+The P2 `kind-harness` live run (steps 1-6) is now a **blocking gate** for the two
+named P2 sub-items — **mTLS api/worker↔postgres handshake + plaintext-refused** and
+**collector default-deny egress**. This was promoted in **P3 W4-T2** per **ADR-0048**:
 
-- The `kind-harness` job is **absent from the `all-gates` required-check aggregator's `needs` list**, and its live `kind-harness.sh` step is `continue-on-error: true`.
-- **Why:** the live kind/CNI path could **not be validated locally on the W4-T3 authoring host** (Windows, no Docker / no Linux kind cluster). P1-W4-LESSONS **L1** is explicit: validate a new gating CI tool LOCALLY before pushing it as required — the local gate set is not the CI gate set, and CNI install / shell quoting often break differently in CI. Making this a required gate now would let a CI-only kind/CNI bring-up quirk mask the entire suite by flipping the required aggregator red on a path nobody has run green.
-- **What IS enforced now:** the static `validate-harness.sh` step runs on every push and is **blocking within the job** (it needs no cluster and reliably bites a silently weakened harness). The static manifest gates (helm lint / kubeconform / kube-linter / conftest) on the chart remain green via the `infra` job.
+- The live `kind-harness.sh` step (`id: harness`) is **no longer
+  `continue-on-error`**, and the `kind-harness` job is now in the **`all-gates`
+  required-check aggregator's `needs` list** (`.github/workflows/ci.yml`). A live
+  regression — Postgres silently admitting plaintext, or the collector default-deny
+  NetworkPolicy removed — now turns the `kind-harness` job red, which turns
+  `all-gates` red, which **blocks merge** (no orphan advisory gate; ADR-0048 §1.1).
+- The static `validate-harness.sh` step + the assertion-library self-tests +
+  `extract_secret.py` tests stay **blocking within the job**; the live run is now
+  blocking **on top of** them, it does not relax them.
+- **Scope:** only the two P2 sub-items above were promoted (ADR-0048 §1 / §6). No
+  new security claim; no other live assertion joined `all-gates`.
 
-**Promotion (re-deferred → P3-Platform):** the W5-T3 release auditor reviewed this and **re-deferred promotion to P3-Platform** — gating an enforcing-CNI kind cluster as a required check needs a certified cluster to run reliably, which this phase's no-hardware host does not have (`P2-RELEASE-READINESS.md` G-SEC). Once the live run is exercised on a Linux/Docker or certified-CNI cluster and the L1 local-validation lesson is satisfied,
-1. drop `continue-on-error: true` from the "Run kind harness" step, and
-2. add `kind-harness` to the `all-gates` `needs` list (`.github/workflows/ci.yml`).
+### Why it can bite (assertions run, do not SKIP)
 
-This is now a **P3-Platform** readiness item (re-deferred from W5-T3); until then the live kind validation is recorded as **CI-only / deferred-accepted** alongside the project's prior live-lab deferrals (e.g. SpatiumDDI live-lab, M5 live-lab acceptance).
+Both checks SKIP loudly (`exit 0`) if their control object is absent — a missing
+control must never read as a pass. Under the harness apply they are **present**, so
+the checks assert (they do not skip): the harness renders with
+`--set mtls.postgres.enabled=true` (so `netops-db-client-tls` exists →
+`mtls-postgres.sh` asserts) and `networkPolicy.collectorEgress` is default-on (so
+`netops-allow-collector-mgmt-egress` exists → `collector-egress.sh` asserts).
+Verified locally with `helm template netops … --set mtls.postgres.enabled=true
+--set mtls.postgres.certManager.enabled=false` — both objects render.
+
+### Prove-it-bites (ADR-0048 §4 — mandatory before promotion)
+
+A promoted gate that does not bite is a **false-green blocking gate — worse than
+`continue-on-error`**. Each live assertion was proven to turn the gate **red** on a
+planted regression, then **reverted** to green. **L1:** kind cannot run on the
+authoring host (Windows, no Docker/Linux kind), so these bites are exercised **on
+the CI ubuntu runner** in the `kind-harness` job, not locally.
+
+| Control | Planted regression (makes it RED) | Assertion that fails | Revert (back to GREEN) |
+|---|---|---|---|
+| **mTLS handshake** | Add a plaintext `host all all 0.0.0.0/0 md5` line to the Postgres `pg_hba` (or set client `sslmode=disable` acceptance) so a plaintext connection is admitted | `assert_handshake_refused "plaintext (sslmode=disable) client"` in `ci/kind/assertions/checks/mtls-postgres.sh` — the plaintext probe now CONNECTS → refusal assertion fails → check non-zero → `kind-harness` job red → `all-gates` red | Remove the plaintext `pg_hba` line (restore `hostssl … clientcert=verify-full` only) → plaintext refused again → green |
+| **Collector egress** | Broaden the egress allow-list so the arbitrary external destination `1.1.1.1:53` is admitted while KEEPING the collector policy present (so the check asserts, not SKIPs): e.g. add `1.1.1.1/32` to `networkPolicy.collectorEgress.managementCidrs` and `53` to its ports, or add a live `kubectl patch`/extra allow-all-egress NetworkPolicy selecting the worker-labelled probe. (Deleting the whole floor via `--set networkPolicy.enabled=false` also removes `netops-allow-collector-mgmt-egress`, which makes the check SKIP rather than fail — use the broaden-not-delete plant so the deny assertion actually runs and goes RED.) | `assert_egress_blocked_retry "arbitrary external egress …"` in `ci/kind/assertions/checks/collector-egress.sh` — the external probe now REACHES `1.1.1.1:53` → deny assertion fails → check non-zero → `kind-harness` job red → `all-gates` red | Remove the broadened allow (restore the narrow mgmt-subnet allow-list on top of the `netops-default-deny-all` floor) → external egress blocked again → green |
+
+The planted change is applied, the red run recorded on the CI runner, then reverted
+so the committed tree is green (the negative-control discipline — plant → red →
+revert, ADR-0048 §4, mirroring the `pg-integration` "proven to bite" precedent).
+
+### The HA live job stays NON-BLOCKING
+
+Only the two G-SEC live assertions above were promoted. The `kind-harness-ha` job
+(the reduced-scale HA topology — CNPG + KEDA + Sentinel, ADR-0047) is a
+**G-REL/G-SCA** reliability/scale path, not this G-SEC promotion; it stays
+`continue-on-error` and **absent from `all-gates`** (see "HA topology" above and the
+ci.yml DELIBERATE-OMISSION block). Promoting the HA drills to blocking is a
+deliberate later step (W5/GA), not W4-T2.
 
 ## Failure modes
 

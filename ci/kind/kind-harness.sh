@@ -11,10 +11,13 @@
 # Lessons baked in (P1-W4-LESSONS):
 #   L1 — kindnet ADMITS but does not ENFORCE NetworkPolicy. We disable the default
 #        CNI (kind-config.yaml) and install Calico; the CNI self-test FAILS the run
-#        if a harness default-deny does not block a known egress. This file is
-#        validated on a local kind cluster before the CI job is treated as gating
-#        (the CI job is intentionally NON-blocking until that local validation —
-#        see ci.yml `kind-harness` job + docs/runbooks/kind-harness.md).
+#        if a harness default-deny does not block a known egress. As of P3 W4-T2
+#        (ADR-0048) the P2 `kind-harness` CI job is BLOCKING (in `all-gates` needs,
+#        no continue-on-error) for the two G-SEC live assertions — the mTLS handshake
+#        refusal + collector default-deny egress — after each was PROVEN TO BITE on a
+#        planted regression and reverted; kind cannot run on the Windows authoring
+#        host, so that bite runs on the CI runner. The `kind-harness-ha` HA job stays
+#        non-blocking (see ci.yml `kind-harness` job + docs/runbooks/kind-harness.md).
 #   L5 — `set -o pipefail` + `test -s` on every render/apply/assert pipe so a
 #        masked exit code can never read green.
 #   L3 — any value an in-cluster exec needs is passed as a positional arg to
@@ -42,7 +45,10 @@
 # on HA readiness (ci/kind/ha/wait-ha-ready.sh) so a half-up cluster never reads
 # ready (L5). L1: kind cannot run on the Windows authoring host — the HA live path
 # is authored + statically validated here and runs LIVE only on the CI ubuntu
-# runner; its CI job stays continue-on-error until W4-T2 promotes it.
+# runner; the `kind-harness-ha` CI job stays continue-on-error / non-blocking (its
+# G-REL/G-SCA promotion is a deliberate W5/GA step). W4-T2 (ADR-0048) promoted the
+# P2 `kind-harness` job — the G-SEC mTLS + collector-egress live assertions — to
+# blocking; this HA add-on is NOT part of that promotion.
 
 set -euo pipefail
 
