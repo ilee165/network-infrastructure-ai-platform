@@ -1151,6 +1151,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # The bite-proof / harness scripts run repo-controlled shell right after
+          # checkout and need no git auth — do NOT persist the token in .git/config
+          # (least privilege; matches the persist-credentials:false job below).
+          persist-credentials: false
 
       # validate-ha-overlay.sh renders the reduced-scale HA overlay → needs helm.
       - name: Set up Helm
@@ -1224,6 +1229,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # This job runs the same repo-controlled bite/harness scripts post-checkout
+          # and needs no git auth — do NOT persist the token (least privilege).
+          persist-credentials: false
 
       # Static harness invariants — includes the W4-T1 HA add-on checks (pinned
       # operators, idempotent+retried install, readiness gating, reduced-scale
