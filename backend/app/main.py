@@ -143,11 +143,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             except Exception as exc:  # noqa: BLE001  (boot best-effort: never crash on audit)
                 logger.warning("kek.provider.select.audit_skipped", reason_class=type(exc).__name__)
-        # M1 placeholder hook: initialize the shared async DB engine pool and
-        # run a startup connectivity check once domain models land.
-        # M2 placeholder hook: initialize the shared Neo4j driver (knowledge/).
         yield
-        # M2 placeholder hook: close the shared Neo4j driver.
+        # Shutdown: release the shared connection pools opened above. The Redis
+        # client is closed first (rate limiter + stream fan-out/ticket store all
+        # share it); per-subscription pubsub objects self-clean in the fan-out's
+        # own finally blocks, so only the shared client remains to close here.
+        await redis_client.aclose()
         await db.dispose_engine()
         logger.info("shutdown")
 

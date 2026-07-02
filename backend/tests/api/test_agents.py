@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -34,6 +35,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -71,16 +73,35 @@ def _make_specialist(
 
 
 # --------------------------------------------------------------------------- #
-# Engine + data fixtures (in-memory aiosqlite, full schema, FK enforcement).
+# Engine + data fixtures (file-backed aiosqlite, full schema, FK enforcement).
 # --------------------------------------------------------------------------- #
 @pytest.fixture()
-async def engine() -> AsyncIterator[AsyncEngine]:
-    eng = create_async_engine("sqlite+aiosqlite://")
+async def engine(tmp_path: Path) -> AsyncIterator[AsyncEngine]:
+    """File-backed WAL SQLite with one exclusive connection per session.
+
+    Deliberately NOT the shared in-memory ``sqlite+aiosqlite://`` pattern the
+    rest of the API suite uses. That URL defaults to StaticPool, which hands
+    the SAME raw DBAPI connection to every session at once — and these tests
+    run a live WebSocket handler task concurrently with the test's own writer
+    sessions. A read-only poll session closing between another session's flush
+    and commit fires a connection-reset ROLLBACK on the shared connection,
+    silently discarding the flushed UPDATE (the later COMMIT no-ops). That was
+    the root cause of the recurring ``KeyError: 'event'`` terminal-frame flake:
+    the handler never observed COMPLETED and exhausted its poll budget.
+
+    NullPool gives each session its own connection (real transaction
+    isolation, like production Postgres); WAL lets the handler's readers run
+    while the test commits; busy_timeout absorbs residual lock contention.
+    """
+    db_path = tmp_path / "agents-api.sqlite"
+    eng = create_async_engine(f"sqlite+aiosqlite:///{db_path.as_posix()}", poolclass=NullPool)
 
     @event.listens_for(eng.sync_engine, "connect")
-    def _fks(dbapi_connection: Any, _record: Any) -> None:
+    def _configure(dbapi_connection: Any, _record: Any) -> None:
         cur = dbapi_connection.cursor()
         cur.execute("PRAGMA foreign_keys=ON")
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA busy_timeout=5000")
         cur.close()
 
     async with eng.begin() as conn:
@@ -731,6 +752,123 @@ class TestWebSocketFanout:
         token = token_for("viewer")
         for frame in fake_ws.sent:
             assert token not in str(frame)
+
+    async def test_live_relay_survives_idle_drains_before_the_frame_arrives(
+        self,
+        app: FastAPI,
+        token_for: Callable[[str], str],
+        sessionmaker: async_sessionmaker[AsyncSession],
+        users: dict[str, User],
+    ) -> None:
+        """A frame published AFTER several idle relay cycles is still relayed.
+
+        Regression pin for the recurring relay flake (2026-07-01 audit, W1): the
+        old drain used ``asyncio.wait_for`` around the subscription's
+        ``__anext__``, and its timeout CANCELLED the generator — closing it for
+        good, so the live relay silently died after its first idle drain. Any
+        frame published later was never relayed (the flake fired whenever the
+        publish lost the race with the first 20 ms drain window). Publishing
+        only after the handler has demonstrably sat through many idle cycles
+        makes the old behaviour fail deterministically.
+        """
+        from app.services.agent_stream import (
+            AgentStreamFrame,
+            InMemoryAgentStreamFanout,
+            channel_for,
+        )
+        from app.services.agent_stream.fanout import _InMemoryBus
+
+        bus = _InMemoryBus()
+        replica_a = InMemoryAgentStreamFanout(bus)
+        app.state.stream_fanout = InMemoryAgentStreamFanout(bus)
+
+        viewer = users["viewer"]
+        async with sessionmaker() as db:
+            session_row = AgentSession(
+                user_id=viewer.id,
+                invoking_role="viewer",
+                intent="stream",
+                status=AgentSessionStatus.RUNNING,
+            )
+            db.add(session_row)
+            await db.commit()
+            session_id = session_row.id
+
+        fake_ws = _FakeWebSocket(app, session_id=str(session_id), token=token_for("viewer"))
+        trace_id = "abcd1234abcd1234abcd1234abcd1234"
+        live = AgentStreamFrame(
+            session_id=str(session_id),
+            trace_id=trace_id,
+            data={"kind": "tool_call", "summary": "late ping", "trace_id": trace_id},
+        )
+
+        async def _drive_handler() -> None:
+            await agents_router.stream_session(fake_ws, session_id, sessionmaker)  # type: ignore[arg-type]
+
+        handler = asyncio.create_task(_drive_handler())
+        await _await_subscriber(bus, channel_for(str(session_id)))
+        # Let the handler run MANY idle relay cycles first — long enough that the
+        # 20 ms drain window has elapsed repeatedly before anything is published.
+        await asyncio.sleep(0.2)
+        await replica_a.publish(live)
+        async with sessionmaker() as db:
+            row = await db.get(AgentSession, session_id)
+            assert row is not None
+            row.status = AgentSessionStatus.COMPLETED
+            await db.commit()
+        await _await_handler_terminal(handler)
+
+        relayed = [f for f in fake_ws.sent if f.get("kind") == "tool_call"]
+        assert relayed, (
+            "the live relay died after an idle drain; a frame published later "
+            f"was never relayed — got {fake_ws.sent}"
+        )
+        assert relayed[0]["summary"] == "late ping"
+        assert fake_ws.sent[-1]["event"] == "end"
+
+    async def test_concurrent_commit_survives_another_sessions_close(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        users: dict[str, User],
+    ) -> None:
+        """Pin the engine fixture's per-session connection isolation.
+
+        On the old shared in-memory StaticPool engine, every session shared ONE
+        raw DBAPI connection: a read-only session closing between another
+        session's flush and commit fired a connection-reset ROLLBACK that
+        silently discarded the flushed UPDATE, and the later commit no-op'd.
+        The WS relay handler then never observed COMPLETED, exhausted its poll
+        budget, and closed without a terminal frame — the recurring
+        ``KeyError: 'event'`` flake. This is that exact interleave, minus the
+        handler: it fails deterministically on the shared-connection engine and
+        must pass on the file-backed NullPool engine above.
+        """
+        viewer = users["viewer"]
+        async with sessionmaker() as db:
+            row = AgentSession(
+                user_id=viewer.id,
+                invoking_role="viewer",
+                intent="isolation pin",
+                status=AgentSessionStatus.RUNNING,
+            )
+            db.add(row)
+            await db.commit()
+            session_id = row.id
+
+        async with sessionmaker() as writer:
+            target = await writer.get(AgentSession, session_id)
+            assert target is not None
+            target.status = AgentSessionStatus.COMPLETED
+            await writer.flush()  # UPDATE issued, transaction still open
+            # A poll-loop analog: an unrelated read-only session opens and closes.
+            async with sessionmaker() as reader:
+                await reader.get(AgentSession, session_id)
+            await writer.commit()
+
+        async with sessionmaker() as check:
+            fresh = await check.get(AgentSession, session_id)
+            assert fresh is not None
+            assert fresh.status is AgentSessionStatus.COMPLETED
 
     async def test_token_is_never_published_to_the_channel(
         self,
