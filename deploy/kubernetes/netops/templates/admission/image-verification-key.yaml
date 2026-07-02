@@ -22,6 +22,10 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ .Values.admission.signedImages.publicKeyConfigMap }}
+  # Explicit namespace: the kind harness applies the rendered chart WITHOUT a
+  # `-n` override (multi-namespace render since PR #86), so every namespaced
+  # object must carry its own metadata.namespace.
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "netops.labels" . | nindent 4 }}
     netops.io/image-verification: "cosign-public-key"
