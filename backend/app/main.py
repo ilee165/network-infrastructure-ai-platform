@@ -163,8 +163,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        # Enumerated, not wildcarded (audit PRODUCTION_READINESS #9): the
+        # frontend (frontend/src/api/client.ts) only ever issues these methods
+        # and sends only these request headers (Accept/Content-Type for the
+        # request body, Authorization for the bearer token).
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type", "Accept"],
     )
 
     @app.middleware("http")

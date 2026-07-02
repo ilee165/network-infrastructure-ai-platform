@@ -73,6 +73,11 @@ DISCOVERY_RUN_STARTED: Final = "discovery.run_started"
 DISCOVERY_RUN_FINISHED: Final = "discovery.run_finished"
 AUTH_LOGIN: Final = "auth.login"
 AUTH_REFRESH: Final = "auth.refresh"
+# Audit Wave 2 (PRODUCTION_READINESS #5) refresh-token reuse detection: a
+# refresh presenting a rotated-out (stale) ``jti`` is a theft signal — the
+# session is revoked in the same request and this event emitted. ``detail``
+# carries only the SHA-256 of the presented ``jti`` — never token material.
+AUTH_REFRESH_REUSE_DETECTED: Final = "auth.refresh_reuse_detected"
 # M3 agent-session audit vocabulary (brief §5/§7): every session start and
 # completion is audited, and each reasoning trace produced by the run is linked
 # back to the session via a dedicated trace entry (``reasoning_trace_id`` set).

@@ -21,7 +21,8 @@
  * dashboard.
  */
 
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Layout } from "./components/Layout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { RoleRoute } from "./components/RoleRoute";
@@ -42,62 +43,70 @@ import { TopologyPage } from "./pages/TopologyPage";
 import { UsersPage } from "./pages/UsersPage";
 
 export function App() {
+  // ErrorBoundary at the app level, per-route (audit UI_UX #1): a render
+  // error anywhere in the tree previously produced a blank page. The
+  // boundary's `resetKey` is the current pathname, so a tripped boundary
+  // clears itself the moment navigation lands on a different route — a
+  // crash on one page never wedges the rest of the app.
+  const location = useLocation();
   return (
-    <Routes>
-      {/* Public — reachable without auth. /change-password is also the forced
-          first-login destination, so it must live outside the gate. */}
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/change-password" element={<ChangePasswordPage />} />
+    <ErrorBoundary resetKey={location.pathname}>
+      <Routes>
+        {/* Public — reachable without auth. /change-password is also the forced
+            first-login destination, so it must live outside the gate. */}
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/change-password" element={<ChangePasswordPage />} />
 
-      {/* Everything else: auth + forced-change gate, then the app shell. */}
-      <Route element={<ProtectedRoute />}>
-        <Route element={<Layout />}>
-          <Route index element={<DashboardPage />} />
-          <Route path="devices" element={<DevicesPage />} />
-          <Route path="config" element={<ConfigPage />} />
-          <Route path="documents" element={<DocumentsPage />} />
-          <Route path="topology" element={<TopologyPage />} />
+        {/* Everything else: auth + forced-change gate, then the app shell. */}
+        <Route element={<ProtectedRoute />}>
+          <Route element={<Layout />}>
+            <Route index element={<DashboardPage />} />
+            <Route path="devices" element={<DevicesPage />} />
+            <Route path="config" element={<ConfigPage />} />
+            <Route path="documents" element={<DocumentsPage />} />
+            <Route path="topology" element={<TopologyPage />} />
 
-          {/* /incidents: viewer+ (incident reports contain agent-generated
-              network-failure evidence; defense-in-depth over the backend
-              viewer+ RBAC on GET /docs — ADR-0019). */}
-          <Route element={<RoleRoute minimum="viewer" />}>
-            <Route path="incidents" element={<IncidentReportsPage />} />
-          </Route>
-
-          <Route path="chat" element={<ChatPage />} />
-
-          {/* /packet: engineer+ (capture launch requires engineer+ RBAC) */}
-          <Route element={<RoleRoute minimum="engineer" />}>
-            <Route path="packet" element={<PacketPage />} />
-          </Route>
-
-          {/* /changes: the ChangeRequest approval queue is an engineer+
-              capability (operator/viewer are not on the change surface;
-              defense-in-depth over the backend RBAC). */}
-          <Route element={<RoleRoute minimum="engineer" />}>
-            <Route path="changes" element={<ChangesPage />} />
-          </Route>
-
-          <Route path="audit" element={<AuditPage />} />
-          <Route path="profile" element={<ProfilePage />} />
-
-          {/* /settings: Appearance is open to any authed user; the LLM section
-              is admin-only (defense-in-depth over the backend RBAC). */}
-          <Route path="settings" element={<SettingsPage />}>
-            <Route element={<RoleRoute minimum="admin" />}>
-              <Route path="llm" element={<SettingsLlmSection />} />
+            {/* /incidents: viewer+ (incident reports contain agent-generated
+                network-failure evidence; defense-in-depth over the backend
+                viewer+ RBAC on GET /docs — ADR-0019). */}
+            <Route element={<RoleRoute minimum="viewer" />}>
+              <Route path="incidents" element={<IncidentReportsPage />} />
             </Route>
-          </Route>
 
-          {/* Admin-only surfaces (defense-in-depth over the backend RBAC). */}
-          <Route element={<RoleRoute minimum="admin" />}>
-            <Route path="users" element={<UsersPage />} />
-          </Route>
+            <Route path="chat" element={<ChatPage />} />
 
-          <Route path="*" element={<Navigate to="/" replace />} />
+            {/* /packet: engineer+ (capture launch requires engineer+ RBAC) */}
+            <Route element={<RoleRoute minimum="engineer" />}>
+              <Route path="packet" element={<PacketPage />} />
+            </Route>
+
+            {/* /changes: the ChangeRequest approval queue is an engineer+
+                capability (operator/viewer are not on the change surface;
+                defense-in-depth over the backend RBAC). */}
+            <Route element={<RoleRoute minimum="engineer" />}>
+              <Route path="changes" element={<ChangesPage />} />
+            </Route>
+
+            <Route path="audit" element={<AuditPage />} />
+            <Route path="profile" element={<ProfilePage />} />
+
+            {/* /settings: Appearance is open to any authed user; the LLM section
+                is admin-only (defense-in-depth over the backend RBAC). */}
+            <Route path="settings" element={<SettingsPage />}>
+              <Route element={<RoleRoute minimum="admin" />}>
+                <Route path="llm" element={<SettingsLlmSection />} />
+              </Route>
+            </Route>
+
+            {/* Admin-only surfaces (defense-in-depth over the backend RBAC). */}
+            <Route element={<RoleRoute minimum="admin" />}>
+              <Route path="users" element={<UsersPage />} />
+            </Route>
+
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
         </Route>
-      </Route>
-    </Routes>
+      </Routes>
+    </ErrorBoundary>
   );
 }

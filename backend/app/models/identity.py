@@ -97,6 +97,13 @@ class RefreshSession(UuidPkMixin, Base):
     user_agent: Mapped[str | None] = mapped_column(String(512))
     ip: Mapped[str | None] = mapped_column(String(64))
     revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+    #: SHA-256 hex of the ``jti`` of the most recently issued refresh token for
+    #: this session (audit PRODUCTION_READINESS #5, migration 0015). A refresh
+    #: presenting a rotated-out (stale) ``jti`` is a theft signal: the session
+    #: is revoked and ``auth.refresh_reuse_detected`` audited. Nullable so
+    #: pre-0015 sessions stay valid (backfilled on their next rotation); only
+    #: the hash is ever stored — never token material.
+    current_jti_hash: Mapped[str | None] = mapped_column(String(64))
 
 
 class SystemSetting(UuidPkMixin, TimestampMixin, Base):

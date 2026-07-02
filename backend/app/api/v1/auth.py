@@ -25,16 +25,27 @@ Logout / admin revoke flips ``revoked_at`` — the row is never deleted — so a
 logged-out, admin-revoked, or deactivated session's refresh token is rejected
 on its next use rather than staying verifiable until its natural 8 h expiry.
 
-Revocation is per-session (``sid``), not per-token (``jti``): rotation reuses
-the same ``sid`` with a fresh ``jti`` and the ``jti`` is never persisted or
-compared. A rotated-out (superseded) refresh token therefore still names the
-same live ``sid`` and remains valid — replayable — until that session is logged
-out / revoked or the token reaches its 8 h expiry. Rotation does not, by itself,
-invalidate the previous refresh token.
+Reuse detection (audit PRODUCTION_READINESS #5, migration 0015): every issuance
+persists the SHA-256 of the new refresh token's ``jti`` on the session row
+(``current_jti_hash`` — hash only, never token material). ``refresh`` compares
+the presented ``jti`` hash against it: a mismatch means a rotated-out
+(superseded) token was replayed — a theft signal — so the session is revoked,
+``auth.refresh_reuse_detected`` is audited, and a generic 401 is returned.
+Rotation therefore invalidates the previous refresh token on the very next use.
+Sessions created before migration 0015 carry a NULL hash and are backfilled on
+their next legitimate rotation.
+
+Known server-side race window: two truly concurrent refreshes with the same
+cookie can both read the stored hash before either commits; the loser's cookie
+then presents a stale ``jti`` on ITS next refresh and falsely trips the
+detector (fail-closed: the user re-authenticates, no access is granted). The
+frontend single-flight refresh guard (Wave 2 item 2) serializes refreshes per
+browser, making this window unreachable in normal operation.
 """
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import time
 import uuid
@@ -80,7 +91,7 @@ from app.core.security import (
     verify_password,
 )
 from app.llm.providers import KNOWN_PROFILES
-from app.models import Role, SystemSetting, User
+from app.models import RefreshSession, Role, SystemSetting, User
 from app.services import oidc as oidc_service
 from app.services import rate_limit
 from app.services.audit import service as audit_service
@@ -130,13 +141,24 @@ class TokenResponse(BaseModel):
     token_type: Literal["bearer"] = "bearer"
 
 
-def _issue_tokens(user: User, sid: uuid.UUID, settings: Settings, response: Response) -> str:
-    """Mint the access token, set a refresh cookie for session *sid*, return the access JWT.
+def _hash_jti(jti: str) -> str:
+    """SHA-256 hex of a refresh-token ``jti`` — the only form ever persisted or audited."""
+    return hashlib.sha256(jti.encode("utf-8")).hexdigest()
+
+
+def _issue_tokens(
+    user: User, refresh_session: RefreshSession, settings: Settings, response: Response
+) -> str:
+    """Mint the access token, set a refresh cookie for *refresh_session*, return the access JWT.
 
     The refresh JWT carries the server-side session id as its ``sid`` claim plus
     a fresh ``jti`` per issuance; rotation reuses the same ``sid`` so the live
     session survives a refresh, while the changing ``jti`` keeps every emitted
-    token distinct. The access token is unchanged (``type=access`` + ``roles``).
+    token distinct. The SHA-256 of the new ``jti`` is persisted on the session
+    row (``current_jti_hash``) so a later replay of a rotated-out token is
+    detectable (reuse detection, PRODUCTION_READINESS #5) — the caller's commit
+    makes it durable atomically with the rest of the request. The access token
+    is unchanged (``type=access`` + ``roles``).
     """
     # ``jti`` makes every access token individually identifiable so the W6-T6
     # API rate-limiter can key a per-token budget (``token:<jti>``) without ever
@@ -157,6 +179,7 @@ def _issue_tokens(user: User, sid: uuid.UUID, settings: Settings, response: Resp
         settings,
         extra_claims=access_claims,
     )
+    refresh_jti = str(uuid.uuid4())
     refresh_token = create_access_token(
         str(user.id),
         settings,
@@ -165,10 +188,13 @@ def _issue_tokens(user: User, sid: uuid.UUID, settings: Settings, response: Resp
         # issuance unique within that session.
         extra_claims={
             "type": TOKEN_TYPE_REFRESH,
-            "sid": str(sid),
-            "jti": str(uuid.uuid4()),
+            "sid": str(refresh_session.id),
+            "jti": refresh_jti,
         },
     )
+    # Persist ONLY the hash of the current jti: a later refresh presenting any
+    # other (rotated-out) jti for this session is a theft signal.
+    refresh_session.current_jti_hash = _hash_jti(refresh_jti)
     response.set_cookie(
         REFRESH_COOKIE_NAME,
         refresh_token,
@@ -411,7 +437,7 @@ async def login(
         user_agent=request.headers.get("user-agent"),
         ip=request.client.host if request.client else None,
     )
-    access_token = _issue_tokens(user, refresh_session.id, settings, response)
+    access_token = _issue_tokens(user, refresh_session, settings, response)
     # Normal local login when OIDC is off; a fenced admin login while OIDC is on
     # is the alerted break-glass event (a distinct, reviewable audit action).
     login_action = (
@@ -445,6 +471,18 @@ async def refresh(
     oracle for whether the session was revoked vs. the user deactivated).
     Rotation reuses the same ``sid`` with a fresh ``jti`` and advances the
     session's ``last_used_at``.
+
+    Reuse detection (PRODUCTION_READINESS #5): the presented ``jti`` hash must
+    match the session's persisted ``current_jti_hash``. A mismatch means a
+    rotated-out token was replayed (theft signal): the session is revoked,
+    ``auth.refresh_reuse_detected`` is audited (hash only — never token
+    material), and the same generic 401 is returned. A NULL stored hash
+    (session predates migration 0015) is accepted once and backfilled by this
+    rotation. Server-side race window: two truly concurrent refreshes with the
+    same cookie can both pass the check before either commits — the loser's
+    NEXT refresh then falsely trips the detector (fail-closed re-login, never
+    an access grant); the frontend single-flight guard (Wave 2 item 2) keeps
+    that window unreachable in normal operation.
     """
     cookie = request.cookies.get(REFRESH_COOKIE_NAME)
     if cookie is None:
@@ -464,8 +502,31 @@ async def refresh(
     if refresh_session is None:
         raise AuthError("Invalid refresh token")
 
+    jti = claims.get("jti")
+    if not isinstance(jti, str) or not jti:
+        raise AuthError("Invalid refresh token")
+    presented_hash = _hash_jti(jti)
+    if refresh_session.current_jti_hash is not None and not secrets.compare_digest(
+        refresh_session.current_jti_hash, presented_hash
+    ):
+        # A validly signed refresh token whose jti is not the session's current
+        # one is a rotated-out token being replayed — a theft signal. Kill the
+        # whole session (both the thief's and the victim's copies die) and
+        # audit; the response stays the generic 401 (no oracle).
+        await session_service.revoke(session, sid=refresh_session.id)
+        await audit_service.record(
+            session,
+            actor=f"user:{user.username}",
+            action=audit_service.AUTH_REFRESH_REUSE_DETECTED,
+            target_type="refresh_session",
+            target_id=str(refresh_session.id),
+            detail={"presented_jti_hash": presented_hash, "outcome": "session_revoked"},
+        )
+        await session.commit()
+        raise AuthError("Invalid refresh token")
+
     await session_service.touch(session, refresh_session)
-    access_token = _issue_tokens(user, refresh_session.id, settings, response)
+    access_token = _issue_tokens(user, refresh_session, settings, response)
     await audit_service.record(
         session,
         actor=f"user:{user.username}",
@@ -774,7 +835,7 @@ async def oidc_callback(
         user_agent=request.headers.get("user-agent"),
         ip=request.client.host if request.client else None,
     )
-    access_token = _issue_tokens(user, refresh_session.id, settings, response)
+    access_token = _issue_tokens(user, refresh_session, settings, response)
     await audit_service.record(
         session,
         actor=_oidc_actor(issuer, subject),

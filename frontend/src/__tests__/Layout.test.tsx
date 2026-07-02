@@ -87,6 +87,41 @@ describe("Layout", () => {
   });
 });
 
+describe("Layout — per-route error boundary", () => {
+  function Boom(): never {
+    throw new Error("page exploded");
+  }
+
+  it("keeps the shell (sidebar nav) mounted when the routed page crashes", () => {
+    useAuthStore.setState({
+      status: "authed",
+      accessToken: "tok",
+      user: userWithRole("engineer"),
+    });
+    // Silence React's expected error logging for the intentional throw.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      render(
+        <MemoryRouter initialEntries={["/"]}>
+          <Routes>
+            <Route element={<Layout />}>
+              <Route index element={<Boom />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>,
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+    // Fallback shown in the outlet area…
+    expect(screen.getByTestId("error-boundary-fallback")).toBeInTheDocument();
+    // …while the app shell survives: nav links stay clickable for recovery.
+    for (const label of NAV_LABELS) {
+      expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
+    }
+  });
+});
+
 describe("Layout — user menu", () => {
   it("shows the display name (falling back to username) and the role", () => {
     renderLayout("engineer", "Alice Smith");

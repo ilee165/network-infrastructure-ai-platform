@@ -18,8 +18,10 @@
 #        EXECUTED plant→red→revert bite the precondition, and (L1: kind cannot run on
 #        the Windows authoring host) that bite has NOT run on any CI runner yet. So
 #        the live step stays continue-on-error and the job stays out of `all-gates`
-#        until a runner records the observed red→green. The `kind-harness-ha` HA job
-#        also stays non-blocking (see ci.yml `kind-harness` job + docs/runbooks/kind-harness.md).
+#        until a runner records the observed red→green. (An audit-W2 T7 promotion
+#        attempt was ROLLED BACK for exactly this reason — see
+#        docs/runbooks/kind-harness.md "Prove-it-bites".) The `kind-harness-ha` HA
+#        job also stays non-blocking (see ci.yml `kind-harness` job + the runbook).
 #   L5 — `set -o pipefail` + `test -s` on every render/apply/assert pipe so a
 #        masked exit code can never read green.
 #   L3 — any value an in-cluster exec needs is passed as a positional arg to
@@ -263,7 +265,16 @@ kubectl create namespace "${CHART_NS}" --dry-run=client -o yaml | kubectl apply 
 # fails the run. There is no path from a failed apply to the assertions that does
 # not first prove the entire log is accounted for.
 apply_log="${APPLY_LOG:-$(mktemp)}"
-if kubectl apply -n "${CHART_NS}" -f "${RENDERED}" 2>&1 | tee "${apply_log}"; then
+# No `-n` override: every namespaced object in the render carries an EXPLICIT
+# metadata.namespace (verified — the chart templates all set
+# `namespace: {{ .Release.Namespace }}` or the packet-capture namespace), and
+# since PR #86 the chart renders a SECOND namespace (netops-packet-capture) whose
+# objects a forced `-n ${CHART_NS}` REJECTS ("namespace ... does not match").
+# Helm orders Namespace objects first in the render, so both namespaces exist
+# before their objects apply. This only surfaced during the audit-W2 T7 promotion
+# ATTEMPT (since rolled back pending the ADR-0048 §4 bite proof) — signal-only
+# mode had hidden it.
+if kubectl apply -f "${RENDERED}" 2>&1 | tee "${apply_log}"; then
   log "all chart objects applied cleanly"
 else
   # Apply returned NON-ZERO. Start fail-closed: take EVERY non-blank log line and
