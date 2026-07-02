@@ -74,7 +74,12 @@ from app.models.config_mgmt import ConfigBackupRun, ConfigSource
 from app.models.inventory import CredentialKind, DeviceCredential
 from app.plugins.base import Capability, ConfigBackupCapability, PluginCapability
 from app.plugins.registry import PluginRegistry, get_default_registry
-from app.plugins.transport import SshParams, SshTransport, SshTransportError
+from app.plugins.transport import (
+    SshParams,
+    SshTransport,
+    SshTransportError,
+    netmiko_device_type,
+)
 from app.services import audit, credentials
 from app.workers.celery_app import celery_app
 
@@ -91,13 +96,6 @@ _SNAPSHOT_CAPTURED = "config.snapshot_captured"
 _SNAPSHOT_FAILED = "config.snapshot_failed"
 _BACKUP_RUN_STARTED = "config.backup_run_started"
 _BACKUP_RUN_FINISHED = "config.backup_run_finished"
-
-#: vendor_id -> netmiko ``device_type`` used to open the capture session.
-_NETMIKO_DEVICE_TYPES: dict[str, str] = {
-    "cisco_ios": "cisco_ios",
-    "cisco_iosxe": "cisco_xe",
-    "eos": "arista_eos",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -235,10 +233,9 @@ def _fetch_running_config(
     if not plugin.supports(Capability.CONFIG_BACKUP):
         raise PluginError(f"vendor {context.vendor_id!r} does not support config backup")
     cred = context.credential
-    default_device_type = _NETMIKO_DEVICE_TYPES.get(context.vendor_id, context.vendor_id)
     params = SshParams(
         host=context.mgmt_ip,
-        device_type=str(cred.params.get("device_type") or default_device_type),
+        device_type=netmiko_device_type(context.vendor_id, cred.params),
         username=cred.username or "",
         password=cred.secret,
         port=int(cred.params.get("port", 22)),

@@ -13,16 +13,17 @@ Security invariants (D11):
   credential material can leak into logs or API responses.
 
 Blocking-I/O placement: netmiko is synchronous; transports run inside Celery
-worker tasks, never on the FastAPI event loop (ADR-0007 §3, ADR-0008).
+worker tasks or via :func:`asyncio.to_thread` (agent on-demand live reads) —
+never directly on the FastAPI event loop (ADR-0007 §3, ADR-0008).
 """
 
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import TracebackType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Final
 
 from netmiko import ConnectHandler
 from netmiko.exceptions import NetmikoBaseException, SSHException
@@ -32,12 +33,45 @@ from app.core.errors import PluginError
 if TYPE_CHECKING:
     from netmiko import BaseConnection
 
-__all__ = ["SshParams", "SshTransport", "SshTransportError"]
+__all__ = [
+    "NETMIKO_DEVICE_TYPES",
+    "SshParams",
+    "SshTransport",
+    "SshTransportError",
+    "netmiko_device_type",
+]
 
 _REDACTED = "***REDACTED***"
 
 #: Netmiko (and re-exported paramiko) failures wrapped into SshTransportError.
 _NETMIKO_FAILURES: tuple[type[Exception], ...] = (NetmikoBaseException, SSHException)
+
+#: vendor_id -> netmiko ``device_type`` for vendors whose plugin id differs
+#: from the netmiko driver name. Vendors absent here fall back to their
+#: vendor_id (which matches the driver name for e.g. ``cisco_nxos``). One map
+#: for every SSH session-open site (discovery, config backup, agent live
+#: reads) — previously each worker carried its own copy.
+NETMIKO_DEVICE_TYPES: Final[dict[str, str]] = {
+    "cisco_ios": "cisco_ios",
+    "cisco_iosxe": "cisco_xe",
+    "eos": "arista_eos",
+    "junos": "juniper_junos",
+    "fortios": "fortinet",
+}
+
+
+def netmiko_device_type(vendor_id: str, params: Mapping[str, Any] | None = None) -> str:
+    """Resolve the netmiko driver name for *vendor_id*.
+
+    A per-credential ``device_type`` in *params* (non-secret protocol metadata
+    on :class:`~app.models.DeviceCredential`) always wins; otherwise the shared
+    :data:`NETMIKO_DEVICE_TYPES` map applies, falling back to the vendor_id
+    itself. Mirrors the semantics both workers previously implemented locally.
+    """
+    override = (params or {}).get("device_type")
+    if override:
+        return str(override)
+    return NETMIKO_DEVICE_TYPES.get(vendor_id, vendor_id)
 
 
 class SshTransportError(PluginError):

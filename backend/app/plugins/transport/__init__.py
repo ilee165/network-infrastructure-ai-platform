@@ -19,9 +19,16 @@ from app.plugins.transport.snmp import (
     SnmpV2cParams,
     SnmpV3Params,
 )
-from app.plugins.transport.ssh import SshParams, SshTransport, SshTransportError
+from app.plugins.transport.ssh import (
+    NETMIKO_DEVICE_TYPES,
+    SshParams,
+    SshTransport,
+    SshTransportError,
+    netmiko_device_type,
+)
 
 __all__ = [
+    "NETMIKO_DEVICE_TYPES",
     "SnmpAuthProtocol",
     "SnmpClient",
     "SnmpPrivProtocol",
@@ -31,4 +38,5 @@ __all__ = [
     "SshParams",
     "SshTransport",
     "SshTransportError",
+    "netmiko_device_type",
 ]
