@@ -3,7 +3,8 @@
  * environment / LLM-profile badges. Pages render through the router outlet.
  */
 
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { logout } from "../api/auth";
 import { useAuthStore } from "../stores/auth";
 import { hasMinimumRole } from "../stores/roles";
@@ -58,6 +59,7 @@ export function Layout() {
   const user = useAuthStore((state) => state.user);
   const setAnon = useAuthStore((state) => state.setAnon);
   const navigate = useNavigate();
+  const location = useLocation();
 
   const isAdmin = hasMinimumRole(user?.role, "admin");
   const isEngineer = hasMinimumRole(user?.role, "engineer");
@@ -174,7 +176,12 @@ export function Layout() {
           </div>
         </header>
         <main className="min-h-0 flex-1 overflow-y-auto p-6">
-          <Outlet />
+          {/* Per-route boundary: a page crash must not unmount the shell
+              (sidebar/header) — the app-level boundary in App.tsx is only the
+              last resort for the shell itself failing. */}
+          <ErrorBoundary resetKey={location.pathname}>
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

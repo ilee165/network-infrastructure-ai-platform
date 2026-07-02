@@ -80,4 +80,20 @@ describe("ErrorBoundary", () => {
     expect(screen.queryByTestId("error-boundary-fallback")).not.toBeInTheDocument();
     expect(screen.getByTestId("fine-page")).toBeInTheDocument();
   });
+
+  it("shows the fallback even when a falsy value is thrown", () => {
+    function BoomFalsy(): never {
+      // A falsy throw is legal JS; the boundary must not treat the caught
+      // value itself as the "no error" sentinel.
+      throw null;
+    }
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <ErrorBoundary>
+          <BoomFalsy />
+        </ErrorBoundary>
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("error-boundary-fallback")).toBeInTheDocument();
+  });
 });

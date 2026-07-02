@@ -25,11 +25,16 @@ interface ErrorBoundaryProps {
 }
 
 interface ErrorBoundaryState {
-  error: Error | null;
+  /** Separate flag: a child may legally `throw null`/`undefined`/`0`/`""` —
+      the caught value itself cannot double as the "no error" sentinel. */
+  hasError: boolean;
+  error: unknown;
 }
 
 /** Fallback UI shown when a child render throws. */
-function ErrorFallback({ error }: { error: Error }) {
+function ErrorFallback({ error }: { error: unknown }) {
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
   return (
     <div
       data-testid="error-boundary-fallback"
@@ -42,18 +47,18 @@ function ErrorFallback({ error }: { error: Error }) {
         This page hit an unexpected error and could not render. Try navigating to another page,
         or reload the app.
       </p>
-      {error.message ? (
-        <p className="max-w-md break-words font-mono text-xs text-zinc-600">{error.message}</p>
+      {message ? (
+        <p className="max-w-md break-words font-mono text-xs text-zinc-600">{message}</p>
       ) : null}
     </div>
   );
 }
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  state: ErrorBoundaryState = { error: null };
+  state: ErrorBoundaryState = { hasError: false, error: null };
 
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { error };
+  static getDerivedStateFromError(error: unknown): ErrorBoundaryState {
+    return { hasError: true, error };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
@@ -62,13 +67,13 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   componentDidUpdate(prevProps: ErrorBoundaryProps): void {
-    if (this.state.error && prevProps.resetKey !== this.props.resetKey) {
-      this.setState({ error: null });
+    if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false, error: null });
     }
   }
 
   render(): ReactNode {
-    if (this.state.error) {
+    if (this.state.hasError) {
       return <ErrorFallback error={this.state.error} />;
     }
     return this.props.children;
