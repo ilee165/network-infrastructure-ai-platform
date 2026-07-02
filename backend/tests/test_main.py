@@ -101,6 +101,34 @@ async def test_cors_preflight_exposes_only_enumerated_methods_and_headers(
     }
 
 
+async def test_cors_preflight_rejects_disallowed_method_and_header(
+    client: httpx.AsyncClient,
+) -> None:
+    """The restriction must actually bite: a preflight for a method or header
+    outside the enumerated allowlist is refused (Starlette answers 400 and
+    never echoes the disallowed value back)."""
+    response = await client.options(
+        "/api/v1/health/live",
+        headers={
+            "Origin": "http://testserver",
+            "Access-Control-Request-Method": "PUT",
+        },
+    )
+    assert response.status_code == 400
+    assert "PUT" not in response.headers.get("access-control-allow-methods", "")
+
+    response = await client.options(
+        "/api/v1/health/live",
+        headers={
+            "Origin": "http://testserver",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "x-not-allowed",
+        },
+    )
+    assert response.status_code == 400
+    assert "x-not-allowed" not in response.headers.get("access-control-allow-headers", "").lower()
+
+
 # ---------------------------------------------------------------------------
 # Prod-grade KEK gating at startup (P1 W6-T2, ADR-0032 §2)
 # ---------------------------------------------------------------------------
