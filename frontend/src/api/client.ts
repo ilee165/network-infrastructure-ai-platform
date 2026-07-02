@@ -15,7 +15,9 @@
  * the original request once with the freshly minted token. If the refresh fails
  * the store is set anonymous and the browser is redirected to `/login`. The
  * refresh call itself never triggers a nested refresh, and the original request
- * is retried at most once — there is no refresh loop.
+ * is retried at most once — there is no refresh loop. Concurrent 401s coalesce
+ * onto a single in-flight refresh (single-flight guard): one POST, one new
+ * token, every waiter retries with it; a failed refresh is not cached.
  */
 
 import { useAuthStore } from "../stores/auth";
@@ -131,6 +133,27 @@ async function parse<T>(response: Response): Promise<T> {
 }
 
 /**
+ * The refresh currently in flight, if any. Concurrent 401s coalesce onto this
+ * single promise (single-flight guard, audit FUNCTIONAL_BUGS #4): only ONE
+ * `POST /auth/refresh` is issued no matter how many requests fail at once,
+ * which also keeps parallel legitimate refreshes from tripping server-side
+ * refresh-token reuse detection. Cleared in `finally` so a failed refresh is
+ * never cached — the next 401 starts a brand-new attempt.
+ */
+let refreshInFlight: Promise<string | null> | null = null;
+
+/**
+ * Single-flight wrapper around {@link attemptRefresh}: all concurrent callers
+ * await the same in-flight refresh and receive the same token (or `null`).
+ */
+function sharedRefresh(): Promise<string | null> {
+  refreshInFlight ??= attemptRefresh().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
+/**
  * Attempt exactly one silent token refresh. The HttpOnly refresh cookie is sent
  * automatically by the browser; no Authorization header is attached and this
  * call NEVER triggers another refresh on its own 401. Returns the new access
@@ -176,8 +199,8 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
     throw await toApiError(response, path);
   }
 
-  // 401 on a normal request: try exactly one refresh, then retry once.
-  const token = await attemptRefresh();
+  // 401 on a normal request: join the (single-flight) refresh, then retry once.
+  const token = await sharedRefresh();
   if (token === null) {
     useAuthStore.getState().setAnon();
     globalThis.location.assign(LOGIN_PATH);
