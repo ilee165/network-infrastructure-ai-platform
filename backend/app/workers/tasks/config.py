@@ -98,7 +98,6 @@ _BACKUP_RUN_STARTED = "config.backup_run_started"
 _BACKUP_RUN_FINISHED = "config.backup_run_finished"
 
 
-
 # ---------------------------------------------------------------------------
 # Seams (monkeypatched by unit tests)
 # ---------------------------------------------------------------------------
