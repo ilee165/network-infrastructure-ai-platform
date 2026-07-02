@@ -732,6 +732,79 @@ class TestWebSocketFanout:
         for frame in fake_ws.sent:
             assert token not in str(frame)
 
+    async def test_live_relay_survives_idle_drains_before_the_frame_arrives(
+        self,
+        app: FastAPI,
+        token_for: Callable[[str], str],
+        sessionmaker: async_sessionmaker[AsyncSession],
+        users: dict[str, User],
+    ) -> None:
+        """A frame published AFTER several idle relay cycles is still relayed.
+
+        Regression pin for the recurring relay flake (2026-07-01 audit, W1): the
+        old drain used ``asyncio.wait_for`` around the subscription's
+        ``__anext__``, and its timeout CANCELLED the generator — closing it for
+        good, so the live relay silently died after its first idle drain. Any
+        frame published later was never relayed (the flake fired whenever the
+        publish lost the race with the first 20 ms drain window). Publishing
+        only after the handler has demonstrably sat through many idle cycles
+        makes the old behaviour fail deterministically.
+        """
+        from app.services.agent_stream import (
+            AgentStreamFrame,
+            InMemoryAgentStreamFanout,
+            channel_for,
+        )
+        from app.services.agent_stream.fanout import _InMemoryBus
+
+        bus = _InMemoryBus()
+        replica_a = InMemoryAgentStreamFanout(bus)
+        app.state.stream_fanout = InMemoryAgentStreamFanout(bus)
+
+        viewer = users["viewer"]
+        async with sessionmaker() as db:
+            session_row = AgentSession(
+                user_id=viewer.id,
+                invoking_role="viewer",
+                intent="stream",
+                status=AgentSessionStatus.RUNNING,
+            )
+            db.add(session_row)
+            await db.commit()
+            session_id = session_row.id
+
+        fake_ws = _FakeWebSocket(app, session_id=str(session_id), token=token_for("viewer"))
+        trace_id = "abcd1234abcd1234abcd1234abcd1234"
+        live = AgentStreamFrame(
+            session_id=str(session_id),
+            trace_id=trace_id,
+            data={"kind": "tool_call", "summary": "late ping", "trace_id": trace_id},
+        )
+
+        async def _drive_handler() -> None:
+            await agents_router.stream_session(fake_ws, session_id, sessionmaker)  # type: ignore[arg-type]
+
+        handler = asyncio.create_task(_drive_handler())
+        await _await_subscriber(bus, channel_for(str(session_id)))
+        # Let the handler run MANY idle relay cycles first — long enough that the
+        # 20 ms drain window has elapsed repeatedly before anything is published.
+        await asyncio.sleep(0.2)
+        await replica_a.publish(live)
+        async with sessionmaker() as db:
+            row = await db.get(AgentSession, session_id)
+            assert row is not None
+            row.status = AgentSessionStatus.COMPLETED
+            await db.commit()
+        await _await_handler_terminal(handler)
+
+        relayed = [f for f in fake_ws.sent if f.get("kind") == "tool_call"]
+        assert relayed, (
+            "the live relay died after an idle drain; a frame published later "
+            f"was never relayed — got {fake_ws.sent}"
+        )
+        assert relayed[0]["summary"] == "late ping"
+        assert fake_ws.sent[-1]["event"] == "end"
+
     async def test_token_is_never_published_to_the_channel(
         self,
         app: FastAPI,

@@ -26,9 +26,10 @@ produces is linked back to the session by a dedicated audit entry whose
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, Query, Request, WebSocket
@@ -611,33 +612,50 @@ async def stream_session(
     # Subscribe BEFORE accepting the socket (and before the DB replay): once we
     # are attached to the channel, a frame published by any replica is buffered on
     # our subscription rather than lost in the accept/replay gap.
+    # One in-flight ``__anext__`` on the live subscription, kept across relay
+    # cycles. It is NEVER cancelled between cycles: cancelling an async
+    # generator's ``__anext__`` throws CancelledError into the generator and
+    # permanently closes it — the pre-W1-audit bug that silently killed the
+    # live relay after its first idle drain (and could eat a frame consumed
+    # but not yet yielded). Cancelled exactly once, at teardown below.
+    pending_live: asyncio.Task[AgentStreamFrame] | None = None
     async with fanout.subscribe(str(session_id)) as live_frames:
         await websocket.accept()
         emitted = 0
-        for _ in range(_STREAM_MAX_POLLS):
-            row = await _load_session_or_404(sessionmaker, session_id)
-            status = row.status
-            traces = await _load_traces(sessionmaker, session_id)
-            steps = [step for trace in traces for step in trace.steps]
-            # Durable replay: emit any newly persisted step (completeness, §5).
-            while emitted < len(steps):
-                data = _step_read(steps[emitted]).model_dump(mode="json")
-                key = _step_frame_key(data)
-                if key not in emitted_keys:
-                    emitted_keys.add(key)
-                    await websocket.send_json(data)
-                emitted += 1
-            # Liveness: relay any live frames already fanned out for this session
-            # (ADR-0044 §2). Done on EVERY iteration — including the terminal one —
-            # so a frame that arrived on the wire just before the run finished is
-            # still delivered before the end frame rather than needlessly dropped.
-            # Cross-source dedup: a frame whose step was already replayed from the DB
-            # (or vice-versa) is skipped via the shared ``emitted_keys`` set.
-            await _relay_pending_live_frames(websocket, live_frames, emitted_keys)
-            if status is not AgentSessionStatus.RUNNING:
-                answer = _final_answer_from_traces(traces)
-                break
-            await asyncio.sleep(_STREAM_POLL_SECONDS)
+        try:
+            for _ in range(_STREAM_MAX_POLLS):
+                row = await _load_session_or_404(sessionmaker, session_id)
+                status = row.status
+                traces = await _load_traces(sessionmaker, session_id)
+                steps = [step for trace in traces for step in trace.steps]
+                # Durable replay: emit any newly persisted step (completeness, §5).
+                while emitted < len(steps):
+                    data = _step_read(steps[emitted]).model_dump(mode="json")
+                    key = _step_frame_key(data)
+                    if key not in emitted_keys:
+                        emitted_keys.add(key)
+                        await websocket.send_json(data)
+                    emitted += 1
+                # Liveness: relay any live frames already fanned out for this session
+                # (ADR-0044 §2). Done on EVERY iteration — including the terminal one —
+                # so a frame that arrived on the wire just before the run finished is
+                # still delivered before the end frame rather than needlessly dropped.
+                # Cross-source dedup: a frame whose step was already replayed from the DB
+                # (or vice-versa) is skipped via the shared ``emitted_keys`` set.
+                pending_live = await _relay_pending_live_frames(
+                    websocket, live_frames, emitted_keys, pending_live
+                )
+                if status is not AgentSessionStatus.RUNNING:
+                    answer = _final_answer_from_traces(traces)
+                    break
+                await asyncio.sleep(_STREAM_POLL_SECONDS)
+        finally:
+            # Teardown is the ONE place the in-flight __anext__ is cancelled —
+            # the generator is closed by the subscription context exit anyway.
+            if pending_live is not None:
+                pending_live.cancel()
+                with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                    await pending_live
 
     # Only emit the terminal ``end`` frame when the run actually REACHED a terminal
     # status. If the poll budget was exhausted while the run is still RUNNING,
@@ -672,29 +690,43 @@ def _step_frame_key(data: dict[str, object]) -> str:
 
 async def _relay_pending_live_frames(
     websocket: WebSocket,
-    live_frames: object,
+    live_frames: AsyncIterator[AgentStreamFrame],
     emitted_keys: set[str],
-) -> None:
+    pending: asyncio.Task[AgentStreamFrame] | None,
+) -> asyncio.Task[AgentStreamFrame] | None:
     """Relay any live pub/sub frames currently available, without blocking.
 
-    Drains the subscription with a near-zero timeout so the relay loop keeps its
+    Drains the subscription with a short timeout so the relay loop keeps its
     terminal-status poll cadence: a frame that has arrived on the channel is sent
     to the peer immediately; if none has arrived this returns at once. Best-effort
     (ADR-0044 §5) — no buffering beyond what the subscription already holds.
+
+    The in-flight ``__anext__`` task is threaded through *pending* across calls
+    and is **never cancelled here**. ``asyncio.wait_for`` was the pre-W1-audit
+    implementation and its timeout CANCELLED the ``__anext__`` — which throws
+    CancelledError into the async generator and closes it for good, so the live
+    relay silently died after its first idle drain (every later drain saw an
+    instant ``StopAsyncIteration``; the DB replay masked the loss). It could
+    also eat a frame the generator had consumed but not yet yielded. Instead an
+    unfinished ``__anext__`` is simply left running and handed back to the next
+    cycle; the caller cancels it exactly once at socket teardown.
 
     Cross-source dedup: a frame whose step was already emitted from the DB replay
     (or an earlier live frame) is skipped via the shared ``emitted_keys`` set so a
     persisted step — published as a frame byte-identical to its replay — is sent at
     most once on the wire (F-agents-582 / F-agents-609).
     """
-    anext_frame = live_frames.__anext__  # type: ignore[attr-defined]
     while True:
+        if pending is None:
+            pending = asyncio.ensure_future(anext(live_frames))
+        done, _ = await asyncio.wait({pending}, timeout=_STREAM_POLL_SECONDS)
+        if not done:
+            return pending  # still in flight — hand it to the next cycle intact
+        task, pending = pending, None
         try:
-            frame: AgentStreamFrame = await asyncio.wait_for(
-                anext_frame(), timeout=_STREAM_POLL_SECONDS
-            )
-        except (TimeoutError, StopAsyncIteration):
-            return
+            frame = task.result()
+        except StopAsyncIteration:
+            return None  # subscription ended; nothing further to relay
         key = _step_frame_key(frame.data)
         if key in emitted_keys:
             continue
