@@ -8,12 +8,14 @@ the ASGI app in-process.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Iterator
 
 import httpx
 import pytest
 from fastapi import FastAPI
 
+import app.main as app_main
 from app.core.config import Settings, get_settings
 from app.main import create_app
 
@@ -24,6 +26,28 @@ def _clear_settings_cache() -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _cap_root_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cap the root logger at WARNING whenever the app configures logging.
+
+    ``create_app()`` calls ``configure_logging`` with the ``env="dev"`` test
+    settings, which sets the root logger to DEBUG; rendering every DEBUG
+    record through the structlog stdout handler dominates the runtime of
+    DB/API-heavy tests. The ``app.main`` reference is wrapped (rather than
+    setting the level once here) because every ``create_app()`` call re-runs
+    ``configure_logging`` and would undo a one-time cap. Tests that assert on
+    DEBUG/INFO records re-lower the level for their own scope via
+    ``caplog.set_level``/``caplog.at_level``.
+    """
+    orig = app_main.configure_logging
+
+    def _configure_then_cap(settings: Settings) -> None:
+        orig(settings)
+        logging.getLogger().setLevel(logging.WARNING)
+
+    monkeypatch.setattr(app_main, "configure_logging", _configure_then_cap)
 
 
 @pytest.fixture()
