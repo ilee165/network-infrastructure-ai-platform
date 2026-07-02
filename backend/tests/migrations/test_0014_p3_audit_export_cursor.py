@@ -2,9 +2,10 @@
 
 Unit tests drive ``alembic upgrade head --sql`` in-process against the PostgreSQL
 dialect (no DB/Docker/network) and assert the emitted DDL creates the
-``audit_export_cursor`` table with the expected columns. ``alembic heads`` is
-asserted to be the SINGLE head ``0014`` chaining after ``0013`` (this is the LATEST
-migration, so it owns the single-head invariant — W3-T1).
+``audit_export_cursor`` table with the expected columns. The single-head
+invariant moved to the 0015 test (the latest migration owns it — see
+``test_0015_refresh_jti_reuse_detection``); here 0014 is asserted to stay on
+the one linear chain below the current head.
 
 This singleton table is the durable last-exported watermark for the audit→SIEM
 export pipeline (ADR-0045 §2): the exporter reads committed ``audit_log`` rows with
@@ -61,11 +62,15 @@ def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_single_head_is_0014() -> None:
-    """`alembic heads` resolves to exactly one head, revision 0014 (no branch)."""
+def test_0014_is_an_ancestor_of_the_single_head() -> None:
+    """0014 stays on the single linear chain below the current head (no branch)."""
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert heads == ["0014"], f"expected single head 0014, got {heads}"
+    assert len(heads) == 1, f"expected a single head, got {heads}"
+    # 0014 must be reachable walking down from the single head — it is still on the
+    # one linear chain (0015 chained onto it), never orphaned by a branch.
+    chain = {rev.revision for rev in script.walk_revisions("base", heads[0])}
+    assert "0014" in chain
 
 
 def test_0014_revises_0013() -> None:
