@@ -147,6 +147,12 @@ class _DecryptRecorder:
         return _Secret()
 
 
+async def _invoke_bgp_read(device_id: uuid.UUID) -> dict[str, Any]:
+    """Call the tool as the agent would and parse its JSON reply."""
+    raw = await tools_module.read_live_bgp_peers.ainvoke({"device_id": str(device_id)})
+    return dict(json.loads(raw))
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -239,7 +245,7 @@ async def test_live_read_opens_credentialed_transport_and_returns_records(
 ) -> None:
     device_id, credential_id = seeded
 
-    payload = json.loads(await tools_module.read_live_bgp_peers.ainvoke({"device_id": str(device_id)}))
+    payload = await _invoke_bgp_read(device_id)
 
     assert "error" not in payload
     assert payload["device_id"] == str(device_id)
@@ -284,7 +290,7 @@ async def test_missing_capability_fails_before_any_decryption(
     device_id, _ = seeded
     fake_registry.refuse_with = PluginError("vendor 'cisco_ios' does not implement 'bgp'")
 
-    payload = json.loads(await tools_module.read_live_bgp_peers.ainvoke({"device_id": str(device_id)}))
+    payload = await _invoke_bgp_read(device_id)
 
     assert "does not implement" in payload["error"]
     assert fake_decrypt.calls == []  # capability check precedes secret access
@@ -309,7 +315,7 @@ async def test_device_without_bound_credential_is_typed_error(
         await session.commit()
         orphan_id = device.id
 
-    payload = json.loads(await tools_module.read_live_bgp_peers.ainvoke({"device_id": str(orphan_id)}))
+    payload = await _invoke_bgp_read(orphan_id)
 
     assert "no bound credential" in payload["error"]
     assert fake_decrypt.calls == []
@@ -344,7 +350,7 @@ async def test_non_ssh_credential_is_typed_error(
         await session.commit()
         snmp_device_id = device.id
 
-    payload = json.loads(await tools_module.read_live_bgp_peers.ainvoke({"device_id": str(snmp_device_id)}))
+    payload = await _invoke_bgp_read(snmp_device_id)
 
     assert "no usable SSH credential" in payload["error"]
     assert fake_decrypt.calls == []
@@ -361,7 +367,7 @@ async def test_scope_refusal_degrades_to_error_not_exception(
         "credential 'lab-ssh' does not cover device 'edge-router-1'"
     )
 
-    payload = json.loads(await tools_module.read_live_bgp_peers.ainvoke({"device_id": str(device_id)}))
+    payload = await _invoke_bgp_read(device_id)
 
     assert payload["error"].startswith("CredentialScopeError:")
     assert open_ssh_recorder == []  # refused before any session was opened
@@ -380,7 +386,7 @@ async def test_transport_failure_degrades_to_error_not_exception(
 
     monkeypatch.setattr(tools_module, "_open_ssh", _refuse)
 
-    payload = json.loads(await tools_module.read_live_bgp_peers.ainvoke({"device_id": str(device_id)}))
+    payload = await _invoke_bgp_read(device_id)
 
     assert payload["error"].startswith("SshTransportError:")
     # The decrypted secret never appears in the surfaced error.
