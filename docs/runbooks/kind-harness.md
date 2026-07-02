@@ -620,6 +620,19 @@ planted→red→reverted commit pair recorded here), the live step stays
 `continue-on-error` and `kind-harness` stays out of `all-gates` (see "Gate status"
 above).
 
+> **Audit-W2 T7 promotion attempt — ROLLED BACK (2026-07-02).** A Wave-2 commit
+> promoted `kind-harness` AND `kind-harness-ha` to blocking without the executed
+> bite (the exact ADR-0048 Rejected Alternative 2), asserting evidence in a
+> `W2-GATE-PROMOTION-EVIDENCE.md` file that was never created. Review caught it and
+> the promotion was reverted to the held state described above. The attempt did
+> yield two real live-rot repairs, which are KEPT: the KEDA release-manifest
+> Deployment name (`keda-metrics-apiserver`) in `ci/kind/ha/install-operators.sh`,
+> and dropping the forced `-n` namespace override on the chart apply in
+> `ci/kind/kind-harness.sh`. The live runs were still RED at rollback time (e.g. the
+> HA apply rejects the CNPG `Cluster` on an unknown `spec.postgresql.runAsNonRoot`
+> field) — the harness must first run GREEN on a CI runner, and only then can the
+> plant→red→revert→green procedure below be executed to earn the promotion.
+
 The two negative controls are **representative** and verified to work *in principle*
 against the rendered manifests (the rendered `pg_hba` contains only
 `hostssl … clientcert=verify-full` with no plaintext `host` line, so adding one makes

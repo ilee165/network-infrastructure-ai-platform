@@ -147,9 +147,9 @@ kubectl -n "${KEDA_NAMESPACE}" rollout status deployment/keda-operator \
   --timeout="${OPERATOR_ROLLOUT_TIMEOUT}"
 # NOTE: the KEDA RELEASE manifest names this Deployment `keda-metrics-apiserver`
 # (the `keda-operator-metrics-apiserver` name is the HELM-chart variant). The
-# chart-variant name was previously used here and only surfaced as a failure when
-# the kind-harness-ha live run was promoted to blocking (audit-W2 T7) —
-# signal-only mode had hidden it.
+# chart-variant name was previously used here and only surfaced as a failure
+# during the audit-W2 T7 promotion attempt (since rolled back pending the
+# ADR-0048 §4 bite proof) — signal-only mode had hidden it.
 kubectl -n "${KEDA_NAMESPACE}" rollout status deployment/keda-metrics-apiserver \
   --timeout="${OPERATOR_ROLLOUT_TIMEOUT}"
 endgroup

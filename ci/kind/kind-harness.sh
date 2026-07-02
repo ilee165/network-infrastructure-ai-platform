@@ -11,12 +11,17 @@
 # Lessons baked in (P1-W4-LESSONS):
 #   L1 — kindnet ADMITS but does not ENFORCE NetworkPolicy. We disable the default
 #        CNI (kind-config.yaml) and install Calico; the CNI self-test FAILS the run
-#        if a harness default-deny does not block a known egress. The `kind-harness`
-#        and `kind-harness-ha` CI jobs are BLOCKING (audit-W2 T7 promotion): the
-#        ADR-0048 §4 plant→red→revert bite was EXECUTED on a CI ubuntu runner —
-#        evidence in docs/production-audit-2026-07-01/W2-GATE-PROMOTION-EVIDENCE.md
-#        + docs/runbooks/kind-harness.md — and both jobs are in `all-gates` with no
-#        continue-on-error on the live steps.
+#        if a harness default-deny does not block a known egress. The P2
+#        `kind-harness` CI job is NOT YET blocking: W4-T2 (ADR-0048) authored the
+#        promotion of the two G-SEC live assertions — mTLS handshake refusal +
+#        collector default-deny egress — to blocking, but ADR-0048 §4 makes an
+#        EXECUTED plant→red→revert bite the precondition, and (L1: kind cannot run on
+#        the Windows authoring host) that bite has NOT run on any CI runner yet. So
+#        the live step stays continue-on-error and the job stays out of `all-gates`
+#        until a runner records the observed red→green. (An audit-W2 T7 promotion
+#        attempt was ROLLED BACK for exactly this reason — see
+#        docs/runbooks/kind-harness.md "Prove-it-bites".) The `kind-harness-ha` HA
+#        job also stays non-blocking (see ci.yml `kind-harness` job + the runbook).
 #   L5 — `set -o pipefail` + `test -s` on every render/apply/assert pipe so a
 #        masked exit code can never read green.
 #   L3 — any value an in-cluster exec needs is passed as a positional arg to
@@ -44,11 +49,12 @@
 # on HA readiness (ci/kind/ha/wait-ha-ready.sh) so a half-up cluster never reads
 # ready (L5). L1: kind cannot run on the Windows authoring host — the HA live path
 # is authored + statically validated here and runs LIVE only on the CI ubuntu
-# runner. Both the `kind-harness` (G-SEC mTLS + collector-egress) and
-# `kind-harness-ha` (HA bring-up) CI jobs are BLOCKING since the audit-W2 T7
-# promotion (ADR-0048 §4 bite executed on a CI ubuntu runner; evidence in
-# docs/production-audit-2026-07-01/W2-GATE-PROMOTION-EVIDENCE.md). The
-# certified-scale drill numbers stay named deferred-accepted → GA (ADR-0047 §4).
+# runner; the `kind-harness-ha` CI job stays continue-on-error / non-blocking (its
+# G-REL/G-SCA promotion is a deliberate W5/GA step). W4-T2 (ADR-0048) AUTHORED the
+# promotion of the P2 `kind-harness` job — the G-SEC mTLS + collector-egress live
+# assertions — to blocking, but that promotion is HELD pending the ADR-0048 §4
+# executed bite (not yet run on any runner, L1); this HA add-on is NOT part of that
+# promotion regardless.
 
 set -euo pipefail
 
@@ -265,8 +271,9 @@ apply_log="${APPLY_LOG:-$(mktemp)}"
 # since PR #86 the chart renders a SECOND namespace (netops-packet-capture) whose
 # objects a forced `-n ${CHART_NS}` REJECTS ("namespace ... does not match").
 # Helm orders Namespace objects first in the render, so both namespaces exist
-# before their objects apply. This only surfaced when the live run was promoted
-# to blocking (audit-W2 T7) — signal-only mode had hidden it.
+# before their objects apply. This only surfaced during the audit-W2 T7 promotion
+# ATTEMPT (since rolled back pending the ADR-0048 §4 bite proof) — signal-only
+# mode had hidden it.
 if kubectl apply -f "${RENDERED}" 2>&1 | tee "${apply_log}"; then
   log "all chart objects applied cleanly"
 else
