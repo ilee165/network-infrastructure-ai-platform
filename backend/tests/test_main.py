@@ -159,3 +159,31 @@ async def test_startup_unconfigured_kek_in_dev_starts_without_provider() -> None
     )
     async with app_.router.lifespan_context(app_):
         assert app_.state.key_provider is None
+
+
+async def test_shutdown_closes_shared_redis_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lifespan shutdown closes the shared Redis client (2026-07-01 audit, W1).
+
+    The lifespan opens ONE redis client shared by the rate limiter, the stream
+    fan-out, and the ticket store; before this fix it was abandoned to GC on
+    shutdown (leaked sockets on rolling restarts / dev reload). The client must
+    be explicitly ``aclose()``d when the lifespan exits.
+    """
+    import redis.asyncio as redis_asyncio
+
+    class _FakeRedisClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    fake = _FakeRedisClient()
+    monkeypatch.setattr(redis_asyncio, "from_url", lambda url: fake)
+
+    app_ = create_app(
+        Settings(_env_file=None, env="dev", secret_key="t", is_prod=False)  # type: ignore[arg-type]
+    )
+    async with app_.router.lifespan_context(app_):
+        assert not fake.closed  # still open while serving
+    assert fake.closed is True
