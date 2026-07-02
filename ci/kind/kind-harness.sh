@@ -259,7 +259,15 @@ kubectl create namespace "${CHART_NS}" --dry-run=client -o yaml | kubectl apply 
 # fails the run. There is no path from a failed apply to the assertions that does
 # not first prove the entire log is accounted for.
 apply_log="${APPLY_LOG:-$(mktemp)}"
-if kubectl apply -n "${CHART_NS}" -f "${RENDERED}" 2>&1 | tee "${apply_log}"; then
+# No `-n` override: every namespaced object in the render carries an EXPLICIT
+# metadata.namespace (verified — the chart templates all set
+# `namespace: {{ .Release.Namespace }}` or the packet-capture namespace), and
+# since PR #86 the chart renders a SECOND namespace (netops-packet-capture) whose
+# objects a forced `-n ${CHART_NS}` REJECTS ("namespace ... does not match").
+# Helm orders Namespace objects first in the render, so both namespaces exist
+# before their objects apply. This only surfaced when the live run was promoted
+# to blocking (audit-W2 T7) — signal-only mode had hidden it.
+if kubectl apply -f "${RENDERED}" 2>&1 | tee "${apply_log}"; then
   log "all chart objects applied cleanly"
 else
   # Apply returned NON-ZERO. Start fail-closed: take EVERY non-blank log line and

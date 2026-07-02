@@ -145,7 +145,12 @@ group "wait for KEDA operator + metrics-apiserver to be Ready"
 # Available before a ScaledObject is applied.
 kubectl -n "${KEDA_NAMESPACE}" rollout status deployment/keda-operator \
   --timeout="${OPERATOR_ROLLOUT_TIMEOUT}"
-kubectl -n "${KEDA_NAMESPACE}" rollout status deployment/keda-operator-metrics-apiserver \
+# NOTE: the KEDA RELEASE manifest names this Deployment `keda-metrics-apiserver`
+# (the `keda-operator-metrics-apiserver` name is the HELM-chart variant). The
+# chart-variant name was previously used here and only surfaced as a failure when
+# the kind-harness-ha live run was promoted to blocking (audit-W2 T7) —
+# signal-only mode had hidden it.
+kubectl -n "${KEDA_NAMESPACE}" rollout status deployment/keda-metrics-apiserver \
   --timeout="${OPERATOR_ROLLOUT_TIMEOUT}"
 endgroup
 log "KEDA Ready (ScaledObject/TriggerAuthentication CRDs Established)"
