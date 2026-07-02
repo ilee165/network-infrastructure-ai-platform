@@ -209,14 +209,13 @@ jobs:
     name: security-scan (gitleaks — tree + history)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # `needs` couples this gate into the graph so it cannot start before the main
-    # jobs and so the `all-gates` aggregator below transitively depends on it.
-    # Without this, security-scan was an orphan parallel job: a gitleaks failure
-    # only blocked merge if the repo admin had manually added it to the
-    # branch-protection required-checks list — i.e. advisory-in-practice. The
-    # single required check is now `all-gates` (see below), which enforces every
-    # gate atomically (P1 W6-T4: "a finding is a red gate, not advisory").
-    needs: [backend, frontend]
+    # No `needs`: this job runs in wave 1 (t=0) so a leaked secret is reported
+    # within ~1 minute instead of after the longest upstream job. It is NOT an
+    # orphan/advisory gate: the `all-gates` aggregator (the single required
+    # check) lists security-scan directly in its `needs` and fails on any
+    # non-success result, so a gitleaks finding still blocks merge atomically
+    # (P1 W6-T4: "a finding is a red gate, not advisory"). The job consumes
+    # nothing from backend/frontend — the old edges were pure scheduling.
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@v7
@@ -1640,7 +1639,10 @@ jobs:
     name: pg-integration (real PostgreSQL — W4 controls under PG)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [backend]
+    # No `needs`: runs in wave 1 (t=0). Merge-blocking is enforced by the
+    # all-gates aggregator's direct `needs` entry; the PG layer shares no
+    # artifacts with the unit-suite backend job (it installs and runs from
+    # source), so the old `needs: [backend]` edge was pure scheduling.
     services:
       postgres:
         # pgvector image: the migration chain's `CREATE EXTENSION vector`
