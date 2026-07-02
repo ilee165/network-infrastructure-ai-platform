@@ -180,7 +180,9 @@ services:
   # NETOPS_DATABASE_URL default (postgresql+asyncpg://netops:netops@postgres:5432/netops);
   # change both together if you customize them.
   postgres:
-    image: pgvector/pgvector:pg16
+    # Pinned to the currently-pulled manifest digest (audit PRODUCTION_READINESS
+    # #8): PostgreSQL 16.14 + pgvector 0.8.2. Bump deliberately, never float.
+    image: pgvector/pgvector:pg16@sha256:00ba258a66dac104fd5171074a0084462a64a1369d8513f3d0a634e2f24d15bc
     environment:
       POSTGRES_USER: netops
       POSTGRES_PASSWORD: netops
@@ -202,7 +204,9 @@ services:
   # NETOPS_NEO4J_PASSWORD in .env and pass `--env-file .env` (or export the
   # variables) so the value reaches this container. See deploy/docker/README.md.
   neo4j:
-    image: neo4j:5-community
+    # Pinned to the currently-pulled manifest digest (audit PRODUCTION_READINESS
+    # #8): Neo4j 5.26.27 Community. Bump deliberately, never float.
+    image: neo4j:5-community@sha256:5a240d74b0bf507048cceb24a718dc98a5403afaeb5e6395ad1e367fb5aabf06
     environment:
       NEO4J_AUTH: ${NETOPS_NEO4J_USER:-neo4j}/${NETOPS_NEO4J_PASSWORD:-neo4j}
     volumes:
@@ -220,7 +224,9 @@ services:
 
   # Celery broker/result backend + cache (ADR-0008).
   redis:
-    image: redis:7-alpine
+    # Pinned to the currently-pulled manifest digest (audit PRODUCTION_READINESS
+    # #8): Redis 7.4.9 on Alpine. Bump deliberately, never float.
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     volumes:
       - redisdata:/data
     healthcheck:
@@ -234,7 +240,9 @@ services:
   #   docker compose -f deploy/docker/docker-compose.yml --profile local-llm up -d
   # Without this profile, configure an external provider via NETOPS_LLM_PROFILE.
   ollama:
-    image: ollama/ollama
+    # Pinned to the currently-pulled manifest digest (audit PRODUCTION_READINESS
+    # #8): Ollama 0.30.8. Bump deliberately, never float.
+    image: ollama/ollama:latest@sha256:05b6fe5143ed006d6d4abd39bdd575f962a5822bdf81e6fbb5e6894eb984ab9c
     profiles: ["local-llm"]
     volumes:
       - ollama-models:/root/.ollama
