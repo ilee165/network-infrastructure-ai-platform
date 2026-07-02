@@ -65,6 +65,42 @@ def test_cors_configured_from_settings(app: FastAPI) -> None:
     assert cors.kwargs["allow_origins"] == ["http://testserver"]
 
 
+async def test_cors_preflight_exposes_only_enumerated_methods_and_headers(
+    client: httpx.AsyncClient,
+) -> None:
+    """Audit PRODUCTION_READINESS #9: no wildcard allow_methods/allow_headers.
+
+    A CORS preflight must echo back the enumerated method/header allowlist the
+    frontend (frontend/src/api/client.ts) actually sends — never ``*``.
+    """
+    response = await client.options(
+        "/api/v1/health/live",
+        headers={
+            "Origin": "http://testserver",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+    assert response.status_code == 200
+    allow_methods = {m.strip() for m in response.headers["access-control-allow-methods"].split(",")}
+    assert allow_methods == {"GET", "POST", "PATCH", "DELETE"}
+    allow_headers = {
+        h.strip().lower() for h in response.headers["access-control-allow-headers"].split(",")
+    }
+    # Starlette's CORSMiddleware always unions the configured allow_headers with
+    # the CORS-safelisted simple headers (accept/accept-language/content-language
+    # /content-type) regardless of what is passed — so those four plus our one
+    # explicit addition (authorization) is the full expected set; there must be
+    # no wildcard and nothing beyond this fixed list.
+    assert allow_headers == {
+        "authorization",
+        "content-type",
+        "accept",
+        "accept-language",
+        "content-language",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Prod-grade KEK gating at startup (P1 W6-T2, ADR-0032 §2)
 # ---------------------------------------------------------------------------
