@@ -38,12 +38,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 from pydantic import Field
 
 from app.agents.framework.tools import ToolClassification, netops_tool
+
+if TYPE_CHECKING:
+    from app.core.crypto import KeyProvider
+    from app.plugins.transport import SshParams, SshTransport
+
+#: Audit actor recorded for every credential decryption by the live-read tools.
+_ACTOR = "agent:troubleshooting"
 
 # ---------------------------------------------------------------------------
 # get_device_routes — normalized store (persisted routing table)
@@ -111,23 +118,43 @@ async def get_device_routes(
 # ---------------------------------------------------------------------------
 
 
-async def _read_live(device_id: str, capability_name: str, method_name: str) -> dict[str, Any]:
-    """Resolve and run one synchronous live-read capability for a device.
+def _key_provider() -> KeyProvider:
+    """The KEK provider used to decrypt the device credential (test seam)."""
+    from app.core.config import get_settings
+    from app.core.crypto import get_key_provider
 
-    Looks the device up in inventory and resolves its vendor plugin's
-    *capability* through the process-wide plugin registry — the real, testable
-    half of an on-demand read. Executing the resolved capability requires a
-    connected transport built from materialized vault credentials (D11); that
-    credential/transport wiring lands with M5, so until then the resolved path
-    surfaces a typed "not yet wired" error rather than opening a session with
-    placeholder secrets. Capability methods are synchronous blocking calls
-    (netmiko/pysnmp, ADR-0007 §3) and will run via :func:`asyncio.to_thread`
-    once the transport seam is injected.
+    return get_key_provider(get_settings())
+
+
+def _open_ssh(params: SshParams) -> SshTransport:
+    """Context-managed SSH transport for *params* (netmiko-backed; test seam)."""
+    from app.plugins.transport import SshTransport
+
+    return SshTransport(params)
+
+
+async def _read_live(device_id: str, capability_name: str, method_name: str) -> dict[str, Any]:
+    """Resolve, connect, and run one synchronous live-read capability for a device.
+
+    The wired on-demand read: look the device up in inventory, resolve its
+    vendor plugin's *capability* class through the process-wide registry, decrypt
+    the device's bound SSH credential with per-credential scope enforced against
+    THIS device (ADR-0040 §2), then open a fresh netmiko session and run the
+    capability method via :func:`asyncio.to_thread` so the blocking call
+    (ADR-0007 §3) never stalls the event loop (D2: async-first backend).
+
+    Ordering matters: the capability is resolved BEFORE the credential is
+    decrypted — a read that can never run ("FortiOS plugin does not implement
+    OSPF analysis", ADR-0006) must not leave a needless secret-access audit row.
 
     Returns ``{"records": [<normalized model dump>, ...]}`` on success or
-    ``{"error": ...}`` on any failure, so a missing data source degrades the
-    diagnosis instead of aborting it. No secret material is ever returned or
-    logged: only a vault *reference* is ever used to open a session (D11).
+    ``{"error": ...}`` on any failure (unknown device, no vendor, no usable
+    bound SSH credential, missing capability, scope refusal, transport or parse
+    failure), so a missing data source degrades the diagnosis instead of
+    aborting it. No secret material is ever returned or logged: ``SshParams``
+    redacts secrets in ``repr``, transport errors name the underlying failure
+    by class only, and every decryption leaves an audit row
+    (actor=``agent:troubleshooting``, reason=``troubleshooting_live_read``).
     """
     from app.core.errors import NetOpsError
     from app.plugins.base import Capability
@@ -138,41 +165,80 @@ async def _read_live(device_id: str, capability_name: str, method_name: str) -> 
         return {"error": f"invalid UUID: {device_id!r}"}
 
     import app.db as _db
-    from app.models import Device
+    from app.models import CredentialKind, Device, DeviceCredential
     from app.plugins.registry import get_default_registry
+    from app.plugins.transport import SshParams, netmiko_device_type
+    from app.services import credentials as credentials_service
 
     async with _db.get_sessionmaker()() as session:
         device = await session.get(Device, uid)
         if device is None:
             return {"error": f"device {device_id} not found"}
         vendor_id = device.vendor_id
+        if vendor_id is None:
+            return {
+                "error": f"device {device_id} has no identified vendor; cannot resolve a plugin"
+            }
 
-    if vendor_id is None:
-        return {"error": f"device {device_id} has no identified vendor; cannot resolve a plugin"}
+        capability = Capability(capability_name)
+        try:
+            impl_cls = get_default_registry().resolve(vendor_id, capability)
+        except NetOpsError as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
 
-    capability = Capability(capability_name)
+        if device.credential_id is None:
+            return {
+                "error": (
+                    f"device {device_id} has no bound credential; "
+                    "a live read opens an SSH session and needs one"
+                )
+            }
+        row = await session.get(DeviceCredential, device.credential_id)
+        if row is None or row.kind is not CredentialKind.SSH:
+            return {
+                "error": (
+                    f"device {device_id} has no usable SSH credential; "
+                    "a live read opens a CLI session"
+                )
+            }
+
+        try:
+            secret = await credentials_service.decrypt(
+                session,
+                _key_provider(),
+                row,
+                actor=_ACTOR,
+                reason="troubleshooting_live_read",
+                # ADR-0040 §2: enforce the credential's scope against THIS
+                # device at session open — a scoped credential cannot open a
+                # session on a device outside its site/role/group.
+                target=device,
+                sessionmaker=credentials_service.autonomous_sessionmaker(session),
+            )
+        except NetOpsError as exc:
+            # Scope refusal / provider unavailable: the fail-closed audit row is
+            # already durable on its own session (autonomous_sessionmaker).
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+        credential_params = dict(row.params or {})
+        ssh_params = SshParams(
+            host=device.mgmt_ip,
+            device_type=netmiko_device_type(vendor_id, credential_params),
+            username=row.username or "",
+            password=secret.plaintext.decode("utf-8"),
+            port=int(credential_params.get("port", 22)),
+        )
+        await session.commit()  # decrypt audit rows survive whatever happens next
+
+    def _connect_and_read() -> list[Any]:
+        with _open_ssh(ssh_params) as transport:
+            impl = impl_cls(transport, uid)  # type: ignore[call-arg]
+            return list(getattr(impl, method_name)())
+
     try:
-        # Fail fast (and explainably) when the vendor lacks the capability —
-        # "FortiOS plugin does not implement OSPF analysis" (ADR-0006).
-        impl = get_default_registry().resolve(vendor_id, capability)
+        records = await asyncio.to_thread(_connect_and_read)
     except NetOpsError as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
-
-    # The capability method is a synchronous blocking call (netmiko/pysnmp,
-    # ADR-0007 §3). Run it via asyncio.to_thread to keep the FastAPI event
-    # loop unblocked (D2: async-first backend). The transport/credential seam
-    # (D11) is injected in M5; until then, constructing a real transport raises
-    # NotImplementedError at the transport-construction seam — not here.
-    # TODO(M5): inject a credentialed transport into impl before this call.
-    try:
-        records = await asyncio.to_thread(getattr(impl, method_name))
-    except NotImplementedError:
-        return {
-            "error": (
-                f"live {capability.value!r} read for vendor {vendor_id!r} is not yet wired: "
-                "the credential/transport session lands in M5"
-            )
-        }
     return {"records": [r.model_dump(mode="json") for r in records]}
 
 

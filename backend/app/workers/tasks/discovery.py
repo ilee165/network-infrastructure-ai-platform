@@ -91,6 +91,7 @@ from app.plugins.transport import (
     SshParams,
     SshTransport,
     SshTransportError,
+    netmiko_device_type,
 )
 from app.schemas.normalized import NormalizedNeighbor
 from app.services import audit, credentials
@@ -119,12 +120,6 @@ _CLI_CAPABILITIES: tuple[Capability, ...] = (
     Capability.NEIGHBORS_CDP,
 )
 
-#: vendor_id -> netmiko ``device_type`` used for the detection connection.
-_NETMIKO_DEVICE_TYPES: dict[str, str] = {
-    "cisco_ios": "cisco_ios",
-    "cisco_iosxe": "cisco_xe",
-    "eos": "arista_eos",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -311,10 +306,7 @@ def _collect_over_ssh(
                 continue
             params = SshParams(
                 host=target_ip,
-                device_type=str(
-                    cred.params.get("device_type")
-                    or _NETMIKO_DEVICE_TYPES.get(vendor_id, vendor_id)
-                ),
+                device_type=netmiko_device_type(vendor_id, cred.params),
                 username=cred.username or "",
                 password=cred.secret,
                 port=int(cred.params.get("port", 22)),
