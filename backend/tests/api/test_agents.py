@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -34,6 +35,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -71,16 +73,35 @@ def _make_specialist(
 
 
 # --------------------------------------------------------------------------- #
-# Engine + data fixtures (in-memory aiosqlite, full schema, FK enforcement).
+# Engine + data fixtures (file-backed aiosqlite, full schema, FK enforcement).
 # --------------------------------------------------------------------------- #
 @pytest.fixture()
-async def engine() -> AsyncIterator[AsyncEngine]:
-    eng = create_async_engine("sqlite+aiosqlite://")
+async def engine(tmp_path: Path) -> AsyncIterator[AsyncEngine]:
+    """File-backed WAL SQLite with one exclusive connection per session.
+
+    Deliberately NOT the shared in-memory ``sqlite+aiosqlite://`` pattern the
+    rest of the API suite uses. That URL defaults to StaticPool, which hands
+    the SAME raw DBAPI connection to every session at once — and these tests
+    run a live WebSocket handler task concurrently with the test's own writer
+    sessions. A read-only poll session closing between another session's flush
+    and commit fires a connection-reset ROLLBACK on the shared connection,
+    silently discarding the flushed UPDATE (the later COMMIT no-ops). That was
+    the root cause of the recurring ``KeyError: 'event'`` terminal-frame flake:
+    the handler never observed COMPLETED and exhausted its poll budget.
+
+    NullPool gives each session its own connection (real transaction
+    isolation, like production Postgres); WAL lets the handler's readers run
+    while the test commits; busy_timeout absorbs residual lock contention.
+    """
+    db_path = tmp_path / "agents-api.sqlite"
+    eng = create_async_engine(f"sqlite+aiosqlite:///{db_path.as_posix()}", poolclass=NullPool)
 
     @event.listens_for(eng.sync_engine, "connect")
-    def _fks(dbapi_connection: Any, _record: Any) -> None:
+    def _configure(dbapi_connection: Any, _record: Any) -> None:
         cur = dbapi_connection.cursor()
         cur.execute("PRAGMA foreign_keys=ON")
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA busy_timeout=5000")
         cur.close()
 
     async with eng.begin() as conn:
@@ -804,6 +825,50 @@ class TestWebSocketFanout:
         )
         assert relayed[0]["summary"] == "late ping"
         assert fake_ws.sent[-1]["event"] == "end"
+
+    async def test_concurrent_commit_survives_another_sessions_close(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        users: dict[str, User],
+    ) -> None:
+        """Pin the engine fixture's per-session connection isolation.
+
+        On the old shared in-memory StaticPool engine, every session shared ONE
+        raw DBAPI connection: a read-only session closing between another
+        session's flush and commit fired a connection-reset ROLLBACK that
+        silently discarded the flushed UPDATE, and the later commit no-op'd.
+        The WS relay handler then never observed COMPLETED, exhausted its poll
+        budget, and closed without a terminal frame — the recurring
+        ``KeyError: 'event'`` flake. This is that exact interleave, minus the
+        handler: it fails deterministically on the shared-connection engine and
+        must pass on the file-backed NullPool engine above.
+        """
+        viewer = users["viewer"]
+        async with sessionmaker() as db:
+            row = AgentSession(
+                user_id=viewer.id,
+                invoking_role="viewer",
+                intent="isolation pin",
+                status=AgentSessionStatus.RUNNING,
+            )
+            db.add(row)
+            await db.commit()
+            session_id = row.id
+
+        async with sessionmaker() as writer:
+            target = await writer.get(AgentSession, session_id)
+            assert target is not None
+            target.status = AgentSessionStatus.COMPLETED
+            await writer.flush()  # UPDATE issued, transaction still open
+            # A poll-loop analog: an unrelated read-only session opens and closes.
+            async with sessionmaker() as reader:
+                await reader.get(AgentSession, session_id)
+            await writer.commit()
+
+        async with sessionmaker() as check:
+            fresh = await check.get(AgentSession, session_id)
+            assert fresh is not None
+            assert fresh.status is AgentSessionStatus.COMPLETED
 
     async def test_token_is_never_published_to_the_channel(
         self,
