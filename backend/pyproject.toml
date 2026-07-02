@@ -77,6 +77,10 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
+    # Parallel test execution: CI runs the unit suite with `-n 4` (4-vCPU
+    # runners); pytest-cov combines per-worker data in-process, so the
+    # --cov-fail-under=80 gate stays computed over the whole suite (ADR-0016).
+    "pytest-xdist",
     "ruff",
     "mypy",
     "import-linter",

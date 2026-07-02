@@ -619,6 +619,10 @@ docstring-parser==0.18.0 \
     --hash=sha256:292510982205c12b1248696f44959db3cdd1740237a968ea1e2e7a900eeb2015 \
     --hash=sha256:b3fcbed555c47d8479be0796ef7e19c2670d428d72e96da63f3a40122860374b
     # via anthropic
+execnet==2.1.2 \
+    --hash=sha256:63d83bfdd9a23e35b9c6a3261412324f964c2ec8dcd8d3c6916ee9373e0befcd \
+    --hash=sha256:67fba928dd5a544b783f6056f449e5e3931a5c378b128bc18501f7ea79e296ec
+    # via pytest-xdist
 fastapi==0.136.3 \
     --hash=sha256:3d2a69bdf04b7e9f3afa292c3bc7a98816bbfafa10bc9b45f3f3700d2f761620 \
     --hash=sha256:e487fae93ad408e6f47641ee4dfe389864fd7bec92e547ea8498fc13f43e83ab
@@ -1759,6 +1763,7 @@ pytest==9.1.1 \
     #   netops-backend (pyproject.toml)
     #   pytest-asyncio
     #   pytest-cov
+    #   pytest-xdist
 pytest-asyncio==1.4.0 \
     --hash=sha256:933ca923a23075a87fb7070c0ec272a6848489824d887c85c812670932835aa1 \
     --hash=sha256:c6c0d2259945122819f171a32ecea2c349ead889ee28176caaf492143424be42
@@ -1766,6 +1771,10 @@ pytest-asyncio==1.4.0 \
 pytest-cov==7.1.0 \
     --hash=sha256:30674f2b5f6351aa09702a9c8c364f6a01c27aae0c1366ae8016160d1efc56b2 \
     --hash=sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678
+    # via netops-backend (pyproject.toml)
+pytest-xdist==3.8.0 \
+    --hash=sha256:202ca578cfeb7370784a8c33d6d05bc6e13b4f25b5053c30a152269fd10f0b88 \
+    --hash=sha256:7e578125ec9bc6050861aa93f2d59f1d8d085595d6551c2c90b6f4fad8d3a9f1
     # via netops-backend (pyproject.toml)
 python-dateutil==2.9.0.post0 \
     --hash=sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3 \

@@ -110,11 +110,16 @@ jobs:
       # the suite is unit-only by design. shell: bash enables pipefail so a
       # pytest failure is not masked by the tee pipe. --cov-fail-under enforces
       # the D16/ADR-0016 coverage gate (>=80%).
+      # -n 4 (pytest-xdist) matches the 4-vCPU public ubuntu-latest runner; the
+      # suite is parallel-safe by construction (per-test in-memory aiosqlite
+      # engines, per-test tmp_path for the file-backed engine, no fixed ports).
+      # pytest-cov combines per-worker coverage in-process, so the >=80% floor
+      # is still evaluated over the WHOLE suite, not per worker.
       - name: Test (pytest + coverage)
         working-directory: backend
         shell: bash
         run: |
-          pytest --cov=app --cov-report=xml --cov-report=term --cov-fail-under=80 -q | tee pytest-output.txt
+          pytest -n 4 --cov=app --cov-report=xml --cov-report=term --cov-fail-under=80 -q | tee pytest-output.txt
           {
             echo "## Backend tests (pytest, unit-only)"
             echo ""
