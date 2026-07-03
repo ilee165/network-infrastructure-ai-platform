@@ -145,7 +145,24 @@ All run on the authoring host against the **pinned** CRDs and the real chart ren
 
 **Bound:** strict field-validation + CEL are the statically-checkable classes of
 live-apply rejection. The CNPG **operator admission webhook** and actual
-scheduling/runtime are **live-only** and remain unverified until a CI run.
+scheduling/runtime are **live-only** — verified on CI below.
+
+### 5.1 CI evidence (real ubuntu runner — PR #94, run 28641001736)
+
+The fix was run on GitHub Actions (kind on the runner's Docker backend). **Two
+consecutive full-green attempts**, with the LIVE harness steps verified at the STEP
+level (not masked by `continue-on-error`):
+
+| Attempt | `kind-harness` step "Run kind harness (create → CNI self-test → apply → assert → teardown)" | `kind-harness-ha` step "Run HA kind harness (create → CNI self-test → operators → apply → HA-ready → assert → teardown)" |
+|---|---|---|
+| 1 | `[success]` | `[success]` |
+| 2 | `[success]` | `[success]` |
+
+The new **blocking** `infra` CR-schema gate passed both attempts (1m22s); `all-gates`,
+`drill-bite-proofs`, `pg-integration`, and every other required check passed. This is the
+ADR-0048 §3 **Prerequisite A** reliability evidence — the live HA bring-up (CNPG operator +
+KEDA + Sentinel) comes up GREEN deterministically, so a red aggregator would mean a real
+regression, not a race. It is **not** the §4 bite and promotes nothing.
 
 ---
 
@@ -189,23 +206,23 @@ The plants are ready to execute **once the harness runs green on CI**.
 
 ## 8. GO / NO-GO
 
-**Recommendation: NO-GO for the bite-proof — but the last *known static* blocker is
-cleared.** Rationale:
+**Recommendation: GO to execute the ADR-0048 §4 bite; NO-GO on the promotion itself
+(a separate, maintainer-authorized step).** The harness rot is repaired and the last
+prerequisite blocker is cleared:
 
-- **GO conditions met:** the F1 live-apply rejection is fixed and statically verified;
-  F2 policy coupling resolved (bite green); all other audited items are clean; the plant
-  diffs are ready.
-- **NO-GO conditions outstanding (both L1-bound, require a CI ubuntu runner):**
-  1. The harness has **not yet been observed GREEN on CI** after the fix (strict/CEL
-     validation is a faithful but partial model; the CNPG operator webhook + runtime are
-     live-only). Mission step 5 ("repeated green streak") is **not satisfiable on this
-     host.**
-  2. Per ADR-0048 §4 the plant→red→revert bite itself must be **executed on CI** and its
-     run URLs / commit pair recorded — that has not happened.
+- **All prerequisites now met:** F1 live-apply rejection fixed + statically verified; F2
+  policy coupling resolved (bite green); S1 class now guarded blocking; every audited item
+  clean; **Prerequisite A satisfied** — the live harness ran GREEN on CI across **2
+  consecutive** attempts, step-verified (§5.1); the §7 plant diffs are staged and match the
+  documented procedure.
+- **Still outstanding (the promotion, unchanged by this session):** per ADR-0048 §4 the
+  plant→red→revert bite (Prerequisite B) must be **executed on a CI runner** — plant →
+  observe RED → revert → GREEN — and its run URLs / commit pair recorded, **before** the
+  two §2 promotion edits (drop `continue-on-error`; add `kind-harness` to `all-gates`) are
+  applied. That is a deliberate, maintainer-authorized step; **this session does not
+  perform it** and leaves ADR-0048 **HELD**.
 
-**Path to GO:** (a) commit this repair to a recovery branch; (b) run `kind-harness` +
-`kind-harness-ha` on a CI ubuntu runner and confirm the live harness step reaches GREEN
-across repeated runs; (c) only then execute the §7 plants (plant → observe RED → revert →
-GREEN), record evidence, and — as a **separate** maintainer-authorized step — apply the
-two ADR-0048 §2 promotion edits. This session performs **none** of (b)/(c) and leaves
-ADR-0048 HELD.
+**Path from here:** apply the §7 plants on a CI branch → confirm each turns the named
+assertion RED → revert → confirm GREEN → record the evidence here and in the runbook
+"Prove-it-bites" section → only then apply the §2 promotion edits. Nothing in this session
+promotes, merges, or updates the held T7 promotion PR.
