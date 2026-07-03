@@ -1,13 +1,15 @@
 # ADR-0049: Packet-Analysis Sandbox Resolution — Executor-Split, Not a Weaker Worker
 
-**Status:** Proposed | **Date:** 2026-07-03 | **Milestone:** Production audit 2026-07-01, Wave 3 (ARCH_DEBT #1)
+**Status:** Accepted | **Date:** 2026-07-03 | **Accepted:** 2026-07-03 (dual-strong design review — see **Design review outcome**) | **Milestone:** Production audit 2026-07-01, Wave 3 (ARCH_DEBT #1)
 
-> **Decision document only.** This ADR resolves the *design contradiction* the
-> 2026-07-01 audit flagged (ARCH_DEBT #1). The implementation is deliberately
-> out-of-wave — it lands in a dedicated follow-on wave after this ADR is
-> Accepted (see **Owner & sequencing**). Nothing in audit Wave 3 changes the
-> running packet-analysis behaviour; the service stays opt-in (default OFF)
-> until the executor-split ships.
+> **Accepted; implementation in progress.** This ADR resolved the *design
+> contradiction* the 2026-07-01 audit flagged (ARCH_DEBT #1). The dual-strong
+> design-review acceptance gate passed on 2026-07-03 (both reviewers: *approach
+> sound*), so the follow-on implementation wave is now scheduled and building on
+> branch `feat/packet-executor-split`. The running packet-analysis service stays
+> opt-in (default OFF) until the executor-split is **test-pinned by the Linux
+> bite-proof** (see **Acceptance**); re-enable-by-default lands in the same PR
+> the bite-proof is green at HEAD.
 
 ## Context
 
@@ -62,14 +64,21 @@ input:
   dedicated packet node pool with `cap_drop: [ALL]`, non-root, and the
   egress-deny NetworkPolicy — but with the *broader* syscall set Celery needs.
   It never itself parses pcap bytes.
-- **Capture/dissection executor (short-lived child).** For each job the
-  dispatcher spawns a fresh child that runs `tcpdump`/`tshark` under the strict
-  ADR-0031 seccomp profile, `cap_drop: [ALL]` (or only `CAP_NET_RAW` for a live
-  capture leg, dropped for offline pcap analysis), read-only rootfs, no egress,
-  and a hard rlimit/timeout. The child is the blast-radius container: if a
-  dissector is popped, the attacker lands in a process that is non-root, holds no
-  capabilities, has no writable filesystem, has no network route out, and dies in
-  seconds. The dispatcher reaps it and records the result.
+- **Dissection executor (short-lived child).** For each *analysis* job the
+  dispatcher spawns a fresh `python -m app.engines.packet.executor` child that
+  runs `tshark` under the strict ADR-0031 seccomp profile, `cap_drop: [ALL]`
+  (**no** `CAP_NET_RAW` — the strict profile denies `socket()`, so a raw-capture
+  leg cannot and must not run here; live capture stays in the separate
+  `packet_capture` workload — see **Design review outcome** §6), read-only
+  rootfs, no egress, and a hard rlimit/timeout. The child both dissects the pcap
+  **and** normalizes the result (the `json.loads` of tshark's output +
+  `summarize_packets` runs *inside* the sandbox), so the dispatcher only ever
+  handles small, schema-shaped `PacketFindings` — never raw pcap-derived bytes.
+  The child is the blast-radius process: if a dissector is popped, the attacker
+  lands non-root, holds no capabilities, has no writable filesystem, holds no
+  inherited socket or secret env, has no network route out, and dies in seconds.
+  The dispatcher reaps it — killing the whole process group on timeout so no
+  tshark grandchild outlives the bound — and records the validated result.
 
 This keeps ADR-0031's threat model intact (the strict profile still wraps the
 tshark process) while removing the false choice between "secure" and
@@ -83,15 +92,89 @@ untrusted bytes.
 re-enabled by default (secure by default restored). Until then it remains opt-in;
 the opt-in default is the *interim* posture, not the accepted end state.
 
+## Design review outcome (2026-07-03, dual-strong)
+
+Per the acceptance gate below, two independent strong-model security reviewers
+reviewed this design *before* the implementation wave was scheduled. Both
+returned **approach sound** and converged on the confinement mechanism; the wave
+proceeds with their blockers folded into the task specs. This section is the
+build contract.
+
+**Mechanism (agreed): a `pyseccomp` self-confining child.** The dispatcher spawns
+`python -m app.engines.packet.executor`, which sets rlimits, `PR_SET_NO_NEW_PRIVS`,
+and a libseccomp filter **parsed from the committed ADR-0031 JSON profile** (single
+source of truth), self-verifies confinement, then runs `tshark` and normalizes
+in-process. Rejected alternatives: `preexec_fn` (fork/thread-unsafe in the billiard
+prefork worker — post-fork malloc deadlock); `nsjail`/`bwrap` (require namespace
+creation that `cap_drop:[ALL]` + the container seccomp deliberately block); a per-job
+K8s Job (fails the compose single-container constraint and needs an API token the pod
+does not mount). This is the same "nested confinement (a)" path ADR-0031 §3's deferred
+note already named as the preferred target.
+
+**Blockers folded into the build (all must hold before re-enable-by-default):**
+
+1. **Fail closed (CRITICAL).** The sandboxed-executor-vs-in-process choice is keyed
+   ONLY on `packet_sandbox_posture_enforced` (default `True`), never on runtime
+   detection. With enforcement on, any confinement-setup failure (pyseccomp import,
+   rlimit, `PR_SET_NO_NEW_PRIVS`, filter load) aborts with `SandboxError` **before any
+   pcap byte is opened**; the executor self-verifies `/proc/self/status` shows
+   `Seccomp:\t2` and `NoNewPrivs:\t1` before spawning tshark, else refuses.
+2. **Child env/fd hygiene (CRITICAL).** The child is spawned with `close_fds` (the live
+   Redis/PG sockets must not cross into the blast radius) and an explicit minimal env
+   allowlist (`PATH`, `TMPDIR`, `LANG`/`LC_*`) — no `NETOPS_*` secret material. Pinned
+   by a test asserting the child sees only fds 0/1/2 and no `NETOPS_*` env.
+3. **Single source of truth (MAJOR).** The executor programs its filter by parsing the
+   committed strict JSON (packaged into the image via `importlib.resources`); the
+   byte-lockstep CI gate is extended to every copy (compose, Helm, in-package) and to
+   the new dispatcher-profile pair.
+4. **Process-group timeout kill (MAJOR).** The dispatcher spawns with
+   `start_new_session=True` and `os.killpg`s the group on timeout; the executor sets
+   `PR_SET_PDEATHSIG=SIGKILL` on the tshark child plus an `RLIMIT_CPU` backstop — so a
+   wedged/popped tshark grandchild cannot outlive the hard timeout (ADR-0023 §1).
+5. **Dispatcher profile (MAJOR).** The analysis container's seccomp is swapped to an
+   authored **deny-by-default dispatcher profile** (client sockets + `seccomp()`/
+   `prctl()` allowed so the child can self-confine; `AF_PACKET`/`AF_NETLINK`-raw, `bpf`,
+   `ptrace`, `mount`, `unshare`, `setns`, `keyctl` still denied) — never RuntimeDefault,
+   never profile removal. conftest/OPA + lockstep gates are re-pointed to the new
+   invariant, not deleted. Every other ADR-0031 control on the container is unchanged.
+6. **Scope = analysis only (MAJOR).** This split covers the **analysis** workload
+   (`packet_analysis` queue) only. The strict child profile denies `socket()`, so
+   `tcpdump` cannot run under it and the child/container carry `CAP_NET_RAW` nowhere;
+   live capture stays in the separate `packet_capture` workload/queue. This supersedes
+   any earlier "CAP_NET_RAW live-capture leg" wording.
+7. **Packaging (MAJOR).** `tshark` + `libseccomp`/`pyseccomp` (Linux-only marker,
+   lockfile-pinned) are added to the **packet-analysis image/stage**, not the shared
+   api/worker image (installing tshark's CVE-bearing C dissectors into the API image
+   would widen *its* surface). A build-time `executor --self-check` fails the build on a
+   missing wheel/library.
+8. **Deny action (MINOR).** The child default action is `SCMP_ACT_KILL_PROCESS` if the
+   live green-path passes (a denied syscall kills with `SIGSYS`); otherwise
+   `SCMP_ACT_ERRNO` parity, with the gate re-worded to assert `EPERM` + nonzero exit.
+   Pinned by the live test.
+
+## Acceptance
+
+A **Linux CI bite-proof**, three legs, green at HEAD before re-enable-by-default:
+(1) **GREEN** — a real pcap through the fully confined executor returns schema-valid
+`PacketFindings`; (2) **RED** — a `socket()`/`ptrace()` probe under identical
+confinement is denied (SIGSYS-killed or EPERM+nonzero) **with a negative control**
+(the same probe unconfined succeeds, proving the gate bites); (3) **TIMEOUT** — a
+wedged child is killed with its whole process group (no orphan survives). The
+Windows/SQLite unit suite cannot run seccomp, so this job runs on a Linux runner
+alongside the existing PG-integration job and is required-when-run.
+
 ## Consequences
 
 **Positive**
 
 - Restores "secure by default" for packet analysis without weakening ADR-0031.
 - The untrusted-input boundary is the short-lived child — the tightest possible
-  sandbox scope, re-armed per job.
-- Live-capture (`CAP_NET_RAW`) privilege is confined to the capture leg and
-  dropped for offline analysis, further shrinking the standing privilege set.
+  sandbox scope, re-armed per job — and normalization runs inside it, so the
+  dispatcher never parses attacker-derived bytes.
+- No `CAP_NET_RAW` anywhere in the analysis tier: the child parses a *file*, never
+  a socket. Live-capture privilege stays isolated in the separate `packet_capture`
+  workload (ADR-0031 §1's physical split), so the analysis tier's standing
+  privilege set is zero capabilities.
 
 **Negative / costs**
 
@@ -120,9 +203,11 @@ the opt-in default is the *interim* posture, not the accepted end state.
   marshalling. Both escalate to the strong model — this is a security-surface
   task touching the sandbox boundary (repo standing discipline).
 - **Acceptance gate:** a security review (dual-strong, per repo policy) of this
-  design before the wave is scheduled; the implementation wave then re-enables the
-  service by default only once the child sandbox is test-pinned (unit + a live
-  bite-proof that a denied syscall inside the child is actually killed).
+  design before the wave is scheduled — **passed 2026-07-03** (both reviewers
+  *approach sound*; outcome + folded blockers recorded under **Design review
+  outcome**). The implementation wave then re-enables the service by default only
+  once the child sandbox is test-pinned (unit + the three-leg Linux **Acceptance**
+  bite-proof, green at HEAD in the re-enable PR).
 
 ## Alternatives considered
 
