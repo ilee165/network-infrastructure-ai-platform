@@ -28,7 +28,7 @@ The audit found **no Critical-severity issues**. It found **3 High-severity issu
 | 1 | **High** | **Troubleshooting Agent live-capability reads are dead code**: every live BGP/OSPF/route read returns "not yet wired: the credential/transport session lands in M5" — M5 shipped 2026-06-19; the transport-injection seam was wired for discovery/config workers but never for this agent (`backend/app/agents/troubleshooting/tools.py:166`) | FUNCTIONAL_BUGS #1 |
 | 2 | **High** | **No React ErrorBoundary anywhere in the frontend** — any render exception blanks the whole SPA with no recovery path | UI_UX #1 |
 | 3 | **High** | **Packet-analysis service is opt-in/default-OFF, contradicting ADR-0031's secure-by-default sandbox design** — recorded as a deferred contradiction in PR #86, still unresolved | ARCH_DEBT #1 |
-| 4 | High (named) | Live kind-harness enforcement gates (mTLS handshake, collector egress-deny, HA bring-up) still `continue-on-error` — promotion authored (ADR-0048) but held for the bite proof | PROD_READINESS #1 |
+| 4 | ~~High~~ **Resolved (WONTFIX)** | Live kind-harness enforcement gates — promotion **Rejected** (ADR-0048, 2026-07-03, audit-W2 T7); live jobs now opt-in, controls stay protected by blocking static gates | PROD_READINESS #1 |
 | 5 | High (named) | External penetration test not performed (G-SEC exit item) | PROD_READINESS #2 |
 | 6 | Medium | Default docker-compose quickstart serves the SPA with **no security headers** (no CSP, X-Frame-Options, X-Content-Type-Options) — headers exist only in the TLS edge overlay and K8s ingress | PROD_READINESS #4 |
 | 7 | Medium | Refresh-token rotation has **no reuse detection**: a superseded refresh token stays valid until session revoke / 8 h expiry (documented, but fixable) | PROD_READINESS #5 |
@@ -58,5 +58,5 @@ The audit found **no Critical-severity issues**. It found **3 High-severity issu
 ## Recommended sequencing
 
 1. **Fix now (days):** Troubleshooting transport injection (#1) · app-level ErrorBoundary (#2) · shutdown Redis `aclose()` · security headers in base `nginx.conf`.
-2. **Next wave:** WS relay race real fix · refresh-token reuse detection · packet-analysis design resolution (supersede or satisfy ADR-0031) · kind-gate promotion bite proof (already planned as W4-T2 hold).
-3. **Before GA (already ledgered):** pen test, 30-day soak, certified-scale runs, OIDC two-IdP live validation, P3 W5 phase-exit audit flipping ADRs 0042–0048.
+2. **Next wave:** WS relay race real fix · refresh-token reuse detection · packet-analysis design resolution (supersede or satisfy ADR-0031). ~~kind-gate promotion bite proof~~ — **dropped (ADR-0048 Rejected, 2026-07-03).**
+3. **Before GA (already ledgered):** pen test, 30-day soak, certified-scale runs, OIDC two-IdP live validation, P3 W5 phase-exit audit flipping ADRs 0042–0047 (0048 is **Rejected** — not flipped).

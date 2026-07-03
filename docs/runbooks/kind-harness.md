@@ -1,6 +1,6 @@
 # Runbook — Ephemeral in-CI kind cluster harness (W4-T3)
 
-> Operator/developer procedure for the ADR-0041 §2/§3 + ADR-0039 §6 kind harness: how it brings up a throwaway cluster with an **enforcing CNI**, proves the CNI actually enforces NetworkPolicy (the **CNI self-test bite**), applies the chart, and runs the assertion-runner that **W4-T4 (mTLS handshake)** and **W4-T5 (collector egress deny)** plug their assertions into. Records that the P2 live kind job's promotion to a **blocking gate** for the two named G-SEC sub-items (mTLS handshake + collector egress deny) is **AUTHORED but HELD** — per ADR-0048 §4 the promotion is gated behind an EXECUTED plant→red→revert bite on a CI ubuntu runner, which (per P1-W4-LESSONS L1: kind cannot run on the authoring host) has **not run yet**; until it does the live step stays `continue-on-error` and out of `all-gates` (see "Gate status" below). The `kind-harness-ha` HA live job likewise stays non-blocking. Cheap-scope only — handshake + deny; HA/scale/soak are P3-Platform.
+> Operator/developer procedure for the ADR-0041 §2/§3 + ADR-0039 §6 kind harness: how it brings up a throwaway cluster with an **enforcing CNI**, proves the CNI actually enforces NetworkPolicy (the **CNI self-test bite**), applies the chart, and runs the assertion-runner that **W4-T4 (mTLS handshake)** and **W4-T5 (collector egress deny)** plug their assertions into. Records that the P2 live kind job's promotion to a **blocking gate** for the two named G-SEC sub-items (mTLS handshake + collector egress deny) is **REJECTED** (ADR-0048, 2026-07-03, audit-W2 T7) — not pursued: the live step stays `continue-on-error`, the job is now **opt-in** (label `ci-kind` / manual dispatch, silenced on ordinary PRs), and the two controls stay enforced at runtime + protected by BLOCKING static gates (see "Gate status" below). The `kind-harness-ha` HA live job likewise stays non-blocking. Cheap-scope only — handshake + deny; HA/scale/soak are P3-Platform.
 
 ## Objective
 
@@ -19,7 +19,7 @@ Give the two W4 enforcement tasks a deterministic, hardware-free place to BITE: 
 | Assertion helpers | `ci/kind/assertions/lib.sh` (`assert_egress_allowed/blocked`, `assert_handshake_ok/refused`, `run_in_pod`) |
 | T4/T5 plug-in | `ci/kind/assertions/checks/` (T4 drops `mtls-*.sh`, T5 drops `collector-egress*.sh`) |
 | Static validator | `ci/kind/selftest/validate-harness.sh` (no cluster; asserts the harness invariants incl. the W4-T1 HA add-on — the policy-as-test bite) |
-| CI job (P2) | `.github/workflows/ci.yml` job `kind-harness` (**signal-only / non-blocking live** — promotion AUTHORED but HELD pending the ADR-0048 §4 bite proof; step stays `continue-on-error`, NOT in `all-gates` needs; see "Gate status" below) |
+| CI job (P2) | `.github/workflows/ci.yml` job `kind-harness` (**signal-only, OPT-IN** — promotion **REJECTED** per ADR-0048; runs only on `workflow_dispatch` or the `ci-kind` label; step stays `continue-on-error`, NOT in `all-gates` needs; see "Gate status" below) |
 | CI job (HA, P3 W4-T1) | `.github/workflows/ci.yml` job `kind-harness-ha` (**non-blocking live** — see "HA topology" + "Gate status") |
 | Cluster name | `netops-w4` (`CLUSTER_NAME` override) |
 | HA operator installer | `ci/kind/ha/install-operators.sh` (CloudNativePG `1.29.1` + KEDA `2.16.1`, pinned; `CNPG_VERSION`/`KEDA_VERSION` override) |
@@ -563,7 +563,29 @@ NetopsApiAvailabilityFastBurn …]` — confirming the fire is genuinely asserte
   GREEN on the actual cluster) — a named prerequisite on the ADR-0047 §4 promotion
   path.
 
-## Gate status — SIGNAL-ONLY (promotion AUTHORED, HELD pending ADR-0048 §4 bite)
+## Gate status — SIGNAL-ONLY, OPT-IN (promotion REJECTED — ADR-0048)
+
+> **REJECTED (2026-07-03, audit-W2 T7).** The ADR-0048 promotion of the P2
+> `kind-harness` live run to a blocking gate will **not** be pursued. The live
+> `kind-harness` / `kind-harness-ha` jobs are now **opt-in** — they run only on a
+> manual `workflow_dispatch` or when a PR carries the **`ci-kind`** label, and are
+> silenced on ordinary PRs. The live `kind-harness.sh` step stays `continue-on-error`
+> and out of `all-gates` **permanently, by decision**.
+>
+> **Why:** getting the live run green requires booting a slice of the whole hardened
+> platform in a bare kind cluster (the platform's own images are not loaded →
+> `ImagePullBackOff`; the hardened Postgres StatefulSet never reaches Ready). The two
+> controls it would gate (mTLS plaintext-refusal, collector default-deny egress) are
+> ALREADY enforced at runtime AND protected by **blocking** static/manifest gates on
+> every PR — the `infra` `conftest pg_hba weak-hostssl` bite, render-twice L4, the
+> CR-schema guard, and the five `drill-bite-proofs` (in `all-gates`). The live
+> promotion added only marginal "the CNI physically enforces" coverage — not worth a
+> permanent flaky ~20-min blocking gate on the merge path. Security posture is
+> unchanged. See ADR-0048 "Rejection".
+>
+> The "AUTHORED but HELD" description below is retained as historical context.
+
+## Gate status (historical) — promotion AUTHORED, HELD pending ADR-0048 §4 bite
 
 The P2 `kind-harness` live run (steps 1-6) is **not yet a blocking gate**. The
 promotion to blocking for the two named P2 sub-items — **mTLS api/worker↔postgres

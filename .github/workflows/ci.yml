@@ -19,6 +19,9 @@ on:
     paths-ignore:
       - "docs/**"
       - "*.md"
+  # Manual trigger for the opt-in live kind jobs (kind-harness / kind-harness-ha),
+  # which are silenced on ordinary PRs (audit-W2 T7 — ADR-0048 Rejected).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -1146,7 +1149,18 @@ jobs:
   # validator step (validate-harness.sh) + the assertion-library self-tests +
   # extract_secret.py tests stay blocking within the job regardless.
   kind-harness:
-    name: kind-harness (enforcing-CNI self-test + mTLS/collector assertions — signal-only, promotion held pending ADR-0048 §4 bite)
+    name: kind-harness (enforcing-CNI self-test + mTLS/collector assertions — signal-only, opt-in; ADR-0048 Rejected, not promoted)
+    # audit-W2 T7 (2026-07-03): NOT promoted — ADR-0048 Rejected. This LIVE kind path
+    # applies the whole chart into a bare kind cluster (heavy; the platform's own
+    # images are not loaded, so it cannot reach green without booting a slice of the
+    # whole platform) and is NOT merge-blocking (absent from all-gates). To avoid
+    # warning noise + ~20 min of runtime on unrelated PRs it runs ONLY on manual
+    # dispatch or when a PR carries the `ci-kind` label. Blocking static coverage
+    # (validate-harness.sh, the render + conftest gates, drill-bite-proofs) runs on
+    # EVERY PR regardless — this gate is signal-only.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci-kind')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -1323,7 +1337,13 @@ jobs:
   # merge gate is the separate `drill-bite-proofs` job (in all-gates `needs`); the live
   # `HA=1 kind-harness.sh` step is continue-on-error.
   kind-harness-ha:
-    name: kind-harness-ha (reduced-scale HA topology — CNPG + KEDA + Sentinel, non-blocking live)
+    name: kind-harness-ha (reduced-scale HA topology — CNPG + KEDA + Sentinel; signal-only, opt-in)
+    # audit-W2 T7 (2026-07-03): same opt-in gate as kind-harness — signal-only, NOT
+    # merge-blocking, silenced on unrelated PRs (runs on manual dispatch or the
+    # `ci-kind` label). See ADR-0048 (Rejected) + docs/runbooks/kind-harness.md.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci-kind')
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -2075,18 +2095,20 @@ jobs:
   # even when a dependency fails; it then inspects the `needs.*.result` values and
   # FAILS unless every one is "success", so a failed OR skipped gate is a red gate.
   #
-  # PROMOTION HELD (P3 W4-T2, ADR-0048 §4): `kind-harness` is DELIBERATELY NOT in
-  # `needs` and its live run stays `continue-on-error`. The promotion is authored but
-  # gated behind the ADR-0048 §4 (Prerequisite B, "non-negotiable") planted-regression
-  # bite proof, which must be SHOWN red→green on a CI ubuntu runner BEFORE the gate
-  # joins this aggregator; Alternative 2 ("Promote without the bite proof") is
-  # Rejected. Per P1-W4-LESSONS L1 kind cannot run on the authoring host, so that
-  # observed bite has NOT been executed on any runner yet — adding `kind-harness`
-  # here now would make an UNVERIFIED gate merge-blocking (the ADR-0048 Risk "worse
-  # than continue-on-error"). Add it here (and drop the step's continue-on-error, and
-  # flip the runbook past-tense claims to reflect the real run) only once a runner has
-  # recorded plaintext-allowed→mTLS red→revert green and collector-broadened→deny
-  # red→revert green, with the run URLs cited.
+  # PROMOTION REJECTED (audit-W2 T7, 2026-07-03 — ADR-0048 Status: Rejected):
+  # `kind-harness` is DELIBERATELY NOT in `needs` — permanently, by decision, no longer
+  # "held pending a bite". Making the live run green requires booting a slice of the
+  # whole hardened platform in a bare kind cluster (the platform's own images are not
+  # loaded → ImagePullBackOff across api/worker/frontend/drills; the hardened Postgres
+  # StatefulSet never reaches Ready), and the two controls it would gate (mTLS
+  # plaintext-refusal, collector default-deny egress) are ALREADY enforced at runtime
+  # and protected by BLOCKING static gates — the `infra` render + `conftest pg_hba
+  # weak-hostssl` bite, the render-twice L4 guard, and `drill-bite-proofs`. The live
+  # promotion added only marginal "the CNI physically enforces" coverage at the cost of
+  # a permanent flaky ~20-min blocking gate + ongoing whole-platform-in-kind upkeep —
+  # not worth it. So the live `kind-harness` step stays `continue-on-error` AND the job
+  # is now opt-in (label `ci-kind` / manual dispatch), silenced on ordinary PRs. See
+  # ADR-0048 "Rejection" + docs/runbooks/kind-harness.md "Gate status".
   #
   # DELIBERATE OMISSION (P3 W4-T1): `kind-harness-ha` also remains NOT in `needs`. Its
   # live reduced-scale HA bring-up (CNPG + KEDA + Sentinel) is `continue-on-error`

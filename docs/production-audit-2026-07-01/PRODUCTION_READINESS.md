@@ -6,14 +6,13 @@ Production readiness audit, 2026-07-01. Assessed against the repo's own gate fra
 
 ---
 
-## 1. Live kind-harness enforcement gates still non-blocking
+## 1. Live kind-harness enforcement gates — non-blocking BY DECISION (ADR-0048 Rejected)
 
-- **Severity:** High (named deferral, promotion pending)
-- **Location:** `.github/workflows/ci.yml:1115` (P2 kind-harness live step `continue-on-error: true`), `ci.yml:1481` (kind-harness-ha live bring-up, same), `all-gates` needs-list omissions (documented inline ~`ci.yml:1976–1989`); `docs/adr/0048-kind-harness-gate-promotion.md`
-- **Root cause:** The mTLS-handshake and collector-egress-deny live enforcement checks (P2 deferral) and the HA bring-up (P3-W1) run SIGNAL-ONLY. The promotion is authored but deliberately held until the bite proof runs green-then-red on the ubuntu runner (ADR-0048's "false-green blocking gate is worse than continue-on-error" stance — correct). W4-T2's promotion was merged in PR #88 with the bite proof still on hold.
-- **Impact:** Until promoted, a regression in mTLS enforcement, collector egress-deny, or HA topology can merge on a green build.
-- **Proposed fix:** Execute the held W4-T2 bite proof (plant a violation, confirm the job goes red, revert, drop `continue-on-error`, join `all-gates`). This is the single highest-leverage readiness action available right now.
-- **Effort:** S–M | **Risk:** Low — the machinery exists; this is execution.
+- **Severity:** ~~High~~ → **Resolved (WONTFIX, 2026-07-03, audit-W2 T7)**
+- **Location:** `.github/workflows/ci.yml` (`kind-harness` / `kind-harness-ha` — now **opt-in**: `workflow_dispatch` or the `ci-kind` label; live steps stay `continue-on-error`, omitted from `all-gates`); `docs/adr/0048-kind-harness-gate-promotion.md` (Status: **Rejected**)
+- **Resolution:** The ADR-0048 promotion is **Rejected** — not pursued. audit-W2 T7 got the harness to actually run its live assertions, which revealed it applies the whole production chart into a bare kind cluster and cannot reach green without booting a slice of the entire platform (the platform's own images are not loaded → `ImagePullBackOff`; the hardened Postgres StatefulSet never reaches Ready). The two controls it would gate (mTLS plaintext-refusal, collector default-deny egress) are ALREADY enforced at runtime AND protected by **blocking** static/manifest gates on every PR — the `infra` `conftest pg_hba weak-hostssl` bite, render-twice L4, the CR-schema guard, and `drill-bite-proofs` (all in `all-gates`). The live promotion added only marginal "the CNI physically enforces" coverage — not worth a permanent flaky ~20-min blocking gate on the merge path. See ADR-0048 "Rejection".
+- **Residual risk (accepted):** a regression that breaks *runtime* CNI/Postgres enforcement while the *manifests* stay correct would not be caught in CI — a narrow, upstream-shaped failure mode. Accepted: the blocking static gates catch the code-change regressions (a weakened pg_hba / a removed NetworkPolicy).
+- **Kept:** the audit-W2 T7 harness hardening (F5 CR-kind residue fix, F4 readiness gate + `HA=1` drill tier-gate, failure diagnostics) — improves the opt-in signal-only harness and its blocking `drill-bite-proofs`.
 
 ## 2. External penetration test not performed
 
