@@ -283,7 +283,11 @@ else
   # tolerated optional-CRD-missing error class. Whatever REMAINS is an
   # unaccounted-for failure, so the chart is incomplete -> HARD FAIL.
   #   - `grep -E '\S'`            : drop blank lines.
-  #   - first `grep -vE` (good)   : drop successful-apply object lines.
+  #   - first `grep -vE` (good)   : drop successful-apply object lines. Includes the
+  #     CNPG/KEDA custom-resource kinds the HA overlay applies
+  #     (cluster./pooler.postgresql.cnpg.io, scaledobject./triggerauthentication.keda.sh):
+  #     their `<kind>/<name> created` lines were being counted as residue and
+  #     FALSE-CLOSED the HA harness before wait-ha-ready ran (F5, audit-W2 T7).
   #   - second `grep -vE` (crd)   : drop the known optional-CRD-missing error text.
   #   - third `grep -vE` (warn)   : drop kubectl `Warning:` lines. A warning is NEVER
   #     fatal — it does not set the apply exit code, and the object still applies. The
@@ -295,7 +299,7 @@ else
   # `|| true` keeps the pipeline alive when a stage matches nothing (empty residue
   # is the GOOD case here); the residue emptiness is what we then gate on.
   residue="$(grep -E '\S' "${apply_log}" \
-    | grep -vE '^(configmap|secret|service|serviceaccount|deployment|deployment\.apps|statefulset|statefulset\.apps|daemonset|daemonset\.apps|cronjob|cronjob\.batch|job|job\.batch|networkpolicy|networkpolicy\.networking\.k8s\.io|role|rolebinding|clusterrole|clusterrolebinding|ingress|ingress\.networking\.k8s\.io|persistentvolumeclaim|poddisruptionbudget|namespace|priorityclass|horizontalpodautoscaler)[^ ]* (created|configured|unchanged|serverside-applied)$' \
+    | grep -vE '^(configmap|secret|service|serviceaccount|deployment|deployment\.apps|statefulset|statefulset\.apps|daemonset|daemonset\.apps|cronjob|cronjob\.batch|job|job\.batch|networkpolicy|networkpolicy\.networking\.k8s\.io|role|rolebinding|clusterrole|clusterrolebinding|ingress|ingress\.networking\.k8s\.io|persistentvolumeclaim|poddisruptionbudget|namespace|priorityclass|horizontalpodautoscaler|cluster\.postgresql\.cnpg\.io|pooler\.postgresql\.cnpg\.io|scaledobject\.keda\.sh|triggerauthentication\.keda\.sh)[^ ]* (created|configured|unchanged|serverside-applied)$' \
     | grep -vE 'no matches for kind|unable to recognize|ensure CRDs are installed|the server could not find the requested resource' \
     | grep -vE '^Warning:' \
     || true)"
@@ -321,10 +325,32 @@ if [ "${HA}" = "1" ]; then
   CHART_NS="${CHART_NS}" bash "${HA_WAIT_READY}"
 fi
 
+# --- 4b. non-HA readiness gate: the G-SEC assertions need Postgres actually UP ---
+# The P2 (non-HA) path applies the chart then asserts the W4-T4 mTLS handshake and
+# the W4-T5 worker->Postgres ALLOW-egress — BOTH dial netops-postgres:5432 and BOTH
+# require Postgres to be READY (accepting authenticated TLS). Without this wait the
+# assertion-runner RACED the StatefulSet: the valid-cert handshake and the
+# allow-egress probe hit a not-yet-listening Postgres and recorded a FALSE red,
+# while the deny paths passed for the wrong reason (audit-W2 T7 F4 — the harness
+# reached its assertions for the first time only after F3, exposing this race). The
+# HA path already gates on readiness via wait-ha-ready.sh (CNPG-managed Postgres),
+# so this bare-StatefulSet wait is non-HA ONLY. The pod's readinessProbe is
+# `pg_isready`, so a Ready replica is serving on 5432 with the mounted server cert +
+# pg_hba loaded (both are startup-time files). L5: a timeout is a HARD failure — a
+# Postgres that never comes up must FAIL the harness, never silently skip the bite.
+if [ "${HA}" != "1" ]; then
+  PG_STS="${PG_STS:-netops-postgres}"
+  log "non-HA — waiting for Postgres (statefulset/${PG_STS}) Ready before the G-SEC assertions"
+  kubectl -n "${CHART_NS}" rollout status "statefulset/${PG_STS}" --timeout="${PG_READY_TIMEOUT:-240s}"
+fi
+
 # --- 5. run the assertion-runner (W4-T4 + W4-T5 checks) -----------------------
 log "running assertion-runner (handshake + deny checks plug in here)"
 ASSERT_LOG_DIR="${ASSERT_LOG_DIR:-$(mktemp -d)}"
-export ASSERT_LOG_DIR CHART_NS SELFTEST_NS PROBE_HOST PROBE_PORT
+# HA is exported so the reduced-scale reliability/scale drills under checks/ gate on
+# it deterministically (skip unless HA=1) instead of probing incidental workload
+# presence, which is tier-ambiguous on the P2 harness (audit-W2 T7 F4).
+export ASSERT_LOG_DIR CHART_NS SELFTEST_NS PROBE_HOST PROBE_PORT HA
 bash "${ASSERT_RUNNER}"
 
 log "harness complete — all assertions passed (teardown runs on exit)"

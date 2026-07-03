@@ -102,6 +102,22 @@ echo "   reduced scale: 1 drill device + 2 drill users; success window=${ATTEMPT
 echo "   certified-scale soak success (30-day calendar window, G-REL §315/§320) is NAMED" \
      "deferred-accepted -> GA (ADR-0047 §4) — NOT claimed here."
 
+# --- tier gate: HA-only drill — SKIP unless this is the HA harness (HA=1) --------
+# Every reduced-scale reliability/scale drill in this dir asserts ONLY on the HA
+# topology (kind-harness.sh run with HA=1). The harness EXPORTS HA, so gate on it
+# FIRST — one deterministic, timing-independent tier signal for all drills.
+# Historically each drill self-detected its tier by probing for a workload's
+# PRESENCE; that is tier-AMBIGUOUS on the P2 harness (which still renders the
+# api/neo4j/worker single-instance workloads) and TIMING-fragile for pod-Running
+# probes — it fails-open or skips only by luck (audit-W2 T7 F4). The per-tier object
+# check below stays as a secondary graceful-skip under HA=1.
+if [ "${HA:-0}" != "1" ]; then
+  echo "SKIP: non-HA harness run (HA!=1) — this reduced-scale HA drill asserts only"
+  echo "      under HA=1 (the kind-harness-ha topology). Nothing to drill on the P2"
+  echo "      run (loud SKIP, never a false-green pass)."
+  exit 0
+fi
+
 # --- precondition: worker pods must be present, else SKIP LOUDLY ----------------
 # On a NON-HA / no-worker harness run there is no worker to kill. Assert nothing
 # rather than read a missing worker as a pass (a silent no-op is a false-green; the
