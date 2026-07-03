@@ -55,4 +55,8 @@ data:
     # confines who can reach 5432; this enforces TLS + cert on every TCP client).
     hostssl     all       all   0.0.0.0/0     scram-sha-256 clientcert=verify-full
     hostssl     all       all   ::/0          scram-sha-256 clientcert=verify-full
+    # PLANTED VIOLATION (audit-W2 T7 bite proof — DO NOT MERGE): a plaintext TCP
+    # line that admits a non-TLS connection; the kind-harness mTLS assertion
+    # (assert_handshake_refused, plaintext client) MUST turn RED on this.
+    host        all       all   0.0.0.0/0     scram-sha-256
 {{- end }}

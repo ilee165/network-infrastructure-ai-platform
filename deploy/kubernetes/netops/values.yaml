@@ -2056,6 +2056,11 @@ networkPolicy:
     # out of the box, but ship a narrower CIDR in production.
     managementCidrs:
       - 10.0.0.0/8
+      # PLANTED VIOLATION (audit-W2 T7 bite proof — DO NOT MERGE): broadens the
+      # allow-list to admit the harness's external deny target (1.1.1.1:53) while
+      # KEEPING the policy present, so the collector-egress deny assertion
+      # (assert_egress_blocked_retry) asserts — and MUST turn RED.
+      - 1.1.1.1/32
     # Device-management ports the worker reaches on the mgmt subnet (ADR-0041 §1):
     # SSH (22/TCP), SNMP (161/UDP), NETCONF (830/TCP), HTTPS device APIs (443/TCP).
     # Confined to the device-reaching protocols — NOT "any port to the mgmt subnet".
@@ -2072,6 +2077,10 @@ networkPolicy:
       - port: 443
         protocol: TCP
       - port: 830
+        protocol: TCP
+      # PLANTED VIOLATION (audit-W2 T7 bite proof — DO NOT MERGE): admits the deny
+      # target's port (53/TCP) on the broadened CIDR above.
+      - port: 53
         protocol: TCP
 
   # -- AUDIT -> SIEM EXPORTER egress (W3-T1, ADR-0045 §5 / ADR-0041 posture). The
