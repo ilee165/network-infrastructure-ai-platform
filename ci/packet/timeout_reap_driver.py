@@ -98,6 +98,9 @@ def main() -> int:
             argv,
             request_bytes=json.dumps(request).encode("utf-8"),
             timeout_seconds=_OUTER_TIMEOUT_SECONDS,
+            # Mirrors the packet_findings_max_bytes default (config.py); the wedge
+            # writes nothing, so only the timeout path is under test here.
+            max_output_bytes=256 * 1024,
         )
     except sandbox.SandboxError:
         pass

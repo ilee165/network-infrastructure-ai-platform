@@ -124,6 +124,7 @@
         "getppid",
         "gettid",
         "set_tid_address",
+        "setsid",
         "futex",
         "futex_waitv",
         "rt_sigaction",
@@ -145,7 +146,7 @@
         "restart_syscall"
       ],
       "action": "SCMP_ACT_ALLOW",
-      "comment": "process/thread lifecycle so the Python parent can spawn the tshark child (argv, not shell — ADR-0023 §1) and reap it. clone/clone3 flags that create new namespaces are still blocked because unshare/setns are denied by the default action."
+      "comment": "process/thread lifecycle so the Python parent can spawn the tshark child (argv, not shell — ADR-0023 §1) and reap it. clone/clone3 flags that create new namespaces are still blocked because unshare/setns are denied by the default action. setsid is DISPATCHER-only: it is the session-leader syscall CPython issues in the forked child when the dispatcher spawns the executor with start_new_session=True (ADR-0049 blocker 4 — the child must lead its own session/process group so a wedged/popped tshark grandchild dies with the group on killpg). Denying it EPERMs every Popen and kills the enforced analysis tier outright (review F1). It is NOT a sandbox-escape primitive (it only detaches the caller into a new session — no namespace, mount, or privilege change) and stays OUT of the strict child profile: the executor never calls setsid."
     },
     {
       "names": [

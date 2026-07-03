@@ -3,7 +3,7 @@
 These files back the Linux CI job `packet-analysis-bite-proof` in
 `.github/workflows/ci.yml`. That job is the **re-enable gate** for the
 packet-analysis service: ADR-0049 requires the executor-split sandbox to be
-test-pinned by a three-leg Linux bite-proof (real seccomp + tshark) that is green
+test-pinned by a four-leg Linux bite-proof (real seccomp + tshark) that is green
 at HEAD before the service goes back on by default. The job builds the
 `packet-analysis` image (`--target packet-analysis`, which ships tshark +
 libseccomp) and runs the **real** `python -m app.engines.packet.executor` under
@@ -15,7 +15,8 @@ authored + syntax-checked; the live run is verified on CI.
 | File | Leg | What it proves |
 |---|---|---|
 | `gen_fixture_pcap.py` | GREEN | Writes a 1-packet Ethernet/IPv4/UDP libpcap (stdlib only) that the confined executor dissects into a schema-valid `PacketFindings` (`packet_count == 1`). |
-| `assert_findings.py` | GREEN | Validates the executor's stdout is a schema-shaped `PacketFindings` with `packet_count >= 1`. |
+| `assert_findings.py` | GREEN + DISPATCH | Validates the executor's stdout is a schema-shaped `PacketFindings` with `packet_count >= 1`. |
+| `dispatcher_spawn_driver.py` | DISPATCH | Drives the real `sandbox.run_executor`/`_spawn_and_reap` seam (`start_new_session=True` ⇒ `setsid()` in the forked child) with the **committed dispatcher seccomp profile** applied at the container level — NOT unconfined — over the fixture pcap (review F2; the coverage hole that let the F1 setsid omission stay green). |
 | `wedge_tshark.sh` | TIMEOUT | Stand-in "tshark" that records its PID and sleeps 600s — the grandchild the dispatcher's process-group kill must reap. |
 | `timeout_reap_driver.py` | TIMEOUT | Drives the real `sandbox._spawn_and_reap` with a small outer timeout + large inner timeout, then asserts the wedge grandchild is gone (killpg worked, no orphan). |
 

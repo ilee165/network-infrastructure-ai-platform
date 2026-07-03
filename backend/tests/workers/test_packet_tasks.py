@@ -16,6 +16,7 @@ hostile filter is rejected by the sandbox and audited as a failure.
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import uuid
 from collections.abc import Iterator
@@ -509,16 +510,33 @@ def test_analyze_capture_refuses_when_posture_check_fails(
 # ---------------------------------------------------------------------------
 
 
+class _FakeStdin(io.BytesIO):
+    """stdin stand-in that keeps the written request readable after ``close()``."""
+
+    captured: bytes = b""
+
+    def close(self) -> None:
+        self.captured = self.getvalue()
+        super().close()
+
+
 class _FakeChild:
-    """A stand-in for the spawned confined executor child (no real subprocess)."""
+    """A stand-in for the spawned confined executor child (no real subprocess).
+
+    Mirrors the stream seam the dispatcher's incremental bounded read uses
+    (review F5): ``stdin``/``stdout`` file-likes plus ``wait()``/``kill()``."""
 
     def __init__(self, *, stdout: bytes, returncode: int = 0) -> None:
-        self._stdout = stdout
-        self.returncode: int | None = returncode
+        self.stdin = _FakeStdin()
+        self.stdout = io.BytesIO(stdout)
+        self.returncode: int | None = None
+        self._exit_code = returncode
         self.pid = 4242
 
-    def communicate(self, input: bytes | None = None, timeout: float | None = None) -> Any:
-        return self._stdout, b""
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            self.returncode = self._exit_code
+        return self.returncode
 
     def kill(self) -> None:  # pragma: no cover - only on the timeout path
         pass
@@ -572,16 +590,13 @@ def test_analyze_capture_enforced_confinement_failure_is_audited(
     monkeypatch.setattr(settings, "packet_sandbox_posture_enforced", True)
     monkeypatch.setattr(tasks, "_assert_posture", lambda settings: None)
 
-    class _ConfinementFailChild(_FakeChild):
-        def communicate(self, input: bytes | None = None, timeout: float | None = None) -> Any:
-            # A popped/hostile child could dump anything on stderr; the dispatcher
-            # must never surface it verbatim into the audited error.
-            return b"", b"LEAK-TOKEN-do-not-surface"
-
+    # A popped/hostile child could dump anything on its output; the dispatcher
+    # must never surface it verbatim into the audited error (stderr is DEVNULL
+    # at the pipe — review F5 — and stdout is unused on a nonzero exit).
     monkeypatch.setattr(
         sandbox.subprocess,
         "Popen",
-        lambda argv, **kwargs: _ConfinementFailChild(stdout=b"", returncode=70),
+        lambda argv, **kwargs: _FakeChild(stdout=b"LEAK-TOKEN-do-not-surface", returncode=70),
     )
 
     result = tasks.analyze_capture(str(uuid.uuid4()))

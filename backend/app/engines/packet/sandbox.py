@@ -45,6 +45,7 @@ import json
 import os
 import subprocess  # noqa: S404 — argv-only, shell=False; the sandbox boundary itself
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,12 @@ _SPAWN_TIMEOUT_MARGIN_SECONDS = 10
 
 #: Seconds to wait for the group to die after a ``killpg`` before giving up reaping.
 _REAP_TIMEOUT_SECONDS = 5
+
+#: Chunk size for the dispatcher's INCREMENTAL read of the child's stdout. The
+#: size bound is enforced per-chunk at read time, so dispatcher memory never holds
+#: more than ``max_output_bytes`` + one chunk even from a popped child that
+#: streams gigabytes (review F5).
+_STDOUT_CHUNK_BYTES = 64 * 1024
 
 #: ``SIGKILL`` as a literal (``signal.SIGKILL`` is POSIX-only and would trip mypy
 #: on the Windows dev host — the killpg path only runs on the enforced Linux tier).
@@ -330,37 +337,94 @@ def _kill_process_group(proc: Any) -> None:
 
 
 def _spawn_and_reap(
-    argv: list[str], *, request_bytes: bytes, timeout_seconds: float
+    argv: list[str], *, request_bytes: bytes, timeout_seconds: float, max_output_bytes: int
 ) -> tuple[int, bytes]:
     """Spawn the executor child, feed it *request_bytes* on stdin, and reap it.
 
     Env-minimal + ``close_fds`` (blocker 2) and ``start_new_session=True`` so the
     child leads its own group; on the OUTER timeout the whole group is SIGKILLed
-    (blocker 4) and a :class:`SandboxError` is raised. The child's stderr is
-    captured but NEVER re-emitted (it is untrusted — ADR-0049 marshalling).
+    (blocker 4) and a :class:`SandboxError` is raised. The child's stderr goes to
+    ``DEVNULL`` — it is untrusted and never used, so it is discarded at the pipe
+    instead of buffered (ADR-0049 marshalling + review F5). stdout is read
+    INCREMENTALLY against *max_output_bytes*: the moment the bound is crossed the
+    whole group is killed, so a popped child streaming gigabytes can never OOM the
+    dispatcher (the memory bound holds at READ time, not post-hoc — review F5).
+
+    A spawn denial (e.g. the dispatcher seccomp filter EPERM-ing the ``setsid()``
+    that ``start_new_session=True`` issues in the forked child) raises a
+    :class:`SandboxError` with a STATIC reason — never the raw OS error text —
+    so the task layer maps it to a clean ``packet.analysis_failed`` (review F1).
     """
-    proc = subprocess.Popen(  # noqa: S603 — argv list, shell=False, minimal env, close_fds
-        argv,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=_child_env(),
-        close_fds=True,
-        start_new_session=True,
-    )
     try:
-        stdout, _stderr = proc.communicate(input=request_bytes, timeout=timeout_seconds)
+        proc = subprocess.Popen(  # noqa: S603 — argv list, shell=False, minimal env, close_fds
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_child_env(),
+            close_fds=True,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise SandboxError("packet executor child could not be spawned") from exc
+
+    chunks: list[bytes] = []
+    bytes_read = 0
+    oversized = False
+
+    def _drain_stdout() -> None:
+        """Read the child's stdout chunkwise, stopping the moment the bound trips."""
+        nonlocal bytes_read, oversized
+        stream = proc.stdout
+        if stream is None:  # pragma: no cover — stdout=PIPE always sets it
+            return
+        while True:
+            try:
+                chunk = stream.read(_STDOUT_CHUNK_BYTES)
+            except (OSError, ValueError):  # pragma: no cover — pipe torn down by the kill
+                return
+            if not chunk:
+                return
+            bytes_read += len(chunk)
+            if bytes_read > max_output_bytes:
+                oversized = True
+                return
+            chunks.append(chunk)
+
+    reader = threading.Thread(target=_drain_stdout, name="packet-executor-stdout", daemon=True)
+    reader.start()
+
+    # Feed the (small, dispatcher-built) request and close stdin. The request is
+    # far below the pipe buffer, so this never blocks; a child that died before
+    # reading it surfaces as EPIPE/EINVAL, which the reap below turns into the
+    # child's own exit status.
+    with contextlib.suppress(OSError):
+        if proc.stdin is not None:
+            proc.stdin.write(request_bytes)
+            proc.stdin.close()
+
+    reader.join(timeout=timeout_seconds)
+    if reader.is_alive() or oversized:
+        _kill_process_group(proc)
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            proc.wait(timeout=_REAP_TIMEOUT_SECONDS)
+        reader.join(timeout=_REAP_TIMEOUT_SECONDS)
+        if oversized:
+            raise SandboxError("packet executor stdout exceeded the size bound")
+        raise SandboxError(f"packet executor exceeded the {timeout_seconds:g}s sandbox timeout")
+
+    # EOF on stdout: reap the exit status (bounded — a child that closed stdout
+    # but refuses to exit is group-killed like a timeout).
+    try:
+        returncode = proc.wait(timeout=_REAP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
         _kill_process_group(proc)
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):
-            proc.communicate(timeout=_REAP_TIMEOUT_SECONDS)
+            proc.wait(timeout=_REAP_TIMEOUT_SECONDS)
         raise SandboxError(
             f"packet executor exceeded the {timeout_seconds:g}s sandbox timeout"
         ) from exc
-    returncode = proc.returncode
-    if returncode is None:  # pragma: no cover — communicate() always sets it
-        returncode = 1
-    return returncode, stdout or b""
+    return returncode, b"".join(chunks)
 
 
 def run_executor(
@@ -411,6 +475,7 @@ def run_executor(
         argv,
         request_bytes=request_bytes,
         timeout_seconds=timeout_seconds + _SPAWN_TIMEOUT_MARGIN_SECONDS,
+        max_output_bytes=max_output_bytes,
     )
     if returncode != 0:
         reason = _EXECUTOR_EXIT_REASONS.get(returncode, "executor failed")
