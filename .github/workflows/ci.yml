@@ -1874,6 +1874,130 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Packet-analysis executor-split bite-proof (ADR-0049 §Acceptance). This is the
+  # RE-ENABLE gate: ADR-0049 flips the service back on by default (compose profile
+  # removed, Helm packet.analysis.enabled=true) only in the SAME PR this job is
+  # green at HEAD. It builds the `packet-analysis` image (--target packet-analysis:
+  # tshark + libseccomp) and runs the REAL `python -m app.engines.packet.executor`
+  # under the REAL deployment posture (cap_drop ALL, non-root 10001, read-only
+  # rootfs, the committed dispatcher seccomp profile). Three required legs:
+  #   GREEN   — a real 1-packet pcap through the fully confined executor returns a
+  #             schema-valid PacketFindings (packet_count>=1).
+  #   RED     — `--self-test=socket|ptrace` under confinement is DENIED (exit 80,
+  #             SELFTEST_DENIED / EPERM), with a NEGATIVE CONTROL: the same probe
+  #             UNCONFINED (enforcement off) SUCCEEDS (exit 81, SELFTEST_NOT_CONFINED).
+  #             If the negative control does not flip, the gate is not biting → fail.
+  #   TIMEOUT — a wedged executor whose tshark grandchild sleeps past the timeout is
+  #             killed with its WHOLE process group (start_new_session + killpg); the
+  #             driver asserts no orphan grandchild survives.
+  # Linux-only (seccomp filter load is kernel-only): authored + syntax-checked on the
+  # Windows dev host, LIVE run verified on this ubuntu runner. No `needs` — wave-1
+  # like pg-integration; merge-blocking via the all-gates aggregator's `needs`.
+  packet-analysis-bite-proof:
+    name: packet-analysis-bite-proof (executor-split seccomp + tshark — Linux, ADR-0049 §Acceptance)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Repo-controlled shell + local docker only; no git auth needed.
+          persist-credentials: false
+
+      - name: Build packet-analysis image (--target packet-analysis; runs the build-time --self-check)
+        run: |
+          set -euo pipefail
+          # The build also runs the ADR-0049 blocker-7 `executor --self-check`
+          # (import pyseccomp + compile the packaged strict filter) — a missing
+          # wheel/library/profile fails the BUILD here, before any leg below.
+          docker build \
+            --target packet-analysis \
+            -f deploy/docker/backend.Dockerfile \
+            -t netops-backend-packet:citest \
+            .
+
+      - name: GREEN — a real pcap through the fully confined executor returns PacketFindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="${RUNNER_TEMP:-/tmp}/packet-fixture.pcap"
+          python3 ci/packet/gen_fixture_pcap.py "$fixture"
+          request='{"pcap_path":"/data/pcaps/tiny.pcap","display_filter":null,"tshark_bin":"tshark","timeout_seconds":30,"top_n":5,"enforced":true}'
+          # REAL production posture: the committed DISPATCHER seccomp profile at the
+          # container level (what compose/Helm apply); the executor child RE-CONFINES
+          # with the strict no-socket profile before opening the pcap. cap_drop ALL +
+          # non-root 10001 + read-only rootfs satisfy the executor's ADR-0031 §2
+          # posture backstop; the tmpfs is the single writable scratch (TMPDIR).
+          out="$(printf '%s' "$request" | docker run --rm -i \
+            --security-opt seccomp=deploy/docker/seccomp/packet-analysis-dispatcher-seccomp.json \
+            --security-opt no-new-privileges \
+            --cap-drop ALL \
+            --user 10001:10001 \
+            --read-only \
+            --tmpfs /tmp/pyshark:size=64m,mode=1777 \
+            -e TMPDIR=/tmp/pyshark \
+            -v "$fixture:/data/pcaps/tiny.pcap:ro" \
+            netops-backend-packet:citest \
+            python -m app.engines.packet.executor)"
+          printf '%s' "$out" | python3 ci/packet/assert_findings.py
+
+      - name: RED — self-test probes DENIED under confinement, negative control FLIPS (proves the filter bites)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Run each probe with the CHILD filter as the only seccomp in play
+          # (container seccomp=unconfined) so the executor's own strict filter is
+          # provably what bites — for BOTH socket and ptrace. Confined (enforced=true)
+          # => SELFTEST_DENIED (80); unconfined negative control (enforced=false) =>
+          # SELFTEST_NOT_CONFINED (81). Exit codes: backend/app/engines/packet/executor.py.
+          run_probe() {  # $1=probe  $2=enforced-json  -> stdout: executor exit code
+            printf '{"pcap_path":"/tmp/pyshark/none.pcap","enforced":%s}' "$2" \
+              | docker run --rm -i \
+                  --security-opt seccomp=unconfined \
+                  --security-opt no-new-privileges \
+                  --cap-drop ALL \
+                  --user 10001:10001 \
+                  --read-only \
+                  --tmpfs /tmp/pyshark:size=32m,mode=1777 \
+                  -e TMPDIR=/tmp/pyshark \
+                  netops-backend-packet:citest \
+                  python -m app.engines.packet.executor --self-test="$1" \
+              >/dev/null 2>&1
+            echo $?
+          }
+          fail=0
+          for probe in socket ptrace; do
+            confined="$(run_probe "$probe" true)"
+            negctl="$(run_probe "$probe" false)"
+            echo "probe=$probe confined_exit=$confined negative_control_exit=$negctl"
+            if [ "$confined" != "80" ]; then
+              echo "::error::RED: $probe NOT denied under confinement (exit $confined, want 80 SELFTEST_DENIED) — child filter did not bite"
+              fail=1
+            fi
+            if [ "$negctl" != "81" ]; then
+              echo "::error::RED negative control: unconfined $probe did NOT succeed (exit $negctl, want 81 SELFTEST_NOT_CONFINED) — the gate proves nothing"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ]
+
+      - name: TIMEOUT — a wedged executor + tshark grandchild are killed with the whole process group
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ci/packet/wedge_tshark.sh
+          # The driver imports the REAL sandbox._spawn_and_reap and drives it with a
+          # small outer timeout + large inner timeout so the DISPATCHER's killpg (not
+          # the child's self-cleanup) is the reaper under test. --init reaps the
+          # SIGKILLed grandchild so /proc reflects it gone.
+          docker run --rm --init \
+            --security-opt seccomp=unconfined \
+            --tmpfs /tmp/pyshark:size=32m,mode=1777 \
+            -e TMPDIR=/tmp/pyshark \
+            -v "$PWD/ci/packet:/ci:ro" \
+            netops-backend-packet:citest \
+            python /ci/timeout_reap_driver.py
+
   # Dependency-lockfile drift gate (P3 W0-T8, closes the P1 systemic TODO "add a
   # dep lockfile — drift bit twice", PRODUCTION.md §10 deps-pinned-per-release /
   # §11 G-MNT no-silent-drift). The P1 `fastapi 0.137 include_router` break had
@@ -2214,7 +2338,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile, observability, drill-bite-proofs]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, packet-analysis-bite-proof, lockfile, observability, drill-bite-proofs]
     steps:
       - name: Assert every gate succeeded
         env:

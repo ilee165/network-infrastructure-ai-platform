@@ -46,16 +46,22 @@ docker compose --env-file .env -f deploy/docker/docker-compose.yml --profile loc
 ```
 
 The core stack (`api`, `worker`, `frontend`, `postgres`, `redis`, `neo4j`) comes
-up with the commands above. The **`packet-analysis`** pcap-parser worker is
-**not functional in the current release** and is deliberately excluded from the
-default `up`: its ADR-0031 §3 no-socket seccomp sandbox is incompatible with a
-broker-connected Celery worker — glibc's DNS resolver needs a socket, so the
-worker never reaches Redis (see ADR-0031 §3 "Deferred"). The `packet` compose
-profile exists only as the deployment seam for that deferred work; starting it
-(`docker compose … --profile packet up -d`) currently yields a worker that
-**crash-loops on the broker connection**, so do **not** enable it until the
-contradiction is resolved (nested seccomp on the tshark child, or a §3 amendment
-plus the §4 egress NetworkPolicy).
+up with the commands above. The **`packet-analysis`** pcap-parser worker is now
+**functional and ON by default** (ADR-0049 executor-split): it comes up with the
+default `up`, no extra profile needed. ADR-0049 resolved the old contradiction —
+the ADR-0031 §3 no-socket seccomp sandbox was incompatible with a broker-connected
+Celery worker (glibc's DNS resolver needs a socket) — by **drawing the sandbox
+boundary around the untrusted work, not the Celery machinery**: this container is
+the broker-connected *dispatcher* (running the deny-by-default DISPATCHER seccomp
+profile, client sockets allowed), and each analysis job spawns a short-lived
+`python -m app.engines.packet.executor` child that **re-confines with the strict
+no-socket profile** before it opens a single pcap byte, then dies. So tshark's
+CVE-bearing dissectors parse attacker-controlled bytes with zero sockets, zero
+capabilities, a read-only rootfs, and no egress — while the dispatcher keeps its
+Redis connection. The re-enable is gated on the Linux CI bite-proof (job
+`packet-analysis-bite-proof`, three legs: confined GREEN parse, RED self-test
+denial with a negative control, and process-group TIMEOUT kill) being green at
+HEAD. To keep it opt-out on a constrained host, add `--scale packet-analysis=0`.
 
 Then verify (core stack):
 

@@ -6,6 +6,18 @@ Production readiness audit, 2026-07-01. Backend: 207 app modules / ~50k LOC; 226
 
 ## 1. Packet-analysis service: opt-in default contradicts ADR-0031
 
+> **RESOLVED (2026-07-03, `feat/packet-executor-split`).** Fixed via **option (a),
+> the executor-split** — ADR-0049 (Accepted). The Celery dispatcher keeps its
+> broker connection under a deny-by-default *dispatcher* seccomp profile and spawns
+> a short-lived `python -m app.engines.packet.executor` child per analysis job that
+> re-confines with the strict ADR-0031 no-socket profile before parsing the pcap
+> (T1/T2), on a dedicated image with tshark + libseccomp (T3). The service is
+> **re-enabled by default** (compose `profiles: ["packet"]` removed;
+> `packet.analysis.enabled: true` in the chart) gated on the Linux CI bite-proof
+> (`packet-analysis-bite-proof`: confined GREEN parse + RED self-test denial with a
+> negative control + process-group TIMEOUT kill) green at HEAD (T4). Secure-by-default
+> restored without weakening ADR-0031. Historical finding below.
+
 - **Severity:** High
 - **Location:** `deploy/docker/docker-compose.yml:112` (`profiles: ["packet"]` — service off by default), `README.md` (packet analysis marked non-functional in the compose quickstart), `deploy/kubernetes/netops/values.yaml` (component gated), vs `docs/adr/0031-packet-sandbox-os-isolation.md`
 - **Root cause:** The ADR-0031 seccomp sandbox profile is incompatible with the packet worker's Celery runtime (socket calls the broker connection needs are denied; tempdir/`sem_open` issues were patched in PR #86 but the fundamental worker-in-sandbox contradiction was explicitly deferred). The pragmatic PR #86 decision — gate the service off so the quickstart works — was correct triage, but it leaves a headline capability (CLAUDE.md requires tcpdump/tshark/Wireshark support) shipped dark, and the platform's "secure by default" principle inverted for this one component (the secure profile and the functional service are mutually exclusive).

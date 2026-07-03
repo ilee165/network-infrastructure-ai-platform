@@ -100,20 +100,16 @@ services:
   #   - mem/cpu limits so an adversarial capture is OOM/CPU-bound, not node-exhausting.
   #   - pids_limit bounds fork/thread abuse from a popped dissector (ADR-0049 §4).
   packet-analysis:
-    # OPT-IN (compose profile "packet") — excluded from the default `docker compose
-    # up` so the core quickstart (api/worker/frontend/postgres/redis/neo4j) comes up
-    # clean. Start it explicitly with `docker compose --profile packet up -d`.
-    #
-    # WHY still opt-in: ADR-0049 RESOLVED the old "no-socket sandbox vs broker-
-    # connected worker" contradiction via the executor-split — this container now
-    # runs the DISPATCHER profile (client sockets allowed) and each analysis job
-    # spawns a short-lived child that re-confines with the strict no-socket profile
-    # before parsing the pcap (T1/T2 shipped). The service stays opt-in ONLY until
-    # the three-leg Linux bite-proof (ADR-0049 §Acceptance) is green at HEAD; the
-    # re-enable-by-default flip is T4, in the same PR the bite-proof lands. On this
-    # dev Compose stack the marshalling/spawn/reap path runs the same way, but the
-    # real seccomp filter load is Linux-kernel-only (deferred to the CI bite-proof).
-    profiles: ["packet"]
+    # ON BY DEFAULT (secure-by-default restored, ADR-0049 §Acceptance / blocker 6).
+    # ADR-0049 RESOLVED the old "no-socket sandbox vs broker-connected worker"
+    # contradiction via the executor-split: this container runs the DISPATCHER
+    # profile (client sockets allowed) and each analysis job spawns a short-lived
+    # child that re-confines with the strict no-socket profile before parsing the
+    # pcap (T1/T2). The interim `profiles: ["packet"]` opt-in was REMOVED in T4,
+    # gated on the three-leg Linux bite-proof (job `packet-analysis-bite-proof`)
+    # being green at HEAD in the same PR. On this dev Compose stack the
+    # marshalling/spawn/reap path runs the same way; the real seccomp filter load
+    # is Linux-kernel-only (proven by the CI bite-proof, not this host).
     build:
       context: ../..
       dockerfile: deploy/docker/backend.Dockerfile

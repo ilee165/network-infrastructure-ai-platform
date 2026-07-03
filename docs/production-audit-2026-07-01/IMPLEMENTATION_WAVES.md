@@ -197,7 +197,7 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 | Item | Why excluded | Home |
 |---|---|---|
-| Packet-analysis **implementation** (post-ADR-0049) | L-effort, design-gated by Wave 3 item 3; likely >20 files with seccomp profiles + CI | Own follow-on wave after ADR acceptance |
+| ~~Packet-analysis **implementation** (post-ADR-0049)~~ **DONE** (2026-07-03, `feat/packet-executor-split`) | Executor-split shipped: self-confining executor child (T1) + dispatcher rewire (T2) + tshark/libseccomp image & dispatcher seccomp profile + lockstep/policy gates (T3) + Linux bite-proof & re-enable-by-default & docs (T4). ARCH_DEBT #1 resolved. | Landed on its own follow-on wave after ADR-0049 acceptance |
 | `ci.yml` modularization (ARCH_DEBT #5) | Every moved gate needs individual red→green re-proof; bundling it with feature waves risks masked gates | Standalone DX effort; schedule after Wave 2's gate promotion settles |
 | Vendor plugin rollback-driver lift (ARCH_DEBT #6) | One-plugin-per-maintenance-wave cadence by design | Amortized across future vendor waves |
 | Pen test, 30-day soak, certified-scale runs, OIDC two-IdP live, break-glass drill | External resources / GA-phase items, already ledgered | `PRODUCTION.md` GA gates |

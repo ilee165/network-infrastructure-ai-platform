@@ -2153,15 +2153,15 @@ packet:
   # packet-analysis: the hardened parser. UNTRUSTED input (pcap bytes). Zero
   # capabilities, Localhost seccomp, read-only pcap, default-deny egress.
   analysis:
-    # OPT-IN / default OFF — pending the T4 re-enable. ADR-0049 RESOLVED the old
-    # "no-socket sandbox vs broker-connected worker" contradiction via the
-    # executor-split: this pod now runs the DISPATCHER Localhost profile (client
-    # sockets + seccomp() allowed) and each analysis job spawns a short-lived child
-    # that re-confines with the strict no-socket profile before parsing the pcap
-    # (T1/T2 shipped). It stays opt-in ONLY until the three-leg Linux bite-proof
-    # (ADR-0049 §Acceptance) is green at HEAD; the re-enable-by-default flip is T4,
-    # in the same PR the bite-proof lands. Mirrors the Compose `packet` opt-in.
-    enabled: false
+    # ON BY DEFAULT (secure-by-default restored, ADR-0049 §Acceptance / blocker 6).
+    # ADR-0049 RESOLVED the old "no-socket sandbox vs broker-connected worker"
+    # contradiction via the executor-split: this pod runs the DISPATCHER Localhost
+    # profile (client sockets + seccomp() allowed) and each analysis job spawns a
+    # short-lived child that re-confines with the strict no-socket profile before
+    # parsing the pcap (T1/T2). The interim default-OFF was flipped to true in T4,
+    # gated on the three-leg Linux bite-proof (CI job `packet-analysis-bite-proof`)
+    # being green at HEAD in the same PR. Mirrors the Compose service (now default).
+    enabled: true
     replicas: 1
     command:
       - celery
