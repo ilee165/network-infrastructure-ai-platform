@@ -2123,6 +2123,38 @@ jobs:
   # (docker-publish `needs: [backend, frontend, docker]`), so nothing unsigned
   # or unscanned can publish; a docker-publish failure turns the main/tag run
   # red on its own. The every-event `docker` validation job IS required here.
+  # PG-test routing heuristic (audit ARCH_DEBT #2). Flags a diff that adds
+  # PostgreSQL-specific SQL/semantics to backend code without a matching
+  # backend/tests/pg/ change (the SQLite unit suite is blind to those). ADVISORY
+  # FOR NOW: deliberately NOT in the `all-gates` needs below, so a hit surfaces
+  # in the checks list without blocking merge — a one-week false-positive soak.
+  # PROMOTE TO BLOCKING by adding `pg-test-routing` to the all-gates `needs`
+  # (no script change: ci/scripts/check-pg-test-routing.sh already exits non-zero
+  # on a violation, proven to bite). See backend/tests/pg/README.md.
+  pg-test-routing:
+    name: pg-test-routing (SQLite-vs-PG coverage heuristic — advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout (full history for merge-base)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check PG-semantic changes ship a tests/pg/ test
+        shell: bash
+        run: |
+          set -euo pipefail
+          # PR: judge against the target branch; push: against origin/main.
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch --no-tags --depth=200 origin "${GITHUB_BASE_REF}" || true
+            base="origin/${GITHUB_BASE_REF}"
+          else
+            base="origin/main"
+          fi
+          bash ci/scripts/check-pg-test-routing.sh "$base"
+
   all-gates:
     name: all-gates (required-check aggregator)
     runs-on: ubuntu-latest
