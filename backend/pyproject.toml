@@ -70,10 +70,11 @@ dependencies = [
     # Declarative compliance policies (M4, ADR-0018): YAML rule documents
     "pyyaml",
     # Packet-analysis self-confining executor (ADR-0049): libseccomp Python
-    # binding. Linux-only (the child confines itself with a seccomp filter parsed
-    # from the strict ADR-0031 profile); the import is guarded so the Windows /
-    # eager unit suite never loads it, and it is only pulled into the
-    # packet-analysis image stage (ADR-0049 blocker 7), never the api/worker image.
+    # binding. A Linux-marker RUNTIME dep — the pure-python wheel installs into
+    # the shared venv on any Linux image (it is NOT image-scoped); the import is
+    # guarded so the Windows / eager unit suite never loads it. What IS scoped to
+    # the packet-analysis image stage (ADR-0049 blocker 7 / T3) are tshark +
+    # libseccomp2 — installed only there, never in the shared api/worker image.
     "pyseccomp; sys_platform == 'linux'",
 ]
 

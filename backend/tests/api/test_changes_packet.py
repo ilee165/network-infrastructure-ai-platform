@@ -543,7 +543,7 @@ class TestCaptureAnalysis:
         )
         assert resp.status_code == 403
 
-    async def test_analysis_fails_closed_on_bad_posture(
+    async def test_analysis_fails_closed_when_posture_enforced(
         self,
         app: FastAPI,
         client: httpx.AsyncClient,
@@ -552,22 +552,19 @@ class TestCaptureAnalysis:
         sessionmaker: async_sessionmaker[AsyncSession],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The synchronous analysis path runs the posture backstop too (ADR-0031 §2).
+        """Synchronous in-pod analysis is DISABLED when posture is enforced (ADR-0049 residual).
 
-        GET /captures/{id}/analysis must refuse to spawn tshark when the web pod
-        lacks the sandbox OS controls — non-root, no CAP_NET_RAW, RO rootfs — and
-        must NOT reach ``analyze_pcap`` with untrusted pcap bytes. Exercises the
-        REAL :func:`get_pcap_analyzer` (the stub override is removed) with
-        ``packet_sandbox_posture_enforced`` on and the posture seam forced to fail.
+        With ``packet_sandbox_posture_enforced`` on (the secure default),
+        GET /captures/{id}/analysis must never dissect untrusted pcap bytes
+        in-process in the credential-bearing API pod: the REAL
+        :func:`get_pcap_analyzer` (the stub override is removed) raises an
+        explicit typed 409 naming the executor-confined ``packet_analysis``
+        worker as the only analysis path, and ``analyze_pcap`` is never invoked.
         """
-        from app.engines.packet import posture as posture_mod
-
         # Use the real analyzer (the app fixture stubs it for the happy path).
         app.dependency_overrides.pop(agents_router.get_pcap_analyzer, None)
-        # Force enforcement on and make the posture check fail (web pod is root).
         app.state.settings.packet_sandbox_posture_enforced = True
-        monkeypatch.setattr(posture_mod, "_effective_uid", lambda: 0)
-        # tshark must never be reached once posture fails closed.
+        # tshark must never be reached on the enforced path.
         analyzed: list[str] = []
         monkeypatch.setattr(
             agents_router, "analyze_pcap", lambda *a, **k: analyzed.append("called")
@@ -578,8 +575,40 @@ class TestCaptureAnalysis:
             f"/api/v1/agents/captures/{capture_id}/analysis", headers=auth("engineer")
         )
 
-        assert resp.status_code == 502
-        assert analyzed == []  # fail-closed: tshark was never spawned
+        assert resp.status_code == 409
+        assert analyzed == []  # fail-closed: analyze_pcap was never invoked
         body = resp.json()
-        # Only the failed posture control is named — never a credential or path.
-        assert "posture" in body["detail"].lower()
+        # The error names the supported path — never a credential or filesystem path.
+        detail = body["detail"]
+        assert "synchronous in-pod packet analysis is disabled" in detail
+        assert "packet_analysis worker" in detail
+
+    async def test_analysis_runs_in_process_when_enforcement_off(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        auth: Callable[[str], dict[str, str]],
+        users: dict[str, User],
+        sessionmaker: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        findings: PacketFindings,
+    ) -> None:
+        """With enforcement OFF (dev/eager runner) the in-process path is unchanged."""
+        app.dependency_overrides.pop(agents_router.get_pcap_analyzer, None)
+        app.state.settings.packet_sandbox_posture_enforced = False
+        analyzed: list[str] = []
+
+        def _fake_analyze(path: str, **kwargs: object) -> PacketFindings:
+            analyzed.append(path)
+            return findings
+
+        monkeypatch.setattr(agents_router, "analyze_pcap", _fake_analyze)
+
+        capture_id = await self._seed_capture(sessionmaker, users["engineer"])
+        resp = await client.get(
+            f"/api/v1/agents/captures/{capture_id}/analysis", headers=auth("engineer")
+        )
+
+        assert resp.status_code == 200
+        assert len(analyzed) == 1  # dev path still analyzes in-process
+        assert resp.json()["packet_count"] == 3

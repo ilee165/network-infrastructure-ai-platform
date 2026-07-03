@@ -244,7 +244,17 @@ class Settings(BaseSettings):
     packet_sandbox_rlimit_as_bytes: int = 2 * 1024 * 1024 * 1024
     packet_sandbox_rlimit_fsize_bytes: int = 64 * 1024 * 1024
     packet_sandbox_rlimit_nofile: int = 256
-    packet_sandbox_rlimit_nproc: int = 64
+    #: CAUTION — ``RLIMIT_NPROC`` is a PER-UID limit, not a per-process-tree one:
+    #: the kernel enforces it against uid-10001's TOTAL task count host-wide
+    #: (processes AND threads, across uvicorn's threadpool, celery prefork, beat,
+    #: the dispatcher, and every other uid-10001 container on the node). A value
+    #: sized to "this job's tree" (e.g. 64) makes tshark's fork() fail EAGAIN
+    #: under ordinary platform load — intermittent, load-correlated analysis
+    #: failures. 512 aligns with the container-level compose ``pids_limit`` (512),
+    #: which is the PRIMARY fork-bomb bound; this rlimit is only a defence-in-depth
+    #: backstop. Do not tune it back down below the platform's steady-state
+    #: uid-10001 task count.
+    packet_sandbox_rlimit_nproc: int = 512
     packet_sandbox_seccomp_deny_action: str = "errno"
 
     #: Hard cap on the bytes the dispatcher reads from the executor child's stdout

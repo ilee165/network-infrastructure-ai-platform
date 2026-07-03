@@ -90,7 +90,10 @@ _SECCOMP_FILENAME = "packet-analysis-seccomp.json"
 _DEFAULT_RLIMIT_AS_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB — fits the 64 MB JSON parse
 _DEFAULT_RLIMIT_FSIZE_BYTES = 64 * 1024 * 1024  # 64 MiB — bounds the /tmp scratch
 _DEFAULT_RLIMIT_NOFILE = 256
-_DEFAULT_RLIMIT_NPROC = 64  # small, > tshark's own thread count
+# PER-UID (all uid-10001 tasks host-wide, incl. api/worker/beat), NOT per-tree;
+# aligned with the compose pids_limit (512) — the cgroup is the primary
+# fork-bomb bound, this rlimit is only a defence-in-depth backstop.
+_DEFAULT_RLIMIT_NPROC = 512
 _DEFAULT_DENY_ACTION = "errno"
 
 #: Seconds added to ``timeout_seconds`` for the ``RLIMIT_CPU`` backstop, so the

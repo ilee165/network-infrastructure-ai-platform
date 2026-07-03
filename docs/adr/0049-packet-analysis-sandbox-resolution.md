@@ -190,6 +190,19 @@ alongside the existing PG-integration job and is required-when-run.
 
 - No change to the process-launch controls or credential split already shipped.
 - No migration; no API change. The change is runtime/topology + deploy manifests.
+- **Residual — the synchronous API analyzer.** The `GET /captures/{id}/analysis`
+  endpoint (the `get_pcap_analyzer` seam in `app/api/v1/agents.py`) parses the
+  pcap **in-process in the API pod** — a pod that holds DB/JWT/KEK credentials
+  plus egress and carries none of the strict controls above. It is therefore
+  **fail-closed** when `packet_sandbox_posture_enforced` is on (the secure
+  default): the endpoint raises an explicit typed 409 ("synchronous in-pod
+  packet analysis is disabled; analysis runs only in the executor-confined
+  `packet_analysis` worker") instead of invoking tshark. The shared api/worker
+  image also ships **no tshark** (a guard test pins the Dockerfile stage
+  split), closing the "just install tshark on the api pod" trap. Routing the
+  endpoint through the analysis tier (enqueue → executor → stored findings) so
+  it works AND stays confined is a scoped follow-up; until then synchronous
+  in-pod analysis is disabled by design.
 
 ## Owner & sequencing
 
