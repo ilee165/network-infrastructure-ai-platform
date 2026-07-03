@@ -1202,7 +1202,7 @@ jobs:
       # already provides. The action installs the kind binary; the harness drives
       # create/CNI/self-test/apply/assert/teardown.
       - name: Install kind
-        uses: helm/kind-action@v1.10.0
+        uses: helm/kind-action@v1.14.0
         with:
           install_only: true
           version: v0.24.0
@@ -1497,7 +1497,7 @@ jobs:
       # kind brings up the throwaway cluster on the Docker backend the GH runner
       # provides; the HA harness path installs the CNPG operator + KEDA on top.
       - name: Install kind
-        uses: helm/kind-action@v1.10.0
+        uses: helm/kind-action@v1.14.0
         with:
           install_only: true
           version: v0.24.0
