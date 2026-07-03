@@ -147,22 +147,36 @@ All run on the authoring host against the **pinned** CRDs and the real chart ren
 live-apply rejection. The CNPG **operator admission webhook** and actual
 scheduling/runtime are **live-only** — verified on CI below.
 
-### 5.1 CI evidence (real ubuntu runner — PR #94, run 28641001736)
+### 5.1 CI evidence (real ubuntu runner — PR #94, run 28641001736) — CORRECTED
 
-The fix was run on GitHub Actions (kind on the runner's Docker backend). **Two
-consecutive full-green attempts**, with the LIVE harness steps verified at the STEP
-level (not masked by `continue-on-error`):
+**A prior draft of this section claimed "two consecutive full-green attempts." That was
+WRONG and is retracted.** The live harness step is `continue-on-error`, whose REST
+`conclusion` field is ALWAYS `success` regardless of the real result; the true result is the
+step `outcome`. The report-step `outcome` (and the harness log) show the live `kind-harness`
+**and** `kind-harness-ha` steps **FAILED at chart apply in every run** (`outcome=failure`),
+masked by `continue-on-error`. Checking `conclusion` instead of `outcome` was the reporting
+error (the exact [[agent-fabricated-bite-proof]] trap).
 
-| Attempt | `kind-harness` step "Run kind harness (create → CNI self-test → apply → assert → teardown)" | `kind-harness-ha` step "Run HA kind harness (create → CNI self-test → operators → apply → HA-ready → assert → teardown)" |
-|---|---|---|
-| 1 | `[success]` | `[success]` |
-| 2 | `[success]` | `[success]` |
+**F3 — root cause (a pre-existing harness bug, separate from F1).** `kubectl apply` returns
+non-zero on the tolerated `no matches for kind Certificate/ClusterPolicy` (cert-manager /
+kyverno CRDs absent in the scaffold), so the harness runs its N6.1 fail-closed residue check.
+That check subtracts successful-apply + CRD-missing lines but **does NOT tolerate kubectl
+`Warning:` lines** — and the apply emits PodSecurity `restricted` warnings on the ADR-0031
+packet-capture / seccomp `install-profile` objects (which legitimately need NET_RAW /
+hostPath / root). Those warning lines are counted as unaccounted residue → **fail-closed
+BEFORE the mtls/collector assertions run.** So the harness has never reached its live
+assertions on any runner; the failure was invisible because the job is signal-only.
 
-The new **blocking** `infra` CR-schema gate passed both attempts (1m22s); `all-gates`,
-`drill-bite-proofs`, `pg-integration`, and every other required check passed. This is the
-ADR-0048 §3 **Prerequisite A** reliability evidence — the live HA bring-up (CNPG operator +
-KEDA + Sentinel) comes up GREEN deterministically, so a red aggregator would mean a real
-regression, not a race. It is **not** the §4 bite and promotes nothing.
+**What IS verified:** F1 (the CNPG `runAsNonRoot` rejection) is fixed — the HA apply no longer
+errors on that field; the S1 `infra` CR-schema gate is genuinely green (a required job, not
+`continue-on-error`). **What is NOT achieved:** a green live harness — so the ADR-0048 §3
+Prerequisite A reliability bar is **NOT** met, and the §4 bite could not run (a planted
+regression produced the *same* apply failure, not an assertion bite; the plant was reverted).
+
+**Fix (proposed):** tolerate `^Warning:` in the `kind-harness.sh` N6.1 residue check (a
+kubectl warning never sets the apply exit code, so it must never count as a failure), then
+re-run and confirm the harness reaches green via the report-step **`outcome`** (never
+`conclusion`).
 
 ---
 
@@ -206,23 +220,21 @@ The plants are ready to execute **once the harness runs green on CI**.
 
 ## 8. GO / NO-GO
 
-**Recommendation: GO to execute the ADR-0048 §4 bite; NO-GO on the promotion itself
-(a separate, maintainer-authorized step).** The harness rot is repaired and the last
-prerequisite blocker is cleared:
+**Recommendation: NO-GO.** F1 is fixed and the S1 guard is in, but the live harness does
+**not** pass — F3 (§5.1) fails it at chart apply before the assertions run, in every run,
+masked by `continue-on-error`. Neither ADR-0048 prerequisite is met on a real runner:
 
-- **All prerequisites now met:** F1 live-apply rejection fixed + statically verified; F2
-  policy coupling resolved (bite green); S1 class now guarded blocking; every audited item
-  clean; **Prerequisite A satisfied** — the live harness ran GREEN on CI across **2
-  consecutive** attempts, step-verified (§5.1); the §7 plant diffs are staged and match the
-  documented procedure.
-- **Still outstanding (the promotion, unchanged by this session):** per ADR-0048 §4 the
-  plant→red→revert bite (Prerequisite B) must be **executed on a CI runner** — plant →
-  observe RED → revert → GREEN — and its run URLs / commit pair recorded, **before** the
-  two §2 promotion edits (drop `continue-on-error`; add `kind-harness` to `all-gates`) are
-  applied. That is a deliberate, maintainer-authorized step; **this session does not
-  perform it** and leaves ADR-0048 **HELD**.
+- **Prerequisite A (reliable green bring-up): NOT met.** The live harness `outcome` is
+  `failure` in every recorded run (F3). It must be fixed and shown green **via the report-step
+  `outcome`** (never `conclusion`) before it can host a blocking gate.
+- **Prerequisite B (the §4 plant→red→revert bite): NOT met and not yet attemptable.** A plant
+  produces the *same* F3 apply failure, not an assertion bite — an attempt confirmed this, and
+  the plant was reverted. The bite is meaningful only once A holds.
 
-**Path from here:** apply the §7 plants on a CI branch → confirm each turns the named
-assertion RED → revert → confirm GREEN → record the evidence here and in the runbook
-"Prove-it-bites" section → only then apply the §2 promotion edits. Nothing in this session
-promotes, merges, or updates the held T7 promotion PR.
+**Path to GO:** (1) fix **F3** — tolerate `^Warning:` in the `kind-harness.sh` N6.1 residue
+check (a kubectl warning never sets the apply exit code, so it must never count as a
+failure); (2) re-run and confirm both `kind-harness` + `kind-harness-ha` reach
+`outcome=success`, verifying the mtls/collector assertions actually RAN (not skipped); (3)
+THEN execute the §4 bite (plant → RED on the *assertion* → revert → GREEN), record the run
+URLs; (4) only THEN apply the §2 promotion edits. This session fixes F1 + adds the S1 guard +
+diagnoses F3; it does **not** promote and leaves ADR-0048 **HELD**.

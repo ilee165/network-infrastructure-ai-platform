@@ -633,18 +633,21 @@ above).
 > field) — the harness must first run GREEN on a CI runner, and only then can the
 > plant→red→revert→green procedure below be executed to earn the promotion.
 >
-> **Recovery — HARNESS REPAIRED + GREEN ON CI (PR #94, run 28641001736; NOT a
-> promotion).** The `spec.postgresql.runAsNonRoot` rot was root-caused (an invalid CNPG
-> field the live apply rejects; it was ALSO *required* by a `hardening.rego` rule +
-> mirrored in 4 `cnpg_*` fixtures — all removed) and the harness now runs GREEN on CI
-> across **2 consecutive** attempts, the `kind-harness` + `kind-harness-ha` LIVE steps
-> step-verified `[success]`. A static **CR-schema guard** (`ci/kind/crd-schemas/` +
-> `ci/kind/selftest/validate-cr-schemas{,-bite}.sh`, blocking in the `infra` job) now
-> makes that unknown-field class BITE statically, so it cannot recur. See
-> `docs/production-audit-2026-07-01/T7-HARNESS-RECOVERY.md`. This satisfies the ADR-0048
-> §3 Prerequisite A reliability bar; the §4 plant→red→revert bite (Prerequisite B) is now
-> **UNBLOCKED but STILL NOT EXECUTED** — the gate remains **HELD** and PR #94 promotes
-> nothing.
+> **Recovery — runAsNonRoot rot FIXED + S1 guard added; harness STILL NOT green (PR #94; NOT
+> a promotion).** The `spec.postgresql.runAsNonRoot` rot was root-caused (an invalid CNPG
+> field the live apply rejects; it was ALSO *required* by a `hardening.rego` rule + mirrored
+> in 4 `cnpg_*` fixtures — all removed), and a static **CR-schema guard**
+> (`ci/kind/crd-schemas/` + `ci/kind/selftest/validate-cr-schemas{,-bite}.sh`, blocking in
+> `infra`) now makes that unknown-field class BITE statically. **BUT the live harness is NOT
+> green:** a separate pre-existing bug (F3) fails the chart apply BEFORE the assertions run —
+> the N6.1 fail-closed residue check counts kubectl PodSecurity `Warning:` lines (on the
+> ADR-0031 packet-capture / seccomp `install-profile` objects) as residue → fail-closed in
+> EVERY run, masked by `continue-on-error`. An earlier "green, 2 consecutive" claim was a
+> `conclusion`-vs-`outcome` reporting error and is **retracted** (always verify the report-step
+> `outcome`, never `conclusion`, for a continue-on-error step). So ADR-0048 §3 Prerequisite A
+> is **NOT** met; the §4 bite cannot run until F3 is fixed and the harness reaches
+> `outcome=success`. Gate remains **HELD**; PR #94 promotes nothing. Detail:
+> `docs/production-audit-2026-07-01/T7-HARNESS-RECOVERY.md` §5.1/§8.
 
 The two negative controls are **representative** and verified to work *in principle*
 against the rendered manifests (the rendered `pg_hba` contains only
