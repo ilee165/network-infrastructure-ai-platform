@@ -9,3 +9,12 @@
 # ci/.gitattributes). Pinning eol=lf keeps the lock LF regardless of the cloner's
 # autocrlf setting, so the gate compares CONTENT, not line endings.
 requirements.lock.txt text eol=lf
+
+# Pin the in-package packet-analysis seccomp profile to LF (ADR-0049 blocker 3).
+# This copy is loaded at runtime by app/engines/packet/executor.py via
+# importlib.resources and MUST stay byte-for-byte identical to the Compose/Helm
+# copies (deploy/docker + deploy/kubernetes/netops/seccomp), which the extended
+# lockstep CI gate compares as raw bytes. deploy/kubernetes's copy is already
+# pinned eol=lf; pin this one the same way so a Windows autocrlf clone cannot
+# materialize CRLF and silently break the byte-for-byte lockstep.
+app/engines/packet/seccomp/*.json text eol=lf

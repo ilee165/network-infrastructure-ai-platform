@@ -69,6 +69,12 @@ dependencies = [
     "pysnmp",
     # Declarative compliance policies (M4, ADR-0018): YAML rule documents
     "pyyaml",
+    # Packet-analysis self-confining executor (ADR-0049): libseccomp Python
+    # binding. Linux-only (the child confines itself with a seccomp filter parsed
+    # from the strict ADR-0031 profile); the import is guarded so the Windows /
+    # eager unit suite never loads it, and it is only pulled into the
+    # packet-analysis image stage (ADR-0049 blocker 7), never the api/worker image.
+    "pyseccomp; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
@@ -177,6 +183,9 @@ module = [
     "ntc_templates.*",
     "pgvector.*",
     "pysnmp.*",
+    # libseccomp Python binding (ADR-0049): Linux-only, no type stubs, imported
+    # lazily in app.engines.packet.executor only on the enforced (Linux) path.
+    "seccomp.*",
     "textfsm.*",
     "yaml.*",
 ]

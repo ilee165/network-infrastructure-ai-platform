@@ -231,6 +231,22 @@ class Settings(BaseSettings):
     #: unit-test/CI runner where the sandbox OS controls are not applied.
     packet_sandbox_posture_enforced: bool = True
 
+    #: packet-analysis executor-split sandbox tuning (ADR-0049). The dispatcher
+    #: forwards these to the self-confining ``python -m app.engines.packet.executor``
+    #: child, which applies them as rlimits BEFORE loading the seccomp filter (fail
+    #: closed). ``RLIMIT_CPU`` is derived from ``packet_analysis_timeout_seconds``
+    #: (the wedged-tshark backstop) and ``RLIMIT_CORE`` is fixed at 0, so neither is
+    #: exposed here. ``deny_action`` selects the child's seccomp default action:
+    #: ``"errno"`` (v1 — a denied syscall returns ``EPERM``) or ``"kill_process"``
+    #: (``SCMP_ACT_KILL_PROCESS``, SIGSYS-kill — the follow-up once the Linux
+    #: green-path is proven on CI; ADR-0049 blocker 8). Defaults mirror the
+    #: fallbacks in ``app.engines.packet.executor``.
+    packet_sandbox_rlimit_as_bytes: int = 2 * 1024 * 1024 * 1024
+    packet_sandbox_rlimit_fsize_bytes: int = 64 * 1024 * 1024
+    packet_sandbox_rlimit_nofile: int = 256
+    packet_sandbox_rlimit_nproc: int = 64
+    packet_sandbox_seccomp_deny_action: str = "errno"
+
     #: pcap-retention beat schedule (ADR-0023 §4): the UTC hour/minute the
     #: ``packet.purge_expired`` task fires at. Default 03:00 UTC.
     pcap_retention_hour: int = 3
