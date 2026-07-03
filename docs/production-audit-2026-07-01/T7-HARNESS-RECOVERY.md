@@ -173,10 +173,27 @@ errors on that field; the S1 `infra` CR-schema gate is genuinely green (a requir
 Prerequisite A reliability bar is **NOT** met, and the §4 bite could not run (a planted
 regression produced the *same* apply failure, not an assertion bite; the plant was reverted).
 
-**Fix (proposed):** tolerate `^Warning:` in the `kind-harness.sh` N6.1 residue check (a
-kubectl warning never sets the apply exit code, so it must never count as a failure), then
-re-run and confirm the harness reaches green via the report-step **`outcome`** (never
-`conclusion`).
+**F3 fixed + verified (`f9be281`, run 28657382053).** `^Warning:` is now tolerated in the
+residue check; the P2 apply is tolerated ("scaffold continues") and the harness **reached its
+assertions for the first time on any runner**. Verifying via the report-step `outcome` (not
+`conclusion`) then surfaced **two more distinct, pre-existing failures** — the live harness has
+apparently never passed end-to-end (F3/F4/F5 accumulated silently under `continue-on-error`):
+
+- **F4 — P2 positive assertions fail (`outcome=failure`).** The *deny* paths pass (plaintext
+  refused, wrong-CA refused, arbitrary external egress blocked) but two *positive* paths fail:
+  the **valid-cert mTLS handshake** to `netops-postgres` fails (should succeed), and the
+  **worker→`netops-postgres:5432` in-cluster egress is BLOCKED** (should be allowed). Most
+  likely the P2 path runs the assertions immediately after apply with **no readiness gate**
+  (the HA path has `wait-ha-ready.sh`; the P2 path does not), so postgres is not yet reachable
+  when the positive probes run. Needs deeper diagnosis (readiness wait vs. cert/deploy).
+- **F5 — HA apply still fails-closed.** The N6.1 good-apply grep pattern does **not** include
+  the CNPG/KEDA CR kinds, so the successful applies `cluster.postgresql.cnpg.io/…`,
+  `pooler.postgresql.cnpg.io/…`, `scaledobject.keda.sh/…`, `triggerauthentication.keda.sh/…`
+  are counted as residue → the HA chart apply fails-closed before the HA-readiness gate +
+  assertions. Fix: add those kinds to the good-apply pattern.
+
+Per the session's "fix F3, verify, then hold" decision, no further harness changes were made
+after F3. The harness is **NOT green**; F4 + F5 remain.
 
 ---
 
