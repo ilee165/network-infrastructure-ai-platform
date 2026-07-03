@@ -1,6 +1,52 @@
 # ADR-0048: kind-harness Gate Promotion — mTLS-Handshake + Collector-Egress-Deny Live Assertions → Blocking in `all-gates`
 
-**Status:** Proposed | **Date:** 2026-06-29 | **Milestone:** P3 W0
+**Status:** Rejected (2026-07-03, audit-W2 T7) | **Date:** 2026-06-29 | **Milestone:** P3 W0
+
+## Rejection (2026-07-03, audit-W2 T7)
+
+**This ADR is Rejected — the promotion will NOT be pursued.** The two controls stay
+signal-only; the live `kind-harness` / `kind-harness-ha` jobs are made **opt-in**
+(label `ci-kind` / manual dispatch, `.github/workflows/ci.yml`), silenced on ordinary
+PRs. The rest of the ADR below is retained as historical context for the decision.
+
+**Why.** The audit-W2 T7 recovery fixed the harness enough to actually reach its live
+assertions for the first time (F1/F3/F5 + a non-HA Postgres readiness gate), which
+exposed that the harness applies the **whole production chart** into a bare kind
+cluster and cannot reach green without booting a slice of the entire platform:
+
+- The platform's own images (`netops-backend:*`, `netops-frontend:*`) are not loaded
+  into the kind node → `ImagePullBackOff` for api / worker / frontend and every
+  backup/drill Job.
+- The hardened Postgres StatefulSet never reaches `Ready` (init-container / restricted-
+  PSC first-boot) and Neo4j crash-loops — so even the two G-SEC assertions (which only
+  need Postgres up) cannot run.
+
+**Why it isn't worth fixing.** The two controls this ADR would promote — mTLS
+plaintext/wrong-CA refusal (ADR-0039) and the collector default-deny egress
+(ADR-0041) — are already (1) **enforced at runtime** in any real deployment (the chart
+renders them), and (2) **protected by BLOCKING static/manifest gates on every PR**: the
+`infra` job's `conftest pg_hba weak-hostssl` bite rejects exactly the pg_hba weakening
+§4 would plant, plus the render-twice L4 guard, the CR-schema guard, and the
+`drill-bite-proofs` job (all in `all-gates`). The live promotion adds only the marginal
+guarantee that the CNI *physically* enforces and Postgres *physically* refuses plaintext
+— belt-and-suspenders against upstream CNI/Postgres misbehaviour, not against a code
+change. That does not justify a **permanent ~20-min flaky blocking gate on the critical
+merge path** plus the ongoing cost of keeping the whole hardened platform booting in
+kind (this ADR's own "Negative" consequences + Prerequisite A flakiness risk). The gate
+was deferred three times (P2→P3→W5→here); rather than carry it indefinitely, Reject it.
+
+**What is kept.** The audit-W2 T7 harness hardening lands regardless — it improves the
+(now opt-in) signal-only harness and its BLOCKING cluster-free bite proofs: F5 (CNPG/KEDA
+CR kinds added to the good-apply residue check so the HA apply no longer fails closed),
+F4 (a non-HA Postgres readiness gate + a deterministic `HA=1` tier gate on the
+reduced-scale drills so they no longer fail-open on the P2 tier; the `drill-bite-proofs`
+set `HA=1`), and a failure-diagnostics dump. `validate-harness.sh` and the five
+`drill-bite-proofs` stay BLOCKING on every PR.
+
+**Superseding note.** If a future milestone wants live CNI/mTLS enforcement in CI, the
+scoped path is a *narrowed* harness that applies only Postgres + the two
+NetworkPolicy/mTLS objects + the probe pods (not the whole chart), with the app images
+`kind load`ed — that would be a **new ADR**, not this one.
 
 ## Context
 

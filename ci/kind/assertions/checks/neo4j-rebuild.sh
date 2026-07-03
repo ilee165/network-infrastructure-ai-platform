@@ -107,6 +107,22 @@ echo "   reduced scale: fixed seeded inventory (2 devices + interfaces/link/rout
 echo "   certified-scale topology-RTO (< 30 min @ 5,000 devices, G-REL §317) is NAMED" \
      "deferred-accepted -> GA (ADR-0047 §4) — NOT claimed here."
 
+# --- tier gate: HA-only drill — SKIP unless this is the HA harness (HA=1) --------
+# Every reduced-scale reliability/scale drill in this dir asserts ONLY on the HA
+# topology (kind-harness.sh run with HA=1). The harness EXPORTS HA, so gate on it
+# FIRST — one deterministic, timing-independent tier signal for all drills.
+# Historically each drill self-detected its tier by probing for a workload's
+# PRESENCE; that is tier-AMBIGUOUS on the P2 harness (which still renders the
+# api/neo4j/worker single-instance workloads) and TIMING-fragile for pod-Running
+# probes — it fails-open or skips only by luck (audit-W2 T7 F4). The per-tier object
+# check below stays as a secondary graceful-skip under HA=1.
+if [ "${HA:-0}" != "1" ]; then
+  echo "SKIP: non-HA harness run (HA!=1) — this reduced-scale HA drill asserts only"
+  echo "      under HA=1 (the kind-harness-ha topology). Nothing to drill on the P2"
+  echo "      run (loud SKIP, never a false-green pass)."
+  exit 0
+fi
+
 # --- precondition: a Neo4j StatefulSet must be present, else SKIP LOUDLY --------
 # On a NON-HA / no-Neo4j harness run there is no graph to destroy/rebuild. Assert
 # nothing rather than read a missing store as a pass (a silent no-op is a

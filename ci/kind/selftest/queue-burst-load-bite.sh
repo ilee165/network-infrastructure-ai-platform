@@ -214,6 +214,10 @@ run_scenario() {
   local log="${WORK}/scenario.log"
   (
     export PATH="${FAKE_BIN}:${PATH}"
+    # The bite SIMULATES the HA harness (the fake kubectl on PATH serves the HA
+    # topology). The drill's HA!=1 tier gate must see HA=1 so it RUNS and BITES here
+    # instead of skipping as a non-HA run (audit-W2 T7 F4).
+    export HA=1
     export FAKE_STATE="${state}"
     export CHART_NS="netops"
     # keep the drill fast + deterministic (tiny windows / load).

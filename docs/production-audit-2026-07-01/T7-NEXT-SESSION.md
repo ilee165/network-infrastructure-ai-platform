@@ -1,5 +1,15 @@
 # T7 — Next-Session Handoff (resume the kind-harness gate promotion)
 
+> **SUPERSEDED — DO NOT RESUME (2026-07-03, audit-W2 T7).** The kind-harness gate
+> promotion is **REJECTED** (ADR-0048 Status: Rejected). The live harness cannot reach
+> green without booting a slice of the whole platform in kind, and the two controls are
+> already protected by BLOCKING static gates; the live `kind-harness` / `kind-harness-ha`
+> jobs are now **opt-in** (label `ci-kind` / manual dispatch). The F4/F5 fixes + failure
+> diagnostics this doc scoped WERE applied (they harden the opt-in signal-only harness);
+> the §4 bite and the §2 promotion described below are **not to be executed**. Retained
+> only as historical context — see ADR-0048 "Rejection" + `docs/runbooks/kind-harness.md`
+> "Gate status".
+
 Single source of truth for resuming the audit-W2 **T7** work. Full analysis:
 `docs/production-audit-2026-07-01/T7-HARNESS-RECOVERY.md`. Memory: `[[t7-harness-recovery]]`.
 

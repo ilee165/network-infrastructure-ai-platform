@@ -351,6 +351,30 @@ grep_must "${HARNESS}" 'bash "\$\{HA_WAIT_READY\}"' \
   "harness gates on HA readiness when HA=1, before running assertions (L5 — no half-up ready)"
 grep_must "${HARNESS}" '\-f "\$\{HA_VALUES\}"' \
   "harness layers the reduced-scale HA overlay via helm -f when HA=1"
+
+# --- audit-W2 T7 F4: non-HA readiness gate + deterministic drill tier gate --------
+# The promotion-scope P2 (non-HA) assertions dial netops-postgres:5432 (the W4-T4
+# mTLS handshake + the W4-T5 worker->pg ALLOW-egress) and MUST run against a READY
+# Postgres; and the HA-only reliability/scale drills MUST skip on the P2 run
+# DETERMINISTICALLY (not by pod-timing luck). Both regressed the live harness to red
+# before F4; lock them — this gate is being promoted to blocking (ADR-0048 §2).
+grep_must "${HARNESS}" 'if \[ "\$\{HA\}" != "1" \]; then' \
+  "harness runs the non-HA readiness branch only when HA!=1 (the HA path uses wait-ha-ready) (F4)"
+grep_must "${HARNESS}" 'rollout status "statefulset/\$\{PG_STS\}"' \
+  "harness gates the NON-HA path on Postgres StatefulSet readiness BEFORE the G-SEC assertions (F4)"
+grep_must "${HARNESS}" 'export ASSERT_LOG_DIR CHART_NS SELFTEST_NS PROBE_HOST PROBE_PORT HA' \
+  "harness EXPORTS HA to the assertion-runner so the HA-only drills gate on it deterministically (F4)"
+# Every HA-only drill SKIPS unless HA=1 — a uniform, timing-independent tier gate (a
+# check that keyed off incidental workload PRESENCE fell through on the P2 tier).
+for _ha_drill in pg-failover neo4j-rebuild worker-kill-idempotency queue-burst-load compressed-soak; do
+  grep_must "${CHECKS_DIR}/${_ha_drill}.sh" 'if \[ "\$\{HA:-0\}" != "1" \]; then' \
+    "HA-only drill ${_ha_drill}.sh SKIPS unless HA=1 (deterministic tier gate, F4)"
+done
+# The 2 G-SEC checks assert on BOTH tiers (P2 + HA) and must NOT carry the HA gate.
+grep_must_not "${CHECKS_DIR}/mtls-postgres.sh" 'HA:-0' \
+  "the W4-T4 mTLS G-SEC check is NOT HA-gated (it asserts on BOTH the P2 and HA tiers) (F4)"
+grep_must_not "${CHECKS_DIR}/collector-egress.sh" 'HA:-0' \
+  "the W4-T5 collector-egress G-SEC check is NOT HA-gated (it asserts on BOTH tiers) (F4)"
 # The HA operator install must run AFTER the CNI self-test passes (HA does not
 # weaken the enforcing-CNI guarantee) and BEFORE the chart apply (CRDs first).
 selftest_pass_line="$(grep -n 'CNI self-test PASSED' "${HARNESS}" | head -1 | cut -d: -f1 || true)"

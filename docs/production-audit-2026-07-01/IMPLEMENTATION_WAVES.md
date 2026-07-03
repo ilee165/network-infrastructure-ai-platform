@@ -53,7 +53,7 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 4. Security headers in base `deploy/docker/nginx.conf` (PRODUCTION_READINESS #4) — CSP starts `Report-Only`, flipped to enforcing after smoke.
 5. Tighten CORS to enumerated methods/headers (PRODUCTION_READINESS #9).
 6. Pin compose data-tier image tags (PRODUCTION_READINESS #8).
-7. Execute the held W4-T2 bite proof and promote the live kind-harness gates: drop `continue-on-error`, join `all-gates` (PRODUCTION_READINESS #1).
+7. ~~Execute the held W4-T2 bite proof and promote the live kind-harness gates.~~ **DROPPED (2026-07-03, audit-W2 T7 — ADR-0048 Rejected):** the live kind harness cannot reach green without booting a slice of the whole platform in kind, and the two controls are already protected by blocking static gates; the live jobs are now opt-in (`ci-kind` label / manual dispatch). See ADR-0048 "Rejection" (PRODUCTION_READINESS #1 → WONTFIX).
 
 **Files affected (~16):**
 - `frontend/src/components/ErrorBoundary.tsx` (new), `frontend/src/App.tsx`, `frontend/src/__tests__/ErrorBoundary.test.tsx` (new)

@@ -116,6 +116,22 @@ echo "   reduced scale: CNPG instances=3 (1 primary + 2 replicas, ADR-0042 §1 q
 echo "   certified-scale failover (G-REL §318 backups-only DR RPO<=5m/RTO<=1h; 30-day soak)" \
      "is NAMED deferred-accepted -> GA (ADR-0047 §4) — NOT claimed here."
 
+# --- tier gate: HA-only drill — SKIP unless this is the HA harness (HA=1) --------
+# Every reduced-scale reliability/scale drill in this dir asserts ONLY on the HA
+# topology (kind-harness.sh run with HA=1). The harness EXPORTS HA, so gate on it
+# FIRST — one deterministic, timing-independent tier signal for all drills.
+# Historically each drill self-detected its tier by probing for a workload's
+# PRESENCE; that is tier-AMBIGUOUS on the P2 harness (which still renders the
+# api/neo4j/worker single-instance workloads) and TIMING-fragile for pod-Running
+# probes — it fails-open or skips only by luck (audit-W2 T7 F4). The per-tier object
+# check below stays as a secondary graceful-skip under HA=1.
+if [ "${HA:-0}" != "1" ]; then
+  echo "SKIP: non-HA harness run (HA!=1) — this reduced-scale HA drill asserts only"
+  echo "      under HA=1 (the kind-harness-ha topology). Nothing to drill on the P2"
+  echo "      run (loud SKIP, never a false-green pass)."
+  exit 0
+fi
+
 # --- precondition: a CNPG Cluster must be present, else SKIP LOUDLY -------------
 # On a NON-HA harness run (no CNPG operator / Cluster) there is no failover to
 # drill. Assert nothing rather than read a missing cluster as a pass (a silent
