@@ -203,8 +203,9 @@ re-validating the platform should know:
 - **Compose needs `--env-file .env`.** With `-f deploy/docker/...` the neo4j
   credential is interpolated from the compose dir/shell, not the root `.env`;
   omitting it starts neo4j with the wrong password.
-- **`alembic upgrade head` is a required first-run step** (revisions `0001`→`0010`
-  exist) and seeds the bootstrap `admin` from `NETOPS_ADMIN_PASSWORD` (insecure
+- **`alembic upgrade head` is a required first-run step** (migrations are
+  sequential — `upgrade head` applies the whole `0001`-onward chain) and seeds
+  the bootstrap `admin` from `NETOPS_ADMIN_PASSWORD` (insecure
   `admin`/`admin` default + warning when unset). `NETOPS_ADMIN_PASSWORD` is read
   by the migration, not `config.py` — the one documented exception to the
   `.env.example` ↔ `config.py` 1:1 rule.
