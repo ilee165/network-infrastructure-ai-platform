@@ -14,12 +14,15 @@ Four tasks, routed to the ``packet`` queue by name prefix:
   EOS ``monitor capture`` CLI, retrieves the pcap to the volume, hashes it, and
   persists ``pcap_metadata``.
 
-- ``packet.analyze_capture`` — **sandboxed** tshark analysis: reads the pcap
-  **read-only**, runs tshark via an argv list (``shell=False``, ``-n``, validated
-  display filter, hard timeout — :mod:`app.engines.packet.sandbox`), and stores
-  normalized findings. This task holds **no credentials** and needs **no egress**;
-  the OS sandbox (dropped caps, non-root, RO mount, limits) is the deployment's
-  job — see ADR-0023 §1 and the dedicated ``packet``-analysis worker class.
+- ``packet.analyze_capture`` — **executor-split** sandboxed tshark analysis
+  (ADR-0049): the dispatcher spawns a short-lived, self-confining
+  ``python -m app.engines.packet.executor`` child (``run_executor``) that parses
+  the untrusted pcap under a strict seccomp filter + rlimits and normalizes
+  IN-process, so the dispatcher only ever handles small, schema-shaped findings —
+  never raw pcap-derived bytes. It holds **no credentials** and needs **no
+  egress**; the enforcement-off dev/unit path stays in-process. The OS sandbox
+  (dropped caps, non-root, RO mount, limits) is the deployment's job — see
+  ADR-0023 §1 / ADR-0031 / ADR-0049 and the dedicated ``packet_analysis`` queue.
 
 - ``packet.purge_expired`` — Celery-beat retention job (ADR-0023 §4): finds
   captures past ``retention_expires_at``, deletes each pcap **file** from the
@@ -68,6 +71,7 @@ from app.engines.packet import (
     expired_capture_ids,
     ingest_capture,
     pcap_path_for,
+    run_executor,
     tombstone_capture,
 )
 from app.engines.packet.capture import sha256_file
@@ -158,7 +162,32 @@ def _assert_posture(settings: Settings) -> None:
 
 
 def _analyze_pcap(path: str, *, display_filter: str | None, settings: Settings) -> PacketFindings:
-    """Run the sandboxed tshark analysis (seam: mocked in tests)."""
+    """Run the sandboxed tshark analysis (seam: mocked in tests).
+
+    ADR-0049 executor-split: when the sandbox posture is enforced (the deployed
+    default) the analysis runs in the confined executor CHILD — ``run_executor``
+    spawns ``python -m app.engines.packet.executor``, which self-confines
+    (seccomp/rlimits/no-new-privs), parses the untrusted pcap, and normalizes
+    IN-process, so this dispatcher only ever receives small, schema-shaped
+    findings and never ``json.loads`` raw tshark output. When enforcement is off
+    (the eager unit-test / Windows-dev runner, where the OS sandbox controls are
+    absent) it falls back to the in-process :func:`analyze_pcap`. The choice is
+    keyed ONLY on ``packet_sandbox_posture_enforced`` — never on runtime detection
+    (ADR-0049 blocker 1, fail closed).
+    """
+    if settings.packet_sandbox_posture_enforced:
+        return run_executor(
+            path,
+            display_filter=display_filter,
+            tshark_bin=settings.tshark_bin,
+            timeout_seconds=settings.packet_analysis_timeout_seconds,
+            rlimit_as_bytes=settings.packet_sandbox_rlimit_as_bytes,
+            rlimit_fsize_bytes=settings.packet_sandbox_rlimit_fsize_bytes,
+            rlimit_nofile=settings.packet_sandbox_rlimit_nofile,
+            rlimit_nproc=settings.packet_sandbox_rlimit_nproc,
+            deny_action=settings.packet_sandbox_seccomp_deny_action,
+            max_output_bytes=settings.packet_findings_max_bytes,
+        )
     return analyze_pcap(
         path,
         display_filter=display_filter,
@@ -545,11 +574,14 @@ async def _load_ssh_context(device_id: UUID) -> _EosCaptureContext:
 def analyze_capture(capture_id: str, display_filter: str | None = None) -> dict[str, Any]:
     """Analyze a stored pcap under the tshark sandbox; return normalized findings.
 
-    Reads the pcap **read-only** and runs tshark via the sandbox (argv list,
-    ``shell=False``, ``-n``, validated display filter, hard timeout). Returns the
-    normalized findings (top talkers, protocol hierarchy, TCP anomalies) — never
-    raw packet bytes (ADR-0023 §1). A rejected filter or a sandbox failure is
-    audited and returned as ``ok=False``.
+    ADR-0049 executor-split: on the enforced tier the dispatcher spawns the
+    self-confining executor child (``run_executor``) to parse the pcap and
+    normalize inside the sandbox; the enforcement-off dev/unit path runs the
+    analysis in-process. Either way the task returns only the normalized findings
+    (top talkers, protocol hierarchy, TCP anomalies) — never raw packet bytes
+    (ADR-0023 §1). A rejected filter, a nonzero executor exit, an oversized/invalid
+    child output, or any sandbox failure is audited and returned as ``ok=False``
+    (no exception escapes the task).
     """
     settings = _settings()
     cap_uuid = uuid.UUID(capture_id)

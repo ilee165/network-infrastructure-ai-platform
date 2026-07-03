@@ -247,6 +247,16 @@ class Settings(BaseSettings):
     packet_sandbox_rlimit_nproc: int = 64
     packet_sandbox_seccomp_deny_action: str = "errno"
 
+    #: Hard cap on the bytes the dispatcher reads from the executor child's stdout
+    #: (ADR-0049 marshalling must-address). The child prints only a small,
+    #: findings-shaped ``PacketFindings`` JSON, but a popped dissector could emit
+    #: arbitrary output, so the dispatcher bounds it at a TIGHT findings-sized
+    #: limit — deliberately NOT the 64 MB raw-tshark cap the child applies to
+    #: tshark's own output — and pydantic-validates the result (list/string caps)
+    #: before anything reaches the DB / audit / API. Default 256 KiB: ~50x the
+    #: largest realistic findings document, ~256x below the raw cap.
+    packet_findings_max_bytes: int = 256 * 1024
+
     #: pcap-retention beat schedule (ADR-0023 §4): the UTC hour/minute the
     #: ``packet.purge_expired`` task fires at. Default 03:00 UTC.
     pcap_retention_hour: int = 3

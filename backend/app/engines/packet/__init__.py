@@ -49,6 +49,8 @@ from app.engines.packet.sandbox import (
     SandboxError,
     analyze_pcap,
     build_tshark_argv,
+    parse_executor_findings,
+    run_executor,
 )
 
 __all__ = [
@@ -70,7 +72,9 @@ __all__ = [
     "build_tshark_argv",
     "expired_capture_ids",
     "ingest_capture",
+    "parse_executor_findings",
     "pcap_path_for",
+    "run_executor",
     "summarize_packets",
     "tombstone_capture",
     "validate_capture_filter",

@@ -15,16 +15,20 @@ tshark itself is mocked — no binary, no real pcap, no network.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from typing import Any
 
 import pytest
 
 from app.engines.packet import (
+    Conversation,
     FilterValidationError,
+    PacketFindings,
     SandboxError,
     analyze_pcap,
     build_tshark_argv,
+    sandbox,
     validate_capture_filter,
 )
 
@@ -195,3 +199,210 @@ def test_analyze_pcap_unparseable_output_becomes_sandbox_error(
     monkeypatch.setattr(subprocess, "run", _Recorder(stdout=b"not json"))
     with pytest.raises(SandboxError):
         analyze_pcap("/data/pcaps/cap.pcap")
+
+
+# ---------------------------------------------------------------------------
+# run_executor — the ADR-0049 dispatcher: spawn + reap the CONFINED child
+# ---------------------------------------------------------------------------
+
+_EXECUTOR_KWARGS: dict[str, Any] = {
+    "tshark_bin": "tshark",
+    "timeout_seconds": 5,
+    "rlimit_as_bytes": 111,
+    "rlimit_fsize_bytes": 222,
+    "rlimit_nofile": 33,
+    "rlimit_nproc": 8,
+    "deny_action": "errno",
+    "max_output_bytes": 64 * 1024,
+}
+
+
+class _FakeProc:
+    """A stand-in for the spawned executor child (no real subprocess)."""
+
+    def __init__(
+        self, *, stdout: bytes = b"{}", returncode: int = 0, timeout: bool = False
+    ) -> None:
+        self._stdout = stdout
+        self._timeout = timeout
+        self.returncode: int | None = None if timeout else returncode
+        self.pid = 4242
+        self.input_seen: bytes | None = None
+        self.communicate_calls = 0
+        self.kill_called = False
+
+    def communicate(self, input: bytes | None = None, timeout: float | None = None) -> Any:
+        self.communicate_calls += 1
+        if input is not None:
+            self.input_seen = input
+        if self._timeout and self.communicate_calls == 1:
+            raise subprocess.TimeoutExpired(cmd="executor", timeout=timeout)
+        if self.returncode is None:
+            self.returncode = 0
+        return self._stdout, b""
+
+    def kill(self) -> None:
+        self.kill_called = True
+
+
+class _PopenRecorder:
+    """Records how subprocess.Popen was called and returns a :class:`_FakeProc`."""
+
+    def __init__(
+        self, *, stdout: bytes = b"{}", returncode: int = 0, timeout: bool = False
+    ) -> None:
+        self._stdout = stdout
+        self._returncode = returncode
+        self._timeout = timeout
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, argv: Any, **kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(stdout=self._stdout, returncode=self._returncode, timeout=self._timeout)
+        self.calls.append({"argv": argv, "kwargs": kwargs, "proc": proc})
+        return proc
+
+
+def test_run_executor_spawns_confined_child_with_minimal_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dispatcher spawns `python -m app.engines.packet.executor` with an env
+    allowlist that carries NO NETOPS_* secret material, close_fds, and its own
+    session — and marshals the pinned request (enforced + settings) on stdin."""
+    monkeypatch.setenv("NETOPS_SECRET_KEY", "super-secret")
+    monkeypatch.setenv("NETOPS_DATABASE_URL", "postgresql://netops:netops@pg/netops")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    recorder = _PopenRecorder(stdout=PacketFindings(packet_count=7).model_dump_json().encode())
+    monkeypatch.setattr(sandbox.subprocess, "Popen", recorder)
+
+    findings = sandbox.run_executor("/data/pcaps/cap.pcap", display_filter=None, **_EXECUTOR_KWARGS)
+
+    assert findings.packet_count == 7
+    call = recorder.calls[0]
+    # spawns the executor MODULE (delegates the pcap parse to the child).
+    assert call["argv"] == [sandbox.sys.executable, "-m", "app.engines.packet.executor"]
+    env = call["kwargs"]["env"]
+    assert not any(key.startswith("NETOPS_") for key in env)  # blocker 2 (no secrets)
+    assert "PATH" in env
+    # blocker 2 (close_fds not disabled) + blocker 4 (own session for group kill).
+    assert call["kwargs"]["close_fds"] is True
+    assert call["kwargs"]["start_new_session"] is True
+    # the pinned request rides on stdin: enforced true + the forwarded settings.
+    request = json.loads(call["proc"].input_seen or b"{}")
+    assert request["enforced"] is True
+    assert request["pcap_path"] == "/data/pcaps/cap.pcap"
+    assert request["rlimit_as_bytes"] == 111
+    assert request["deny_action"] == "errno"
+    assert request["tshark_bin"] == "tshark"
+
+
+def test_run_executor_never_reuses_the_64mb_raw_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dispatcher caps the child's stdout at the TIGHT findings bound passed in
+    (KB-scale), not the 64 MB raw-tshark cap — an oversized child output fails."""
+    oversized = b'{"packet_count":0,"junk":"' + b"x" * 5000 + b'"}'
+    recorder = _PopenRecorder(stdout=oversized)
+    monkeypatch.setattr(sandbox.subprocess, "Popen", recorder)
+    kwargs = {**_EXECUTOR_KWARGS, "max_output_bytes": 1024}
+    with pytest.raises(SandboxError):
+        sandbox.run_executor("/data/pcaps/cap.pcap", **kwargs)
+
+
+def test_run_executor_nonzero_exit_maps_to_sandbox_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nonzero executor exit becomes a SandboxError whose message is the STATIC
+    reason + code — never the child's stderr / raw bytes."""
+    recorder = _PopenRecorder(stdout=b"", returncode=70)  # CONFINEMENT_SETUP_FAILED
+    monkeypatch.setattr(sandbox.subprocess, "Popen", recorder)
+    with pytest.raises(SandboxError) as excinfo:
+        sandbox.run_executor("/data/pcaps/cap.pcap", **_EXECUTOR_KWARGS)
+    message = str(excinfo.value)
+    assert "70" in message
+    assert "confinement setup failed" in message
+
+
+def test_run_executor_timeout_kills_whole_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On the outer timeout the WHOLE process group is SIGKILLed (blocker 4) so a
+    wedged/popped tshark grandchild cannot outlive the bound."""
+    killed: dict[str, int] = {}
+    monkeypatch.setattr(sandbox.os, "getpgid", lambda pid: 9191, raising=False)
+    monkeypatch.setattr(
+        sandbox.os, "killpg", lambda pgid, sig: killed.update(pgid=pgid, sig=sig), raising=False
+    )
+    recorder = _PopenRecorder(timeout=True)
+    monkeypatch.setattr(sandbox.subprocess, "Popen", recorder)
+
+    with pytest.raises(SandboxError):
+        sandbox.run_executor(
+            "/data/pcaps/slow.pcap", **{**_EXECUTOR_KWARGS, "timeout_seconds": 0.1}
+        )
+
+    assert killed == {"pgid": 9191, "sig": sandbox._SIGKILL}
+
+
+# ---------------------------------------------------------------------------
+# _child_env — the minimal allowlist (ADR-0049 blocker 2)
+# ---------------------------------------------------------------------------
+
+
+def test_child_env_excludes_netops_and_keeps_locale(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NETOPS_SECRET_KEY", "x")
+    monkeypatch.setenv("NETOPS_REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    env = sandbox._child_env()
+    assert not any(key.startswith("NETOPS_") for key in env)
+    assert env["PATH"] == "/usr/bin"
+    assert env.get("LC_ALL") == "C.UTF-8"
+
+
+# ---------------------------------------------------------------------------
+# parse_executor_findings — marshalling: bound what the (untrusted) child emits
+# ---------------------------------------------------------------------------
+
+
+def test_parse_executor_findings_accepts_valid_findings() -> None:
+    raw = (
+        PacketFindings(
+            packet_count=5,
+            top_talkers=[Conversation(src="10.0.0.1", dst="10.0.0.2", packets=3, bytes=240)],
+        )
+        .model_dump_json()
+        .encode()
+    )
+    out = sandbox.parse_executor_findings(raw, max_bytes=64 * 1024)
+    assert out.packet_count == 5
+    assert out.top_talkers[0].src == "10.0.0.1"
+
+
+def test_parse_executor_findings_rejects_oversized_output() -> None:
+    with pytest.raises(SandboxError):
+        sandbox.parse_executor_findings(b'{"packet_count":0}', max_bytes=4)
+
+
+def test_parse_executor_findings_rejects_unparseable_output() -> None:
+    with pytest.raises(SandboxError):
+        sandbox.parse_executor_findings(b"not json {", max_bytes=64 * 1024)
+
+
+def test_parse_executor_findings_rejects_overlong_list() -> None:
+    """A popped child that emits an unbounded talker list is rejected (list cap)."""
+    payload = {
+        "packet_count": 0,
+        "top_talkers": [{"src": "a", "dst": "b", "packets": 1, "bytes": 1} for _ in range(2000)],
+    }
+    raw = json.dumps(payload).encode()
+    with pytest.raises(SandboxError):
+        sandbox.parse_executor_findings(raw, max_bytes=10 * 1024 * 1024)
+
+
+def test_parse_executor_findings_rejects_overlong_string() -> None:
+    """A popped child that emits an unbounded string field is rejected (string cap)."""
+    payload = {
+        "packet_count": 0,
+        "top_talkers": [{"src": "x" * 500, "dst": "b", "packets": 1, "bytes": 1}],
+    }
+    raw = json.dumps(payload).encode()
+    with pytest.raises(SandboxError):
+        sandbox.parse_executor_findings(raw, max_bytes=64 * 1024)

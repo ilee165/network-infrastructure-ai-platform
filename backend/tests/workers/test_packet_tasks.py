@@ -26,7 +26,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.engines.packet import PacketFindings
+from app.engines.packet import PacketFindings, sandbox
 from app.engines.packet.filters import FilterValidationError
 from app.engines.packet.sandbox import SandboxError
 from app.models import AuditLog, Base, PcapMetadata
@@ -502,6 +502,125 @@ def test_analyze_capture_refuses_when_posture_check_fails(
     assert spawned == []  # tshark never spawned — failed closed
     actions = {a.action for a in _fetch_all(db_url, AuditLog)}
     assert "packet.analysis_failed" in actions
+
+
+# ---------------------------------------------------------------------------
+# packet.analyze_capture — ADR-0049 executor-split dispatch (spawn vs in-process)
+# ---------------------------------------------------------------------------
+
+
+class _FakeChild:
+    """A stand-in for the spawned confined executor child (no real subprocess)."""
+
+    def __init__(self, *, stdout: bytes, returncode: int = 0) -> None:
+        self._stdout = stdout
+        self.returncode: int | None = returncode
+        self.pid = 4242
+
+    def communicate(self, input: bytes | None = None, timeout: float | None = None) -> Any:
+        return self._stdout, b""
+
+    def kill(self) -> None:  # pragma: no cover - only on the timeout path
+        pass
+
+
+def test_analyze_capture_enforced_spawns_confined_executor(
+    eager_celery: None, db_url: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With posture enforcement ON, the dispatcher runs analysis in the confined
+    executor CHILD (spawn) — not in-process — and records the validated findings.
+
+    The child is stubbed at ``subprocess.Popen`` so no real process/tshark runs;
+    what is pinned is that the dispatcher spawns ``-m app.engines.packet.executor``
+    with a NETOPS_*-free env and audits the completion (blockers 1/2)."""
+    settings = tasks._settings()
+    monkeypatch.setattr(settings, "pcap_dir", tmp_path)
+    monkeypatch.setattr(settings, "packet_sandbox_posture_enforced", True)
+    monkeypatch.setenv("NETOPS_SECRET_KEY", "super-secret")
+    # Pre-flight posture backstop: the eager runner has none of the OS controls,
+    # so neutralize the dispatcher's own check (ADR-0031 §2) — the child re-checks.
+    monkeypatch.setattr(tasks, "_assert_posture", lambda settings: None)
+
+    seen: dict[str, Any] = {}
+
+    def _fake_popen(argv: Any, **kwargs: Any) -> _FakeChild:
+        seen["argv"] = argv
+        seen["env"] = kwargs.get("env")
+        return _FakeChild(
+            stdout=PacketFindings(packet_count=11, tcp_resets=1).model_dump_json().encode()
+        )
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", _fake_popen)
+
+    result = tasks.analyze_capture(str(uuid.uuid4()))
+
+    assert result["ok"] is True
+    assert result["findings"]["packet_count"] == 11
+    assert seen["argv"][1:] == ["-m", "app.engines.packet.executor"]
+    assert not any(key.startswith("NETOPS_") for key in seen["env"])
+    completed = [a for a in _fetch_all(db_url, AuditLog) if a.action == "packet.analysis_completed"]
+    assert completed and completed[0].detail["packet_count"] == 11
+
+
+def test_analyze_capture_enforced_confinement_failure_is_audited(
+    eager_celery: None, db_url: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confinement-setup nonzero exit (blocker 1, fail closed) => ok=False +
+    packet.analysis_failed, and the child's stderr is NEVER re-emitted."""
+    settings = tasks._settings()
+    monkeypatch.setattr(settings, "pcap_dir", tmp_path)
+    monkeypatch.setattr(settings, "packet_sandbox_posture_enforced", True)
+    monkeypatch.setattr(tasks, "_assert_posture", lambda settings: None)
+
+    class _ConfinementFailChild(_FakeChild):
+        def communicate(self, input: bytes | None = None, timeout: float | None = None) -> Any:
+            # A popped/hostile child could dump anything on stderr; the dispatcher
+            # must never surface it verbatim into the audited error.
+            return b"", b"LEAK-TOKEN-do-not-surface"
+
+    monkeypatch.setattr(
+        sandbox.subprocess,
+        "Popen",
+        lambda argv, **kwargs: _ConfinementFailChild(stdout=b"", returncode=70),
+    )
+
+    result = tasks.analyze_capture(str(uuid.uuid4()))
+
+    assert result["ok"] is False
+    assert "LEAK-TOKEN-do-not-surface" not in result["error"]  # no raw child stderr
+    actions = {a.action for a in _fetch_all(db_url, AuditLog)}
+    assert "packet.analysis_failed" in actions
+
+
+def test_analyze_capture_enforcement_off_uses_in_process_fallback(
+    eager_celery: None, db_url: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With enforcement OFF (the eager/Windows-dev path) the dispatcher analyzes
+    IN-PROCESS and never spawns the executor child (blocker 1: choice keyed only on
+    the enforcement flag)."""
+    settings = tasks._settings()
+    monkeypatch.setattr(settings, "pcap_dir", tmp_path)
+    monkeypatch.setattr(settings, "packet_sandbox_posture_enforced", False)
+    monkeypatch.setattr(tasks, "_assert_posture", lambda settings: None)
+
+    def _forbid_spawn(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("enforcement-off path must not spawn the executor child")
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", _forbid_spawn)
+
+    # In-process fallback runs analyze_pcap -> tshark via subprocess.run; stub it.
+    class _Completed:
+        stdout = b"[]"
+        returncode = 0
+
+    monkeypatch.setattr(sandbox.subprocess, "run", lambda argv, **kwargs: _Completed())
+
+    result = tasks.analyze_capture(str(uuid.uuid4()))
+
+    assert result["ok"] is True
+    assert result["findings"]["packet_count"] == 0
+    actions = {a.action for a in _fetch_all(db_url, AuditLog)}
+    assert "packet.analysis_completed" in actions
 
 
 # ---------------------------------------------------------------------------
