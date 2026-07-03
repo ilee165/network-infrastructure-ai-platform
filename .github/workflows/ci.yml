@@ -641,33 +641,59 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # ADR-0031 §3 requires the Compose and Helm copies of the packet-analysis
-      # seccomp profile to stay byte-for-byte identical (the chart derives its
-      # ConfigMap from the Helm copy; Compose reads its own). A one-sided edit —
-      # e.g. a syscall added to one copy only — is a silent security drift. This
-      # gate catches it. (They had already drifted on line endings before this.)
-      - name: seccomp profiles byte-identical (ADR-0031 §3 lockstep) — RED gate
+      # ADR-0031 §3 / ADR-0049 blocker 3 require every copy of the packet-analysis
+      # seccomp profiles to stay byte-for-byte identical. A one-sided edit — e.g. a
+      # syscall added to one copy only — is a silent security drift. Two profiles,
+      # each with multiple copies:
+      #   STRICT child profile (deny-by-default, no sockets) — THREE copies: the
+      #     Compose copy, the Helm chart copy, AND the in-package copy the executor
+      #     loads at runtime via importlib.resources (ADR-0049 blocker 3 single
+      #     source of truth). All three must match.
+      #   DISPATCHER container profile (strict + client sockets + seccomp()/prctl())
+      #     — TWO copies (Compose + Helm) the analysis container runs under at
+      #     container level (ADR-0049 blocker 5). The child re-confines with the
+      #     strict profile above. Both must match.
+      # (The copies had already drifted on line endings before this gate existed;
+      # .gitattributes now pins every copy eol=lf so the byte cmp is content-only.)
+      - name: seccomp profiles byte-identical (ADR-0031 §3 / ADR-0049 blockers 3+5 lockstep) — RED gate
         shell: bash
         run: |
           set -euo pipefail
-          a=deploy/docker/seccomp/packet-analysis-seccomp.json
-          b=deploy/kubernetes/netops/seccomp/packet-analysis-seccomp.json
-          # Negative control (L1 "the gate must RUN and BITE"): a planted one-byte
-          # divergence in scratch copies MUST make cmp fail; otherwise the check is
-          # a false-green. Never touches the committed tree.
-          tmp=$(mktemp -d); cp "$a" "$tmp/a"; cp "$b" "$tmp/b"; printf '\n' >> "$tmp/b"
-          if cmp -s "$tmp/a" "$tmp/b"; then
-            echo "::error::negative control failed — cmp did not detect planted seccomp divergence"
+          strict_docker=deploy/docker/seccomp/packet-analysis-seccomp.json
+          strict_helm=deploy/kubernetes/netops/seccomp/packet-analysis-seccomp.json
+          strict_pkg=backend/app/engines/packet/seccomp/packet-analysis-seccomp.json
+          disp_docker=deploy/docker/seccomp/packet-analysis-dispatcher-seccomp.json
+          disp_helm=deploy/kubernetes/netops/seccomp/packet-analysis-dispatcher-seccomp.json
+          # Negative controls (P1 W4 L1 "the gate must RUN and BITE"): a planted
+          # one-byte divergence in scratch copies MUST make cmp fail; otherwise the
+          # check is a false-green. Never touches the committed tree. One control per
+          # profile family so BOTH cmp legs are proven to bite.
+          tmp=$(mktemp -d)
+          cp "$strict_docker" "$tmp/sa"; cp "$strict_helm" "$tmp/sb"; printf '\n' >> "$tmp/sb"
+          if cmp -s "$tmp/sa" "$tmp/sb"; then
+            echo "::error::negative control failed — cmp did not detect planted STRICT seccomp divergence"
+            exit 1
+          fi
+          cp "$disp_docker" "$tmp/da"; cp "$disp_helm" "$tmp/db"; printf '\n' >> "$tmp/db"
+          if cmp -s "$tmp/da" "$tmp/db"; then
+            echo "::error::negative control failed — cmp did not detect planted DISPATCHER seccomp divergence"
             exit 1
           fi
           rm -rf "$tmp"
-          # Real gate: the two committed profiles must be byte-for-byte identical.
-          if ! cmp -s "$a" "$b"; then
-            echo "::error::packet-analysis seccomp profiles diverged (ADR-0031 §3 byte-for-byte lockstep). Diff:"
-            diff -u "$a" "$b" || true
+          # Real gate 1: the THREE strict copies are byte-for-byte identical.
+          if ! cmp -s "$strict_docker" "$strict_helm" || ! cmp -s "$strict_docker" "$strict_pkg"; then
+            echo "::error::strict packet-analysis seccomp profiles diverged (ADR-0031 §3 / ADR-0049 blocker 3 byte-for-byte lockstep across Compose/Helm/in-package). Diffs:"
+            diff -u "$strict_docker" "$strict_helm" || true
+            diff -u "$strict_docker" "$strict_pkg" || true
             exit 1
           fi
-          echo "packet-analysis seccomp profiles are byte-identical (ADR-0031 §3 lockstep)."
+          # Real gate 2: the DISPATCHER pair is byte-for-byte identical.
+          if ! cmp -s "$disp_docker" "$disp_helm"; then
+            echo "::error::dispatcher packet-analysis seccomp profiles diverged (ADR-0049 blocker 5 byte-for-byte lockstep across Compose/Helm). Diff:"
+            diff -u "$disp_docker" "$disp_helm" || true
+            exit 1
+          fi
+          echo "packet-analysis seccomp profiles byte-identical (strict x3 + dispatcher x2; ADR-0031 §3 / ADR-0049 blockers 3+5 lockstep)."
 
       - name: Set up Helm
         uses: azure/setup-helm@v5
@@ -745,6 +771,34 @@ jobs:
       - name: conftest (OPA policy-as-test)
         run: |
           conftest test rendered.yaml \
+            --policy deploy/kubernetes/policy/rego \
+            --all-namespaces
+
+      # ADR-0049 blocker 3 — packet-analysis tier render + policy validation. The
+      # packet-analysis Deployment + its NetworkPolicy are OPT-IN (default OFF,
+      # pending the T4 re-enable), so the default `rendered.yaml` above does NOT
+      # contain them and EVERY packet-analysis conftest rule (dispatcher seccomp
+      # profile, cap_drop:[ALL], no NET_RAW, RO-rootfs, non-root, RO pcap mount,
+      # default-deny+Redis egress) passes VACUOUSLY there. This step renders the
+      # chart with the analysis tier ENABLED and runs kubeconform + kube-linter +
+      # conftest on THAT render, so the executor-split invariant is actually
+      # schema/policy-gated in CI — a regression to the strict no-socket profile
+      # (which breaks the broker-connected worker) or a dropped hardening control
+      # fails the build here, not in production.
+      - name: Render + validate packet-analysis tier (ADR-0049 blocker 3)
+        run: |
+          set -o pipefail
+          helm template netops deploy/kubernetes/netops \
+            --namespace netops --kube-version 1.29.0 \
+            --set packet.analysis.enabled=true | tr -d '\r' > rendered-packet-analysis.yaml
+          test -s rendered-packet-analysis.yaml
+          kubeconform -strict -summary \
+            -kubernetes-version 1.29.0 \
+            -ignore-missing-schemas \
+            -skip ClusterPolicy,Cluster,Pooler \
+            rendered-packet-analysis.yaml
+          kube-linter lint rendered-packet-analysis.yaml --config deploy/kubernetes/.kube-linter.yaml
+          conftest test rendered-packet-analysis.yaml \
             --policy deploy/kubernetes/policy/rego \
             --all-namespaces
 

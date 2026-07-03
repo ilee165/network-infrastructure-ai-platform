@@ -72,6 +72,17 @@ images:
     repository: netops-backend
     tag: "p1"
     pullPolicy: IfNotPresent
+  # packet-analysis image (ADR-0049 blocker 7). A DISTINCT image from `backend`:
+  # it is the same app built from the Dockerfile `packet-analysis` stage, which
+  # adds tshark + libseccomp2 (the CVE-bearing C dissectors) ON TOP of the slim
+  # runtime. Kept separate so the api/worker image stays slim and does NOT carry
+  # tshark's dissector CVEs. CI must build + push this stage to
+  # `<registry>/netops-backend-packet` and set a digest-pinned `tag` per
+  # PRODUCTION.md §10; the placeholder below is an explicit version, never `latest`.
+  packetAnalysis:
+    repository: netops-backend-packet
+    tag: "p1"
+    pullPolicy: IfNotPresent
   # W4 per-service images. The api + worker share the backend image (same
   # uvicorn/celery process tree, ADR-0029 §1); frontend is the nginx static +
   # same-origin reverse-proxy image (ADR-0012 §2). Data-store images are the
@@ -2142,15 +2153,14 @@ packet:
   # packet-analysis: the hardened parser. UNTRUSTED input (pcap bytes). Zero
   # capabilities, Localhost seccomp, read-only pcap, default-deny egress.
   analysis:
-    # OPT-IN / default OFF. The analysis pod runs the ADR-0031 §3 no-socket
-    # Localhost seccomp profile, but a Celery worker must reach the Redis broker
-    # over TCP — the two are mutually exclusive at the container level (glibc
-    # getaddrinfo cannot even open a DNS socket, so the worker never connects), and
-    # tshark is spawned by plain subprocess with no subprocess-level seccomp to
-    # split them. Enable only once that contradiction is resolved — nested seccomp
-    # on the tshark child (worker keeps its socket), or an ADR-0031 §3 amendment
-    # allowing client sockets and relying on the §4 default-deny egress
-    # NetworkPolicy. Mirrors the Compose `packet` opt-in profile.
+    # OPT-IN / default OFF — pending the T4 re-enable. ADR-0049 RESOLVED the old
+    # "no-socket sandbox vs broker-connected worker" contradiction via the
+    # executor-split: this pod now runs the DISPATCHER Localhost profile (client
+    # sockets + seccomp() allowed) and each analysis job spawns a short-lived child
+    # that re-confines with the strict no-socket profile before parsing the pcap
+    # (T1/T2 shipped). It stays opt-in ONLY until the three-leg Linux bite-proof
+    # (ADR-0049 §Acceptance) is green at HEAD; the re-enable-by-default flip is T4,
+    # in the same PR the bite-proof lands. Mirrors the Compose `packet` opt-in.
     enabled: false
     replicas: 1
     command:
@@ -2167,10 +2177,15 @@ packet:
       runAsGroup: 10001
       allowPrivilegeEscalation: false
       readOnlyRootFilesystem: true
-    # Localhost seccomp profile (ADR-0031 §3) — deny-by-default allow-list.
+    # Localhost seccomp profile — the ADR-0049 blocker-5 DISPATCHER profile
+    # (deny-by-default: the strict child allow-list PLUS client sockets +
+    # seccomp()/prctl() a broker-connected Celery worker + self-confining parent
+    # need). The executor child re-confines with the strict no-socket profile per
+    # analysis job (T1/T2). The kubelet resolves this file at
+    # /var/lib/kubelet/seccomp/netops/... (seeded by the seccomp-installer DaemonSet).
     seccompProfile:
       type: Localhost
-      localhostProfile: netops/packet-analysis-seccomp.json
+      localhostProfile: netops/packet-analysis-dispatcher-seccomp.json
     resources:
       requests:
         cpu: 100m
@@ -2194,14 +2209,16 @@ packet:
     emptyDir:
       sizeLimit: 2Gi
 
-# -- Seccomp-installer DaemonSet (W3 deferred minor, ADR-0031 §3).
-#    The packet-analysis pod uses a Localhost seccomp profile
-#    (netops/packet-analysis-seccomp.json). The kubelet must find that file at
-#    /var/lib/kubelet/seccomp/netops/packet-analysis-seccomp.json on the host.
-#    This DaemonSet copies the bundled profile to that path on each node that
-#    may run the packet-analysis pod. Default on (secure-by-default: omitting it
-#    causes the packet-analysis pod to crash on any node without a pre-seeded
-#    profile). Disable only if your nodes are pre-seeded out-of-band.
+# -- Seccomp-installer DaemonSet (W3 deferred minor, ADR-0031 §3 / ADR-0049).
+#    The packet-analysis pod uses the DISPATCHER Localhost seccomp profile
+#    (netops/packet-analysis-dispatcher-seccomp.json). The kubelet must find that
+#    file at /var/lib/kubelet/seccomp/netops/packet-analysis-dispatcher-seccomp.json
+#    on the host. This DaemonSet copies the bundled profile to that path on each
+#    node that may run the packet-analysis pod. Default on (secure-by-default:
+#    omitting it causes the packet-analysis pod to crash on any node without a
+#    pre-seeded profile). Disable only if your nodes are pre-seeded out-of-band.
+#    (The strict CHILD profile the executor re-confines with is loaded in-container
+#    from the wheel via importlib.resources, NOT seeded on the node.)
 seccompInstaller:
   enabled: true
   # -- Namespace the installer DaemonSet/ConfigMap/SA render into. It runs root +

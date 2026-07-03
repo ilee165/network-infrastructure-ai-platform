@@ -173,21 +173,27 @@ from the base file so the platform is reachable only through the TLS edge.
 
 ### packet-analysis seccomp profile path
 
-The `packet-analysis` service applies the deny-by-default Localhost seccomp
-profile (ADR-0031 §3), byte-for-byte the same JSON the Helm chart references.
-Docker **Compose** resolves a `seccomp=` **relative** path against the **project
-directory** — the directory of the first `-f` compose file (`deploy/docker/` by
-default), **not** the client CWD (that CWD-relative rule applies to `docker run
---security-opt`, a different tool). So the default is compose-file-relative and
-resolves correctly from **any** working directory:
-`NETOPS_SECCOMP_PROFILE=./seccomp/packet-analysis-seccomp.json`. Do **not** add a
-`deploy/docker/` prefix — Compose already anchors to that directory, so a
-prefixed value doubles the path (`deploy/docker/deploy/docker/seccomp/...`) and
-fails with "opening seccomp profile ... failed". For an air-gapped mirror,
-override it with an **absolute** path:
+The `packet-analysis` service applies the deny-by-default **dispatcher** Localhost
+seccomp profile (ADR-0049 blocker 5), byte-for-byte the same JSON the Helm chart
+references. This CONTAINER profile is the strict child profile PLUS the client
+sockets + `seccomp()`/`prctl()` a broker-connected Celery worker + self-confining
+parent need; each analysis job then spawns a `python -m app.engines.packet.executor`
+child that re-confines with the strict no-socket profile before parsing the pcap
+(ADR-0049 executor-split). Docker **Compose** resolves a `seccomp=` **relative**
+path against the **project directory** — the directory of the first `-f` compose
+file (`deploy/docker/` by default), **not** the client CWD (that CWD-relative rule
+applies to `docker run --security-opt`, a different tool). So the default is
+compose-file-relative and resolves correctly from **any** working directory:
+`NETOPS_SECCOMP_PROFILE=./seccomp/packet-analysis-dispatcher-seccomp.json`. Do
+**not** add a `deploy/docker/` prefix — Compose already anchors to that directory,
+so a prefixed value doubles the path (`deploy/docker/deploy/docker/seccomp/...`)
+and fails with "opening seccomp profile ... failed". Do **not** point it at the
+strict `packet-analysis-seccomp.json` — that no-socket profile is the CHILD profile
+and would block the worker's broker connection at the container level. For an
+air-gapped mirror, override it with an **absolute** path:
 
 ```bash
-NETOPS_SECCOMP_PROFILE=/opt/netops/seccomp/packet-analysis-seccomp.json \
+NETOPS_SECCOMP_PROFILE=/opt/netops/seccomp/packet-analysis-dispatcher-seccomp.json \
   docker compose -f deploy/docker/docker-compose.yml up -d
 ```
 

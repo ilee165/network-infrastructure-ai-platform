@@ -31,8 +31,9 @@ RBAC + admission policy, and the packet-sandbox OS-isolation workloads
 | `NetworkPolicy` set | ADR-0029 §2 / ADR-0041 | `default-deny-all` floor + one additive allow per §3.1 arrow; DNS-only egress; collector/worker mgmt-subnet egress (`ipBlock` CIDR only, device-mgmt ports; ADR-0041 — deny asserted on the W4-T3 kind cluster); external-LLM egress opt-in default-off |
 | `Namespace` PSA labels | ADR-0029 §3 | `enforce/audit/warn = restricted` (install namespace); capture namespace relaxed for its NET_RAW deviation |
 | `packet-capture` Deployment | ADR-0031 §1 | `NET_RAW`+`NET_ADMIN`, tainted pool, own SA, confined management-subnet egress |
-| `packet-analysis` Deployment | ADR-0031 §2 | drop-ALL caps (no add), non-root uid≥10000, RO-rootfs, Localhost seccomp, RO pcap, bounded scratch, resource limits, default-deny egress |
-| `packet-analysis-seccomp.json` | ADR-0031 §3 | deny-by-default seccomp allow-list |
+| `packet-analysis` Deployment | ADR-0031 §2 / ADR-0049 | drop-ALL caps (no add), non-root uid≥10000, RO-rootfs, **dispatcher** Localhost seccomp, tshark image (`packet-analysis` stage), RO pcap, bounded scratch, resource limits, default-deny egress |
+| `packet-analysis-dispatcher-seccomp.json` | ADR-0049 blocker 5 | container profile: strict child allow-list + client sockets + `seccomp()`/`prctl()` (the broker-connected dispatcher) |
+| `packet-analysis-seccomp.json` | ADR-0031 §3 | strict deny-by-default (no-socket) CHILD profile the executor re-confines with per job (loaded in-container from the wheel) |
 | ServiceAccounts | ADR-0029 §5 / ADR-0031 §1 | one per workload, `automountServiceAccountToken: false`, zero ClusterRole(Binding) |
 | Admission policy (Kyverno / VAP) | ADR-0029 §5 | no-`latest`, signed-image (data-gated), PSS-deviation allow-list naming EXACTLY the packet sandbox |
 | pgBackRest backup `CronJob`s + `ConfigMap` (W5-T1) | ADR-0030 §1/§4 | continuous WAL archiving (postgres `archive_mode=on` + `archive_command`) + weekly-full / daily-incr backups → MinIO/S3, repo `aes-256-cbc` encryption, `pgbackrest verify` GATES every job; ON by default (`backup.postgres.enabled`); own `backup-sa`; confined egress NetworkPolicy; all repo secrets by external-secret reference |
@@ -73,10 +74,11 @@ Prerequisites for the hardened path:
   `admission.engine=vap` for a webhook-free ValidatingAdmissionPolicy.
 - A **tainted packet node pool**: `node-role.netops/packet=true:NoSchedule`
   with nodes labelled `node-role.netops/packet=true`.
-- The **Localhost seccomp profile** seeded on the packet nodes at
-  `<kubelet-seccomp-root>/netops/packet-analysis-seccomp.json` — the bundled
-  `seccompInstaller` DaemonSet (default on) copies `seccomp/` here onto each node;
-  disable it only if your nodes are pre-seeded out-of-band.
+- The **dispatcher Localhost seccomp profile** seeded on the packet nodes at
+  `<kubelet-seccomp-root>/netops/packet-analysis-dispatcher-seccomp.json` — the
+  bundled `seccompInstaller` DaemonSet (default on) copies it here onto each node;
+  disable it only if your nodes are pre-seeded out-of-band. (The strict CHILD
+  profile is loaded in-container from the wheel, not from the kubelet root.)
 - A **platform Secret** referenced by `secrets.existingSecret`, populated by the
   external-secrets operator or a CSI secrets-store backed by your KMS/Vault
   (ADR-0029 §6). Leaving it empty renders a **dev-only** generated Secret (warned).

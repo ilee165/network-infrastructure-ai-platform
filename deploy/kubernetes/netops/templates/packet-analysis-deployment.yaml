@@ -52,8 +52,10 @@ spec:
         {{- toYaml .Values.packetNodePool.nodeSelector | nindent 8 }}
       containers:
         - name: packet-analysis
-          image: {{ include "netops.backendImage" . }}
-          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          # ADR-0049 blocker 7: the tshark+libseccomp image (Dockerfile
+          # `packet-analysis` stage), NOT the slim shared backend image.
+          image: {{ include "netops.image" (dict "img" .Values.images.packetAnalysis) }}
+          imagePullPolicy: {{ .Values.images.packetAnalysis.pullPolicy }}
           command:
             {{- toYaml .Values.packet.analysis.command | nindent 12 }}
           # readOnlyRootFilesystem leaves no writable default tempdir, so Python/
@@ -77,6 +79,11 @@ spec:
             seccompProfile:
               type: {{ .Values.packet.analysis.seccompProfile.type }}
               localhostProfile: {{ .Values.packet.analysis.seccompProfile.localhostProfile }}
+          # Fork/thread-abuse bound (ADR-0049 §4). K8s has no pod-spec PID-limit
+          # field (the Compose `pids_limit` equivalent is the kubelet-level
+          # --pod-max-pids / a namespace pods ResourceQuota, an operator control);
+          # in-pod the executor child sets RLIMIT_NPROC (T1) and these CPU/memory
+          # limits OOM/CPU-bound an adversarial capture so it cannot exhaust a node.
           resources:
             {{- toYaml .Values.packet.analysis.resources | nindent 12 }}
           volumeMounts:

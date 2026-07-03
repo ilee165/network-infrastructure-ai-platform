@@ -1,0 +1,263 @@
+{
+  "_comment": "DISPATCHER seccomp profile for the packet-analysis CONTAINER (ADR-0049 blocker 5). This is the profile the packet-analysis container runs under at the CONTAINER level — NOT the strict child profile. The executor-split (ADR-0049) draws the sandbox boundary around the untrusted pcap parse, not the Celery machinery: the long-lived DISPATCHER process is a broker-connected Celery consumer that needs client sockets (Redis/PG/DNS) and the seccomp()/prctl() syscalls to spawn a SELF-CONFINING child (python -m app.engines.packet.executor). That child re-applies the STRICT deny-by-default profile (packet-analysis-seccomp.json) with prctl(PR_SET_NO_NEW_PRIVS)+seccomp() BEFORE it opens a single pcap byte, so tshark's C dissectors run with NO socket at all (the strict filter denies socket()). This dispatcher profile is therefore the STRICT profile PLUS the minimum a broker-connected worker + a self-confining parent need: the client-socket family, seccomp(), and (already in the strict base) prctl(). It STILL denies every escape/raw primitive the strict profile denies — socket(AF_PACKET)/socket(AF_NETLINK) (arg-filtered below), bpf, ptrace, mount, unshare, setns, keyctl/add_key/request_key, process_vm_readv/writev, kexec, init_module, personality — by the SCMP_ACT_ERRNO default action. NET_RAW is absent (cap_drop:[ALL], no add), so even the allowed socket() cannot open an AF_PACKET SOCK_RAW capture socket. Byte-identical to deploy/kubernetes/netops/seccomp/packet-analysis-dispatcher-seccomp.json (the chart's ConfigMap/localhostProfile copy) and pinned by the extended ADR-0049 blocker-3 lockstep CI gate.",
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "defaultErrnoRet": 1,
+  "archMap": [
+    {
+      "architecture": "SCMP_ARCH_X86_64",
+      "subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"]
+    },
+    {
+      "architecture": "SCMP_ARCH_AARCH64",
+      "subArchitectures": ["SCMP_ARCH_ARM"]
+    }
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "read",
+        "readv",
+        "pread64",
+        "preadv",
+        "preadv2",
+        "write",
+        "writev",
+        "pwrite64",
+        "pwritev",
+        "pwritev2",
+        "open",
+        "openat",
+        "openat2",
+        "close",
+        "close_range",
+        "lseek",
+        "fcntl",
+        "fcntl64",
+        "stat",
+        "stat64",
+        "fstat",
+        "fstat64",
+        "lstat",
+        "lstat64",
+        "newfstatat",
+        "fstatat64",
+        "statx",
+        "access",
+        "faccessat",
+        "faccessat2",
+        "readlink",
+        "readlinkat",
+        "getcwd",
+        "getdents",
+        "getdents64",
+        "dup",
+        "dup2",
+        "dup3",
+        "pipe",
+        "pipe2",
+        "poll",
+        "ppoll",
+        "select",
+        "pselect6",
+        "epoll_create",
+        "epoll_create1",
+        "epoll_ctl",
+        "epoll_wait",
+        "epoll_pwait",
+        "eventfd",
+        "eventfd2",
+        "fadvise64",
+        "fdatasync",
+        "fsync",
+        "ftruncate",
+        "ftruncate64",
+        "unlink",
+        "unlinkat",
+        "rename",
+        "renameat",
+        "renameat2",
+        "mkdir",
+        "mkdirat",
+        "rmdir",
+        "umask",
+        "chdir",
+        "fchdir",
+        "ioctl"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "file I/O and directory ops: read the pcap, write to the bounded /tmp scratch (ADR-0031 §2). No socket/network syscalls here."
+    },
+    {
+      "names": [
+        "mmap",
+        "mmap2",
+        "munmap",
+        "mprotect",
+        "mremap",
+        "madvise",
+        "msync",
+        "brk",
+        "mlock",
+        "munlock",
+        "mlock2",
+        "membarrier"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "memory management for the C dissectors and the Python heap. mprotect is allowed for the runtime; W^X is enforced by readOnlyRootFilesystem + no-new-privs, not by denying mprotect."
+    },
+    {
+      "names": [
+        "clone",
+        "clone3",
+        "fork",
+        "vfork",
+        "execve",
+        "execveat",
+        "wait4",
+        "waitid",
+        "exit",
+        "exit_group",
+        "kill",
+        "tgkill",
+        "tkill",
+        "getpid",
+        "getppid",
+        "gettid",
+        "set_tid_address",
+        "futex",
+        "futex_waitv",
+        "rt_sigaction",
+        "rt_sigprocmask",
+        "rt_sigreturn",
+        "rt_sigpending",
+        "rt_sigtimedwait",
+        "rt_sigsuspend",
+        "sigaltstack",
+        "nanosleep",
+        "clock_nanosleep",
+        "sched_yield",
+        "sched_getaffinity",
+        "set_robust_list",
+        "get_robust_list",
+        "prlimit64",
+        "getrlimit",
+        "getrusage",
+        "restart_syscall"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "process/thread lifecycle so the Python parent can spawn the tshark child (argv, not shell — ADR-0023 §1) and reap it. clone/clone3 flags that create new namespaces are still blocked because unshare/setns are denied by the default action."
+    },
+    {
+      "names": [
+        "prctl",
+        "arch_prctl",
+        "gettimeofday",
+        "clock_gettime",
+        "clock_getres",
+        "time",
+        "times",
+        "getuid",
+        "geteuid",
+        "getgid",
+        "getegid",
+        "getgroups",
+        "getresuid",
+        "getresgid",
+        "getpgrp",
+        "getpgid",
+        "getsid",
+        "setpgid",
+        "uname",
+        "sysinfo",
+        "getrandom",
+        "rseq",
+        "capget",
+        "sched_getparam",
+        "sched_getscheduler",
+        "sched_get_priority_max",
+        "sched_get_priority_min"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "benign process introspection + time + RNG that glibc/Python need at startup. prctl is allowed for PR_SET_NAME/PR_SET_NO_NEW_PRIVS; capset is NOT allowed (the parser drops to zero caps and never re-acquires). Note the absence of bpf(), ptrace(), mount(), unshare(), setns(), keyctl(), add_key(), request_key(), process_vm_readv/writev(), kexec_load(), init_module(), finit_module(), and personality() — each is a known sandbox-escape or raw-socket primitive and is denied by SCMP_ACT_ERRNO. socket() is arg-filtered below (client families only), NOT allowed unconditionally."
+    },
+    {
+      "names": [
+        "fsopen",
+        "fsconfig",
+        "fsmount",
+        "fspick",
+        "open_tree",
+        "move_mount",
+        "mount_setattr",
+        "statfs",
+        "fstatfs",
+        "statfs64",
+        "fstatfs64"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "runc >=1.2 container init (new mount API). fsopen/fsconfig/fsmount/fspick/open_tree/move_mount/mount_setattr are required by runc's safe re-open of /proc/self/fd — the CVE-2024-21626 (\"Leaky Vessels\") mitigation — and statfs/fstatfs verify the reopened handle is really procfs (PROC_SUPER_MAGIC). Without these the analysis container cannot start and crash-loops: 'reopen exec fifo: get safe /proc/thread-self/fd handle: fstatfs fsmount:fscontext:proc: operation not permitted'. These mirror moby's own default hardened profile. They are INERT without CAP_SYS_ADMIN, which this sandbox drops (cap_drop:ALL + no-new-privileges): the unprivileged parser still cannot mount a filesystem, pivot_root, or change namespaces — the classic mount()/unshare()/setns() escape primitives remain denied by the default action (SCMP_ACT_ERRNO)."
+    },
+    {
+      "names": [
+        "link",
+        "linkat"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "celery/billiard POSIX named-semaphore creation: glibc sem_open(O_CREAT) atomically creates /dev/shm/sem.<name> via a temp-file-then-link() dance, so a denied link() crashes the celery prefork worker at boot ('PermissionError: [Errno 1] Operation not permitted' in _billiard.SemLock). link/linkat create hard links only (no new content, same filesystem, write required on the target dir — reachable only inside the writable tmpfs scratch and /dev/shm here); they are NOT a sandbox-escape primitive and are allowed unconditionally by moby's default profile. The pcap is on a read-only mount and cannot be hard-linked out."
+    },
+    {
+      "names": [
+        "socketpair",
+        "bind",
+        "connect",
+        "listen",
+        "accept",
+        "accept4",
+        "getsockname",
+        "getpeername",
+        "getsockopt",
+        "setsockopt",
+        "sendto",
+        "sendmsg",
+        "sendmmsg",
+        "recvfrom",
+        "recvmsg",
+        "recvmmsg",
+        "shutdown"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "DISPATCHER-only (ADR-0049 blocker 5): the client-socket family a broker-connected Celery consumer needs — connect()/send*/recv*/shutdown for the long-lived Redis broker + Postgres connections, socketpair for the billiard prefork pool's parent<->worker IPC, getsockname/getpeername/get-set-sockopt for connection setup and DNS. This whole group is ABSENT from the strict child profile (packet-analysis-seccomp.json): the executor child re-confines with that stricter filter before touching the pcap, so tshark inherits NO socket capability. socket() itself is arg-filtered (client AF_* only) in the entries below — AF_PACKET/AF_NETLINK are NOT reachable, so no raw-capture or netlink primitive is exposed even here. NET_RAW is absent (cap_drop:[ALL]), so an AF_PACKET SOCK_RAW capture socket cannot be opened regardless."
+    },
+    {
+      "names": [
+        "seccomp"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "DISPATCHER-only (ADR-0049 blocker 5): the executor CHILD self-confines by loading the strict libseccomp filter via the seccomp() syscall (SECCOMP_SET_MODE_FILTER). The container profile must therefore permit seccomp() so the child can INSTALL a STRICTER filter on itself (seccomp filters only ever add restrictions — this can never widen the sandbox). The load needs no capability because the child first sets prctl(PR_SET_NO_NEW_PRIVS) (prctl is in the introspection group above). Once the child loads the strict filter (which does NOT list seccomp), a second seccomp() call is denied — the child confines exactly once. seccomp() is absent from the strict child profile."
+    },
+    {
+      "names": ["socket"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        { "index": 0, "value": 1, "op": "SCMP_CMP_EQ" }
+      ],
+      "comment": "DISPATCHER-only, ARG-FILTERED (ADR-0049 blocker 5): allow socket() for AF_UNIX/AF_LOCAL (domain==1) only — the billiard prefork pool + local IPC. Any other domain falls through to the SCMP_ACT_ERRNO default. This is the arg-filtered alternative to a blanket socket() allow the blocker prefers."
+    },
+    {
+      "names": ["socket"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        { "index": 0, "value": 2, "op": "SCMP_CMP_EQ" }
+      ],
+      "comment": "DISPATCHER-only, ARG-FILTERED: allow socket() for AF_INET (domain==2) — the IPv4 TCP Redis broker + Postgres connections and UDP DNS to the container resolver. AF_PACKET (17) and AF_NETLINK (16) are NOT matched by any entry, so a raw-capture or netlink socket() returns EPERM under the default action. glibc getaddrinfo's optional AF_NETLINK ADDRCONFIG probe fails closed (EPERM) and falls back cleanly, so denying netlink does not break DNS to the container resolver over AF_INET UDP."
+    },
+    {
+      "names": ["socket"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        { "index": 0, "value": 10, "op": "SCMP_CMP_EQ" }
+      ],
+      "comment": "DISPATCHER-only, ARG-FILTERED: allow socket() for AF_INET6 (domain==10) — the IPv6 counterpart of the broker/DB/DNS client sockets. Same denial of AF_PACKET/AF_NETLINK as the AF_INET entry."
+    }
+  ]
+}
