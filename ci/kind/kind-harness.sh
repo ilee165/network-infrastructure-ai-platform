@@ -97,6 +97,38 @@ log() { echo "== $* =="; }
 group() { echo "::group::$*"; }
 endgroup() { echo "::endgroup::"; }
 
+# --- failure diagnostics ------------------------------------------------------
+# Called when a readiness gate FAILS, BEFORE the teardown trap deletes the cluster,
+# so a stuck workload explains itself in the job log — the cluster is ephemeral and
+# no pod artifacts survive otherwise. Never fails the script itself (every probe is
+# `|| true`); the caller exits non-zero after it. Covers the plain Postgres
+# StatefulSet (P2) and the CNPG-managed pods (HA): describe surfaces scheduling /
+# volume-mount / probe events, and logs (init containers + the PREVIOUS crash)
+# surface a first-boot FATAL (audit-W2 T7 — Postgres never reached Ready live).
+dump_ns_diag() {
+  local ns="$1" sel
+  group "DIAG: pods in ${ns}"
+  kubectl -n "${ns}" get pods -o wide 2>&1 || true
+  endgroup
+  group "DIAG: recent events in ${ns}"
+  kubectl -n "${ns}" get events --sort-by=.lastTimestamp 2>&1 | tail -50 || true
+  endgroup
+  group "DIAG: PVCs in ${ns}"
+  kubectl -n "${ns}" get pvc 2>&1 || true
+  endgroup
+  for sel in 'app.kubernetes.io/component=postgres' 'cnpg.io/cluster'; do
+    group "DIAG: describe pods -l ${sel}"
+    kubectl -n "${ns}" describe pod -l "${sel}" 2>&1 || true
+    endgroup
+    group "DIAG: logs -l ${sel} (current, all containers)"
+    kubectl -n "${ns}" logs -l "${sel}" --all-containers --tail=150 2>&1 || true
+    endgroup
+    group "DIAG: logs -l ${sel} (previous crash, all containers)"
+    kubectl -n "${ns}" logs -l "${sel}" --all-containers --previous --tail=150 2>&1 || true
+    endgroup
+  done
+}
+
 # --- teardown (runs on ANY exit: success, failure, or signal) ----------------
 teardown() {
   local rc=$?
@@ -322,7 +354,11 @@ fi
 # prerequisite). This gate HARD-FAILS the run until every HA workload is healthy.
 if [ "${HA}" = "1" ]; then
   log "HA=1 — gating on reduced-scale HA topology readiness (CNPG + Sentinel + KEDA)"
-  CHART_NS="${CHART_NS}" bash "${HA_WAIT_READY}"
+  if ! CHART_NS="${CHART_NS}" bash "${HA_WAIT_READY}"; then
+    echo "::error::HA readiness gate FAILED — dumping namespace diagnostics before teardown" >&2
+    dump_ns_diag "${CHART_NS}"
+    exit 1
+  fi
 fi
 
 # --- 4b. non-HA readiness gate: the G-SEC assertions need Postgres actually UP ---
@@ -341,7 +377,11 @@ fi
 if [ "${HA}" != "1" ]; then
   PG_STS="${PG_STS:-netops-postgres}"
   log "non-HA — waiting for Postgres (statefulset/${PG_STS}) Ready before the G-SEC assertions"
-  kubectl -n "${CHART_NS}" rollout status "statefulset/${PG_STS}" --timeout="${PG_READY_TIMEOUT:-240s}"
+  if ! kubectl -n "${CHART_NS}" rollout status "statefulset/${PG_STS}" --timeout="${PG_READY_TIMEOUT:-240s}"; then
+    echo "::error::Postgres (statefulset/${PG_STS}) did NOT become Ready in ${PG_READY_TIMEOUT:-240s} — dumping namespace diagnostics before teardown" >&2
+    dump_ns_diag "${CHART_NS}"
+    exit 1
+  fi
 fi
 
 # --- 5. run the assertion-runner (W4-T4 + W4-T5 checks) -----------------------
