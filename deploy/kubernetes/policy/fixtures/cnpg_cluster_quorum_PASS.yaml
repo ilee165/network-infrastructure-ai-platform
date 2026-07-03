@@ -22,10 +22,6 @@ spec:
   imageName: ghcr.io/cloudnative-pg/postgresql:16.4-1-pgvector
   priorityClassName: netops-postgres-ha
   postgresql:
-    # EXPLICIT non-root (ADR-0042 §4): the hardening gate requires this be present
-    # and exactly true — omission is now DENIED (fail-closed), so the compliant
-    # shape must carry it.
-    runAsNonRoot: true
     synchronous:
       method: any
       number: 1

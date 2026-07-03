@@ -14,7 +14,6 @@ spec:
   imageName: ghcr.io/cloudnative-pg/postgresql:16.4-1-pgvector
   priorityClassName: netops-postgres-ha
   postgresql:
-    runAsNonRoot: true
     synchronous:
       method: any
       number: 1

@@ -2893,17 +2893,15 @@ deny contains msg if {
 	msg := sprintf("CNPG Cluster %q imageName %q must carry an explicit tag or digest in the image name (a registry host:port is NOT a tag) (ADR-0029 §5)", [input.metadata.name, img])
 }
 
-# --- secure-by-default: the cluster MUST run non-root. CNPG defaults to non-root,
-# but ADR-0042 §4 requires it be EXPLICIT in the chart so a future edit cannot
-# silently relax it (postgresql.runAsNonRoot must not be false). ---
-deny contains msg if {
-	is_cnpg_cluster(input)
-	# Fail closed: deny unless postgresql.runAsNonRoot is EXPLICITLY `true`. A missing
-	# field (default null) or any non-true value is rejected so omission cannot
-	# silently relax the control (ADR-0042 §4 "must be EXPLICIT").
-	object.get(object.get(input.spec, "postgresql", {}), "runAsNonRoot", null) != true
-	msg := sprintf("CNPG Cluster %q must run non-root (postgresql.runAsNonRoot must be explicitly true) (ADR-0042 §4 / ADR-0029 §3)", [input.metadata.name])
-}
+# --- secure-by-default non-root: intentionally NOT a chart-asserted rule (T7 repair).
+# CloudNativePG runs every managed Postgres pod NON-ROOT by construction (uid/gid 26);
+# `runAsNonRoot` is NOT a field of `spec.postgresql` — it lives on the operator-managed
+# `spec.podSecurityContext` / `spec.securityContext`. A prior rule here required
+# `spec.postgresql.runAsNonRoot == true`, which forced an UNKNOWN field the CNPG CRD
+# REJECTS on live apply (kubectl >=1.25 strict validation): a static gate that green-lit
+# a manifest the live cluster refuses. The non-root guarantee is intrinsic to the operator
+# and cannot be relaxed via `spec.postgresql`, so there is nothing to assert here; the
+# invalid-field rule was removed (ADR-0042 §4 non-root intent preserved intrinsically). ---
 
 # --- resource requests AND limits present on the Cluster (never absent, ADR-0029 §3). ---
 deny contains msg if {
