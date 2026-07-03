@@ -73,7 +73,12 @@ def templated_route(request: Request) -> str:
     raw_suffix = path_format
     for name, value in path_params.items():
         raw_suffix = raw_suffix.replace("{" + name + "}", str(value))
-    raw_path = request.url.path
+    # scope["path"] — NOT request.url.path — is the exact (ASGI-decoded) string
+    # Starlette routing matched against, so anchor equality is guaranteed by
+    # construction whenever str(param) round-trips. request.url.path re-parses the
+    # path through a URL string, where a decoded reserved char in a param value
+    # (e.g. %3F -> "?") truncates the path at the "?" and breaks the anchor.
+    raw_path: str = request.scope["path"]
     if raw_suffix and raw_path.endswith(raw_suffix):
         return raw_path[: len(raw_path) - len(raw_suffix)] + path_format
     # Defensive fallback (prefix not recoverable): the router-relative template is

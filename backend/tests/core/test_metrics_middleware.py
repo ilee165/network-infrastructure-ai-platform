@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from prometheus_client import CollectorRegistry, generate_latest
 
 from app.core import metrics
@@ -86,6 +86,43 @@ async def test_unmatched_path_is_bucketed_not_leaked(client: httpx.AsyncClient) 
     assert _http_count(method="GET", route=UNMATCHED_ROUTE, status_class="4xx") == before + 1
     rendered = generate_latest().decode()
     assert "random-probe-987" not in rendered
+
+
+async def test_prefixed_route_label_survives_encoded_reserved_char_in_param() -> None:
+    """Mount-prefix reconstruction anchors on scope["path"], not request.url.path.
+
+    FastAPI 0.137+ lazy includes leave a router-RELATIVE template on
+    ``scope["route"]`` (``/files/{name}``); the middleware re-anchors it to the
+    full mounted label (``/api/v1/files/{name}``) against ``scope["path"]`` — the
+    exact ASGI-decoded string routing matched. This test sends a param value with
+    an encoded reserved char (``%3F`` → ``?``): ``request.url.path`` would re-parse
+    the decoded ``?`` as a query separator, truncate the path, miss the anchor, and
+    degrade the label to the prefix-less router-relative template. BITES on any
+    regression back to URL-string parsing.
+    """
+    app = FastAPI()
+    app.middleware("http")(metrics_middleware)
+    router = APIRouter()
+
+    @router.get("/files/{name}")
+    async def get_file(name: str) -> dict[str, str]:
+        return {"name": name}
+
+    app.include_router(router, prefix="/api/v1")
+
+    template = "/api/v1/files/{name}"
+    before = _http_count(method="GET", route=template, status_class="2xx")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        resp = await c.get("/api/v1/files/a%3Fb")
+    assert resp.status_code == 200
+
+    # Full mounted template got the count — not the prefix-less fallback.
+    assert _http_count(method="GET", route=template, status_class="2xx") == before + 1
+    rendered = generate_latest().decode()
+    assert 'route="/files/{name}"' not in rendered  # the degraded fallback label
+    assert "a%3Fb" not in rendered  # and never the raw value
+    assert 'route="/api/v1/files/a' not in rendered
 
 
 async def test_handler_exception_counts_as_5xx(client: httpx.AsyncClient) -> None:
