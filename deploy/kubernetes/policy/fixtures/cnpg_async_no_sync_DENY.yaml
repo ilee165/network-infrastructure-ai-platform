@@ -13,10 +13,9 @@ spec:
   imageName: ghcr.io/cloudnative-pg/postgresql:16.4-1-pgvector
   priorityClassName: netops-postgres-ha
   # NO spec.postgresql.synchronous — async streaming replication only. THIS is
-  # the defect: a commit is acked before the WAL reaches any replica. (non-root is
-  # set so the fixture is denied ONLY for the missing synchronous stanza.)
-  postgresql:
-    runAsNonRoot: true
+  # the defect: a commit is acked before the WAL reaches any replica. The fixture
+  # is denied ONLY for the missing synchronous stanza.
+  postgresql: {}
   bootstrap:
     initdb:
       database: netops

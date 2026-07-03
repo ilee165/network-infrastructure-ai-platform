@@ -50,12 +50,16 @@ spec:
   imageName: {{ $cnpg.imageName }}
   # PriorityClass so Postgres outranks the unpriorited batch workers (§1).
   priorityClassName: {{ $cnpg.priorityClass.name }}
-  # SECURE BY DEFAULT (ADR-0042 §4 / ADR-0029 §3): EXPLICIT non-root. The operator
-  # renders the pods with dropped-ALL caps + RuntimeDefault seccomp + RO-rootfs.
-  # The flag is set explicitly (not left to the CNPG default) so the hardening
-  # gate can require it and a future edit cannot silently relax it.
+  # SECURE BY DEFAULT (ADR-0042 §4 / ADR-0029 §3): the CloudNativePG operator runs
+  # every managed Postgres pod NON-ROOT by construction (uid/gid 26) with dropped-
+  # ALL caps + a RuntimeDefault seccomp profile + a read-only rootfs — the non-root
+  # guarantee is INTRINSIC to the operator, not a chart-set flag. NOTE: runAsNonRoot
+  # is NOT a field of the CNPG `spec.postgresql` API (it lives on the operator-
+  # managed `spec.podSecurityContext` / `spec.securityContext`). A prior
+  # `spec.postgresql.runAsNonRoot: true` here was an UNKNOWN field the CNPG CRD
+  # REJECTS on live apply (kubectl >=1.25 strict field validation) — a false-green
+  # the static gate could not see (kubeconform -skips the CR). Removed (T7 repair).
   postgresql:
-    runAsNonRoot: true
     # QUORUM synchronous replication (ADR-0042 §2). CNPG generates
     # synchronous_standby_names = `ANY 1 (<replicas>)` from this stanza — DO NOT
     # set synchronous_standby_names directly. This is the CLUSTER-level quorum SET

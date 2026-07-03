@@ -285,11 +285,19 @@ else
   #   - `grep -E '\S'`            : drop blank lines.
   #   - first `grep -vE` (good)   : drop successful-apply object lines.
   #   - second `grep -vE` (crd)   : drop the known optional-CRD-missing error text.
+  #   - third `grep -vE` (warn)   : drop kubectl `Warning:` lines. A warning is NEVER
+  #     fatal — it does not set the apply exit code, and the object still applies. The
+  #     ADR-0031 packet-capture / seccomp `install-profile` objects legitimately trip
+  #     PodSecurity `restricted` warnings (NET_RAW / hostPath / root), which were being
+  #     counted as residue and FALSE-CLOSED the whole harness before the assertions ran
+  #     (F3, audit-W2 T7). A REAL error is a non-`Warning:` line, so this does not weaken
+  #     the incomplete-chart guard: a broken Deployment/Secret/schema rejection still bites.
   # `|| true` keeps the pipeline alive when a stage matches nothing (empty residue
   # is the GOOD case here); the residue emptiness is what we then gate on.
   residue="$(grep -E '\S' "${apply_log}" \
     | grep -vE '^(configmap|secret|service|serviceaccount|deployment|deployment\.apps|statefulset|statefulset\.apps|daemonset|daemonset\.apps|cronjob|cronjob\.batch|job|job\.batch|networkpolicy|networkpolicy\.networking\.k8s\.io|role|rolebinding|clusterrole|clusterrolebinding|ingress|ingress\.networking\.k8s\.io|persistentvolumeclaim|poddisruptionbudget|namespace|priorityclass|horizontalpodautoscaler)[^ ]* (created|configured|unchanged|serverside-applied)$' \
     | grep -vE 'no matches for kind|unable to recognize|ensure CRDs are installed|the server could not find the requested resource' \
+    | grep -vE '^Warning:' \
     || true)"
   if [ -n "${residue}" ]; then
     echo "::error::chart apply FAILED and the apply log contains lines that are NEITHER a successful apply NOR the tolerated optional-CRD-missing class — the chart is incomplete; refusing to run assertions against it (fail-closed, N6/#15):" >&2
