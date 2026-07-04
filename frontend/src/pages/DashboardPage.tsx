@@ -5,27 +5,35 @@
  * `GET /api/v1/health/ready` through TanStack Query and renders one status
  * card per backend dependency (postgres / neo4j / redis). The activity feed
  * is an honest empty state until M1 delivers inventory and discovery.
+ *
+ * Status pills use the shared `StatusPill` (audit UI_UX #3/#7) — the
+ * dependency/overall status → variant mapping stays here since it's specific
+ * to this page's data. The readiness-load error uses the shared
+ * `ErrorBanner`, and the probing state uses `Skeleton` cards matching the
+ * dependency-card layout instead of plain "Loading…" text (audit UI_UX #4).
  */
 
 import { useQuery } from "@tanstack/react-query";
 import { getReadiness, type DependencyStatus, type ReadinessReport } from "../api/health";
 import { EmptyState } from "../components/EmptyState";
+import { ErrorBanner } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
+import { Skeleton } from "../components/Skeleton";
+import { StatusPill, type StatusPillVariant } from "../components/StatusPill";
 
 /** Poll readiness on this interval so the console reflects outages quickly. */
 const READINESS_REFETCH_MS = 15_000;
 
-const PILL_BASE =
-  "inline-flex items-center rounded border px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider";
-
-const OVERALL_PILL_STYLES: Record<ReadinessReport["status"], string> = {
-  ok: "border-status-ok/40 bg-status-ok/10 text-status-ok",
-  degraded: "border-status-warn/40 bg-status-warn/10 text-status-warn",
+/** Page-level mapping from the overall readiness status to a StatusPill tone. */
+const OVERALL_VARIANT: Record<ReadinessReport["status"], StatusPillVariant> = {
+  ok: "ok",
+  degraded: "warn",
 };
 
-const DEPENDENCY_PILL_STYLES: Record<DependencyStatus["status"], string> = {
-  ok: "border-status-ok/40 bg-status-ok/10 text-status-ok",
-  error: "border-status-error/40 bg-status-error/10 text-status-error",
+/** Page-level mapping from a single dependency's status to a StatusPill tone. */
+const DEPENDENCY_VARIANT: Record<DependencyStatus["status"], StatusPillVariant> = {
+  ok: "ok",
+  error: "error",
 };
 
 interface DependencyCardProps {
@@ -39,9 +47,7 @@ function DependencyCard({ name, dependency }: DependencyCardProps) {
     <article data-testid={`dependency-card-${name}`} className="panel flex flex-col gap-2 p-4">
       <div className="flex items-center justify-between gap-2">
         <h4 className="font-mono text-xs uppercase tracking-widest text-zinc-400">{name}</h4>
-        <span className={`${PILL_BASE} ${DEPENDENCY_PILL_STYLES[dependency.status]}`}>
-          {dependency.status}
-        </span>
+        <StatusPill variant={DEPENDENCY_VARIANT[dependency.status]}>{dependency.status}</StatusPill>
       </div>
       <p className="font-mono text-xl text-zinc-100">
         {dependency.latency_ms.toFixed(1)}
@@ -55,6 +61,20 @@ function DependencyCard({ name, dependency }: DependencyCardProps) {
         <p className="text-[11px] text-zinc-500">probe ok</p>
       )}
     </article>
+  );
+}
+
+/** Skeleton placeholder matching DependencyCard's layout, shown while probing. */
+function DependencyCardSkeleton({ index }: { index: number }) {
+  return (
+    <div data-testid={`dependency-card-skeleton-${index}`} className="panel flex flex-col gap-2 p-4">
+      <div className="flex items-center justify-between gap-2">
+        <Skeleton className="h-3 w-16" />
+        <Skeleton className="h-4 w-12" />
+      </div>
+      <Skeleton className="h-6 w-20" />
+      <Skeleton className="h-3 w-24" />
+    </div>
   );
 }
 
@@ -72,12 +92,9 @@ export function DashboardPage() {
         description="Platform health and operational overview."
         actions={
           data ? (
-            <span
-              data-testid="overall-status"
-              className={`${PILL_BASE} ${OVERALL_PILL_STYLES[data.status]}`}
-            >
+            <StatusPill variant={OVERALL_VARIANT[data.status]} data-testid="overall-status">
               {data.status}
-            </span>
+            </StatusPill>
           ) : null
         }
       />
@@ -85,18 +102,13 @@ export function DashboardPage() {
       <section aria-label="Dependency health" className="flex flex-col gap-3">
         <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">Dependencies</h3>
         {isPending ? (
-          <p role="status" className="text-xs text-zinc-500">
-            Probing dependencies…
-          </p>
-        ) : null}
-        {error ? (
-          <div
-            role="alert"
-            className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-          >
-            Readiness check failed: {error.message}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {[0, 1, 2].map((index) => (
+              <DependencyCardSkeleton key={index} index={index} />
+            ))}
           </div>
         ) : null}
+        {error ? <ErrorBanner error={error} data-testid="readiness-error" /> : null}
         {data ? (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {Object.entries(data.dependencies).map(([name, dependency]) => (

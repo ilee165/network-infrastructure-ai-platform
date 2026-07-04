@@ -102,7 +102,8 @@ describe("DashboardPage", () => {
     );
     renderDashboard();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Internal Server Error/);
+    // ErrorBanner (audit UI_UX #3) renders the RFC 7807 `detail`, not `title`.
+    expect(await screen.findByRole("alert")).toHaveTextContent(/unexpected failure/);
   });
 
   it("requests the canonical readiness path", async () => {
@@ -112,5 +113,17 @@ describe("DashboardPage", () => {
 
     await screen.findByTestId("dependency-card-postgres");
     expect(fetchMock).toHaveBeenCalledWith("/api/v1/health/ready", expect.anything());
+  });
+
+  it("shows skeleton placeholder cards (not text) while probing", () => {
+    // A promise that never resolves keeps the query in its pending state.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    renderDashboard();
+
+    expect(screen.getByTestId("dependency-card-skeleton-0")).toBeInTheDocument();
+    expect(screen.queryByText(/probing dependencies/i)).not.toBeInTheDocument();
   });
 });
