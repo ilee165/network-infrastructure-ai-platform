@@ -81,39 +81,44 @@ services:
       start_period: 30s
       retries: 3
 
-  # Packet-analysis sandbox (ADR-0031 §2/§3) — the UNTRUSTED-pcap parser, hardened
-  # in lockstep with the Helm `packet-analysis` Deployment. tshark's C dissectors
-  # carry parsing CVEs and the pcap bytes are remote-attacker-controlled, so this
-  # service runs with the SAME OS-isolation profile as the K8s analysis pod:
-  #   - seccomp: the deny-by-default Localhost profile, byte-for-byte the file the
-  #     chart references (seccomp lockstep, ADR-0031 §3).
+  # Packet-analysis sandbox (ADR-0031 §2/§3 + ADR-0049) — the UNTRUSTED-pcap parser,
+  # hardened in lockstep with the Helm `packet-analysis` Deployment. tshark's C
+  # dissectors carry parsing CVEs and the pcap bytes are remote-attacker-controlled,
+  # so this service runs with the SAME OS-isolation profile as the K8s analysis pod:
+  #   - seccomp: the deny-by-default DISPATCHER Localhost profile (ADR-0049 blocker
+  #     5), byte-for-byte the file the chart references (seccomp lockstep). The
+  #     dispatcher is a broker-connected Celery consumer, so this CONTAINER profile
+  #     is the strict child profile PLUS client sockets + seccomp()/prctl(); each
+  #     analysis job then spawns a `python -m app.engines.packet.executor` child
+  #     that RE-CONFINES with the strict no-socket profile before it opens a pcap
+  #     byte (T1/T2), so tshark's CVE-bearing dissectors run with zero sockets.
   #   - cap_drop:[ALL], no add — the parser holds zero Linux capabilities (NO NET_RAW).
   #   - read_only root filesystem + a single bounded tmpfs scratch at the pyshark
   #     temp path (the K8s `emptyDir` scratch equivalent).
   #   - non-root, no-new-privileges (allowPrivilegeEscalation:false equivalent).
   #   - pcap volume mounted READ-ONLY (parser cannot alter/delete evidence).
   #   - mem/cpu limits so an adversarial capture is OOM/CPU-bound, not node-exhausting.
+  #   - pids_limit bounds fork/thread abuse from a popped dissector (ADR-0049 §4).
   packet-analysis:
-    # OPT-IN (compose profile "packet") — excluded from the default `docker compose
-    # up` so the core quickstart (api/worker/frontend/postgres/redis/neo4j) comes up
-    # clean. Start it explicitly with `docker compose --profile packet up -d`.
-    #
-    # WHY opt-in: the hardened analysis sandbox (ADR-0031 §3) denies socket() by
-    # design — the pcap parser must never open a network path. But this service is
-    # a Celery worker that must reach the Redis broker over TCP, so a container-level
-    # no-socket seccomp profile and a broker-connected worker are mutually exclusive
-    # (glibc getaddrinfo cannot even open a DNS socket → "Temporary failure in name
-    # resolution"), and tshark is spawned by plain subprocess.run with no
-    # subprocess-level seccomp to split the two. Resolving it — nested seccomp on the
-    # tshark child (worker keeps its socket), or an ADR-0031 §3 amendment allowing
-    # client sockets and relying on the §4 default-deny egress NetworkPolicy — is
-    # deferred design work. Everything else in this service (mount-API + link/linkat
-    # seccomp allowances, TMPDIR on the read-only rootfs) is fixed and correct.
-    profiles: ["packet"]
+    # ON BY DEFAULT (secure-by-default restored, ADR-0049 §Acceptance / blocker 6).
+    # ADR-0049 RESOLVED the old "no-socket sandbox vs broker-connected worker"
+    # contradiction via the executor-split: this container runs the DISPATCHER
+    # profile (client sockets allowed) and each analysis job spawns a short-lived
+    # child that re-confines with the strict no-socket profile before parsing the
+    # pcap (T1/T2). The interim `profiles: ["packet"]` opt-in was REMOVED in T4,
+    # gated on the three-leg Linux bite-proof (job `packet-analysis-bite-proof`)
+    # being green at HEAD in the same PR. On this dev Compose stack the
+    # marshalling/spawn/reap path runs the same way; the real seccomp filter load
+    # is Linux-kernel-only (proven by the CI bite-proof, not this host).
     build:
       context: ../..
       dockerfile: deploy/docker/backend.Dockerfile
-    image: netops-backend:dev
+      # ADR-0049 blocker 7: the analysis tier needs tshark + libseccomp, which the
+      # slim api/worker image deliberately does NOT ship. Build the dedicated
+      # packet-analysis stage (tshark + libseccomp2 + a build-time executor
+      # --self-check) so the CVE-bearing dissectors stay OFF the shared image.
+      target: packet-analysis
+    image: netops-backend-packet:dev
     command: celery -A app.workers.celery_app worker -Q packet_analysis
     env_file: ../../.env
     # read_only rootfs (below) leaves every default tempfile location (/tmp,
@@ -123,7 +128,8 @@ services:
     # tmpfs scratch (ADR-0031 §2). Lockstep with the chart's TMPDIR env.
     environment:
       TMPDIR: /tmp/pyshark
-    # Seccomp lockstep with the Helm chart (ADR-0031 §3): same JSON, two targets.
+    # Seccomp lockstep with the Helm chart (ADR-0049 blocker 5 dispatcher profile):
+    # same JSON, two targets (deploy/docker + deploy/kubernetes/netops/seccomp).
     # Compose resolves a `seccomp=` RELATIVE path against the PROJECT DIRECTORY
     # (the dir of the first `-f` compose file, i.e. deploy/docker/ by default) —
     # NOT the client CWD (that CWD-relative rule is `docker run --security-opt`,
@@ -135,7 +141,7 @@ services:
     # byte-for-byte in lockstep with the chart profile.
     security_opt:
       - "no-new-privileges:true"
-      - "seccomp=${NETOPS_SECCOMP_PROFILE:-./seccomp/packet-analysis-seccomp.json}"
+      - "seccomp=${NETOPS_SECCOMP_PROFILE:-./seccomp/packet-analysis-dispatcher-seccomp.json}"
     cap_drop:
       - ALL
     user: "10001:10001"
@@ -149,6 +155,10 @@ services:
       - /tmp/pyshark:size=512m,mode=1777
     mem_limit: 1g
     cpus: 2.0
+    # Bound fork/thread abuse from a popped dissector (ADR-0049 §4). The executor
+    # child also sets RLIMIT_NPROC (T1); this container-level cap is the
+    # belt-and-suspenders bound on the whole dispatcher+child process tree.
+    pids_limit: 512
     depends_on:
       postgres:
         condition: service_healthy

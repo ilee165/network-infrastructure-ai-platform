@@ -1,10 +1,13 @@
 {{- /*
 seccomp-installer DaemonSet (W3 deferred minor, ADR-0031 §3).
 
-The packet-analysis pod uses a Localhost seccomp profile
-(netops/packet-analysis-seccomp.json via securityContext.seccompProfile.type=Localhost
-localhostProfile=netops/packet-analysis-seccomp.json). The kubelet resolves a
-Localhost profile against its seccomp root: /var/lib/kubelet/seccomp/<path>.
+The packet-analysis pod uses a Localhost seccomp profile — the ADR-0049 blocker-5
+DISPATCHER profile (netops/packet-analysis-dispatcher-seccomp.json via
+securityContext.seccompProfile.type=Localhost). The kubelet resolves a Localhost
+profile against its seccomp root: /var/lib/kubelet/seccomp/<path>. (The STRICT child
+profile the executor re-confines with is loaded IN-CONTAINER from the wheel via
+importlib.resources, NOT from the kubelet root, so only the dispatcher profile is
+seeded here.)
 
 Without the profile file present on the node, the kubelet rejects the pod
 (CreateContainerError / cannot find seccomp profile). This DaemonSet copies
@@ -40,8 +43,8 @@ metadata:
 data:
   # The seccomp profile content is embedded here at render time. The DaemonSet
   # mounts this ConfigMap and copies the file to the kubelet seccomp directory.
-  packet-analysis-seccomp.json: |
-    {{ .Files.Get "seccomp/packet-analysis-seccomp.json" | fromJson | toJson }}
+  packet-analysis-dispatcher-seccomp.json: |
+    {{ .Files.Get "seccomp/packet-analysis-dispatcher-seccomp.json" | fromJson | toJson }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -114,8 +117,8 @@ spec:
               set -e
               DEST="{{ .Values.seccompInstaller.kubeletSeccompRoot }}/{{ .Values.seccompInstaller.profileDir }}"
               mkdir -p "${DEST}"
-              cp /profiles/packet-analysis-seccomp.json "${DEST}/packet-analysis-seccomp.json"
-              echo "Installed seccomp profile to ${DEST}/packet-analysis-seccomp.json"
+              cp /profiles/packet-analysis-dispatcher-seccomp.json "${DEST}/packet-analysis-dispatcher-seccomp.json"
+              echo "Installed seccomp profile to ${DEST}/packet-analysis-dispatcher-seccomp.json"
           resources:
             {{- toYaml .Values.seccompInstaller.resources | nindent 12 }}
           volumeMounts:

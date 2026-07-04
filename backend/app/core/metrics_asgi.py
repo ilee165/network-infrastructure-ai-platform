@@ -46,17 +46,44 @@ def templated_route(request: Request) -> str:
     """Return the matched route's TEMPLATED path pattern, never the raw path.
 
     Starlette stamps the matched :class:`~starlette.routing.Route` on
-    ``request.scope["route"]`` during routing; its ``.path`` is the template with
-    ``{param}`` placeholders intact (``/api/v1/devices/{id}``). When no route
-    matched (a 404), there is no templated pattern, so the request is bucketed
-    under :data:`UNMATCHED_ROUTE` rather than leaking the raw probed path — the
-    cardinality guard the W3-T0 test bites on.
+    ``request.scope["route"]`` during routing. Its ``path_format`` is the template
+    with ``{param}`` placeholders intact — but since FastAPI 0.137 made
+    ``include_router`` lazy (ARCH_DEBT #3), that template is **router-relative**
+    (``/agents/{session_id}``), stripped of the ``/api/v1`` mount prefix the
+    request actually carried. The full label ``/api/v1/agents/{session_id}`` is
+    reconstructed by anchoring the router-relative template at the END of the raw
+    request path: filling the matched ``path_params`` back into the template
+    yields the raw suffix the route served, and the bytes preceding it are the
+    mount prefix. Anchoring on the suffix (not a value substring-replace) keeps a
+    param value that happens to equal a static segment from corrupting the label.
+
+    When no route matched (a 404), there is no templated pattern, so the request
+    is bucketed under :data:`UNMATCHED_ROUTE` rather than leaking the raw probed
+    path — the cardinality guard the W3-T0 test bites on.
     """
     route = request.scope.get("route")
     path_format = getattr(route, "path_format", None) or getattr(route, "path", None)
-    if isinstance(path_format, str) and path_format:
-        return path_format
-    return UNMATCHED_ROUTE
+    if not isinstance(path_format, str) or not path_format:
+        return UNMATCHED_ROUTE
+
+    # Fill the matched params back into the router-relative template to rebuild
+    # the exact raw suffix the route served, then recover the mount prefix that
+    # precedes it in the full request path.
+    path_params = request.scope.get("path_params") or {}
+    raw_suffix = path_format
+    for name, value in path_params.items():
+        raw_suffix = raw_suffix.replace("{" + name + "}", str(value))
+    # scope["path"] — NOT request.url.path — is the exact (ASGI-decoded) string
+    # Starlette routing matched against, so anchor equality is guaranteed by
+    # construction whenever str(param) round-trips. request.url.path re-parses the
+    # path through a URL string, where a decoded reserved char in a param value
+    # (e.g. %3F -> "?") truncates the path at the "?" and breaks the anchor.
+    raw_path: str = request.scope["path"]
+    if raw_suffix and raw_path.endswith(raw_suffix):
+        return raw_path[: len(raw_path) - len(raw_suffix)] + path_format
+    # Defensive fallback (prefix not recoverable): the router-relative template is
+    # still bounded/templated — never the raw path.
+    return path_format
 
 
 async def metrics_middleware(

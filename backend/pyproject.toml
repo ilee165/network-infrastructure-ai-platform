@@ -9,15 +9,14 @@ description = "AI Network Operations Platform - modular-monolith backend (FastAP
 requires-python = ">=3.11"
 dependencies = [
     # Web / API (D2)
-    # Capped <0.137: FastAPI 0.137.0 changed APIRouter.include_router to keep a
-    # lazy `_IncludedRouter` wrapper instead of flattening child routes into the
-    # parent's `.routes`. The W6-T6 rate-limit-wiring tests
-    # (tests/api/test_agents_rate_limit_wiring.py) introspect `app.routes` for the
-    # per-route API budget and require the flattened structure. 0.136.3 is the
-    # last flattening release and accepts starlette>=1.3.1 (the security floor
-    # below). Lift the cap once those tests traverse the nested structure.
-    # re-review 2026-09-23 (migrate the wiring tests, then allow >=0.137).
-    "fastapi>=0.136,<0.137",
+    # The former <0.137 cap (FastAPI 0.137.0 made APIRouter.include_router lazy,
+    # keeping an `_IncludedRouter` node instead of flattening child routes into
+    # the parent's `.routes`) is lifted (ARCH_DEBT #3): the W6-T6 rate-limit
+    # wiring tests (tests/api/test_agents_rate_limit_wiring.py) now traverse the
+    # effective (dependency-merged) route tree via `_IncludedRouter`, so the
+    # flattened structure is no longer required. Exact version pinned by the
+    # dependency lockfile; starlette security floor kept below.
+    "fastapi>=0.137",
     "uvicorn[standard]",
     # starlette is FastAPI's transitive ASGI core; pin its security floor here.
     # security: GHSA-82w8-qh3p-5jfq, GHSA-jp82-jpqv-5vv3 ; re-review 2026-09-23
@@ -70,6 +69,13 @@ dependencies = [
     "pysnmp",
     # Declarative compliance policies (M4, ADR-0018): YAML rule documents
     "pyyaml",
+    # Packet-analysis self-confining executor (ADR-0049): libseccomp Python
+    # binding. A Linux-marker RUNTIME dep — the pure-python wheel installs into
+    # the shared venv on any Linux image (it is NOT image-scoped); the import is
+    # guarded so the Windows / eager unit suite never loads it. What IS scoped to
+    # the packet-analysis image stage (ADR-0049 blocker 7 / T3) are tshark +
+    # libseccomp2 — installed only there, never in the shared api/worker image.
+    "pyseccomp; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
@@ -178,6 +184,12 @@ module = [
     "ntc_templates.*",
     "pgvector.*",
     "pysnmp.*",
+    # libseccomp Python binding (ADR-0049): Linux-only, no type stubs, imported
+    # lazily in app.engines.packet.executor only on the enforced (Linux) path.
+    # Both spellings: the official ``seccomp`` C binding and the pip-installable
+    # ``pyseccomp`` fork the packet-analysis image ships.
+    "seccomp.*",
+    "pyseccomp.*",
     "textfsm.*",
     "yaml.*",
 ]

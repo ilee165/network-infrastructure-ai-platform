@@ -54,6 +54,7 @@ from app.core import metrics
 from app.core.config import Settings
 from app.core.errors import (
     AuthError,
+    ConflictError,
     ForbiddenError,
     NotFoundError,
     UnprocessableEntityError,
@@ -63,7 +64,6 @@ from app.core.security import Role, decode_access_token
 from app.engines.packet import (
     PacketFindings,
     analyze_pcap,
-    assert_sandbox_posture,
     pcap_path_for,
     validate_capture_filter,
 )
@@ -254,29 +254,35 @@ PcapAnalyzer = Callable[[uuid.UUID, str | None], PacketFindings]
 def get_pcap_analyzer(
     settings: Annotated[Settings, Depends(get_app_settings)],
 ) -> PcapAnalyzer:
-    """Return the sandboxed pcap analyzer (overridable DI seam).
+    """Return the pcap analyzer for the synchronous API path (overridable DI seam).
 
-    Production resolves the capture's on-disk pcap path from settings and runs
-    :func:`app.engines.packet.analyze_pcap` — argv-only, ``shell=False``, ``-n``,
-    whitelisted display filter, hard timeout (ADR-0023 §1). The analyzer returns
-    only normalized :class:`PacketFindings` (top talkers, protocol hierarchy, TCP
-    anomalies), never raw packet bytes (ADR-0023 §1). Tests override this seam so
-    the API contract is exercised without a real capture file.
+    **Fail-closed by design (ADR-0049 residual):** when
+    ``packet_sandbox_posture_enforced`` is on (the secure default), this seam
+    NEVER parses pcap bytes in-process — it raises :class:`ConflictError` (409)
+    instead. The API/web pod holds DB/JWT/KEK credentials + egress and none of
+    the executor-split sandbox controls, and the shared api/worker image ships
+    no tshark (a guard test pins the Dockerfile stage split), so synchronous
+    in-pod analysis is disabled; analysis runs only in the executor-confined
+    ``packet_analysis`` worker (ADR-0049). Routing this endpoint through that
+    tier (enqueue → executor → stored findings) is a scoped follow-up.
 
-    Before tshark is spawned the synchronous path asserts the same OS-isolation
-    posture as the worker backstop (ADR-0031 §2): non-root, no ``CAP_NET_RAW``,
-    read-only rootfs. The FastAPI/web pod is the install namespace at PSA
-    restricted — it holds DB creds/egress and *none* of the packet-analysis
-    sandbox controls — so without this check untrusted pcap bytes would be parsed
-    unconfined here, defeating the ADR-0031 §2 "refuses to spawn tshark / fails
-    closed" goal that the Celery ``packet.analyze_capture`` path already enforces.
+    Only with enforcement OFF (the eager unit-test / dev runner) does the seam
+    run :func:`app.engines.packet.analyze_pcap` in-process — argv-only,
+    ``shell=False``, ``-n``, whitelisted display filter, hard timeout
+    (ADR-0023 §1) — returning only normalized :class:`PacketFindings`, never raw
+    packet bytes. Tests override this seam so the API contract is exercised
+    without a real capture file.
     """
 
     def _analyze(capture_id: uuid.UUID, display_filter: str | None) -> PacketFindings:
-        # Runtime sandbox-posture backstop (ADR-0031 §2): the synchronous API
-        # path must fail closed too — refuse to spawn tshark when this pod is
-        # root, holds CAP_NET_RAW, or has a writable rootfs.
-        assert_sandbox_posture(enforced=settings.packet_sandbox_posture_enforced)
+        if settings.packet_sandbox_posture_enforced:
+            # Fail closed (ADR-0049 residual): never dissect untrusted pcap
+            # bytes inside the credential-bearing API pod. The message names
+            # the supported path only — no path/credential detail leaks.
+            raise ConflictError(
+                "synchronous in-pod packet analysis is disabled; analysis runs "
+                "only in the executor-confined packet_analysis worker (ADR-0049)"
+            )
         path = pcap_path_for(capture_id, pcap_dir=settings.pcap_dir)
         return analyze_pcap(
             path,
@@ -1119,11 +1125,18 @@ async def get_capture_analysis(
 ) -> PacketFindings:
     """Return the normalized analysis findings for a stored capture (engineer+).
 
-    Runs the sandboxed tshark analysis (argv-only, ``-n``, whitelisted filter,
-    hard timeout — ADR-0023 §1) over the capture's pcap and returns only the
-    normalized :class:`PacketFindings` (top talkers, protocol hierarchy, TCP
-    anomalies). Raw packet bytes never leave the sandbox (ADR-0023 §1). 404 when
-    the capture is unknown or its pcap has been tombstoned by retention.
+    **409 when the sandbox posture is enforced** (the secure default): the
+    synchronous in-pod analysis path is disabled by design — this pod holds
+    credentials and none of the executor-split controls, so it never parses
+    untrusted pcap bytes; analysis runs only in the executor-confined
+    ``packet_analysis`` worker (ADR-0049 residual, see :func:`get_pcap_analyzer`).
+
+    With enforcement off (dev/eager runner) it runs the sandboxed tshark
+    analysis (argv-only, ``-n``, whitelisted filter, hard timeout — ADR-0023 §1)
+    over the capture's pcap and returns only the normalized
+    :class:`PacketFindings` (top talkers, protocol hierarchy, TCP anomalies).
+    Raw packet bytes never leave the sandbox (ADR-0023 §1). 404 when the capture
+    is unknown or its pcap has been tombstoned by retention.
     """
     row = await _get_capture_or_404(session, capture_id)
     if row.tombstoned_at is not None:

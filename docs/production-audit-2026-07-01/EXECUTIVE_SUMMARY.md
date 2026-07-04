@@ -27,7 +27,7 @@ The audit found **no Critical-severity issues**. It found **3 High-severity issu
 |---|---|---|---|
 | 1 | **High** | **Troubleshooting Agent live-capability reads are dead code**: every live BGP/OSPF/route read returns "not yet wired: the credential/transport session lands in M5" — M5 shipped 2026-06-19; the transport-injection seam was wired for discovery/config workers but never for this agent (`backend/app/agents/troubleshooting/tools.py:166`) | FUNCTIONAL_BUGS #1 |
 | 2 | **High** | **No React ErrorBoundary anywhere in the frontend** — any render exception blanks the whole SPA with no recovery path | UI_UX #1 |
-| 3 | **High** | **Packet-analysis service is opt-in/default-OFF, contradicting ADR-0031's secure-by-default sandbox design** — recorded as a deferred contradiction in PR #86, still unresolved | ARCH_DEBT #1 |
+| 3 | ~~High~~ **Resolved** | Packet-analysis opt-in/default-OFF contradiction — fixed via the **executor-split** (ADR-0049, `feat/packet-executor-split`): confined executor child + re-enabled by default, gated on the Linux `packet-analysis-bite-proof` CI job | ARCH_DEBT #1 |
 | 4 | ~~High~~ **Resolved (WONTFIX)** | Live kind-harness enforcement gates — promotion **Rejected** (ADR-0048, 2026-07-03, audit-W2 T7); live jobs now opt-in, controls stay protected by blocking static gates | PROD_READINESS #1 |
 | 5 | High (named) | External penetration test not performed (G-SEC exit item) | PROD_READINESS #2 |
 | 6 | Medium | Default docker-compose quickstart serves the SPA with **no security headers** (no CSP, X-Frame-Options, X-Content-Type-Options) — headers exist only in the TLS edge overlay and K8s ingress | PROD_READINESS #4 |

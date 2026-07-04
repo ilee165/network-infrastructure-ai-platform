@@ -9,6 +9,11 @@
 #   worker -> compose overrides the command:
 #             celery -A app.workers.celery_app worker -Q discovery,config,packet,docs,system
 #
+# The `packet-analysis` STAGE (ADR-0049 blocker 7) extends `runtime` with tshark +
+# libseccomp2 for the untrusted-pcap dissection tier. It is a SEPARATE build target
+# (`--target packet-analysis`, image netops-backend-packet) so the shared api/worker
+# image stays slim and free of tshark's CVE-bearing C dissectors.
+#
 # The build context is the REPOSITORY ROOT (docker-compose.yml sets
 # `context: ../..`), so paths below are repo-relative:
 #   docker build -f deploy/docker/backend.Dockerfile .
@@ -65,3 +70,42 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live', timeout=3).status == 200 else 1)"]
 
 CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+
+# ---- packet-analysis: runtime + tshark + libseccomp (ADR-0049 blocker 7) --------
+# The UNTRUSTED-pcap dissection tier. This stage extends the slim `runtime` with
+# ONLY what the executor-split child needs — tshark (the CVE-bearing C dissectors)
+# and libseccomp.so.2 (the pyseccomp ctypes binding target the child loads its
+# strict filter through). Kept OUT of the shared api/worker image so that image
+# does not carry tshark's dissector attack surface. Build/consume via
+# `--target packet-analysis` (compose service `packet-analysis`,
+# image netops-backend-packet). pyseccomp itself is a pure-python wheel already
+# installed into /opt/venv by the builder — no compiler/headers are needed here.
+FROM runtime AS packet-analysis
+
+# Root only to apt-install; drop back to the non-root netops user immediately.
+USER root
+
+# tshark for file dissection (never live capture — the analysis tier holds no
+# CAP_NET_RAW) + libseccomp2 for the child's runtime seccomp filter. Preseed
+# wireshark-common so dumpcap is NOT installed setuid-root: this tier dissects
+# files, never captures, so a setuid raw-capture helper would be unused standing
+# privilege. --no-install-recommends keeps the layer minimal.
+RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    echo "wireshark-common wireshark-common/install-setuid boolean false" | debconf-set-selections; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends tshark libseccomp2; \
+    rm -rf /var/lib/apt/lists/*; \
+    # Defence in depth: ensure no setuid dumpcap survives (file dissection needs none).
+    if [ -e /usr/bin/dumpcap ]; then chmod u-s /usr/bin/dumpcap || true; fi
+
+USER netops
+
+# Build-time self-check (ADR-0049 blocker 7): import the seccomp binding, load the
+# PACKAGED strict profile, and COMPILE the filter (no kernel load). A missing
+# pyseccomp wheel, a missing libseccomp.so.2, or a profile that failed to package
+# into the wheel fails the BUILD here — not the first production analysis job.
+RUN ["python", "-m", "app.engines.packet.executor", "--self-check"]
+
+# Inherit the runtime healthcheck/CMD; compose + Helm override the command to
+# `celery ... -Q packet_analysis`.

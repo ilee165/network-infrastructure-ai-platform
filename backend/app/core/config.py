@@ -231,6 +231,42 @@ class Settings(BaseSettings):
     #: unit-test/CI runner where the sandbox OS controls are not applied.
     packet_sandbox_posture_enforced: bool = True
 
+    #: packet-analysis executor-split sandbox tuning (ADR-0049). The dispatcher
+    #: forwards these to the self-confining ``python -m app.engines.packet.executor``
+    #: child, which applies them as rlimits BEFORE loading the seccomp filter (fail
+    #: closed). ``RLIMIT_CPU`` is derived from ``packet_analysis_timeout_seconds``
+    #: (the wedged-tshark backstop) and ``RLIMIT_CORE`` is fixed at 0, so neither is
+    #: exposed here. ``deny_action`` selects the child's seccomp default action:
+    #: ``"errno"`` (v1 — a denied syscall returns ``EPERM``) or ``"kill_process"``
+    #: (``SCMP_ACT_KILL_PROCESS``, SIGSYS-kill — the follow-up once the Linux
+    #: green-path is proven on CI; ADR-0049 blocker 8). Defaults mirror the
+    #: fallbacks in ``app.engines.packet.executor``.
+    packet_sandbox_rlimit_as_bytes: int = 2 * 1024 * 1024 * 1024
+    packet_sandbox_rlimit_fsize_bytes: int = 64 * 1024 * 1024
+    packet_sandbox_rlimit_nofile: int = 256
+    #: CAUTION — ``RLIMIT_NPROC`` is a PER-UID limit, not a per-process-tree one:
+    #: the kernel enforces it against uid-10001's TOTAL task count host-wide
+    #: (processes AND threads, across uvicorn's threadpool, celery prefork, beat,
+    #: the dispatcher, and every other uid-10001 container on the node). A value
+    #: sized to "this job's tree" (e.g. 64) makes tshark's fork() fail EAGAIN
+    #: under ordinary platform load — intermittent, load-correlated analysis
+    #: failures. 512 aligns with the container-level compose ``pids_limit`` (512),
+    #: which is the PRIMARY fork-bomb bound; this rlimit is only a defence-in-depth
+    #: backstop. Do not tune it back down below the platform's steady-state
+    #: uid-10001 task count.
+    packet_sandbox_rlimit_nproc: int = 512
+    packet_sandbox_seccomp_deny_action: str = "errno"
+
+    #: Hard cap on the bytes the dispatcher reads from the executor child's stdout
+    #: (ADR-0049 marshalling must-address). The child prints only a small,
+    #: findings-shaped ``PacketFindings`` JSON, but a popped dissector could emit
+    #: arbitrary output, so the dispatcher bounds it at a TIGHT findings-sized
+    #: limit — deliberately NOT the 64 MB raw-tshark cap the child applies to
+    #: tshark's own output — and pydantic-validates the result (list/string caps)
+    #: before anything reaches the DB / audit / API. Default 256 KiB: ~50x the
+    #: largest realistic findings document, ~256x below the raw cap.
+    packet_findings_max_bytes: int = 256 * 1024
+
     #: pcap-retention beat schedule (ADR-0023 §4): the UTC hour/minute the
     #: ``packet.purge_expired`` task fires at. Default 03:00 UTC.
     pcap_retention_hour: int = 3

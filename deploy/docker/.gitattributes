@@ -1,0 +1,9 @@
+# Pin the packet-analysis seccomp profiles to LF line endings (ADR-0031 §3 /
+# ADR-0049 blocker 3). These JSON profiles are compared as RAW BYTES by the
+# lockstep CI gate (.github/workflows/ci.yml job `infra`) against their
+# deploy/kubernetes/netops/seccomp and in-package backend/app/engines/packet
+# copies (all pinned eol=lf there). Under core.autocrlf=true a Windows clone
+# would materialize CRLF in the working tree and the byte-for-byte `cmp` would
+# FALSE-RED on pure line-ending churn. Pinning eol=lf keeps every copy LF
+# regardless of the cloner's autocrlf setting, so the gate compares CONTENT.
+seccomp/*.json text eol=lf

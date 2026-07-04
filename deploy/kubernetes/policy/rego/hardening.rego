@@ -86,12 +86,25 @@ deny contains msg if {
 	msg := sprintf("packet-analysis container %q must use a Localhost seccomp profile (ADR-0031 §3)", [c.name])
 }
 
+# The analysis container must carry the ADR-0049 blocker-5 DISPATCHER profile at
+# CONTAINER level (deny-by-default: the strict child allow-list PLUS client sockets
+# + seccomp()/prctl() a broker-connected Celery worker + self-confining parent
+# need). This RE-POINTS the former "some localhostProfile present" assertion to the
+# SPECIFIC dispatcher profile, so a regression to the strict no-socket profile
+# (which breaks the broker-connected worker) OR to RuntimeDefault / profile removal
+# is caught. The child re-confines with the strict profile per job (loaded
+# in-container from the wheel via importlib.resources) — that is NOT a container
+# control and is pinned by the byte-lockstep CI gate + the executor tests, not here.
 deny contains msg if {
 	input.kind == "Deployment"
 	input.metadata.name == "packet-analysis"
 	some c in input.spec.template.spec.containers
-	not c.securityContext.seccompProfile.localhostProfile
-	msg := sprintf("packet-analysis container %q must reference the Localhost seccomp profile file (ADR-0031 §3)", [c.name])
+	not analysis_has_dispatcher_seccomp(c)
+	msg := sprintf("packet-analysis container %q must reference the dispatcher Localhost seccomp profile netops/packet-analysis-dispatcher-seccomp.json at container level (ADR-0049 blocker 5); a regression to the strict no-socket profile breaks the broker-connected worker (ADR-0031 §3)", [c.name])
+}
+
+analysis_has_dispatcher_seccomp(c) if {
+	endswith(c.securityContext.seccompProfile.localhostProfile, "packet-analysis-dispatcher-seccomp.json")
 }
 
 # resources.requests AND limits present.

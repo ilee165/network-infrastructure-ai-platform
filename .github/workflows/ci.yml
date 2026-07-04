@@ -641,33 +641,59 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # ADR-0031 §3 requires the Compose and Helm copies of the packet-analysis
-      # seccomp profile to stay byte-for-byte identical (the chart derives its
-      # ConfigMap from the Helm copy; Compose reads its own). A one-sided edit —
-      # e.g. a syscall added to one copy only — is a silent security drift. This
-      # gate catches it. (They had already drifted on line endings before this.)
-      - name: seccomp profiles byte-identical (ADR-0031 §3 lockstep) — RED gate
+      # ADR-0031 §3 / ADR-0049 blocker 3 require every copy of the packet-analysis
+      # seccomp profiles to stay byte-for-byte identical. A one-sided edit — e.g. a
+      # syscall added to one copy only — is a silent security drift. Two profiles,
+      # each with multiple copies:
+      #   STRICT child profile (deny-by-default, no sockets) — THREE copies: the
+      #     Compose copy, the Helm chart copy, AND the in-package copy the executor
+      #     loads at runtime via importlib.resources (ADR-0049 blocker 3 single
+      #     source of truth). All three must match.
+      #   DISPATCHER container profile (strict + client sockets + seccomp()/prctl())
+      #     — TWO copies (Compose + Helm) the analysis container runs under at
+      #     container level (ADR-0049 blocker 5). The child re-confines with the
+      #     strict profile above. Both must match.
+      # (The copies had already drifted on line endings before this gate existed;
+      # .gitattributes now pins every copy eol=lf so the byte cmp is content-only.)
+      - name: seccomp profiles byte-identical (ADR-0031 §3 / ADR-0049 blockers 3+5 lockstep) — RED gate
         shell: bash
         run: |
           set -euo pipefail
-          a=deploy/docker/seccomp/packet-analysis-seccomp.json
-          b=deploy/kubernetes/netops/seccomp/packet-analysis-seccomp.json
-          # Negative control (L1 "the gate must RUN and BITE"): a planted one-byte
-          # divergence in scratch copies MUST make cmp fail; otherwise the check is
-          # a false-green. Never touches the committed tree.
-          tmp=$(mktemp -d); cp "$a" "$tmp/a"; cp "$b" "$tmp/b"; printf '\n' >> "$tmp/b"
-          if cmp -s "$tmp/a" "$tmp/b"; then
-            echo "::error::negative control failed — cmp did not detect planted seccomp divergence"
+          strict_docker=deploy/docker/seccomp/packet-analysis-seccomp.json
+          strict_helm=deploy/kubernetes/netops/seccomp/packet-analysis-seccomp.json
+          strict_pkg=backend/app/engines/packet/seccomp/packet-analysis-seccomp.json
+          disp_docker=deploy/docker/seccomp/packet-analysis-dispatcher-seccomp.json
+          disp_helm=deploy/kubernetes/netops/seccomp/packet-analysis-dispatcher-seccomp.json
+          # Negative controls (P1 W4 L1 "the gate must RUN and BITE"): a planted
+          # one-byte divergence in scratch copies MUST make cmp fail; otherwise the
+          # check is a false-green. Never touches the committed tree. One control per
+          # profile family so BOTH cmp legs are proven to bite.
+          tmp=$(mktemp -d)
+          cp "$strict_docker" "$tmp/sa"; cp "$strict_helm" "$tmp/sb"; printf '\n' >> "$tmp/sb"
+          if cmp -s "$tmp/sa" "$tmp/sb"; then
+            echo "::error::negative control failed — cmp did not detect planted STRICT seccomp divergence"
+            exit 1
+          fi
+          cp "$disp_docker" "$tmp/da"; cp "$disp_helm" "$tmp/db"; printf '\n' >> "$tmp/db"
+          if cmp -s "$tmp/da" "$tmp/db"; then
+            echo "::error::negative control failed — cmp did not detect planted DISPATCHER seccomp divergence"
             exit 1
           fi
           rm -rf "$tmp"
-          # Real gate: the two committed profiles must be byte-for-byte identical.
-          if ! cmp -s "$a" "$b"; then
-            echo "::error::packet-analysis seccomp profiles diverged (ADR-0031 §3 byte-for-byte lockstep). Diff:"
-            diff -u "$a" "$b" || true
+          # Real gate 1: the THREE strict copies are byte-for-byte identical.
+          if ! cmp -s "$strict_docker" "$strict_helm" || ! cmp -s "$strict_docker" "$strict_pkg"; then
+            echo "::error::strict packet-analysis seccomp profiles diverged (ADR-0031 §3 / ADR-0049 blocker 3 byte-for-byte lockstep across Compose/Helm/in-package). Diffs:"
+            diff -u "$strict_docker" "$strict_helm" || true
+            diff -u "$strict_docker" "$strict_pkg" || true
             exit 1
           fi
-          echo "packet-analysis seccomp profiles are byte-identical (ADR-0031 §3 lockstep)."
+          # Real gate 2: the DISPATCHER pair is byte-for-byte identical.
+          if ! cmp -s "$disp_docker" "$disp_helm"; then
+            echo "::error::dispatcher packet-analysis seccomp profiles diverged (ADR-0049 blocker 5 byte-for-byte lockstep across Compose/Helm). Diff:"
+            diff -u "$disp_docker" "$disp_helm" || true
+            exit 1
+          fi
+          echo "packet-analysis seccomp profiles byte-identical (strict x3 + dispatcher x2; ADR-0031 §3 / ADR-0049 blockers 3+5 lockstep)."
 
       - name: Set up Helm
         uses: azure/setup-helm@v5
@@ -745,6 +771,34 @@ jobs:
       - name: conftest (OPA policy-as-test)
         run: |
           conftest test rendered.yaml \
+            --policy deploy/kubernetes/policy/rego \
+            --all-namespaces
+
+      # ADR-0049 blocker 3 — packet-analysis tier render + policy validation. The
+      # packet-analysis Deployment + its NetworkPolicy are OPT-IN (default OFF,
+      # pending the T4 re-enable), so the default `rendered.yaml` above does NOT
+      # contain them and EVERY packet-analysis conftest rule (dispatcher seccomp
+      # profile, cap_drop:[ALL], no NET_RAW, RO-rootfs, non-root, RO pcap mount,
+      # default-deny+Redis egress) passes VACUOUSLY there. This step renders the
+      # chart with the analysis tier ENABLED and runs kubeconform + kube-linter +
+      # conftest on THAT render, so the executor-split invariant is actually
+      # schema/policy-gated in CI — a regression to the strict no-socket profile
+      # (which breaks the broker-connected worker) or a dropped hardening control
+      # fails the build here, not in production.
+      - name: Render + validate packet-analysis tier (ADR-0049 blocker 3)
+        run: |
+          set -o pipefail
+          helm template netops deploy/kubernetes/netops \
+            --namespace netops --kube-version 1.29.0 \
+            --set packet.analysis.enabled=true | tr -d '\r' > rendered-packet-analysis.yaml
+          test -s rendered-packet-analysis.yaml
+          kubeconform -strict -summary \
+            -kubernetes-version 1.29.0 \
+            -ignore-missing-schemas \
+            -skip ClusterPolicy,Cluster,Pooler \
+            rendered-packet-analysis.yaml
+          kube-linter lint rendered-packet-analysis.yaml --config deploy/kubernetes/.kube-linter.yaml
+          conftest test rendered-packet-analysis.yaml \
             --policy deploy/kubernetes/policy/rego \
             --all-namespaces
 
@@ -1820,6 +1874,166 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Packet-analysis executor-split bite-proof (ADR-0049 §Acceptance). This is the
+  # RE-ENABLE gate: ADR-0049 flips the service back on by default (compose profile
+  # removed, Helm packet.analysis.enabled=true) only in the SAME PR this job is
+  # green at HEAD. It builds the `packet-analysis` image (--target packet-analysis:
+  # tshark + libseccomp) and runs the REAL `python -m app.engines.packet.executor`
+  # under the REAL deployment posture (cap_drop ALL, non-root 10001, read-only
+  # rootfs, the committed dispatcher seccomp profile). Four required legs:
+  #   GREEN    — a real 1-packet pcap through the fully confined executor returns a
+  #              schema-valid PacketFindings (packet_count>=1).
+  #   DISPATCH — the REAL dispatcher seam (sandbox.run_executor/_spawn_and_reap,
+  #              start_new_session=True) spawns+reaps the confined child UNDER the
+  #              committed DISPATCHER profile (NOT unconfined) over a real pcap.
+  #              Added for review F2: GREEN runs the executor as PID 1 and TIMEOUT
+  #              runs unconfined, so no leg covered the dispatcher->child spawn
+  #              under the deployed profile — exactly how the setsid omission (F1,
+  #              EPERM on every Popen) stayed green. This leg makes that class BITE.
+  #   RED      — `--self-test=socket|ptrace` under confinement is DENIED (exit 80,
+  #              SELFTEST_DENIED / EPERM), with a NEGATIVE CONTROL: the same probe
+  #              UNCONFINED (enforcement off) SUCCEEDS (exit 81, SELFTEST_NOT_CONFINED).
+  #              If the negative control does not flip, the gate is not biting → fail.
+  #   TIMEOUT  — a wedged executor whose tshark grandchild sleeps past the timeout is
+  #              killed with its WHOLE process group (start_new_session + killpg); the
+  #              driver asserts no orphan grandchild survives.
+  # Linux-only (seccomp filter load is kernel-only): authored + syntax-checked on the
+  # Windows dev host, LIVE run verified on this ubuntu runner. No `needs` — wave-1
+  # like pg-integration; merge-blocking via the all-gates aggregator's `needs`.
+  packet-analysis-bite-proof:
+    name: packet-analysis-bite-proof (executor-split seccomp + tshark — Linux, ADR-0049 §Acceptance)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Repo-controlled shell + local docker only; no git auth needed.
+          persist-credentials: false
+
+      - name: Build packet-analysis image (--target packet-analysis; runs the build-time --self-check)
+        run: |
+          set -euo pipefail
+          # The build also runs the ADR-0049 blocker-7 `executor --self-check`
+          # (import pyseccomp + compile the packaged strict filter) — a missing
+          # wheel/library/profile fails the BUILD here, before any leg below.
+          docker build \
+            --target packet-analysis \
+            -f deploy/docker/backend.Dockerfile \
+            -t netops-backend-packet:citest \
+            .
+
+      - name: GREEN — a real pcap through the fully confined executor returns PacketFindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="${RUNNER_TEMP:-/tmp}/packet-fixture.pcap"
+          python3 ci/packet/gen_fixture_pcap.py "$fixture"
+          request='{"pcap_path":"/data/pcaps/tiny.pcap","display_filter":null,"tshark_bin":"tshark","timeout_seconds":30,"top_n":5,"enforced":true}'
+          # REAL production posture: the committed DISPATCHER seccomp profile at the
+          # container level (what compose/Helm apply); the executor child RE-CONFINES
+          # with the strict no-socket profile before opening the pcap. cap_drop ALL +
+          # non-root 10001 + read-only rootfs satisfy the executor's ADR-0031 §2
+          # posture backstop; the tmpfs is the single writable scratch (TMPDIR).
+          out="$(printf '%s' "$request" | docker run --rm -i \
+            --security-opt seccomp=deploy/docker/seccomp/packet-analysis-dispatcher-seccomp.json \
+            --security-opt no-new-privileges \
+            --cap-drop ALL \
+            --user 10001:10001 \
+            --read-only \
+            --tmpfs /tmp/pyshark:size=64m,mode=1777 \
+            -e TMPDIR=/tmp/pyshark \
+            -v "$fixture:/data/pcaps/tiny.pcap:ro" \
+            netops-backend-packet:citest \
+            python -m app.engines.packet.executor)"
+          printf '%s' "$out" | python3 ci/packet/assert_findings.py
+
+      - name: DISPATCH — the real dispatcher spawns+reaps the confined child UNDER the deployed dispatcher profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="${RUNNER_TEMP:-/tmp}/packet-fixture.pcap"
+          python3 ci/packet/gen_fixture_pcap.py "$fixture"
+          # Review F2: drive the PRODUCTION dispatcher seam — sandbox.run_executor
+          # -> _spawn_and_reap (start_new_session=True => CPython calls setsid() in
+          # the forked child) — with the COMMITTED dispatcher seccomp profile at the
+          # container level, exactly as compose/Helm deploy it. A profile that
+          # denies any syscall the spawn path needs (the F1 setsid class) EPERMs
+          # the Popen, the driver exits nonzero, and this leg goes RED. The child
+          # still self-confines with the strict profile before reading the pcap;
+          # the runner-side assert proves the round-trip produced schema-valid
+          # PacketFindings from the real fixture.
+          out="$(docker run --rm \
+            --security-opt seccomp=deploy/docker/seccomp/packet-analysis-dispatcher-seccomp.json \
+            --security-opt no-new-privileges \
+            --cap-drop ALL \
+            --user 10001:10001 \
+            --read-only \
+            --tmpfs /tmp/pyshark:size=64m,mode=1777 \
+            -e TMPDIR=/tmp/pyshark \
+            -v "$fixture:/data/pcaps/tiny.pcap:ro" \
+            -v "$PWD/ci/packet:/ci:ro" \
+            netops-backend-packet:citest \
+            python /ci/dispatcher_spawn_driver.py)"
+          printf '%s' "$out" | python3 ci/packet/assert_findings.py
+
+      - name: RED — self-test probes DENIED under confinement, negative control FLIPS (proves the filter bites)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Run each probe with the CHILD filter as the only seccomp in play
+          # (container seccomp=unconfined) so the executor's own strict filter is
+          # provably what bites — for BOTH socket and ptrace. Confined (enforced=true)
+          # => SELFTEST_DENIED (80); unconfined negative control (enforced=false) =>
+          # SELFTEST_NOT_CONFINED (81). Exit codes: backend/app/engines/packet/executor.py.
+          run_probe() {  # $1=probe  $2=enforced-json  -> stdout: executor exit code
+            printf '{"pcap_path":"/tmp/pyshark/none.pcap","enforced":%s}' "$2" \
+              | docker run --rm -i \
+                  --security-opt seccomp=unconfined \
+                  --security-opt no-new-privileges \
+                  --cap-drop ALL \
+                  --user 10001:10001 \
+                  --read-only \
+                  --tmpfs /tmp/pyshark:size=32m,mode=1777 \
+                  -e TMPDIR=/tmp/pyshark \
+                  netops-backend-packet:citest \
+                  python -m app.engines.packet.executor --self-test="$1" \
+              >/dev/null 2>&1
+            echo $?
+          }
+          fail=0
+          for probe in socket ptrace; do
+            confined="$(run_probe "$probe" true)"
+            negctl="$(run_probe "$probe" false)"
+            echo "probe=$probe confined_exit=$confined negative_control_exit=$negctl"
+            if [ "$confined" != "80" ]; then
+              echo "::error::RED: $probe NOT denied under confinement (exit $confined, want 80 SELFTEST_DENIED) — child filter did not bite"
+              fail=1
+            fi
+            if [ "$negctl" != "81" ]; then
+              echo "::error::RED negative control: unconfined $probe did NOT succeed (exit $negctl, want 81 SELFTEST_NOT_CONFINED) — the gate proves nothing"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ]
+
+      - name: TIMEOUT — a wedged executor + tshark grandchild are killed with the whole process group
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ci/packet/wedge_tshark.sh
+          # The driver imports the REAL sandbox._spawn_and_reap and drives it with a
+          # small outer timeout + large inner timeout so the DISPATCHER's killpg (not
+          # the child's self-cleanup) is the reaper under test. --init reaps the
+          # SIGKILLed grandchild so /proc reflects it gone.
+          docker run --rm --init \
+            --security-opt seccomp=unconfined \
+            --tmpfs /tmp/pyshark:size=32m,mode=1777 \
+            -e TMPDIR=/tmp/pyshark \
+            -v "$PWD/ci/packet:/ci:ro" \
+            netops-backend-packet:citest \
+            python /ci/timeout_reap_driver.py
+
   # Dependency-lockfile drift gate (P3 W0-T8, closes the P1 systemic TODO "add a
   # dep lockfile — drift bit twice", PRODUCTION.md §10 deps-pinned-per-release /
   # §11 G-MNT no-silent-drift). The P1 `fastapi 0.137 include_router` break had
@@ -2123,12 +2337,44 @@ jobs:
   # (docker-publish `needs: [backend, frontend, docker]`), so nothing unsigned
   # or unscanned can publish; a docker-publish failure turns the main/tag run
   # red on its own. The every-event `docker` validation job IS required here.
+  # PG-test routing heuristic (audit ARCH_DEBT #2). Flags a diff that adds
+  # PostgreSQL-specific SQL/semantics to backend code without a matching
+  # backend/tests/pg/ change (the SQLite unit suite is blind to those). ADVISORY
+  # FOR NOW: deliberately NOT in the `all-gates` needs below, so a hit surfaces
+  # in the checks list without blocking merge — a one-week false-positive soak.
+  # PROMOTE TO BLOCKING by adding `pg-test-routing` to the all-gates `needs`
+  # (no script change: ci/scripts/check-pg-test-routing.sh already exits non-zero
+  # on a violation, proven to bite). See backend/tests/pg/README.md.
+  pg-test-routing:
+    name: pg-test-routing (SQLite-vs-PG coverage heuristic — advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout (full history for merge-base)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check PG-semantic changes ship a tests/pg/ test
+        shell: bash
+        run: |
+          set -euo pipefail
+          # PR: judge against the target branch; push: against origin/main.
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch --no-tags --depth=200 origin "${GITHUB_BASE_REF}" || true
+            base="origin/${GITHUB_BASE_REF}"
+          else
+            base="origin/main"
+          fi
+          bash ci/scripts/check-pg-test-routing.sh "$base"
+
   all-gates:
     name: all-gates (required-check aggregator)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, lockfile, observability, drill-bite-proofs]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, packet-analysis-bite-proof, lockfile, observability, drill-bite-proofs]
     steps:
       - name: Assert every gate succeeded
         env:
