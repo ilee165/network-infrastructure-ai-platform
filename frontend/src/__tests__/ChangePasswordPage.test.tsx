@@ -169,6 +169,9 @@ describe("ChangePasswordPage — accessible form labels and pending spinner", ()
     expect(within(submit).getByRole("status")).toBeInTheDocument();
 
     resolveChange({ changed: true });
+    // Drain the success chain (getMe → setUser → pushToast → navigate) before
+    // the test ends so no state update leaks past the test boundary.
+    await waitFor(() => expect(useUiStore.getState().toasts).toHaveLength(1));
   });
 });
 

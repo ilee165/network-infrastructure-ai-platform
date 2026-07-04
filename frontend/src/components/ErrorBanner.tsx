@@ -21,7 +21,7 @@ const GENERIC_MESSAGE = "Something went wrong.";
 /** Resolve the best available message for an unknown thrown/caught value. */
 function messageFor(error: unknown): string {
   if (error instanceof ApiError) {
-    return error.problem.detail;
+    return error.problem.detail || GENERIC_MESSAGE;
   }
   if (error instanceof Error) {
     return error.message || GENERIC_MESSAGE;

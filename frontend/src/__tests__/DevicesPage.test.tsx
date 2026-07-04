@@ -469,5 +469,44 @@ describe("DevicesPage — discovery-run mutation outcomes routed through toast",
         headers: { "Content-Type": "application/json" },
       }),
     );
+    // Drain the onSuccess chain (toast + query invalidation) before the test
+    // ends so no state update leaks past the test boundary.
+    await waitFor(() => expect(useUiStore.getState().toasts).toHaveLength(1));
+  });
+
+  it("pushes an error toast when starting a discovery run fails", async () => {
+    const mock = vi.fn((url: string, init?: RequestInit): Promise<Response> => {
+      if ((init as RequestInit | undefined)?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ detail: "boom" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      const body = String(url).includes("/discovery/runs") ? EMPTY_RUNS : EMPTY_LIST;
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await screen.findByTestId("launcher-seeds-input");
+    fireEvent.change(screen.getByTestId("launcher-seeds-input"), {
+      target: { value: "10.0.0.1" },
+    });
+    fireEvent.change(screen.getByTestId("launcher-allowlist-input"), {
+      target: { value: "10.0.0.0/24" },
+    });
+    fireEvent.click(screen.getByTestId("launcher-submit-btn"));
+
+    await waitFor(() => {
+      expect(useUiStore.getState().toasts).toHaveLength(1);
+    });
+    expect(useUiStore.getState().toasts[0]).toMatchObject({ kind: "error" });
   });
 });

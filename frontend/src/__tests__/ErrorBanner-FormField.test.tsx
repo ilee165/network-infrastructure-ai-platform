@@ -21,6 +21,17 @@ describe("ErrorBanner", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Device abc123 was not found.");
   });
 
+  it("falls back to the generic message when an ApiError's detail is empty", () => {
+    const error = new ApiError({
+      type: "urn:netops:error:internal",
+      title: "Internal Server Error",
+      status: 500,
+      detail: "",
+    });
+    render(<ErrorBanner error={error} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Something went wrong.");
+  });
+
   it("falls back to error.message for a plain Error", () => {
     render(<ErrorBanner error={new Error("network timeout")} />);
     expect(screen.getByRole("alert")).toHaveTextContent("network timeout");
