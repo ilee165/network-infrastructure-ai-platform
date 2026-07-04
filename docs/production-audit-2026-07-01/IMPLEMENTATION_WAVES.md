@@ -1,6 +1,8 @@
 # Implementation Waves — Remediation Plan from the 2026-07-01 Audit
 
-Derived from [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) and its companion reports. Five waves, risk-ordered per the remediation brief; every wave stays under 20 changed files. **Planning document — nothing here is implemented yet.**
+Derived from [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) and its companion reports. Five waves, risk-ordered per the remediation brief; every wave stays under 20 changed files.
+
+> **Execution status (2026-07-04):** Waves 1–3 are merged — W1 → PR #90 (2026-07-02); W2 → PRs #93/#94/#95 (2026-07-02/03, item 7 dropped per ADR-0048 Rejection); W3 → PR #108 (2026-07-03, which also carried the out-of-wave packet executor-split). Wave 4 is in progress (item 1 → PR #109, 2026-07-04). Wave 5 is not started. Per-wave annotations below.
 
 Conventions: one atomic commit per task (repo standing discipline); every wave ends with the full gate set green (`ruff check . && ruff format --check . && mypy && lint-imports`, `pytest`, `vitest/eslint/tsc`, plus wave-specific gates). Rollback unit = the task's atomic commit (`git revert`), never `reset --hard`.
 
@@ -8,7 +10,7 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 1 — Broken-behavior bug fixes
+## Wave 1 — Broken-behavior bug fixes — ✅ DONE (2026-07-02, PR #90)
 
 **Goal:** Every shipped feature actually works: live troubleshooting reads return device data, the app shuts down cleanly, and the cross-replica WebSocket relay is deterministic (flake retired for real).
 
@@ -42,7 +44,7 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 2 — Functional & security improvements
+## Wave 2 — Functional & security improvements — ✅ DONE (2026-07-02/03, PRs #93/#94/#95; item 7 dropped)
 
 **Goal:** Close the exploitable/user-visible hardening gaps: render-crash safety net, refresh-token theft detection (with its frontend prerequisite), secure-by-default quickstart, and live enforcement gates that actually block.
 
@@ -84,7 +86,9 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 3 — Architecture cleanup
+## Wave 3 — Architecture cleanup — ✅ DONE (2026-07-03, PR #108)
+
+> **Completed 2026-07-03** (PR #108; self-review in [wave3/PR_REVIEW.md](wave3/PR_REVIEW.md)). All five items landed. Deviations from plan: the auth split shipped as an `api/v1/auth/` *package* (`_shared`/`login`/`oidc`/`account`/`users`/`settings`, largest 468 LOC) rather than the sibling modules sketched below, and item 3 went further than "decision only" — ADR-0049 was Accepted after dual-strong review and the executor-split **implementation** shipped in the same PR (see out-of-wave table). One success criterion remains open: `pg-test-routing` is **advisory** pending its one-week false-positive soak; promote to blocking (one-line `all-gates` `needs` edit) ~2026-07-10. Note: the PR squash-merged Wave 3 together with the packet implementation into one commit (`a8ee95c`), so the per-item rollback plan below is not executable for this wave as merged.
 
 **Goal:** Shrink the highest-risk review surfaces and retire tracked debt: auth module split, fastapi unpin, packet-analysis design decision on paper, PG-test routing enforcement, doc-drift fixes.
 
@@ -122,7 +126,7 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 4 — UI/UX polish
+## Wave 4 — UI/UX polish — 🔄 IN PROGRESS (item 1 merged 2026-07-04, PR #109)
 
 **Goal:** Shared component vocabulary, responsive baseline, enforced a11y floor, perceived-performance polish — concentrated on the five highest-traffic pages.
 

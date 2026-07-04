@@ -27,6 +27,14 @@ Production readiness audit, 2026-07-01. Backend: 207 app modules / ~50k LOC; 226
 
 ## 2. SQLite unit suite hides PostgreSQL semantics (recurring bug class)
 
+> **RESOLVED (2026-07-03, audit Wave 3 / PR #108).** Routing rule codified in
+> `backend/tests/pg/README.md` (PG-semantic code MUST ship a `tests/pg/` test;
+> `PG_ROUTING_ALLOW=1` escape hatch) and enforced by
+> `ci/scripts/check-pg-test-routing.sh` via the `pg-test-routing` CI job —
+> red-proven on a synthetic `SET LOCAL` diff. The job runs **advisory** during a
+> one-week false-positive soak; promotion to blocking (one-line `all-gates`
+> `needs` edit) is the remaining follow-up, due ~2026-07-10. Historical finding below.
+
 - **Severity:** Medium
 - **Location:** `backend/tests/` (default suite on SQLite) vs `backend/tests/pg/` + `pg-integration` CI job (Postgres-backed, but scoped to the P2-W4 controls)
 - **Root cause:** The fast unit suite runs against SQLite; PostgreSQL-only semantics (NULLS-FIRST ordering, partitioned-index rules, `REVOKE`, write-locking, `synchronous_commit`) are invisible to it. This was the *recurring root cause* of the P2-W4 review majors. W5-T0 closed it for the W4 controls with a real PG test layer and a blocking CI job (proven to bite), but the pattern is structural: every new PG-semantic feature (e.g., the P3 audit-export cursor, migration 0014) re-opens the gap unless its tests land in the PG layer.
@@ -36,6 +44,13 @@ Production readiness audit, 2026-07-01. Backend: 207 app modules / ~50k LOC; 226
 
 ## 3. `fastapi>=0.136,<0.137` upper pin
 
+> **RESOLVED (2026-07-03, audit Wave 3 / PR #108).** Cap lifted — `pyproject.toml`
+> now `fastapi>=0.137`, lockfile pins 0.139.0. The route-introspection test was
+> adapted to 0.137's lazy `_IncludedRouter` model, and the migration surfaced and
+> fixed a real regression: `metrics_asgi.templated_route()` lost the `/api/v1`
+> mount prefix in the Prometheus `route` label (the P3-W3 SLO label source). Full
+> suite green on 0.139. Historical finding below.
+
 - **Severity:** Medium
 - **Location:** `backend/pyproject.toml:20`
 - **Root cause:** FastAPI 0.137 changed `include_router` behavior and broke the route-introspection tests (P1-W6 CI saga); the cap was the correct emergency fix, and the lockfile (P3-W0) now prevents silent drift. But an upper pin on the core web framework accrues risk with each upstream release: security patches, Starlette compatibility ranges, and Pydantic interplay all age against a frozen minor.
@@ -44,6 +59,12 @@ Production readiness audit, 2026-07-01. Backend: 207 app modules / ~50k LOC; 226
 - **Risk:** Low–Medium — test-surface change, well-bounded.
 
 ## 4. `api/v1/auth.py` is a 1,548-line module on a secret-adjacent surface
+
+> **RESOLVED (2026-07-03, audit Wave 3 / PR #108).** Split into the
+> `backend/app/api/v1/auth/` package — `_shared` / `login` / `oidc` / `account` /
+> `users` / `settings`; largest module is `login.py` at 468 LOC. Pure motion:
+> OpenAPI schema byte-identical (49 paths), 138-test auth suite green with zero
+> test edits, `lint-imports` module-boundary contract green. Historical finding below.
 
 - **Severity:** Medium
 - **Location:** `backend/app/api/v1/auth.py` — largest file in the repo; contains password login + lockout, token mint/refresh/logout, OIDC login/callback/logout federation, user CRUD, session administration, and their helpers.
@@ -80,6 +101,11 @@ Production readiness audit, 2026-07-01. Backend: 207 app modules / ~50k LOC; 226
 - **Risk:** Low.
 
 ## 8. Documentation drift in operating facts
+
+> **RESOLVED (2026-07-03, audit Wave 3 / PR #108).** `CLAUDE.md` migration-range
+> fact generalized ("migrations are sequential — `upgrade head` applies the whole
+> `0001`-onward chain"); the stale `main.py` placeholder comments were already
+> removed in Wave 1 (PR #90). Historical finding below.
 
 - **Severity:** Low
 - **Location:** `CLAUDE.md` ("revisions `0001`→`0010` exist" — the repo is at `0014`; similar risk for other frozen facts), stale placeholder comments in `main.py` (see FUNCTIONAL_BUGS #6)
