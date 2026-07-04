@@ -602,6 +602,36 @@ class TestGraphCap:
         response = await self._get(app_with_graph, auth_headers("viewer"), params={"site": "lon"})
         assert response.status_code == 413, response.text
 
+    async def test_stale_count_cannot_leak_an_over_cap_200(
+        self,
+        app: FastAPI,
+        graph_records: list[dict[str, Any]],
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        """The pre-check races a concurrent projection (read-committed Neo4j).
+
+        Simulate the graph growing between the count and the read: the count
+        statement reports under-cap, but the read materializes 7 nodes.  The
+        post-fetch guard must still refuse with a 413 — an over-cap 200 is
+        never a legal response.
+        """
+
+        class StaleCountClient(FakeKnowledgeClient):
+            async def execute_read(
+                self, work: Callable[..., Any], *args: Any, **kwargs: Any
+            ) -> Any:
+                if getattr(work, "__name__", "") == "_count_graph_nodes":
+                    return 0
+                return await super().execute_read(work, *args, **kwargs)
+
+        app.dependency_overrides[deps.get_knowledge_client] = lambda: StaleCountClient(
+            graph_records
+        )
+        app.state.settings.topology_max_nodes = 3
+        response = await self._get(app, auth_headers("viewer"))
+        assert response.status_code == 413, response.text
+        assert "7 nodes" in response.json()["detail"]
+
     async def test_neighborhood_is_exempt_from_the_cap(
         self,
         app_with_graph: FastAPI,

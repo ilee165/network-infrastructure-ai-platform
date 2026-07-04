@@ -82,8 +82,12 @@ async def get_graph(
     subgraph is empty).
 
     Over ``topology_max_nodes`` (audit Wave 5, G-SCA) the read is refused with
-    a 413 problem — never a truncated 200 — before the graph is materialized;
-    the count pre-check applies the same filters as the read itself.  The
+    a 413 problem — never a truncated or over-cap 200.  The count pre-check
+    (same filters as the read) refuses cheaply before materializing the graph;
+    a second guard on the materialized node set closes the pre-check's race
+    with a concurrent projection pass — Neo4j read transactions are
+    read-committed, not snapshot-isolated, so the graph can legitimately grow
+    between the two statements no matter how they are batched.  The
     depth-bounded ``/graph/neighborhood`` endpoint is exempt by construction.
     """
     # ``layer`` is constrained by the pattern above; this guards the contract.
@@ -93,13 +97,20 @@ async def get_graph(
     if max_nodes > 0:
         node_count = await count_graph_nodes(client, layer=layer, site=site, vrf=vrf)
         if node_count > max_nodes:
-            raise GraphTooLargeError(
-                f"this subgraph has {node_count} nodes, over the {max_nodes}-node "
-                "limit; narrow the read with ?site=<name> or "
-                "GET /topology/graph/neighborhood, or raise NETOPS_TOPOLOGY_MAX_NODES"
-            )
+            raise _too_large(node_count, max_nodes)
     graph = await fetch_graph(client, layer=layer, site=site, vrf=vrf)
+    if 0 < max_nodes < len(graph["nodes"]):
+        raise _too_large(len(graph["nodes"]), max_nodes)
     return GraphResponse.model_validate(graph)
+
+
+def _too_large(node_count: int, max_nodes: int) -> GraphTooLargeError:
+    """The 413 problem for an over-cap graph read (count, limit, alternatives)."""
+    return GraphTooLargeError(
+        f"this subgraph has {node_count} nodes, over the {max_nodes}-node "
+        "limit; narrow the read with ?site=<name> or "
+        "GET /topology/graph/neighborhood, or raise NETOPS_TOPOLOGY_MAX_NODES"
+    )
 
 
 @router.get(

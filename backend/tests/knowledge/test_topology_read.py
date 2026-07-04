@@ -25,6 +25,7 @@ from app.knowledge.schema import (
     REL_ROUTES_TO,
 )
 from app.knowledge.topology_read import (
+    _DNS_REL_TYPES,
     MAX_NEIGHBORHOOD_DEPTH,
     count_graph_nodes,
     fetch_neighborhood,
@@ -76,21 +77,38 @@ class _FakeTx:
         if "relationships(p)" in cypher:
             return _FakeResult(self._neighborhood_edges(cypher, params["device"]))
         if "count(DISTINCT n)" in cypher:
-            return _FakeResult([{"node_count": self._distinct_node_count(cypher)}])
+            return _FakeResult([{"node_count": self._distinct_node_count(cypher, params)}])
         raise AssertionError(f"unexpected cypher: {cypher}")
 
-    def _distinct_node_count(self, cypher: str) -> int:
+    def _distinct_node_count(self, cypher: str, params: dict[str, Any]) -> int:
+        # Mirror the production count predicate exactly (the lockstep the
+        # _count_graph_nodes docstring demands): the site predicate is bypassed
+        # for the DNS relationship family, and vrf only constrains ROUTES_TO.
         rel_segment = cypher.split("[r:", 1)[1].split("]", 1)[0]
         selected = set(rel_segment.split("|"))
-        identities = {
-            (labels[0], _node_key(labels[0], props))
-            for rec in self._records
-            if rec["rel_type"] in selected
+        site = params.get("site")
+        vrf = params.get("vrf")
+        identities: set[tuple[str, Any]] = set()
+        for rec in self._records:
+            if rec["rel_type"] not in selected:
+                continue
+            if (
+                site is not None
+                and rec["rel_type"] not in _DNS_REL_TYPES
+                and not (rec["a_props"].get("site") == site or rec["b_props"].get("site") == site)
+            ):
+                continue
+            if (
+                vrf is not None
+                and rec["rel_type"] == REL_ROUTES_TO
+                and rec["rel_props"].get("vrf") != vrf
+            ):
+                continue
             for labels, props in (
                 (rec["a_labels"], rec["a_props"]),
                 (rec["b_labels"], rec["b_props"]),
-            )
-        }
+            ):
+                identities.add((labels[0], _node_key(labels[0], props)))
         return len(identities)
 
     def _all_device_nodes(self) -> list[dict[str, Any]]:
@@ -173,8 +191,8 @@ class FakeKnowledgeClient:
 # ---------------------------------------------------------------------------
 
 
-def _dev(pg_id: str, hostname: str, stamp: str = PROJECTED_AT) -> dict[str, Any]:
-    return {"pg_id": pg_id, "hostname": hostname, "site": "nyc", "last_projected_at": stamp}
+def _dev(pg_id: str, hostname: str, stamp: str = PROJECTED_AT, site: str = "nyc") -> dict[str, Any]:
+    return {"pg_id": pg_id, "hostname": hostname, "site": site, "last_projected_at": stamp}
 
 
 def _edge(
@@ -183,6 +201,7 @@ def _edge(
     a_props: dict[str, Any],
     b_label: str,
     b_props: dict[str, Any],
+    rel_props: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "a_labels": [a_label],
@@ -190,21 +209,28 @@ def _edge(
         "b_labels": [b_label],
         "b_props": b_props,
         "rel_type": rel_type,
-        "rel_props": {"last_projected_at": PROJECTED_AT},
+        "rel_props": rel_props or {"last_projected_at": PROJECTED_AT},
     }
 
 
 def _chain_records() -> list[dict[str, Any]]:
     dev_a = _dev("dev-a", "sw-01", stamp=EARLIER)
     dev_b = _dev("dev-b", "sw-02")
-    dev_c = _dev("dev-c", "sw-03")
-    dev_d = _dev("dev-d", "sw-04")
+    dev_c = _dev("dev-c", "sw-03", site="lon")
+    dev_d = _dev("dev-d", "sw-04", site="lon")
     subnet = {"cidr": "10.0.0.0/24", "last_projected_at": PROJECTED_AT}
     return [
         _edge(REL_CONNECTED_TO, "Device", dev_a, "Device", dev_b),
         _edge(REL_CONNECTED_TO, "Device", dev_b, "Device", dev_c),
         _edge(REL_CONNECTED_TO, "Device", dev_c, "Device", dev_d),
-        _edge(REL_ROUTES_TO, "Device", dev_b, "Subnet", subnet),
+        _edge(
+            REL_ROUTES_TO,
+            "Device",
+            dev_b,
+            "Subnet",
+            subnet,
+            rel_props={"vrf": "blue", "last_projected_at": PROJECTED_AT},
+        ),
     ]
 
 
@@ -301,6 +327,19 @@ class TestCountGraphNodes:
     async def test_layer_filter_narrows_the_count(self, client: FakeKnowledgeClient) -> None:
         assert await count_graph_nodes(client, layer="l2") == 4
         assert await count_graph_nodes(client, layer="l3") == 2
+
+    async def test_site_filter_narrows_the_count(self, client: FakeKnowledgeClient) -> None:
+        # nyc touches a-b, b-c (dev-b side) and the subnet spur: a, b, c, subnet.
+        assert await count_graph_nodes(client, layer="all", site="nyc") == 4
+        # lon touches b-c (dev-c side) and c-d: b, c, d.
+        assert await count_graph_nodes(client, layer="all", site="lon") == 3
+        assert await count_graph_nodes(client, layer="all", site="no-such-site") == 0
+
+    async def test_vrf_filter_constrains_routes_to_only(self, client: FakeKnowledgeClient) -> None:
+        # vrf never drops CONNECTED_TO edges; it only constrains ROUTES_TO.
+        assert await count_graph_nodes(client, layer="all", vrf="blue") == 5
+        assert await count_graph_nodes(client, layer="all", vrf="red") == 4
+        assert await count_graph_nodes(client, layer="l3", vrf="red") == 0
 
     async def test_empty_graph_counts_zero(self) -> None:
         assert await count_graph_nodes(FakeKnowledgeClient([]), layer="all") == 0
