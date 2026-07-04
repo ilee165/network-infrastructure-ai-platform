@@ -15,6 +15,20 @@ import { useUiStore } from "../stores/ui";
 /** DOM id the mobile hamburger toggle points `aria-controls` at. */
 const SIDEBAR_ID = "app-sidebar";
 
+/** Matches Tailwind's `lg:` breakpoint, above which the sidebar is a static
+ *  column rather than an off-canvas drawer. */
+const DESKTOP_QUERY = "(min-width: 1024px)";
+
+/**
+ * Whether the viewport is currently at/above `lg:`. Defaults to `true`
+ * (treat as desktop) when `matchMedia` is unavailable — e.g. in the jsdom
+ * test environment — so the drawer's accessibility gating only ever
+ * activates where it can be verified against a real media query.
+ */
+function isDesktopViewport(): boolean {
+  return typeof globalThis.matchMedia !== "function" || globalThis.matchMedia(DESKTOP_QUERY).matches;
+}
+
 interface NavItem {
   to: string;
   label: string;
@@ -80,6 +94,33 @@ export function Layout() {
   // which is a persisted preference in `ui.ts`) so it always starts closed.
   const [drawerOpen, setDrawerOpen] = useState(false);
 
+  // Tracks whether the viewport is at/above `lg:`, i.e. whether the sidebar
+  // is currently rendered as the static column (always visible) or as the
+  // off-canvas drawer (visible only while `drawerOpen`). Unlike the `lg:`
+  // CSS overrides, this is real state so the a11y attributes below — which
+  // can't be expressed as a static, breakpoint-conditional JSX prop — can
+  // track the same condition at runtime.
+  const [isDesktop, setIsDesktop] = useState(isDesktopViewport);
+
+  useEffect(() => {
+    if (typeof globalThis.matchMedia !== "function") {
+      return;
+    }
+    const mql = globalThis.matchMedia(DESKTOP_QUERY);
+    function onChange(event: MediaQueryListEvent): void {
+      setIsDesktop(event.matches);
+    }
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, []);
+
+  // Below `lg:`, with the drawer closed, the sidebar sits off-screen
+  // (`-translate-x-full`) but would otherwise remain in the tab order and
+  // accessibility tree. `aria-hidden` + `inert` pull its ~14 interactive
+  // controls (13 NavLinks + the collapse toggle) out of both while it's
+  // off-canvas, without affecting the always-visible `lg:` static column.
+  const sidebarOffCanvas = !isDesktop && !drawerOpen;
+
   // Escape closes the drawer from anywhere in the shell, matching the
   // backdrop-click affordance.
   useEffect(() => {
@@ -137,6 +178,8 @@ export function Layout() {
 
       <aside
         id={SIDEBAR_ID}
+        aria-hidden={sidebarOffCanvas ? "true" : undefined}
+        inert={sidebarOffCanvas}
         className={`fixed inset-y-0 left-0 z-40 flex h-full ${sidebarCollapsed ? "w-14" : "w-56"} flex-col border-r border-carbon-700 bg-carbon-900 transition-transform duration-150 motion-reduce:transition-none ${drawerOpen ? "translate-x-0" : "-translate-x-full"} lg:static lg:z-auto lg:translate-x-0`}
       >
         <div className="flex h-12 items-center gap-2 border-b border-carbon-700 px-3">

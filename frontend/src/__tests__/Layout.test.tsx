@@ -174,6 +174,59 @@ describe("Layout — responsive drawer sidebar", () => {
   });
 });
 
+describe("Layout — off-canvas sidebar a11y (mobile, drawer closed)", () => {
+  /** Install a `matchMedia` stub reporting a below-`lg:` (mobile) viewport,
+   *  matching the pattern used for the theme store's OS-preference stub. */
+  function stubMobileViewport(): void {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("marks the sidebar aria-hidden + inert while off-canvas, so its ~14 controls don't sit in the tab order ahead of the visible hamburger", () => {
+    stubMobileViewport();
+    renderLayout("engineer");
+    const sidebar = document.getElementById("app-sidebar");
+    expect(sidebar).toHaveAttribute("aria-hidden", "true");
+    expect(sidebar).toHaveAttribute("inert");
+  });
+
+  it("clears aria-hidden/inert once the drawer is opened", () => {
+    stubMobileViewport();
+    renderLayout("engineer");
+    fireEvent.click(screen.getByRole("button", { name: /open navigation/i }));
+    const sidebar = document.getElementById("app-sidebar");
+    expect(sidebar).not.toHaveAttribute("aria-hidden");
+    expect(sidebar).not.toHaveAttribute("inert");
+  });
+
+  it("never hides the sidebar at a desktop (`lg:`) viewport, drawer closed or not", () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: true,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    renderLayout("engineer");
+    const sidebar = document.getElementById("app-sidebar");
+    expect(sidebar).not.toHaveAttribute("aria-hidden");
+    expect(sidebar).not.toHaveAttribute("inert");
+  });
+});
+
 describe("Layout — user menu", () => {
   it("shows the display name (falling back to username) and the role", () => {
     renderLayout("engineer", "Alice Smith");
