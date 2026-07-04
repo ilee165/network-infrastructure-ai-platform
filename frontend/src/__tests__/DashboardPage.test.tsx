@@ -115,7 +115,7 @@ describe("DashboardPage", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/v1/health/ready", expect.anything());
   });
 
-  it("shows skeleton placeholder cards (not text) while probing", () => {
+  it("shows skeleton placeholder cards (not visible text) while probing", () => {
     // A promise that never resolves keeps the query in its pending state.
     vi.stubGlobal(
       "fetch",
@@ -124,6 +124,18 @@ describe("DashboardPage", () => {
     renderDashboard();
 
     expect(screen.getByTestId("dependency-card-skeleton-0")).toBeInTheDocument();
-    expect(screen.queryByText(/probing dependencies/i)).not.toBeInTheDocument();
+  });
+
+  it("announces the probing state to screen readers via a visually-hidden status", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    renderDashboard();
+
+    const status = screen.getByRole("status", { name: /probing dependencies/i });
+    expect(status).toHaveClass("sr-only");
+    // Announced once, not once per skeleton card.
+    expect(screen.getAllByRole("status")).toHaveLength(1);
   });
 });

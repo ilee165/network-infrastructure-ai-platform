@@ -7,16 +7,30 @@
 
 import type { HTMLAttributes } from "react";
 
-type SkeletonProps = HTMLAttributes<HTMLDivElement>;
+interface SkeletonProps extends HTMLAttributes<HTMLDivElement> {
+  /**
+   * Accessible loading announcement. Rendered as a visually-hidden
+   * (`sr-only`) element with `role="status"` alongside the (still
+   * `aria-hidden`) pulsing block, so screen-reader users get the same loading
+   * cue sighted users infer from the skeleton animation.
+   */
+  label?: string;
+}
 
 /** A single pulsing placeholder block. Purely decorative — hidden from a11y tree. */
-export function Skeleton({ className = "", ...rest }: SkeletonProps) {
+export function Skeleton({ className = "", label, ...rest }: SkeletonProps) {
   return (
-    <div
-      aria-hidden="true"
-      className={`animate-pulse motion-reduce:animate-none rounded bg-carbon-800 ${className}`}
-      {...rest}
-    />
+    <>
+      {/* role="status" computes its accessible name from `aria-label`, not
+          content (same idiom as `Spinner` below) — a text child alone would
+          be announced with no name. */}
+      {label ? <span role="status" aria-label={label} className="sr-only" /> : null}
+      <div
+        aria-hidden="true"
+        className={`animate-pulse motion-reduce:animate-none rounded bg-carbon-800 ${className}`}
+        {...rest}
+      />
+    </>
   );
 }
 
@@ -25,6 +39,12 @@ interface SkeletonRowsProps {
   rows: number;
   /** Number of placeholder columns (cells) per row. */
   cols: number;
+  /**
+   * Accessible loading announcement, e.g. "Loading inventory…". Rendered
+   * once as a visually-hidden `role="status"` cell in an extra `sr-only`
+   * row — the pulsing rows themselves stay `aria-hidden`.
+   */
+  label?: string;
 }
 
 /**
@@ -32,9 +52,16 @@ interface SkeletonRowsProps {
  * border-carbon-800 last:border-0` rows, `py-1 pr-4` cells). Drop directly
  * inside an existing `<tbody>` in place of the real rows while loading.
  */
-export function SkeletonRows({ rows, cols }: SkeletonRowsProps) {
+export function SkeletonRows({ rows, cols, label }: SkeletonRowsProps) {
   return (
     <>
+      {label ? (
+        <tr className="sr-only">
+          <td colSpan={cols}>
+            <span role="status" aria-label={label} />
+          </td>
+        </tr>
+      ) : null}
       {Array.from({ length: rows }, (_, rowIndex) => (
         <tr key={rowIndex} className="border-b border-carbon-800 last:border-0">
           {Array.from({ length: cols }, (_, colIndex) => (

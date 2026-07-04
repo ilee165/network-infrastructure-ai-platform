@@ -22,13 +22,12 @@
  * Wired to ``api/changes.ts`` (T15 endpoints). Engineer+ surface (ADR-0020 §5).
  *
  * Status pills use the shared `StatusPill` (audit UI_UX #3/#7); the
- * kind/state → variant mapping stays here since it is page-specific.
- * `StatusPill`'s sanctioned variants are ok/warn/error/neutral only, so the
- * non-statusful `kind` tag (config/ddi) and the in-progress `executing` state
- * map to `neutral` rather than a bespoke accent tone — a conservative choice
- * absent a fifth variant in the shared primitive. Approve/reject outcomes are
- * routed through the toast channel (audit UI_UX #6) in addition to the
- * existing inline decision-error panel (now `ErrorBanner`), which stays
+ * kind/state → variant mapping stays here since it is page-specific. The
+ * non-statusful `kind` tag `config` and the in-progress `executing` state use
+ * the `info` (accent) variant, matching their pre-shared-primitive tone;
+ * `ddi` uses `ok` (green), also matching its prior tone. Approve/reject
+ * outcomes are routed through the toast channel (audit UI_UX #6) in addition
+ * to the existing inline decision-error panel (now `ErrorBanner`), which stays
  * because the four-eyes/RBAC rejection detail is security-relevant and must
  * remain visible on this surface, not just as a transient toast.
  */
@@ -58,8 +57,8 @@ const QUEUE_COLS = 5;
 
 /** Page-level mapping from a CR's kind to a StatusPill tone (categorical, not a status). */
 const KIND_VARIANT: Record<ChangeRequestKind, StatusPillVariant> = {
-  config: "neutral",
-  ddi: "neutral",
+  config: "info",
+  ddi: "ok",
 };
 
 /** Page-level mapping from a CR's lifecycle state to a StatusPill tone. */
@@ -67,7 +66,7 @@ const STATE_VARIANT: Record<ChangeRequestState, StatusPillVariant> = {
   draft: "neutral",
   pending_approval: "warn",
   approved: "ok",
-  executing: "neutral",
+  executing: "info",
   completed: "ok",
   failed: "error",
   rolled_back: "error",
@@ -166,7 +165,7 @@ function DetailPanel({
     },
     onError: (err) => {
       setDecisionError(err);
-      pushToast("error", "Change request approval was rejected.");
+      pushToast("error", "Change request approval failed.");
     },
   });
 
@@ -331,7 +330,7 @@ export function ChangesPage() {
         <div className="panel overflow-x-auto">
           <table className="w-full text-xs">
             <tbody>
-              <SkeletonRows rows={4} cols={QUEUE_COLS} />
+              <SkeletonRows rows={4} cols={QUEUE_COLS} label="Loading change requests…" />
             </tbody>
           </table>
         </div>

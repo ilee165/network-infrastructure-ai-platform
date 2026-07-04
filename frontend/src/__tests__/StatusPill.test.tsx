@@ -46,6 +46,15 @@ describe("StatusPill", () => {
     );
   });
 
+  it("renders the info variant with the accent token classes", () => {
+    render(<StatusPill variant="info">running</StatusPill>);
+    expect(screen.getByText("running").closest("span")).toHaveClass(
+      "border-accent/40",
+      "bg-accent/10",
+      "text-accent",
+    );
+  });
+
   it("renders a distinct aria-hidden glyph per variant so status is not color-only", () => {
     const { rerender } = render(
       <StatusPill variant="ok" data-testid="pill">
@@ -76,8 +85,15 @@ describe("StatusPill", () => {
     );
     const neutralGlyph = glyphFor()?.textContent;
 
+    rerender(
+      <StatusPill variant="info" data-testid="pill">
+        running
+      </StatusPill>,
+    );
+    const infoGlyph = glyphFor()?.textContent;
+
     expect(okGlyph).toBeTruthy();
-    const glyphs = new Set([okGlyph, warnGlyph, errorGlyph, neutralGlyph]);
-    expect(glyphs.size).toBe(4);
+    const glyphs = new Set([okGlyph, warnGlyph, errorGlyph, neutralGlyph, infoGlyph]);
+    expect(glyphs.size).toBe(5);
   });
 });

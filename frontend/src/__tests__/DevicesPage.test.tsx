@@ -84,6 +84,20 @@ const RUNS_WITH_PENDING: RunListResponse = {
   offset: 0,
 };
 
+const RUNNING_RUN: RunStatus = {
+  ...PENDING_RUN,
+  id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+  status: "running",
+  started_at: "2024-01-15T11:01:00Z",
+};
+
+const RUNS_WITH_RUNNING: RunListResponse = {
+  items: [RUNNING_RUN],
+  total: 1,
+  limit: 50,
+  offset: 0,
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
@@ -121,17 +135,27 @@ afterEach(() => {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("DevicesPage — loading state", () => {
-  it("shows skeleton placeholder rows (not text) while the inventory loads", () => {
+  it("shows skeleton placeholder rows (not visible text) while the inventory loads", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() => new Promise<Response>(() => {})),
     );
     renderPage();
 
-    expect(screen.queryByText(/loading inventory/i)).not.toBeInTheDocument();
     // Skeleton rows render as empty <td>s inside the inventory table shell.
     const skeletonCells = document.querySelectorAll("td .animate-pulse");
     expect(skeletonCells.length).toBeGreaterThan(0);
+  });
+
+  it("announces the inventory loading state to screen readers via a visually-hidden status", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    renderPage();
+
+    const status = screen.getByRole("status", { name: /loading inventory/i });
+    expect(status.closest("tr")).toHaveClass("sr-only");
   });
 });
 
@@ -262,6 +286,14 @@ describe("DevicesPage — run status list", () => {
     expect(screen.getByText(/10\.0\.0\.1/)).toBeInTheDocument();
   });
 
+  it("renders a running run with the accent (info) tone, restoring its pre-shared-primitive tone", async () => {
+    vi.stubGlobal("fetch", fetchRouted(EMPTY_LIST, RUNS_WITH_RUNNING));
+    renderPage();
+
+    const badge = await screen.findByTestId("run-status-running");
+    expect(badge).toHaveClass("border-accent/40", "bg-accent/10", "text-accent");
+  });
+
   it("never fires a per-run GET /discovery/runs/{id} request — status comes from the list poll only", async () => {
     const mock = fetchRouted(EMPTY_LIST, RUNS_WITH_PENDING);
     vi.stubGlobal("fetch", mock);
@@ -318,6 +350,45 @@ describe("DevicesPage — expandable row a11y", () => {
     fireEvent.click(row);
     const detail = await screen.findByTestId(`device-detail-${DEVICE_ID}`);
     expect(detail).toHaveClass("transition-opacity", "motion-reduce:transition-none");
+  });
+
+  it("announces the interfaces panel loading state to screen readers", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string): Promise<Response> => {
+        if (String(url).includes("/interfaces")) {
+          return new Promise<Response>(() => {});
+        }
+        return fetchRouted(DEVICE_LIST, EMPTY_RUNS)(url);
+      }),
+    );
+    renderPage();
+
+    const row = await screen.findByTestId(`device-row-${DEVICE_ID}`);
+    fireEvent.click(row);
+
+    const status = await screen.findByRole("status", { name: /loading interfaces/i });
+    expect(status.closest("tr")).toHaveClass("sr-only");
+  });
+
+  it("announces the neighbors panel loading state to screen readers", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string): Promise<Response> => {
+        if (String(url).includes("/neighbors")) {
+          return new Promise<Response>(() => {});
+        }
+        return fetchRouted(DEVICE_LIST, EMPTY_RUNS)(url);
+      }),
+    );
+    renderPage();
+
+    const row = await screen.findByTestId(`device-row-${DEVICE_ID}`);
+    fireEvent.click(row);
+    fireEvent.click(await screen.findByText("Neighbors"));
+
+    const status = await screen.findByRole("status", { name: /loading neighbors/i });
+    expect(status.closest("tr")).toHaveClass("sr-only");
   });
 });
 

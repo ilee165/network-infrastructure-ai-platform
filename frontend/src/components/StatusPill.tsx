@@ -14,7 +14,7 @@
 
 import type { ReactNode } from "react";
 
-export type StatusPillVariant = "ok" | "warn" | "error" | "neutral";
+export type StatusPillVariant = "ok" | "warn" | "error" | "neutral" | "info";
 
 interface StatusPillProps {
   variant: StatusPillVariant;
@@ -31,6 +31,7 @@ const VARIANT_STYLES: Record<StatusPillVariant, string> = {
   warn: "border-status-warn/40 bg-status-warn/10 text-status-warn",
   error: "border-status-error/40 bg-status-error/10 text-status-error",
   neutral: "border-carbon-600 bg-carbon-800 text-zinc-400",
+  info: "border-accent/40 bg-accent/10 text-accent",
 };
 
 /** Non-color glyph per variant so status reads without relying on hue. */
@@ -39,6 +40,7 @@ const VARIANT_GLYPH: Record<StatusPillVariant, string> = {
   warn: "▲", // ▲
   error: "✕", // ✕
   neutral: "○", // ○
+  info: "◆", // ◆
 };
 
 export function StatusPill({ variant, children, "data-testid": dataTestId }: StatusPillProps) {

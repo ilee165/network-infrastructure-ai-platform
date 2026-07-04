@@ -157,6 +157,31 @@ describe("ChangesPage — queue", () => {
     expect(screen.getByTestId(`cr-row-${CR_OTHER_ID}`)).toBeInTheDocument();
   });
 
+  it("renders the config kind and executing state with the accent (info) tone, restoring their pre-shared-primitive tone", async () => {
+    const executing: ChangeRequestRead = { ...CR_OTHER, state: "executing" };
+    vi.mocked(listChangeRequests).mockResolvedValue({
+      items: [executing],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    renderPage();
+
+    const kindBadge = await screen.findByTestId(`cr-kind-${CR_OTHER_ID}`);
+    expect(kindBadge).toHaveClass("border-accent/40", "bg-accent/10", "text-accent");
+    const stateBadge = screen.getByTestId(`cr-state-${CR_OTHER_ID}`);
+    expect(stateBadge).toHaveClass("border-accent/40", "bg-accent/10", "text-accent");
+  });
+
+  it("renders the ddi kind with the ok (green) tone, restoring its pre-shared-primitive tone", async () => {
+    vi.mocked(listChangeRequests).mockResolvedValue(LIST_BOTH);
+    renderPage();
+
+    // CR_MINE is kind "ddi".
+    const kindBadge = await screen.findByTestId(`cr-kind-${CR_MINE_ID}`);
+    expect(kindBadge).toHaveClass("border-status-ok/40", "bg-status-ok/10", "text-status-ok");
+  });
+
   it("shows an empty state when there are no change requests", async () => {
     vi.mocked(listChangeRequests).mockResolvedValue(EMPTY_LIST);
     renderPage();
@@ -171,12 +196,19 @@ describe("ChangesPage — queue", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("boom");
   });
 
-  it("shows skeleton placeholder rows (not text) while the queue loads", () => {
+  it("shows skeleton placeholder rows (not visible text) while the queue loads", () => {
     vi.mocked(listChangeRequests).mockReturnValue(new Promise(() => {}));
     renderPage();
 
-    expect(screen.queryByText(/loading change requests/i)).not.toBeInTheDocument();
     expect(document.querySelectorAll("td .animate-pulse").length).toBeGreaterThan(0);
+  });
+
+  it("announces the queue loading state to screen readers via a visually-hidden status", () => {
+    vi.mocked(listChangeRequests).mockReturnValue(new Promise(() => {}));
+    renderPage();
+
+    const status = screen.getByRole("status", { name: /loading change requests/i });
+    expect(status.closest("tr")).toHaveClass("sr-only");
   });
 });
 
@@ -349,5 +381,38 @@ describe("ChangesPage — server rejection surfacing", () => {
 
     const err = await screen.findByTestId("cr-decision-error");
     expect(err).toHaveTextContent(/four-eyes violation/);
+  });
+
+  it("pushes an accurate generic failure toast on approval failure (not a rejection claim)", async () => {
+    vi.mocked(listChangeRequests).mockResolvedValue(LIST_BOTH);
+    vi.mocked(approveChangeRequest).mockRejectedValue(problem(500, "internal error"));
+    renderPage();
+    fireEvent.click(await screen.findByTestId(`cr-view-${CR_OTHER_ID}`));
+    fireEvent.click(await screen.findByTestId("cr-approve-btn"));
+
+    await waitFor(() => {
+      expect(useUiStore.getState().toasts).toHaveLength(1);
+    });
+    const [toast] = useUiStore.getState().toasts;
+    expect(toast).toMatchObject({ kind: "error", message: "Change request approval failed." });
+    // A transient/server failure must never be mischaracterized as a
+    // deliberate four-eyes rejection.
+    expect(toast?.message).not.toMatch(/rejected/i);
+  });
+
+  it("pushes an accurate generic failure toast on rejection failure", async () => {
+    vi.mocked(listChangeRequests).mockResolvedValue(LIST_BOTH);
+    vi.mocked(rejectChangeRequest).mockRejectedValue(problem(500, "internal error"));
+    renderPage();
+    fireEvent.click(await screen.findByTestId(`cr-view-${CR_OTHER_ID}`));
+    fireEvent.click(await screen.findByTestId("cr-reject-btn"));
+
+    await waitFor(() => {
+      expect(useUiStore.getState().toasts).toHaveLength(1);
+    });
+    expect(useUiStore.getState().toasts[0]).toMatchObject({
+      kind: "error",
+      message: "Change request rejection failed.",
+    });
   });
 });

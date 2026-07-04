@@ -65,11 +65,11 @@ function DependencyCard({ name, dependency }: DependencyCardProps) {
 }
 
 /** Skeleton placeholder matching DependencyCard's layout, shown while probing. */
-function DependencyCardSkeleton({ index }: { index: number }) {
+function DependencyCardSkeleton({ index, label }: { index: number; label?: string }) {
   return (
     <div data-testid={`dependency-card-skeleton-${index}`} className="panel flex flex-col gap-2 p-4">
       <div className="flex items-center justify-between gap-2">
-        <Skeleton className="h-3 w-16" />
+        <Skeleton className="h-3 w-16" label={label} />
         <Skeleton className="h-4 w-12" />
       </div>
       <Skeleton className="h-6 w-20" />
@@ -104,7 +104,11 @@ export function DashboardPage() {
         {isPending ? (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {[0, 1, 2].map((index) => (
-              <DependencyCardSkeleton key={index} index={index} />
+              <DependencyCardSkeleton
+                key={index}
+                index={index}
+                label={index === 0 ? "Probing dependencies…" : undefined}
+              />
             ))}
           </div>
         ) : null}

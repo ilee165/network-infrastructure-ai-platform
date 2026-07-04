@@ -10,10 +10,9 @@
  *
  * Status pills use the shared `StatusPill` (audit UI_UX #3/#7); the
  * status/run-status → variant mapping stays here since it is page-specific.
- * `StatusPill`'s sanctioned variants are ok/warn/error/neutral only — the
- * in-progress states ("new" device status, "running" run status) map to
- * `neutral` rather than a bespoke accent tone, a conservative choice absent a
- * fifth variant in the shared primitive.
+ * The in-progress "running" run status uses the `info` (accent) variant,
+ * matching its pre-shared-primitive tone; the "new" device status has no
+ * prior accent precedent and stays `neutral`.
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -50,7 +49,7 @@ type RunStatusValue = RunStatus["status"];
 /** Page-level mapping from a discovery run's status to a StatusPill tone. */
 const RUN_VARIANT: Record<RunStatusValue, StatusPillVariant> = {
   pending: "warn",
-  running: "neutral",
+  running: "info",
   succeeded: "ok",
   failed: "error",
 };
@@ -106,7 +105,9 @@ function InterfacesPanel({ deviceId }: { deviceId: string }) {
         </tr>
       </thead>
       <tbody>
-        {isPending ? <SkeletonRows rows={3} cols={INTERFACES_COLS} /> : null}
+        {isPending ? (
+          <SkeletonRows rows={3} cols={INTERFACES_COLS} label="Loading interfaces…" />
+        ) : null}
         {data?.map((iface: DeviceInterfaceRead) => (
           <tr key={iface.id} className="border-b border-carbon-800 last:border-0">
             <td className="py-1 pr-4 font-mono text-zinc-200">{iface.name}</td>
@@ -155,7 +156,9 @@ function NeighborsPanel({ deviceId }: { deviceId: string }) {
         </tr>
       </thead>
       <tbody>
-        {isPending ? <SkeletonRows rows={3} cols={NEIGHBORS_COLS} /> : null}
+        {isPending ? (
+          <SkeletonRows rows={3} cols={NEIGHBORS_COLS} label="Loading neighbors…" />
+        ) : null}
         {data?.map((nb: DeviceNeighborRead) => (
           <tr key={nb.id} className="border-b border-carbon-800 last:border-0">
             <td className="py-1 pr-4 font-mono uppercase text-zinc-400">{nb.protocol}</td>
@@ -533,7 +536,7 @@ export function DevicesPage() {
           <div className="panel overflow-x-auto">
             <table className="w-full text-xs">
               <tbody>
-                <SkeletonRows rows={4} cols={INVENTORY_COLS} />
+                <SkeletonRows rows={4} cols={INVENTORY_COLS} label="Loading inventory…" />
               </tbody>
             </table>
           </div>

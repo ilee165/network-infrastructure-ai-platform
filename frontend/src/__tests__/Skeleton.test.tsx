@@ -14,6 +14,20 @@ describe("Skeleton", () => {
     expect(block).toHaveClass("animate-pulse", "motion-reduce:animate-none");
     expect(block).toHaveAttribute("aria-hidden", "true");
   });
+
+  it("renders no accessible status by default (no label given)", () => {
+    render(<Skeleton data-testid="block" />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("renders a visually-hidden role=status announcement when a label is given", () => {
+    render(<Skeleton data-testid="block" label="Probing dependencies…" />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveAccessibleName("Probing dependencies…");
+    expect(status).toHaveClass("sr-only");
+    // The pulsing visual stays aria-hidden regardless of the label.
+    expect(screen.getByTestId("block")).toHaveAttribute("aria-hidden", "true");
+  });
 });
 
 describe("SkeletonRows", () => {
@@ -32,6 +46,37 @@ describe("SkeletonRows", () => {
       expect(row).toHaveClass("border-b", "border-carbon-800", "last:border-0");
       expect(row.querySelectorAll("td")).toHaveLength(4);
     }
+  });
+
+  it("renders no accessible status by default (no label given)", () => {
+    render(
+      <table>
+        <tbody data-testid="body">
+          <SkeletonRows rows={3} cols={4} />
+        </tbody>
+      </table>,
+    );
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("renders a visually-hidden role=status announcement when a label is given, without adding a visible row", () => {
+    render(
+      <table>
+        <tbody data-testid="body">
+          <SkeletonRows rows={3} cols={4} label="Loading inventory…" />
+        </tbody>
+      </table>,
+    );
+    const status = screen.getByRole("status");
+    expect(status).toHaveAccessibleName("Loading inventory…");
+    expect(status.closest("tr")).toHaveClass("sr-only");
+
+    // Still exactly 3 pulsing placeholder rows — the sr-only row is extra.
+    const body = screen.getByTestId("body");
+    const pulsingRows = Array.from(body.querySelectorAll("tr")).filter((row) =>
+      row.querySelector(".animate-pulse"),
+    );
+    expect(pulsingRows).toHaveLength(3);
   });
 });
 
