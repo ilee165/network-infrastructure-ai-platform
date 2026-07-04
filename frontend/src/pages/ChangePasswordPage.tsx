@@ -8,9 +8,11 @@
  * Flow: validate client-side (new length >= 8 and confirm matches new) → call
  * ``changePassword(current, new)`` → refetch ``getMe()`` and cache it so the
  * store's ``must_change_password`` flips false (releasing the forced gate) →
- * push a success toast → navigate to "/". Backend errors (e.g. a wrong
- * current password) render via the shared ``ErrorBanner`` and keep the user
- * on the page.
+ * push a success toast → navigate to "/". Backend errors from the change call
+ * itself (e.g. a wrong current password) render via the shared ``ErrorBanner``
+ * and keep the user on the page; the post-success ``getMe()`` refresh is
+ * best-effort — if it fails, the forced-gate flag is cleared on the cached
+ * user instead, and it never presents as a change failure.
  *
  * All three inputs are wrapped in ``FormField`` for real label/control
  * association (audit UI_UX #5 — this page previously had zero aria
@@ -69,16 +71,32 @@ export function ChangePasswordPage() {
     setPending(true);
     try {
       await changePassword(current, next);
-      // Refetch /me so must_change_password flips false and the forced gate (if
-      // any) releases; cache it before navigating into the app.
-      const user = await getMe();
-      setUser(user);
-      pushToast("success", "Password changed.");
-      navigate("/", { replace: true });
     } catch (err) {
       setApiError(err);
       setPending(false);
+      return;
     }
+
+    // The change is committed server-side from here on: a failure in the
+    // post-success refresh must not surface through ErrorBanner as a change
+    // failure — the user would retry with a current password that is no
+    // longer valid.
+    try {
+      // Refetch /me so must_change_password flips false and the forced gate
+      // (if any) releases; cache it before navigating into the app.
+      const user = await getMe();
+      setUser(user);
+    } catch {
+      // Best-effort refresh: the backend just confirmed the change, so the
+      // flag is certainly false server-side. Clear it on the cached user so
+      // ProtectedRoute doesn't bounce the user back to this page.
+      const cached = useAuthStore.getState().user;
+      if (cached) {
+        setUser({ ...cached, must_change_password: false });
+      }
+    }
+    pushToast("success", "Password changed.");
+    navigate("/", { replace: true });
   }
 
   return (

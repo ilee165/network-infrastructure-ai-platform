@@ -113,6 +113,30 @@ describe("ChangePasswordPage — successful change", () => {
     expect(useAuthStore.getState().user?.must_change_password).toBe(false);
   });
 
+  it("does not present a failed post-success getMe() as a change failure", async () => {
+    vi.mocked(changePassword).mockResolvedValue({ changed: true });
+    vi.mocked(getMe).mockRejectedValue(new Error("network down"));
+
+    renderPage();
+    fireEvent.change(screen.getByLabelText(/current password/i), {
+      target: { value: "old-pass-1" },
+    });
+    fireEvent.change(screen.getByLabelText(/^new password/i), {
+      target: { value: "new-pass-12" },
+    });
+    fireEvent.change(screen.getByLabelText(/confirm/i), { target: { value: "new-pass-12" } });
+    fireEvent.click(screen.getByRole("button", { name: /change password/i }));
+
+    // The change succeeded: navigate + success toast, never the error banner.
+    await waitFor(() => {
+      expect(screen.getByTestId("location")).toHaveTextContent("/");
+    });
+    expect(screen.queryByTestId("change-password-error")).not.toBeInTheDocument();
+    expect(useUiStore.getState().toasts[0]).toMatchObject({ kind: "success" });
+    // The forced gate is released on the cached user despite the failed refresh.
+    expect(useAuthStore.getState().user?.must_change_password).toBe(false);
+  });
+
   it("pushes a success toast onto the shared ui store", async () => {
     vi.mocked(changePassword).mockResolvedValue({ changed: true });
     vi.mocked(getMe).mockResolvedValue({ ...FLAGGED_USER, must_change_password: false });
