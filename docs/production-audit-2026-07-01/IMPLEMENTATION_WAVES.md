@@ -1,6 +1,8 @@
 # Implementation Waves — Remediation Plan from the 2026-07-01 Audit
 
-Derived from [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) and its companion reports. Five waves, risk-ordered per the remediation brief; every wave stays under 20 changed files. **Planning document — nothing here is implemented yet.**
+Derived from [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) and its companion reports. Five waves, risk-ordered per the remediation brief; every wave stays under 20 changed files.
+
+> **Execution status (2026-07-04):** Waves 1–3 are merged — W1 → PR #90 (2026-07-02); W2 → PRs #93/#94/#95 (2026-07-02/03, item 7 dropped per ADR-0048 Rejection); W3 → PR #108 (2026-07-03, which also carried the out-of-wave packet executor-split). Wave 4 is in progress (item 1 → PR #109, 2026-07-04). Wave 5 was revised 2026-07-04 after pre-implementation validation and implemented the same day on `claude/audit-wave-5-review-1g0o1n` (pending merge; see the Wave 5 annotation). Per-wave annotations below.
 
 Conventions: one atomic commit per task (repo standing discipline); every wave ends with the full gate set green (`ruff check . && ruff format --check . && mypy && lint-imports`, `pytest`, `vitest/eslint/tsc`, plus wave-specific gates). Rollback unit = the task's atomic commit (`git revert`), never `reset --hard`.
 
@@ -8,7 +10,7 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 1 — Broken-behavior bug fixes
+## Wave 1 — Broken-behavior bug fixes — ✅ DONE (2026-07-02, PR #90)
 
 **Goal:** Every shipped feature actually works: live troubleshooting reads return device data, the app shuts down cleanly, and the cross-replica WebSocket relay is deterministic (flake retired for real).
 
@@ -42,7 +44,7 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 2 — Functional & security improvements
+## Wave 2 — Functional & security improvements — ✅ DONE (2026-07-02/03, PRs #93/#94/#95; item 7 dropped)
 
 **Goal:** Close the exploitable/user-visible hardening gaps: render-crash safety net, refresh-token theft detection (with its frontend prerequisite), secure-by-default quickstart, and live enforcement gates that actually block.
 
@@ -84,7 +86,9 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 3 — Architecture cleanup
+## Wave 3 — Architecture cleanup — ✅ DONE (2026-07-03, PR #108)
+
+> **Completed 2026-07-03** (PR #108; self-review in [wave3/PR_REVIEW.md](wave3/PR_REVIEW.md)). All five items landed. Deviations from plan: the auth split shipped as an `api/v1/auth/` *package* (`_shared`/`login`/`oidc`/`account`/`users`/`settings`, largest 468 LOC) rather than the sibling modules sketched below, and item 3 went further than "decision only" — ADR-0049 was Accepted after dual-strong review and the executor-split **implementation** shipped in the same PR (see out-of-wave table). One success criterion remains open: `pg-test-routing` is **advisory** pending its one-week false-positive soak; promote to blocking (one-line `all-gates` `needs` edit) ~2026-07-10. Note: the PR squash-merged Wave 3 together with the packet implementation into one commit (`a8ee95c`), so the per-item rollback plan below is not executable for this wave as merged.
 
 **Goal:** Shrink the highest-risk review surfaces and retire tracked debt: auth module split, fastapi unpin, packet-analysis design decision on paper, PG-test routing enforcement, doc-drift fixes.
 
@@ -122,7 +126,7 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 4 — UI/UX polish
+## Wave 4 — UI/UX polish — 🔄 IN PROGRESS (item 1 merged 2026-07-04, PR #109)
 
 **Goal:** Shared component vocabulary, responsive baseline, enforced a11y floor, perceived-performance polish — concentrated on the five highest-traffic pages.
 
@@ -160,36 +164,50 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 5 — Performance & scale optimization
+## Wave 5 — Performance & scale optimization — ✅ IMPLEMENTED 2026-07-04 (branch `claude/audit-wave-5-review-1g0o1n`, pending merge)
+
+> **Implemented 2026-07-04** per the revised spec below, one atomic commit per item: neighborhood read (`319796c`), `topology_max_nodes` cap → 413 (`003358e`), frontend scoped-by-default adoption (`8101d87`). Item 4 was dropped to backlog by the revision. All gates green at each commit (ruff/format/mypy/lint-imports, backend suite, vitest/eslint/tsc). Success criteria met: UI default load is scoped (site or neighborhood), the unscoped fetch is explicit and 413-bounded, and all new Cypher lives in `app.knowledge` (lint-imports enforced).
+
+> **Plan revision (2026-07-04, pre-implementation validation against `main` @ `c87d79c`).** The section below is the revised, executable spec; four corrections vs. the original text:
+> 1. **ARCH_DEBT #7's premise is partially stale.** `GET /topology/graph` already accepts `site` / `vrf` / `layer` (server-side and in the typed client `frontend/src/api/topology.ts`) — it is the *UI* that never passes them (`TopologyPage.tsx` fetches by `layer` only). By-site scoping therefore needs **no new endpoint**; the new backend work is the neighborhood query and the cap.
+> 2. **Query placement corrected.** New Cypher goes in `app/knowledge/` — `app.knowledge` is the only package that talks to Neo4j (REPO-STRUCTURE §3.2, enforced by the `lint-imports` contract). The original file list (`engines/topology/` query module) would have failed that gate; `engines/topology/` is not touched.
+> 3. **File list completed.** The cap needs a new 413-class problem-details error (`app/core/errors.py` has none today) and a `NETOPS_TOPOLOGY_MAX_NODES` setting (`config.py` + `.env.example`, 1:1 rule) to honor the "config-tunable cap" rollback plan.
+> 4. **The perf fixture the original test plan cited does not exist.** The drill harness's topology fixture is a fixed 42-node count-only dry-run stub; the 5,000-device seeded dataset is a named GA-phase artifact (ADR-0047). This wave ships **functional** tests (cap bites, depth bounds, scope membership); latency/scale assertions land at P5 with that dataset. Former item 4 (hot-list-endpoint query review) is demoted to backlog — it cites no audit finding and every list endpoint already paginates (`limit ≤ 500`).
+>
+> Discipline carry-over from Wave 3: one revertible commit per item **must survive the merge** (no bundling/squash across items), or the rollback plan below is void.
 
 **Goal:** Remove the known scale ceiling before certification finds it: scoped topology queries end-to-end, bounded `/graph`.
 
 **Work items (audit refs):**
-1. Scoped topology reads (ARCH_DEBT #7): by-site and device-neighborhood-at-depth-N subgraph endpoints backed by Neo4j subgraph queries.
-2. Cap the unscoped `/graph`: `max_nodes` guard returning a problem-details 413-class error with guidance to scoped variants.
-3. Frontend adoption: TopologyPage default-loads a scoped view (site/neighborhood picker), full-graph fetch becomes explicit + capped.
-4. Query-efficiency review of the hot list endpoints (count-subquery pattern, index alignment) — measure first; change only what profiling justifies.
+1. Device-neighborhood-at-depth-N subgraph read (ARCH_DEBT #7): new Cypher in `app/knowledge/topology_read.py` (or a sibling module) + `GET /topology/graph/neighborhood` (device key, `depth` 1–N bounded, same `layer` families). By-site scoping already exists via the `site` query param — reuse, don't rebuild.
+2. Cap the unscoped `/graph`: `max_nodes` guard (count pre-check before serialization; setting `NETOPS_TOPOLOGY_MAX_NODES`) returning a new 413-class problem-details error with guidance to the `site`/neighborhood variants.
+3. Frontend adoption: TopologyPage default-loads a scoped view — site picker (wires the *existing* `site` param) + device-neighborhood mode; full-graph fetch becomes an explicit action and renders the 413 guidance when over cap. `vrf` is not a scoping dimension (it only constrains `ROUTES_TO` edges) — site/neighborhood are.
+4. ~~Query-efficiency review of the hot list endpoints~~ **DEMOTED TO BACKLOG (2026-07-04 revision):** no audit finding cites it, all list endpoints already paginate, and there is no profiling harness to satisfy its own "measure first" bar. Re-open only with profiling evidence.
 
-**Files affected (~11):**
-- `backend/app/api/v1/topology.py`, `backend/app/schemas/` (topology schemas)
-- `backend/app/engines/topology/` (query module, 1–2 files)
-- `backend/tests/api/test_topology.py` + engine query tests (2 files)
-- `frontend/src/api/topology.ts`, `frontend/src/pages/TopologyPage.tsx`, `frontend/src/pages/topology-graph.ts`, `frontend/src/__tests__/TopologyPage.test.tsx`
+**Files affected (~14):**
+- `backend/app/knowledge/topology_read.py` (neighborhood query + cap pre-check)
+- `backend/app/api/v1/topology.py`, `backend/app/schemas/topology.py`
+- `backend/app/core/errors.py` (413 problem-details class), `backend/app/core/config.py`, `.env.example`
+- `backend/tests/knowledge/test_topology_read.py` (new), `backend/tests/api/test_topology.py` (extend)
+- `frontend/src/api/topology.ts`, `frontend/src/pages/TopologyPage.tsx`, `frontend/src/pages/topology-graph.ts`
+- `frontend/src/__tests__/TopologyPage.test.tsx`, `frontend/src/__tests__/topology.test.ts` (extend)
 
-**Dependencies:** none hard; scheduled last because risk-to-value is lowest at current scale and it should land close to the G-SCA certification work (P5) it enables. Coordinate with the P3→P5 roadmap so the seeded 5,000-device dataset from the drill harness doubles as the perf fixture.
+**Dependencies:** none hard; scheduled last because risk-to-value is lowest at current scale and it should land close to the G-SCA certification work (P5) it enables. The 5,000-device seeded dataset remains a P5/GA deliverable (ADR-0047) — this wave makes the G-SCA mechanism ("UI uses scoped queries, no full-graph fetch") true in code; P5 measures it at scale.
 
 **Test plan:**
-- Unit/integration on scoped queries (correct subgraph membership, depth bounds, empty scopes).
-- Cap test: seeded graph over `max_nodes` → 413 problem details, never a truncated 200.
-- Reduced-scale perf assertion on the kind-harness seeded dataset: scoped query latency bounded, full-graph rejection at threshold — wire into the existing drill-as-test pattern (must run AND bite).
-- Frontend: TopologyPage tests for scoped default + explicit full-graph path.
+- Unit/integration on the neighborhood query (correct subgraph membership, depth bounds honored, empty scopes) in `tests/knowledge/` + API-level tests.
+- Cap test: seeded graph over `max_nodes` → 413 problem details, never a truncated 200; under-cap responses byte-identical to today.
+- Frontend: TopologyPage tests for scoped default, explicit full-graph path, and over-cap 413 guidance rendering.
+- Latency/scale assertion **deferred to P5** with the ADR-0047 5,000-device dataset (revision note 4) — not faked at unit scale.
+- Full backend + frontend suites green.
 
-**Rollback plan:** scoped endpoints are additive — revert frontend adoption commit to restore full-graph default while keeping the new endpoints; cap is config-tunable (raise limit) before any code revert.
+**Rollback plan:** the neighborhood endpoint is additive — revert the frontend adoption commit to restore the full-graph default while keeping the new endpoint; cap is config-tunable (`NETOPS_TOPOLOGY_MAX_NODES`, raise or disable) before any code revert.
 
 **Success criteria:**
-- UI default topology load fetches a scoped subgraph; unscoped fetch is explicit and bounded.
+- UI default topology load fetches a scoped subgraph; unscoped fetch is explicit and bounded (413 over cap).
 - G-SCA's "UI uses scoped queries, no full-graph fetch" criterion satisfiable in code (certification itself remains a GA item).
 - No regression on current-lab-scale topology UX.
+- `lint-imports` green — all new Cypher confined to `app.knowledge`.
 
 ---
 

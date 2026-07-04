@@ -36,6 +36,7 @@ from neo4j import AsyncManagedTransaction
 
 from app.knowledge.neo4j_client import Neo4jClient
 from app.knowledge.schema import (
+    LABEL_DEVICE,
     NODE_KEY_PROPERTY,
     REL_CONNECTED_TO,
     REL_HAS_INTERFACE,
@@ -53,7 +54,10 @@ __all__ = [
     "LAYER_L2",
     "LAYER_L3",
     "LAYERS",
+    "MAX_NEIGHBORHOOD_DEPTH",
+    "count_graph_nodes",
     "fetch_graph",
+    "fetch_neighborhood",
     "rel_types_for_layer",
 ]
 
@@ -64,6 +68,16 @@ LAYER_L3 = "l3"
 LAYER_DNS = "dns"
 LAYER_ALL = "all"
 LAYERS: tuple[str, ...] = (LAYER_L2, LAYER_L3, LAYER_DNS, LAYER_ALL)
+
+#: Upper bound on the ``depth`` of a device-neighborhood read (audit Wave 5,
+#: ARCH_DEBT #7).  The bound is interpolated into the variable-length Cypher
+#: pattern (the driver cannot parameterize a path-length literal), so it is a
+#: single module constant the API layer also uses for its query-param ``le``.
+MAX_NEIGHBORHOOD_DEPTH = 5
+
+#: The ``Device`` label's key property (``pg_id``) — the neighborhood center
+#: is addressed by it.
+_DEVICE_KEY_PROPERTY = NODE_KEY_PROPERTY[LABEL_DEVICE]
 
 #: The L3 relationship family (everything that is not the single L2 type).
 _L3_REL_TYPES: tuple[str, ...] = (
@@ -187,6 +201,21 @@ async def _read_graph(
 
     nodes: dict[tuple[str, Any], dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
+    await _consume_edge_records(result, nodes, edges)
+    return {"nodes": list(nodes.values()), "edges": edges}
+
+
+async def _consume_edge_records(
+    result: Any,
+    nodes: dict[tuple[str, Any], dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> None:
+    """Fold edge-shaped records (``a_*`` / ``b_*`` / ``rel_*``) into *nodes* / *edges*.
+
+    Shared by the full-graph and neighborhood readers: every surviving endpoint
+    is registered (deduplicated by ``(label, key)``) so the returned subgraph is
+    always self-consistent — no dangling edges.
+    """
 
     def _register(labels: list[str], props: dict[str, Any]) -> Any:
         label = _primary_label(labels)
@@ -210,6 +239,55 @@ async def _read_graph(
             }
         )
 
+
+async def _read_neighborhood(
+    tx: AsyncManagedTransaction,
+    *,
+    rel_types: tuple[str, ...],
+    device: str,
+    depth: int,
+) -> dict[str, Any] | None:
+    """Collect the device-centered neighborhood subgraph in one transaction.
+
+    Returns ``None`` when no projected ``Device`` carries the requested key (the
+    API layer turns that into a 404).  The center device is always part of the
+    node set, even when it has no edges in the selected layer.  The traversal is
+    undirected — a neighborhood is "everything within N hops", regardless of
+    which way the projected relationships point — but each returned relationship
+    keeps its own start/end orientation.
+    """
+    device_result = await tx.run(
+        f"MATCH (d:{LABEL_DEVICE}) WHERE d.{_DEVICE_KEY_PROPERTY} = $device "
+        "RETURN labels(d) AS labels, properties(d) AS props",
+        device=device,
+    )
+    center: dict[str, Any] | None = None
+    async for record in device_result:
+        label = _primary_label(record["labels"])
+        if label is not None:
+            center = _node_payload(label, record["props"])
+            break
+    if center is None:
+        return None
+
+    nodes: dict[tuple[str, Any], dict[str, Any]] = {(center["label"], center["key"]): center}
+    edges: list[dict[str, Any]] = []
+
+    # Relationship types and the depth bound are validated module-level values
+    # (the driver cannot parameterize either literal); ``device`` stays a bound
+    # parameter so untrusted keys cannot inject Cypher.
+    rel_pattern = "|".join(rel_types)
+    cypher = (
+        f"MATCH (d:{LABEL_DEVICE}) WHERE d.{_DEVICE_KEY_PROPERTY} = $device "
+        f"MATCH p = (d)-[:{rel_pattern}*1..{depth}]-() "
+        "UNWIND relationships(p) AS rel "
+        "WITH DISTINCT rel "
+        "RETURN labels(startNode(rel)) AS a_labels, properties(startNode(rel)) AS a_props, "
+        "       labels(endNode(rel)) AS b_labels, properties(endNode(rel)) AS b_props, "
+        "       type(rel) AS rel_type, properties(rel) AS rel_props"
+    )
+    result = await tx.run(cypher, device=device)
+    await _consume_edge_records(result, nodes, edges)
     return {"nodes": list(nodes.values()), "edges": edges}
 
 
@@ -236,5 +314,94 @@ async def fetch_graph(
     """
     rel_types = rel_types_for_layer(layer)
     graph = await client.execute_read(_read_graph, rel_types=rel_types, site=site, vrf=vrf)
+    graph["projected_at"] = _projected_at(graph["nodes"])
+    return graph
+
+
+async def _count_graph_nodes(
+    tx: AsyncManagedTransaction,
+    *,
+    rel_types: tuple[str, ...],
+    site: str | None,
+    vrf: str | None,
+) -> int:
+    """Count the distinct nodes :func:`_read_graph` would return.
+
+    Same MATCH/WHERE as the full read (the two must stay in lockstep — a cap
+    decision made against a different predicate would be meaningless), but the
+    graph never leaves Neo4j: only the count crosses the wire.
+    """
+    rel_pattern = "|".join(rel_types)
+    dns_rel_types = list(_DNS_REL_TYPES)
+    cypher = (
+        f"MATCH (a)-[r:{rel_pattern}]->(b) "
+        "WHERE ($site IS NULL OR a.site = $site OR b.site = $site "
+        "       OR type(r) IN $dns_rel_types) "
+        "  AND ($vrf IS NULL OR r.vrf = $vrf OR NOT type(r) = 'ROUTES_TO') "
+        "UNWIND [a, b] AS n "
+        "RETURN count(DISTINCT n) AS node_count"
+    )
+    result = await tx.run(cypher, site=site, vrf=vrf, dns_rel_types=dns_rel_types)
+    async for record in result:
+        return int(record["node_count"])
+    return 0
+
+
+async def count_graph_nodes(
+    client: Neo4jClient,
+    *,
+    layer: str,
+    site: str | None = None,
+    vrf: str | None = None,
+) -> int:
+    """Node count of the subgraph :func:`fetch_graph` would return.
+
+    The pre-check behind the ``topology_max_nodes`` guard (audit Wave 5): lets
+    the API refuse an over-cap read with a 413 problem *before* materializing
+    and serializing an unbounded graph.
+    """
+    rel_types = rel_types_for_layer(layer)
+    count = await client.execute_read(_count_graph_nodes, rel_types=rel_types, site=site, vrf=vrf)
+    return int(count)
+
+
+async def fetch_neighborhood(
+    client: Neo4jClient,
+    *,
+    device: str,
+    depth: int,
+    layer: str,
+) -> GraphData | None:
+    """Read the subgraph within *depth* hops of one projected device.
+
+    The scoped read the G-SCA gate requires ("UI uses scoped queries, no
+    full-graph fetch" — audit Wave 5, ARCH_DEBT #7): bounded by construction,
+    so it stays usable at 5,000-device scale where the full projection is not.
+
+    Args:
+        client: The Neo4j access wrapper (:class:`Neo4jClient`).
+        device: Key of the center ``Device`` node (its ``pg_id``).
+        depth:  Hop radius, ``1..MAX_NEIGHBORHOOD_DEPTH`` (undirected traversal).
+        layer:  ``l2`` / ``l3`` / ``dns`` / ``all`` — relationship families walked.
+
+    Returns:
+        The same wire shape as :func:`fetch_graph` (center device always
+        included, even isolated), or ``None`` when no projected device carries
+        *device* as its key.
+
+    Raises:
+        ValueError: If *depth* is outside ``1..MAX_NEIGHBORHOOD_DEPTH`` — the
+            bound is interpolated into the Cypher pattern, so it is re-checked
+            here rather than trusted to the caller.
+    """
+    depth = int(depth)
+    if not 1 <= depth <= MAX_NEIGHBORHOOD_DEPTH:
+        raise ValueError(f"depth must be between 1 and {MAX_NEIGHBORHOOD_DEPTH}, got {depth}")
+    rel_types = rel_types_for_layer(layer)
+    graph = await client.execute_read(
+        _read_neighborhood, rel_types=rel_types, device=device, depth=depth
+    )
+    if graph is None:
+        return None
     graph["projected_at"] = _projected_at(graph["nodes"])
     return graph

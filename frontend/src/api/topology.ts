@@ -91,6 +91,9 @@ export interface TopologyDiffResponse {
 
 // ── Query-string params ───────────────────────────────────────────────────────
 
+/** Upper bound on the neighborhood ``depth`` (mirrors the backend constant). */
+export const MAX_NEIGHBORHOOD_DEPTH = 5;
+
 /** Optional filters for ``GET /topology/graph``. */
 export interface TopologyGraphParams {
   /** Scope to devices assigned to this site name. */
@@ -105,6 +108,16 @@ export interface TopologyGraphParams {
    * ``all`` — all relationship types (default server-side).
    */
   layer?: "l2" | "l3" | "dns" | "all";
+}
+
+/** Params for ``GET /topology/graph/neighborhood`` (audit Wave 5, scoped read). */
+export interface TopologyNeighborhoodParams {
+  /** Key (``pg_id``) of the device at the center of the neighborhood. */
+  device: string;
+  /** Hop radius, 1..{@link MAX_NEIGHBORHOOD_DEPTH} (server default 2). */
+  depth?: number;
+  /** Relationship families to walk — same semantics as the graph read. */
+  layer?: TopologyGraphParams["layer"];
 }
 
 // ── API functions ─────────────────────────────────────────────────────────────
@@ -123,6 +136,24 @@ export function getTopologyGraph(params: TopologyGraphParams = {}): Promise<Topo
   if (params.layer !== undefined) qs.set("layer", params.layer);
   const query = qs.toString();
   return apiFetch<TopologyGraph>(`/topology/graph${query ? `?${query}` : ""}`);
+}
+
+/**
+ * ``GET /api/v1/topology/graph/neighborhood`` — the subgraph within ``depth``
+ * hops of one device (the scoped read the topology page defaults to).
+ *
+ * @param params - ``device`` (required), optional ``depth`` and ``layer``.
+ * @returns The device-centered neighborhood subgraph.
+ * @throws {ApiError} 404 when the device key is not in the projection; 422 for
+ *   an out-of-range ``depth``.
+ */
+export function getTopologyNeighborhood(
+  params: TopologyNeighborhoodParams,
+): Promise<TopologyGraph> {
+  const qs = new URLSearchParams({ device: params.device });
+  if (params.depth !== undefined) qs.set("depth", String(params.depth));
+  if (params.layer !== undefined) qs.set("layer", params.layer);
+  return apiFetch<TopologyGraph>(`/topology/graph/neighborhood?${qs.toString()}`);
 }
 
 /**

@@ -22,7 +22,12 @@ from app.knowledge.neo4j_client import (
     dispose_client,
     get_client,
 )
-from app.knowledge.topology_read import GraphData, fetch_graph
+from app.knowledge.topology_read import (
+    GraphData,
+    count_graph_nodes,
+    fetch_graph,
+    fetch_neighborhood,
+)
 
 __all__ = [
     "Chunk",
@@ -33,10 +38,12 @@ __all__ = [
     "OllamaEmbedder",
     "RetrievedChunk",
     "chunk_document",
+    "count_graph_nodes",
     "create_client",
     "dispose_client",
     "embed_document",
     "fetch_graph",
+    "fetch_neighborhood",
     "get_client",
     "get_default_embedder",
     "retrieve",

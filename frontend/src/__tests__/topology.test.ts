@@ -12,7 +12,12 @@ import type {
   TopologyDiffResponse,
   TopologyGraph,
 } from "../api/topology";
-import { getTopologyDiff, getTopologyGraph } from "../api/topology";
+import {
+  getTopologyDiff,
+  getTopologyGraph,
+  getTopologyNeighborhood,
+  MAX_NEIGHBORHOOD_DEPTH,
+} from "../api/topology";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -223,6 +228,72 @@ describe("getTopologyGraph — RFC 7807 error path", () => {
     } catch (err) {
       expect(err).toBeInstanceOf(ApiError);
       expect((err as ApiError).status).toBe(502);
+    }
+  });
+});
+
+// ── getTopologyNeighborhood ───────────────────────────────────────────────────
+
+describe("getTopologyNeighborhood", () => {
+  const DEVICE = "11111111-1111-1111-1111-111111111111";
+
+  it("returns a typed TopologyGraph on 200", async () => {
+    vi.stubGlobal("fetch", okFetch(GRAPH_RESPONSE));
+    const result = await getTopologyNeighborhood({ device: DEVICE });
+    expect(result).toEqual(GRAPH_RESPONSE);
+  });
+
+  it("hits the canonical /api/v1/topology/graph/neighborhood path with device", async () => {
+    const mock = okFetch(GRAPH_RESPONSE);
+    vi.stubGlobal("fetch", mock);
+    await getTopologyNeighborhood({ device: DEVICE });
+    const url = String((mock.mock.calls[0] as unknown as [string])[0]);
+    expect(url).toContain("/api/v1/topology/graph/neighborhood");
+    expect(url).toContain(`device=${DEVICE}`);
+  });
+
+  it("omits depth and layer unless provided (server defaults apply)", async () => {
+    const mock = okFetch(GRAPH_RESPONSE);
+    vi.stubGlobal("fetch", mock);
+    await getTopologyNeighborhood({ device: DEVICE });
+    const url = String((mock.mock.calls[0] as unknown as [string])[0]);
+    expect(url).not.toContain("depth=");
+    expect(url).not.toContain("layer=");
+  });
+
+  it("serializes depth and layer when provided", async () => {
+    const mock = okFetch(GRAPH_RESPONSE);
+    vi.stubGlobal("fetch", mock);
+    await getTopologyNeighborhood({ device: DEVICE, depth: 3, layer: "l2" });
+    const url = String((mock.mock.calls[0] as unknown as [string])[0]);
+    expect(url).toContain("depth=3");
+    expect(url).toContain("layer=l2");
+  });
+
+  it("exports the depth bound the backend enforces", () => {
+    expect(MAX_NEIGHBORHOOD_DEPTH).toBe(5);
+  });
+
+  it("throws ApiError with the problem document on 404 (unknown device)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      errorFetch(
+        {
+          type: "urn:netops:error:not-found",
+          title: "Not Found",
+          status: 404,
+          detail: `no projected device with key '${DEVICE}'`,
+          instance: "/api/v1/topology/graph/neighborhood",
+        },
+        404,
+      ),
+    );
+    try {
+      await getTopologyNeighborhood({ device: DEVICE });
+      expect.fail("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).status).toBe(404);
     }
   });
 });

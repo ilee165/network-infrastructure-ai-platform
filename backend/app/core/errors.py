@@ -101,6 +101,21 @@ class ConflictError(NetOpsError):
     slug = "conflict"
 
 
+class GraphTooLargeError(NetOpsError):
+    """The requested topology subgraph exceeds the configured node cap.
+
+    The G-SCA guard on ``GET /topology/graph`` (audit Wave 5, ARCH_DEBT #7):
+    over the ``topology_max_nodes`` setting the API refuses outright rather
+    than truncating, so a 200 is always the complete requested subgraph. The
+    ``detail`` carries the count, the limit, and the scoped alternatives
+    (``?site=`` / ``/graph/neighborhood``).
+    """
+
+    status_code = 413
+    title = "Graph Too Large"
+    slug = "graph-too-large"
+
+
 class AuthError(NetOpsError):
     """Authentication failed: missing, invalid, or expired credentials."""
 

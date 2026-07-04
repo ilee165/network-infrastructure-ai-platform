@@ -26,6 +26,7 @@ export interface DeviceRead {
   os_version: string | null;
   serial: string | null;
   status: DeviceStatus;
+  site: string | null;
   credential_id: string | null;
   last_discovered_at: string | null;
   created_at: string;
