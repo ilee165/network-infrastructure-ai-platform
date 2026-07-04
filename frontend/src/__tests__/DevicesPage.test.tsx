@@ -4,11 +4,12 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DeviceListResponse } from "../api/devices";
 import type { RunListResponse, RunStatus } from "../api/discovery";
 import { DevicesPage } from "../pages/DevicesPage";
+import { useUiStore } from "../stores/ui";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -114,9 +115,25 @@ function renderPage(): void {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  useUiStore.setState({ toasts: [] });
 });
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+describe("DevicesPage — loading state", () => {
+  it("shows skeleton placeholder rows (not text) while the inventory loads", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    renderPage();
+
+    expect(screen.queryByText(/loading inventory/i)).not.toBeInTheDocument();
+    // Skeleton rows render as empty <td>s inside the inventory table shell.
+    const skeletonCells = document.querySelectorAll("td .animate-pulse");
+    expect(skeletonCells.length).toBeGreaterThan(0);
+  });
+});
 
 describe("DevicesPage — inventory table", () => {
   it("renders one row per device with hostname, mgmt IP, vendor, model, OS and status", async () => {
@@ -258,5 +275,128 @@ describe("DevicesPage — run status list", () => {
       new RegExp(`/discovery/runs/${PENDING_RUN.id}`).test(String(url)),
     );
     expect(perRunCalls).toHaveLength(0);
+  });
+});
+
+describe("DevicesPage — expandable row a11y", () => {
+  const DEVICE_ID = "11111111-1111-1111-1111-111111111111";
+
+  it("toggles aria-expanded and reveals the detail panel on click", async () => {
+    vi.stubGlobal("fetch", fetchRouted(DEVICE_LIST, EMPTY_RUNS));
+    renderPage();
+
+    const row = await screen.findByTestId(`device-row-${DEVICE_ID}`);
+    expect(row).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(row);
+    expect(row).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByTestId(`device-detail-${DEVICE_ID}`)).toBeInTheDocument();
+
+    fireEvent.click(row);
+    expect(row).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("toggles expansion with the Enter and Space keys (keyboard operability)", async () => {
+    vi.stubGlobal("fetch", fetchRouted(DEVICE_LIST, EMPTY_RUNS));
+    renderPage();
+
+    const row = await screen.findByTestId(`device-row-${DEVICE_ID}`);
+    expect(row).toHaveAttribute("tabIndex", "0");
+
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(row).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.keyDown(row, { key: " " });
+    expect(row).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("applies a reduced-motion-safe transition to the expanded panel", async () => {
+    vi.stubGlobal("fetch", fetchRouted(DEVICE_LIST, EMPTY_RUNS));
+    renderPage();
+
+    const row = await screen.findByTestId(`device-row-${DEVICE_ID}`);
+    fireEvent.click(row);
+    const detail = await screen.findByTestId(`device-detail-${DEVICE_ID}`);
+    expect(detail).toHaveClass("transition-opacity", "motion-reduce:transition-none");
+  });
+});
+
+describe("DevicesPage — discovery-run mutation outcomes routed through toast", () => {
+  it("pushes a success toast when a discovery run starts", async () => {
+    const postResponse = new Response(JSON.stringify(PENDING_RUN), {
+      status: 202,
+      headers: { "Content-Type": "application/json" },
+    });
+    const mock = vi.fn((url: string, init?: RequestInit): Promise<Response> => {
+      if ((init as RequestInit | undefined)?.method === "POST") {
+        return Promise.resolve(postResponse);
+      }
+      const body = String(url).includes("/discovery/runs") ? EMPTY_RUNS : EMPTY_LIST;
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await screen.findByTestId("launcher-seeds-input");
+    fireEvent.change(screen.getByTestId("launcher-seeds-input"), {
+      target: { value: "10.0.0.1" },
+    });
+    fireEvent.change(screen.getByTestId("launcher-allowlist-input"), {
+      target: { value: "10.0.0.0/24" },
+    });
+    fireEvent.click(screen.getByTestId("launcher-submit-btn"));
+
+    await waitFor(() => {
+      expect(useUiStore.getState().toasts).toHaveLength(1);
+    });
+    expect(useUiStore.getState().toasts[0]).toMatchObject({
+      kind: "success",
+      message: "Discovery run started.",
+    });
+  });
+
+  it("shows a spinner on the submit button while the run is starting", async () => {
+    let resolvePost!: (value: Response) => void;
+    const mock = vi.fn((url: string, init?: RequestInit): Promise<Response> => {
+      if ((init as RequestInit | undefined)?.method === "POST") {
+        return new Promise<Response>((resolve) => {
+          resolvePost = resolve;
+        });
+      }
+      const body = String(url).includes("/discovery/runs") ? EMPTY_RUNS : EMPTY_LIST;
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await screen.findByTestId("launcher-seeds-input");
+    fireEvent.change(screen.getByTestId("launcher-seeds-input"), {
+      target: { value: "10.0.0.1" },
+    });
+    fireEvent.change(screen.getByTestId("launcher-allowlist-input"), {
+      target: { value: "10.0.0.0/24" },
+    });
+    const submit = screen.getByTestId("launcher-submit-btn");
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(submit).toBeDisabled());
+    expect(within(submit).getByRole("status")).toBeInTheDocument();
+
+    resolvePost(
+      new Response(JSON.stringify(PENDING_RUN), {
+        status: 202,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
   });
 });

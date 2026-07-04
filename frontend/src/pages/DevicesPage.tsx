@@ -4,13 +4,21 @@
  * Populated by the discovery engine (SSH/SNMP via the Cisco IOS, Cisco
  * IOS-XE, and Arista EOS plugins). Provides:
  *  - Inventory table (hostname, mgmt IP, vendor, model, OS, status, last discovered)
- *  - Row expansion for interfaces and neighbors
+ *  - Row expansion for interfaces and neighbors (keyboard-operable, audit UI_UX #5)
  *  - Discovery launcher: seed IPs, hop limit, allowlist CIDRs, credential names
  *  - Discovery runs list with status badges (polls while pending/running)
+ *
+ * Status pills use the shared `StatusPill` (audit UI_UX #3/#7); the
+ * status/run-status → variant mapping stays here since it is page-specific.
+ * `StatusPill`'s sanctioned variants are ok/warn/error/neutral only — the
+ * in-progress states ("new" device status, "running" run status) map to
+ * `neutral` rather than a bespoke accent tone, a conservative choice absent a
+ * fifth variant in the shared primitive.
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
+import type { KeyboardEvent } from "react";
 import {
   listDeviceInterfaces,
   listDeviceNeighbors,
@@ -21,38 +29,52 @@ import {
 } from "../api/devices";
 import { listRuns, startRun } from "../api/discovery";
 import type { RunStatus, StartRunRequest } from "../api/discovery";
+import { ErrorBanner } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
+import { SkeletonRows, Spinner } from "../components/Skeleton";
+import { StatusPill, type StatusPillVariant } from "../components/StatusPill";
+import { useUiStore } from "../stores/ui";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /** Refresh the runs list while any run is pending/running. */
 const RUNS_POLL_MS = 3_000;
 
-const PILL_BASE =
-  "inline-flex items-center rounded border px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider";
+/** Number of columns in the inventory table (for the loading skeleton). */
+const INVENTORY_COLS = 7;
+/** Number of columns in the discovery-runs table (for the loading skeleton). */
+const RUNS_COLS = 6;
 
 type RunStatusValue = RunStatus["status"];
 
-const RUN_PILL: Record<RunStatusValue, string> = {
-  pending: "border-status-warn/40 bg-status-warn/10 text-status-warn",
-  running: "border-accent/40 bg-accent/10 text-accent",
-  succeeded: "border-status-ok/40 bg-status-ok/10 text-status-ok",
-  failed: "border-status-error/40 bg-status-error/10 text-status-error",
+/** Page-level mapping from a discovery run's status to a StatusPill tone. */
+const RUN_VARIANT: Record<RunStatusValue, StatusPillVariant> = {
+  pending: "warn",
+  running: "neutral",
+  succeeded: "ok",
+  failed: "error",
+};
+
+/** Page-level mapping from a device's status to a StatusPill tone. */
+const DEVICE_VARIANT: Record<DeviceRead["status"], StatusPillVariant> = {
+  active: "ok",
+  new: "neutral",
+  unreachable: "error",
+  decommissioned: "neutral",
 };
 
 // ── Status badge ──────────────────────────────────────────────────────────────
 
 function DeviceStatusBadge({ status }: { status: DeviceRead["status"] }) {
-  const styles: Record<DeviceRead["status"], string> = {
-    active: "border-status-ok/40 bg-status-ok/10 text-status-ok",
-    new: "border-carbon-600 bg-carbon-800 text-zinc-400",
-    unreachable: "border-status-error/40 bg-status-error/10 text-status-error",
-    decommissioned: "border-carbon-600 bg-carbon-900 text-zinc-600",
-  };
-  return <span className={`${PILL_BASE} ${styles[status]}`}>{status}</span>;
+  return <StatusPill variant={DEVICE_VARIANT[status]}>{status}</StatusPill>;
 }
 
 // ── Expanded: interfaces table ────────────────────────────────────────────────
+
+/** Column count of the interfaces detail table (for the loading skeleton). */
+const INTERFACES_COLS = 6;
+/** Column count of the neighbors detail table (for the loading skeleton). */
+const NEIGHBORS_COLS = 5;
 
 function InterfacesPanel({ deviceId }: { deviceId: string }) {
   const { data, isPending, error } = useQuery({
@@ -60,13 +82,14 @@ function InterfacesPanel({ deviceId }: { deviceId: string }) {
     queryFn: () => listDeviceInterfaces(deviceId),
   });
 
-  if (isPending) {
-    return <p className="text-xs text-zinc-500 px-4 py-2">Loading interfaces…</p>;
-  }
   if (error) {
-    return <p className="text-xs text-status-error px-4 py-2">{error.message}</p>;
+    return (
+      <div className="px-4 py-2">
+        <ErrorBanner error={error} />
+      </div>
+    );
   }
-  if (!data || data.length === 0) {
+  if (!isPending && (!data || data.length === 0)) {
     return <p className="text-xs text-zinc-500 px-4 py-2">No interfaces recorded.</p>;
   }
 
@@ -83,7 +106,8 @@ function InterfacesPanel({ deviceId }: { deviceId: string }) {
         </tr>
       </thead>
       <tbody>
-        {data.map((iface: DeviceInterfaceRead) => (
+        {isPending ? <SkeletonRows rows={3} cols={INTERFACES_COLS} /> : null}
+        {data?.map((iface: DeviceInterfaceRead) => (
           <tr key={iface.id} className="border-b border-carbon-800 last:border-0">
             <td className="py-1 pr-4 font-mono text-zinc-200">{iface.name}</td>
             <td className="py-1 pr-4 font-mono text-zinc-300">{iface.ip_address ?? "—"}</td>
@@ -108,13 +132,14 @@ function NeighborsPanel({ deviceId }: { deviceId: string }) {
     queryFn: () => listDeviceNeighbors(deviceId),
   });
 
-  if (isPending) {
-    return <p className="text-xs text-zinc-500 px-4 py-2">Loading neighbors…</p>;
-  }
   if (error) {
-    return <p className="text-xs text-status-error px-4 py-2">{error.message}</p>;
+    return (
+      <div className="px-4 py-2">
+        <ErrorBanner error={error} />
+      </div>
+    );
   }
-  if (!data || data.length === 0) {
+  if (!isPending && (!data || data.length === 0)) {
     return <p className="text-xs text-zinc-500 px-4 py-2">No neighbors recorded.</p>;
   }
 
@@ -130,7 +155,8 @@ function NeighborsPanel({ deviceId }: { deviceId: string }) {
         </tr>
       </thead>
       <tbody>
-        {data.map((nb: DeviceNeighborRead) => (
+        {isPending ? <SkeletonRows rows={3} cols={NEIGHBORS_COLS} /> : null}
+        {data?.map((nb: DeviceNeighborRead) => (
           <tr key={nb.id} className="border-b border-carbon-800 last:border-0">
             <td className="py-1 pr-4 font-mono uppercase text-zinc-400">{nb.protocol}</td>
             <td className="py-1 pr-4 font-mono text-zinc-200">{nb.local_interface}</td>
@@ -182,10 +208,46 @@ function DeviceDetailPanel({ deviceId }: { deviceId: string }) {
 
 // ── Inventory table ───────────────────────────────────────────────────────────
 
+/**
+ * Expanded detail row: mounts at opacity-0 and fades to opacity-100 on the
+ * next frame, giving row expansion a ~150ms transition (audit UI_UX #4)
+ * instead of popping in. Reduced motion drops the transition entirely.
+ */
+function ExpandedDeviceRow({ deviceId, colSpan }: { deviceId: string; colSpan: number }) {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setVisible(true));
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  return (
+    <tr>
+      <td colSpan={colSpan} className="p-0">
+        <div
+          data-testid={`device-detail-${deviceId}`}
+          className={`transition-opacity duration-150 motion-reduce:transition-none ${
+            visible ? "opacity-100" : "opacity-0"
+          }`}
+        >
+          <DeviceDetailPanel deviceId={deviceId} />
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 function DeviceTable({ devices }: { devices: DeviceRead[] }) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const toggle = (id: string) => setExpanded((prev) => (prev === id ? null : id));
+
+  function handleKeyDown(event: KeyboardEvent<HTMLTableRowElement>, id: string): void {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggle(id);
+    }
+  }
 
   return (
     <div className="panel overflow-x-auto">
@@ -205,8 +267,13 @@ function DeviceTable({ devices }: { devices: DeviceRead[] }) {
           {devices.map((device) => (
             <Fragment key={device.id}>
               <tr
-                className="cursor-pointer border-b border-carbon-800 transition-colors last:border-0 hover:bg-carbon-800/50"
+                role="button"
+                tabIndex={0}
+                aria-expanded={expanded === device.id}
+                data-testid={`device-row-${device.id}`}
+                className="cursor-pointer border-b border-carbon-800 transition-colors last:border-0 hover:bg-carbon-800/50 focus:outline-none focus:ring-1 focus:ring-inset focus:ring-accent"
                 onClick={() => toggle(device.id)}
+                onKeyDown={(event) => handleKeyDown(event, device.id)}
               >
                 <td className="px-4 py-2 font-mono text-zinc-100">{device.hostname}</td>
                 <td className="px-4 py-2 font-mono text-zinc-300">{device.mgmt_ip}</td>
@@ -222,13 +289,7 @@ function DeviceTable({ devices }: { devices: DeviceRead[] }) {
                     : "—"}
                 </td>
               </tr>
-              {expanded === device.id && (
-                <tr>
-                  <td colSpan={7} className="p-0">
-                    <DeviceDetailPanel deviceId={device.id} />
-                  </td>
-                </tr>
-              )}
+              {expanded === device.id && <ExpandedDeviceRow deviceId={device.id} colSpan={7} />}
             </Fragment>
           ))}
         </tbody>
@@ -247,12 +308,9 @@ function RunRow({ run }: { run: RunStatus }) {
     <tr className="border-b border-carbon-800 last:border-0">
       <td className="px-4 py-2 font-mono text-[11px] text-zinc-500">{run.id.slice(0, 8)}…</td>
       <td className="px-4 py-2">
-        <span
-          data-testid={`run-status-${run.status}`}
-          className={`${PILL_BASE} ${RUN_PILL[run.status]}`}
-        >
+        <StatusPill variant={RUN_VARIANT[run.status]} data-testid={`run-status-${run.status}`}>
           {run.status}
-        </span>
+        </StatusPill>
       </td>
       <td className="px-4 py-2 font-mono text-xs text-zinc-300">{run.seeds.join(", ")}</td>
       <td className="px-4 py-2 text-xs text-zinc-500">{run.hop_limit}</td>
@@ -272,13 +330,14 @@ function RunRow({ run }: { run: RunStatus }) {
 
 function DiscoveryLauncher() {
   const queryClient = useQueryClient();
+  const pushToast = useUiStore((state) => state.pushToast);
 
   const [seeds, setSeeds] = useState("");
   const [hopLimit, setHopLimit] = useState("1");
   const [allowlist, setAllowlist] = useState("");
   const [credentials, setCredentials] = useState("");
 
-  const { data: runsData } = useQuery({
+  const { data: runsData, isPending: runsPending } = useQuery({
     queryKey: ["discovery-runs"],
     queryFn: () => listRuns({ limit: 20 }),
     // Poll while any run is active.
@@ -300,6 +359,10 @@ function DiscoveryLauncher() {
       setAllowlist("");
       setCredentials("");
       setHopLimit("1");
+      pushToast("success", "Discovery run started.");
+    },
+    onError: (err) => {
+      pushToast("error", err instanceof Error ? err.message : "Failed to start discovery run.");
     },
   });
 
@@ -397,17 +460,24 @@ function DiscoveryLauncher() {
           type="submit"
           data-testid="launcher-submit-btn"
           disabled={mutation.isPending || seeds.trim() === "" || allowlist.trim() === ""}
-          className="btn"
+          className="btn flex items-center justify-center gap-2"
         >
+          {mutation.isPending && <Spinner aria-label="Starting run" />}
           {mutation.isPending ? "Starting…" : "Start run"}
         </button>
-        {mutation.isError ? (
-          <p className="w-full text-xs text-status-error">{mutation.error.message}</p>
-        ) : null}
       </form>
 
       {/* Runs list */}
-      {runs.length > 0 ? (
+      {runsPending ? (
+        <div className="panel overflow-x-auto">
+          <table className="w-full text-xs">
+            <tbody>
+              <SkeletonRows rows={3} cols={RUNS_COLS} />
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {!runsPending && runs.length > 0 ? (
         <div className="panel overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
@@ -460,18 +530,15 @@ export function DevicesPage() {
       <section aria-label="Device inventory" className="flex flex-col gap-3">
         <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">Inventory</h3>
         {isPending ? (
-          <p role="status" className="text-xs text-zinc-500">
-            Loading inventory…
-          </p>
-        ) : null}
-        {error ? (
-          <div
-            role="alert"
-            className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-          >
-            Inventory load failed: {error.message}
+          <div className="panel overflow-x-auto">
+            <table className="w-full text-xs">
+              <tbody>
+                <SkeletonRows rows={4} cols={INVENTORY_COLS} />
+              </tbody>
+            </table>
           </div>
         ) : null}
+        {error ? <ErrorBanner error={error} data-testid="inventory-error" /> : null}
         {!isPending && !error && devices.length === 0 ? (
           <div
             data-testid="devices-empty-state"
