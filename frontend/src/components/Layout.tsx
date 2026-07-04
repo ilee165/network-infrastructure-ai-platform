@@ -3,6 +3,7 @@
  * environment / LLM-profile badges. Pages render through the router outlet.
  */
 
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Toaster } from "./Toaster";
@@ -10,6 +11,9 @@ import { logout } from "../api/auth";
 import { useAuthStore } from "../stores/auth";
 import { hasMinimumRole } from "../stores/roles";
 import { useUiStore } from "../stores/ui";
+
+/** DOM id the mobile hamburger toggle points `aria-controls` at. */
+const SIDEBAR_ID = "app-sidebar";
 
 interface NavItem {
   to: string;
@@ -71,6 +75,26 @@ export function Layout() {
   // Prefer the human-friendly name, fall back to the login username.
   const displayName = user?.display_name ?? user?.username ?? "";
 
+  // Below `lg:` the sidebar renders as an overlay drawer instead of the fixed
+  // column; this is transient, view-local state (unlike `sidebarCollapsed`,
+  // which is a persisted preference in `ui.ts`) so it always starts closed.
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // Escape closes the drawer from anywhere in the shell, matching the
+  // backdrop-click affordance.
+  useEffect(() => {
+    if (!drawerOpen) {
+      return;
+    }
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        setDrawerOpen(false);
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [drawerOpen]);
+
   /**
    * Log out: revoke the server-side session + clear the refresh cookie, drop
    * the in-memory auth state, then route to /login. The server call is
@@ -92,8 +116,21 @@ export function Layout() {
       data-theme={theme}
       className="flex h-screen overflow-hidden bg-carbon-950 text-zinc-300"
     >
+      {/* Below `lg:` the drawer is an overlay: a dimmed backdrop behind a
+          fixed-position sidebar, both dismissable. At `lg:` and above neither
+          renders as an overlay — the backdrop never mounts and the sidebar
+          reverts to its normal static column via the `lg:` overrides below. */}
+      {drawerOpen && (
+        <div
+          data-testid="drawer-backdrop"
+          onClick={() => setDrawerOpen(false)}
+          className="fixed inset-0 z-30 bg-black/50 transition-opacity duration-150 motion-reduce:transition-none lg:hidden"
+        />
+      )}
+
       <aside
-        className={`flex h-full ${sidebarCollapsed ? "w-14" : "w-56"} flex-col border-r border-carbon-700 bg-carbon-900`}
+        id={SIDEBAR_ID}
+        className={`fixed inset-y-0 left-0 z-40 flex h-full ${sidebarCollapsed ? "w-14" : "w-56"} flex-col border-r border-carbon-700 bg-carbon-900 transition-transform duration-150 motion-reduce:transition-none ${drawerOpen ? "translate-x-0" : "-translate-x-full"} lg:static lg:z-auto lg:translate-x-0`}
       >
         <div className="flex h-12 items-center gap-2 border-b border-carbon-700 px-3">
           <span className="grid h-7 w-7 shrink-0 place-items-center rounded bg-accent/15 font-mono text-xs font-bold text-accent">
@@ -113,6 +150,7 @@ export function Layout() {
               end={item.end}
               aria-label={item.label}
               title={item.label}
+              onClick={() => setDrawerOpen(false)}
               className={({ isActive }) =>
                 [
                   "flex items-center gap-3 rounded px-2.5 py-2 text-sm transition-colors",
@@ -141,7 +179,19 @@ export function Layout() {
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-12 shrink-0 items-center justify-between border-b border-carbon-700 bg-carbon-900 px-4">
-          <div className="flex min-w-0 items-baseline gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setDrawerOpen((open) => !open)}
+              aria-expanded={drawerOpen}
+              aria-controls={SIDEBAR_ID}
+              aria-label={drawerOpen ? "Close navigation" : "Open navigation"}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded border border-carbon-700 text-zinc-400 transition-colors hover:border-carbon-600 hover:text-zinc-100 lg:hidden"
+            >
+              <span aria-hidden="true" className="font-mono text-sm leading-none">
+                {drawerOpen ? "✕" : "☰"}
+              </span>
+            </button>
             <h1 className="truncate text-sm font-semibold text-zinc-100">NetOps Console</h1>
             <span className="hidden truncate text-xs text-zinc-500 sm:inline">
               AI Network Operations Platform
