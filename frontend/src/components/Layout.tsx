@@ -121,10 +121,17 @@ export function Layout() {
           renders as an overlay — the backdrop never mounts and the sidebar
           reverts to its normal static column via the `lg:` overrides below. */}
       {drawerOpen && (
-        <div
+        <button
+          type="button"
           data-testid="drawer-backdrop"
           onClick={() => setDrawerOpen(false)}
-          className="fixed inset-0 z-30 bg-black/50 transition-opacity duration-150 motion-reduce:transition-none lg:hidden"
+          // Decorative/redundant dismiss control: Escape and the hamburger
+          // toggle are the accessible ways to close the drawer, so this is
+          // taken out of the tab order and hidden from assistive tech rather
+          // than duplicated as a focusable, announced button.
+          aria-hidden="true"
+          tabIndex={-1}
+          className="fixed inset-0 z-30 cursor-default bg-black/50 transition-opacity duration-150 motion-reduce:transition-none lg:hidden"
         />
       )}
 
