@@ -268,14 +268,22 @@ def _resolve_default_action(module: Any, profile: ParsedProfile, deny_action: st
 
 def _add_architectures(flt: Any, module: Any, architectures: tuple[str, ...]) -> None:
     """Add the profile's architectures to *flt* (the native arch is pre-added by
-    ``SyscallFilter``; re-adding it or an arch this libseccomp lacks is benign)."""
+    ``SyscallFilter``; re-adding it or an arch this libseccomp lacks is benign).
+
+    The two bindings signal "already present / unsupported arch" with different
+    exception types: the official ``seccomp`` C binding raises
+    ``ValueError``/``RuntimeError``, while the pip-installable ``pyseccomp`` ctypes
+    fork surfaces the libseccomp errno as an ``OSError`` family error
+    (``FileExistsError`` / ``EEXIST`` when re-adding the native arch — the CI
+    ``--self-check`` regression). Tolerate all three; the native arch that matters
+    for THIS kernel is already present regardless."""
     for name in architectures:
         arch = getattr(module.Arch, name.removeprefix("SCMP_ARCH_"), None)
         if arch is None:
             continue
         try:
             flt.add_arch(arch)
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError, OSError):
             continue
 
 
@@ -286,7 +294,9 @@ def build_syscall_filter(profile: ParsedProfile, module: Any, *, deny_action: st
     syscalls are added with the group's action. A syscall name unknown to *this*
     libseccomp build is skipped **only for an ALLOW rule** — a skipped allow just
     leaves that syscall denied by the default action (strictly safer); a skipped
-    deny would be a hole, so it is re-raised.
+    deny would be a hole, so it is re-raised. Both binding exception dialects are
+    caught (``ValueError``/``RuntimeError`` from the official binding, ``OSError``
+    family from the pyseccomp ctypes fork).
     """
     flt = module.SyscallFilter(defaction=_resolve_default_action(module, profile, deny_action))
     _add_architectures(flt, module, profile.architectures)
@@ -296,7 +306,7 @@ def build_syscall_filter(profile: ParsedProfile, module: Any, *, deny_action: st
         for name in rule.names:
             try:
                 flt.add_rule(action, name)
-            except (ValueError, RuntimeError):
+            except (ValueError, RuntimeError, OSError):
                 if allow:
                     continue
                 raise

@@ -46,19 +46,34 @@ from app.engines.packet.executor import (
 class _FakeFilter:
     """Records how the filter was programmed (no kernel load)."""
 
-    def __init__(self, defaction: Any, *, raise_on: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self,
+        defaction: Any,
+        *,
+        raise_on: frozenset[str] = frozenset(),
+        rule_exc: type[BaseException] = ValueError,
+        preadded_arch: Any = None,
+    ) -> None:
         self.defaction = defaction
         self.arches: list[Any] = []
         self.rules: list[tuple[Any, str]] = []
         self.loaded = False
         self._raise_on = raise_on
+        self._rule_exc = rule_exc
+        # The native arch libseccomp's SyscallFilter pre-adds for the running kernel.
+        if preadded_arch is not None:
+            self.arches.append(preadded_arch)
 
     def add_arch(self, arch: Any) -> None:
+        # pyseccomp (ctypes) raises FileExistsError/EEXIST when re-adding an arch
+        # that is already present (e.g. the native arch SyscallFilter pre-added).
+        if arch in self.arches:
+            raise FileExistsError(17, "File exists")
         self.arches.append(arch)
 
     def add_rule(self, action: Any, name: str) -> None:
         if name in self._raise_on:
-            raise ValueError(f"unknown syscall {name!r}")
+            raise self._rule_exc(f"unknown syscall {name!r}")
         self.rules.append((action, name))
 
     def load(self) -> None:
@@ -83,8 +98,16 @@ class _FakeSeccomp:
     TRAP = "TRAP"
     Arch = _FakeArch
 
-    def __init__(self, *, raise_on: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self,
+        *,
+        raise_on: frozenset[str] = frozenset(),
+        rule_exc: type[BaseException] = ValueError,
+        preadded_arch: Any = None,
+    ) -> None:
         self.raise_on = raise_on
+        self.rule_exc = rule_exc
+        self.preadded_arch = preadded_arch
         self.last_filter: _FakeFilter | None = None
 
     @staticmethod
@@ -92,7 +115,12 @@ class _FakeSeccomp:
         return ("ERRNO", ret)
 
     def SyscallFilter(self, defaction: Any) -> _FakeFilter:  # noqa: N802 — binding name
-        flt = _FakeFilter(defaction, raise_on=self.raise_on)
+        flt = _FakeFilter(
+            defaction,
+            raise_on=self.raise_on,
+            rule_exc=self.rule_exc,
+            preadded_arch=self.preadded_arch,
+        )
         self.last_filter = flt
         return flt
 
@@ -185,6 +213,31 @@ def test_build_filter_skips_allow_syscall_unknown_to_this_libseccomp() -> None:
     added = {name for _action, name in flt.rules}
     assert "futex_waitv" not in added
     assert "futex" in added  # the rest of the group still added
+
+
+def test_build_filter_tolerates_readding_native_arch_eexist() -> None:
+    """pyseccomp (ctypes) raises ``FileExistsError``/EEXIST when re-adding the arch
+    ``SyscallFilter`` already pre-added for the running kernel. build_syscall_filter
+    must tolerate it and keep going — the CI ``--self-check`` regression (exit 90,
+    ``FileExistsError``) that the fake-only unit suite previously hid."""
+    profile = load_seccomp_profile()
+    module = _FakeSeccomp(preadded_arch="X86_64")  # native arch pre-added, like libseccomp
+    flt = build_syscall_filter(profile, module, deny_action="errno")  # must NOT raise
+    assert "X86_64" in flt.arches  # pre-added, re-add tolerated
+    assert {"X86", "X32", "AARCH64", "ARM"} <= set(flt.arches)  # the rest still added
+    assert "read" in {name for _a, name in flt.rules}  # rules programmed after archs
+
+
+def test_build_filter_skips_allow_syscall_oserror() -> None:
+    """A syscall unknown to *this* libseccomp raises an OSError family error under
+    the pyseccomp ctypes binding (not ValueError); an ALLOW rule is still skipped
+    (strictly safer), matching the official-binding ValueError path."""
+    profile = load_seccomp_profile()
+    module = _FakeSeccomp(raise_on=frozenset({"futex_waitv"}), rule_exc=OSError)
+    flt = build_syscall_filter(profile, module, deny_action="errno")
+    added = {name for _action, name in flt.rules}
+    assert "futex_waitv" not in added
+    assert "futex" in added
 
 
 # ---------------------------------------------------------------------------
