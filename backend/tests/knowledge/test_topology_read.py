@@ -26,6 +26,7 @@ from app.knowledge.schema import (
 )
 from app.knowledge.topology_read import (
     MAX_NEIGHBORHOOD_DEPTH,
+    count_graph_nodes,
     fetch_neighborhood,
 )
 
@@ -74,7 +75,23 @@ class _FakeTx:
             return _FakeResult(self._device_lookup(params["device"]))
         if "relationships(p)" in cypher:
             return _FakeResult(self._neighborhood_edges(cypher, params["device"]))
+        if "count(DISTINCT n)" in cypher:
+            return _FakeResult([{"node_count": self._distinct_node_count(cypher)}])
         raise AssertionError(f"unexpected cypher: {cypher}")
+
+    def _distinct_node_count(self, cypher: str) -> int:
+        rel_segment = cypher.split("[r:", 1)[1].split("]", 1)[0]
+        selected = set(rel_segment.split("|"))
+        identities = {
+            (labels[0], _node_key(labels[0], props))
+            for rec in self._records
+            if rec["rel_type"] in selected
+            for labels, props in (
+                (rec["a_labels"], rec["a_props"]),
+                (rec["b_labels"], rec["b_props"]),
+            )
+        }
+        return len(identities)
 
     def _all_device_nodes(self) -> list[dict[str, Any]]:
         nodes: dict[Any, dict[str, Any]] = {}
@@ -267,3 +284,23 @@ class TestFetchNeighborhood:
     ) -> None:
         with pytest.raises(ValueError, match="depth must be between"):
             await fetch_neighborhood(client, device="dev-a", depth=depth, layer="all")
+
+
+# ---------------------------------------------------------------------------
+# count_graph_nodes (the topology_max_nodes cap pre-check, audit Wave 5)
+# ---------------------------------------------------------------------------
+
+
+class TestCountGraphNodes:
+    async def test_counts_distinct_nodes_across_all_layers(
+        self, client: FakeKnowledgeClient
+    ) -> None:
+        # 4 devices + 1 subnet; dev-b appears in three edges but counts once.
+        assert await count_graph_nodes(client, layer="all") == 5
+
+    async def test_layer_filter_narrows_the_count(self, client: FakeKnowledgeClient) -> None:
+        assert await count_graph_nodes(client, layer="l2") == 4
+        assert await count_graph_nodes(client, layer="l3") == 2
+
+    async def test_empty_graph_counts_zero(self) -> None:
+        assert await count_graph_nodes(FakeKnowledgeClient([]), layer="all") == 0

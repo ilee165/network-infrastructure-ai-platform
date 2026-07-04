@@ -117,6 +117,13 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = "neo4j"
 
+    #: Node cap for ``GET /topology/graph`` (audit Wave 5, G-SCA): when the
+    #: subgraph that would be returned has more nodes than this, the API
+    #: refuses with a 413 problem instead of streaming an unbounded payload;
+    #: ``0`` disables the guard. Scoped reads (``?site=`` and
+    #: ``/topology/graph/neighborhood``) are the intended path at scale.
+    topology_max_nodes: int = 5000
+
     #: LLM provider profile (ADR-0009): local (Ollama, default) | anthropic | openai | azure.
     llm_profile: str = "local"
 

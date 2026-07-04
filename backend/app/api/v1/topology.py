@@ -31,11 +31,12 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, get_knowledge_client, require_role
-from app.core.errors import NotFoundError
+from app.api.deps import get_app_settings, get_db, get_knowledge_client, require_role
+from app.core.config import Settings
+from app.core.errors import GraphTooLargeError, NotFoundError
 from app.engines.topology.diff import diff_snapshots
 from app.engines.topology.snapshots import SnapshotData
-from app.knowledge import Neo4jClient, fetch_graph, fetch_neighborhood
+from app.knowledge import Neo4jClient, count_graph_nodes, fetch_graph, fetch_neighborhood
 from app.knowledge.topology_read import LAYER_ALL, LAYERS, MAX_NEIGHBORHOOD_DEPTH
 from app.models import TopologySnapshot, User
 from app.schemas.topology import GraphResponse, TopologyDiffResponse
@@ -45,6 +46,7 @@ router = APIRouter(prefix="/topology", tags=["topology"])
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 KnowledgeClient = Annotated[Neo4jClient, Depends(get_knowledge_client)]
 Viewer = Annotated[User, Depends(require_role("viewer"))]
+AppSettings = Annotated[Settings, Depends(get_app_settings)]
 
 
 async def _snapshot_or_404(session: AsyncSession, run_id: uuid.UUID) -> TopologySnapshot:
@@ -65,6 +67,7 @@ def _snapshot_data(snapshot: TopologySnapshot) -> SnapshotData:
 @router.get("/graph", response_model=GraphResponse, summary="Read the projected topology graph")
 async def get_graph(
     client: KnowledgeClient,
+    settings: AppSettings,
     _user: Viewer,
     site: Annotated[str | None, Query(max_length=255)] = None,
     vrf: Annotated[str | None, Query(max_length=255)] = None,
@@ -77,10 +80,24 @@ async def get_graph(
     dependencies, or ``all``).  ``projected_at`` is the most recent
     ``last_projected_at`` across the returned nodes (``null`` when the filtered
     subgraph is empty).
+
+    Over ``topology_max_nodes`` (audit Wave 5, G-SCA) the read is refused with
+    a 413 problem — never a truncated 200 — before the graph is materialized;
+    the count pre-check applies the same filters as the read itself.  The
+    depth-bounded ``/graph/neighborhood`` endpoint is exempt by construction.
     """
     # ``layer`` is constrained by the pattern above; this guards the contract.
     if layer not in LAYERS:  # pragma: no cover - pattern enforces the set
         raise NotFoundError(f"unknown topology layer {layer!r}")
+    max_nodes = settings.topology_max_nodes
+    if max_nodes > 0:
+        node_count = await count_graph_nodes(client, layer=layer, site=site, vrf=vrf)
+        if node_count > max_nodes:
+            raise GraphTooLargeError(
+                f"this subgraph has {node_count} nodes, over the {max_nodes}-node "
+                "limit; narrow the read with ?site=<name> or "
+                "GET /topology/graph/neighborhood, or raise NETOPS_TOPOLOGY_MAX_NODES"
+            )
     graph = await fetch_graph(client, layer=layer, site=site, vrf=vrf)
     return GraphResponse.model_validate(graph)
 

@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import deps
 from app.knowledge.schema import (
+    NODE_KEY_PROPERTY,
     REL_CONNECTED_TO,
     REL_HAS_INTERFACE,
     REL_IN_ZONE,
@@ -94,6 +95,17 @@ class _FakeTx:
             ):
                 continue
             out.append(rec)
+        if "count(DISTINCT n)" in cypher:
+            # The cap pre-check: same filters, only the distinct-node count.
+            identities = {
+                (labels[0], props.get(NODE_KEY_PROPERTY[labels[0]]))
+                for rec in out
+                for labels, props in (
+                    (rec["a_labels"], rec["a_props"]),
+                    (rec["b_labels"], rec["b_props"]),
+                )
+            }
+            return _FakeResult([{"node_count": len(identities)}])
         return _FakeResult(out)
 
     def _device_lookup(self, device: str) -> list[dict[str, Any]]:
@@ -522,6 +534,88 @@ class TestGraph:
             "/api/v1/topology/graph", headers=auth_headers("inactive")
         )
         assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# GET /topology/graph — topology_max_nodes cap (audit Wave 5)
+# ---------------------------------------------------------------------------
+
+
+class TestGraphCap:
+    """The seeded graph has 7 distinct nodes (3 devices, subnet, zone, record, ip)."""
+
+    async def _get(
+        self,
+        app: FastAPI,
+        headers: dict[str, str],
+        path: str = "/api/v1/topology/graph",
+        params: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as c:
+            return await c.get(path, params=params, headers=headers)
+
+    async def test_over_cap_graph_is_413_problem_never_truncated(
+        self,
+        app_with_graph: FastAPI,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        app_with_graph.state.settings.topology_max_nodes = 3
+        response = await self._get(app_with_graph, auth_headers("viewer"))
+        assert response.status_code == 413, response.text
+        assert response.headers["content-type"].startswith("application/problem+json")
+        body = response.json()
+        assert body["type"] == "urn:netops:error:graph-too-large"
+        # The detail carries the count, the limit, and the scoped alternatives.
+        assert "7 nodes" in body["detail"]
+        assert "3-node" in body["detail"]
+        assert "neighborhood" in body["detail"]
+
+    async def test_under_cap_graph_is_unchanged_200(
+        self,
+        app_with_graph: FastAPI,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        app_with_graph.state.settings.topology_max_nodes = 7
+        response = await self._get(app_with_graph, auth_headers("viewer"))
+        assert response.status_code == 200, response.text
+        assert len(response.json()["nodes"]) == 7
+
+    async def test_zero_disables_the_guard(
+        self,
+        app_with_graph: FastAPI,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        app_with_graph.state.settings.topology_max_nodes = 0
+        response = await self._get(app_with_graph, auth_headers("viewer"))
+        assert response.status_code == 200, response.text
+        assert len(response.json()["nodes"]) == 7
+
+    async def test_site_scoped_read_is_also_guarded(
+        self,
+        app_with_graph: FastAPI,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        # site=lon still spans 5 nodes (dev-a/dev-c + the site-exempt DNS
+        # island); an over-cap scoped read must refuse too, not stream.
+        app_with_graph.state.settings.topology_max_nodes = 4
+        response = await self._get(app_with_graph, auth_headers("viewer"), params={"site": "lon"})
+        assert response.status_code == 413, response.text
+
+    async def test_neighborhood_is_exempt_from_the_cap(
+        self,
+        app_with_graph: FastAPI,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        # Depth-bounded by construction — usable even under an aggressive cap.
+        app_with_graph.state.settings.topology_max_nodes = 1
+        response = await self._get(
+            app_with_graph,
+            auth_headers("viewer"),
+            path="/api/v1/topology/graph/neighborhood",
+            params={"device": "dev-b", "depth": 1},
+        )
+        assert response.status_code == 200, response.text
 
 
 # ---------------------------------------------------------------------------

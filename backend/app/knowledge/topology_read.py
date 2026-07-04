@@ -55,6 +55,7 @@ __all__ = [
     "LAYER_L3",
     "LAYERS",
     "MAX_NEIGHBORHOOD_DEPTH",
+    "count_graph_nodes",
     "fetch_graph",
     "fetch_neighborhood",
     "rel_types_for_layer",
@@ -315,6 +316,53 @@ async def fetch_graph(
     graph = await client.execute_read(_read_graph, rel_types=rel_types, site=site, vrf=vrf)
     graph["projected_at"] = _projected_at(graph["nodes"])
     return graph
+
+
+async def _count_graph_nodes(
+    tx: AsyncManagedTransaction,
+    *,
+    rel_types: tuple[str, ...],
+    site: str | None,
+    vrf: str | None,
+) -> int:
+    """Count the distinct nodes :func:`_read_graph` would return.
+
+    Same MATCH/WHERE as the full read (the two must stay in lockstep — a cap
+    decision made against a different predicate would be meaningless), but the
+    graph never leaves Neo4j: only the count crosses the wire.
+    """
+    rel_pattern = "|".join(rel_types)
+    dns_rel_types = list(_DNS_REL_TYPES)
+    cypher = (
+        f"MATCH (a)-[r:{rel_pattern}]->(b) "
+        "WHERE ($site IS NULL OR a.site = $site OR b.site = $site "
+        "       OR type(r) IN $dns_rel_types) "
+        "  AND ($vrf IS NULL OR r.vrf = $vrf OR NOT type(r) = 'ROUTES_TO') "
+        "UNWIND [a, b] AS n "
+        "RETURN count(DISTINCT n) AS node_count"
+    )
+    result = await tx.run(cypher, site=site, vrf=vrf, dns_rel_types=dns_rel_types)
+    async for record in result:
+        return int(record["node_count"])
+    return 0
+
+
+async def count_graph_nodes(
+    client: Neo4jClient,
+    *,
+    layer: str,
+    site: str | None = None,
+    vrf: str | None = None,
+) -> int:
+    """Node count of the subgraph :func:`fetch_graph` would return.
+
+    The pre-check behind the ``topology_max_nodes`` guard (audit Wave 5): lets
+    the API refuse an over-cap read with a 413 problem *before* materializing
+    and serializing an unbounded graph.
+    """
+    rel_types = rel_types_for_layer(layer)
+    count = await client.execute_read(_count_graph_nodes, rel_types=rel_types, site=site, vrf=vrf)
+    return int(count)
 
 
 async def fetch_neighborhood(
