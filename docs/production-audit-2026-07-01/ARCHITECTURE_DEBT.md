@@ -93,6 +93,19 @@ Production readiness audit, 2026-07-01. Backend: 207 app modules / ~50k LOC; 226
 
 ## 7. `GET /api/v1/topology/graph` returns the full projected graph
 
+> **RESOLVED (2026-07-04, audit Wave 5, branch `claude/audit-wave-5-review-1g0o1n`,
+> pending merge).** Scoped reads end-to-end: new
+> `GET /topology/graph/neighborhood` (device-centered, depth 1–5, Cypher in
+> `app.knowledge`), `NETOPS_TOPOLOGY_MAX_NODES` cap on `/graph` (413 problem
+> details with guidance to the scoped variants, count pre-check in lockstep
+> with the read, 0 disables), and TopologyPage now loads scoped by default
+> (site / device-neighborhood picker) with the full-graph fetch explicit and
+> server-bounded. Note: `site`/`vrf`/`layer` scoping already existed
+> server-side at audit time — the finding's "no scoping parameters" wording
+> was imprecise; the real gaps (UI full-fetch default, no neighborhood read,
+> no cap) are what Wave 5 closed. Latency assertions at 5,000-device scale
+> remain a P5 item with the ADR-0047 seeded dataset. Historical finding below.
+
 - **Severity:** Low (becomes High at scale)
 - **Location:** `backend/app/api/v1/topology.py:60` — no scoping/pagination parameters (the only list-shaped endpoint without them)
 - **Root cause:** Adequate at lab scale, but the G-SCA gate text itself requires "UI uses scoped queries, no full-graph fetch" at 5,000 devices / 100k interfaces. The scoped-query capability doesn't exist yet, so the frontend necessarily full-fetches.

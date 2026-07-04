@@ -2,7 +2,7 @@
 
 Derived from [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) and its companion reports. Five waves, risk-ordered per the remediation brief; every wave stays under 20 changed files.
 
-> **Execution status (2026-07-04):** Waves 1–3 are merged — W1 → PR #90 (2026-07-02); W2 → PRs #93/#94/#95 (2026-07-02/03, item 7 dropped per ADR-0048 Rejection); W3 → PR #108 (2026-07-03, which also carried the out-of-wave packet executor-split). Wave 4 is in progress (item 1 → PR #109, 2026-07-04). Wave 5 is not started; its plan was revised 2026-07-04 after pre-implementation validation (see the Wave 5 revision note). Per-wave annotations below.
+> **Execution status (2026-07-04):** Waves 1–3 are merged — W1 → PR #90 (2026-07-02); W2 → PRs #93/#94/#95 (2026-07-02/03, item 7 dropped per ADR-0048 Rejection); W3 → PR #108 (2026-07-03, which also carried the out-of-wave packet executor-split). Wave 4 is in progress (item 1 → PR #109, 2026-07-04). Wave 5 was revised 2026-07-04 after pre-implementation validation and implemented the same day on `claude/audit-wave-5-review-1g0o1n` (pending merge; see the Wave 5 annotation). Per-wave annotations below.
 
 Conventions: one atomic commit per task (repo standing discipline); every wave ends with the full gate set green (`ruff check . && ruff format --check . && mypy && lint-imports`, `pytest`, `vitest/eslint/tsc`, plus wave-specific gates). Rollback unit = the task's atomic commit (`git revert`), never `reset --hard`.
 
@@ -164,7 +164,9 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 5 — Performance & scale optimization — 📝 PLAN REVISED 2026-07-04 (not started)
+## Wave 5 — Performance & scale optimization — ✅ IMPLEMENTED 2026-07-04 (branch `claude/audit-wave-5-review-1g0o1n`, pending merge)
+
+> **Implemented 2026-07-04** per the revised spec below, one atomic commit per item: neighborhood read (`319796c`), `topology_max_nodes` cap → 413 (`003358e`), frontend scoped-by-default adoption (`8101d87`). Item 4 was dropped to backlog by the revision. All gates green at each commit (ruff/format/mypy/lint-imports, backend suite, vitest/eslint/tsc). Success criteria met: UI default load is scoped (site or neighborhood), the unscoped fetch is explicit and 413-bounded, and all new Cypher lives in `app.knowledge` (lint-imports enforced).
 
 > **Plan revision (2026-07-04, pre-implementation validation against `main` @ `c87d79c`).** The section below is the revised, executable spec; four corrections vs. the original text:
 > 1. **ARCH_DEBT #7's premise is partially stale.** `GET /topology/graph` already accepts `site` / `vrf` / `layer` (server-side and in the typed client `frontend/src/api/topology.ts`) — it is the *UI* that never passes them (`TopologyPage.tsx` fetches by `layer` only). By-site scoping therefore needs **no new endpoint**; the new backend work is the neighborhood query and the cap.
