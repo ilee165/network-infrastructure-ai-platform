@@ -8,53 +8,61 @@
  * Flow: validate client-side (new length >= 8 and confirm matches new) → call
  * ``changePassword(current, new)`` → refetch ``getMe()`` and cache it so the
  * store's ``must_change_password`` flips false (releasing the forced gate) →
- * navigate to "/". Backend errors (e.g. a wrong current password) render via the
- * ``ApiError`` detail and keep the user on the page.
+ * push a success toast → navigate to "/". Backend errors (e.g. a wrong
+ * current password) render via the shared ``ErrorBanner`` and keep the user
+ * on the page.
+ *
+ * All three inputs are wrapped in ``FormField`` for real label/control
+ * association (audit UI_UX #5 — this page previously had zero aria
+ * attributes). Client-side validation errors are field-specific and surface
+ * through the relevant FormField's error slot; the backend/API error is a
+ * panel-level outcome and surfaces through ``ErrorBanner`` instead. The
+ * submit button shows a ``Spinner`` while pending.
  */
 
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { changePassword, getMe } from "../api/auth";
-import { ApiError } from "../api/client";
+import { ErrorBanner } from "../components/ErrorBanner";
+import { FormField } from "../components/FormField";
+import { Spinner } from "../components/Skeleton";
 import { useAuthStore } from "../stores/auth";
+import { useUiStore } from "../stores/ui";
 
 /** Minimum length the backend enforces for a new password (mirrored client-side). */
 const MIN_PASSWORD_LENGTH = 8;
 
-/** Generic fallback when an error is not a structured ``ApiError``. */
-const GENERIC_ERROR = "Could not change your password. Please try again.";
-
-/** Extract a user-facing message from a thrown value (problem-details detail). */
-function errorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    return error.problem.detail;
-  }
-  return GENERIC_ERROR;
+interface FieldErrors {
+  next?: string;
+  confirm?: string;
 }
 
 export function ChangePasswordPage() {
   const setUser = useAuthStore((state) => state.setUser);
+  const pushToast = useUiStore((state) => state.pushToast);
   const navigate = useNavigate();
 
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [apiError, setApiError] = useState<unknown>(null);
   const [pending, setPending] = useState(false);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    setError(null);
+    setFieldErrors({});
+    setApiError(null);
 
     // Client-side guards run before any network call (defense-in-depth over the
     // backend's own min-length + the fact it has no confirm field).
     if (next.length < MIN_PASSWORD_LENGTH) {
-      setError(`New password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+      setFieldErrors({ next: `New password must be at least ${MIN_PASSWORD_LENGTH} characters.` });
       return;
     }
     if (next !== confirm) {
-      setError("New password and confirmation do not match.");
+      setFieldErrors({ confirm: "New password and confirmation do not match." });
       return;
     }
 
@@ -65,9 +73,10 @@ export function ChangePasswordPage() {
       // any) releases; cache it before navigating into the app.
       const user = await getMe();
       setUser(user);
+      pushToast("success", "Password changed.");
       navigate("/", { replace: true });
     } catch (err) {
-      setError(errorMessage(err));
+      setApiError(err);
       setPending(false);
     }
   }
@@ -82,56 +91,59 @@ export function ChangePasswordPage() {
         <p className="mt-1 text-xs text-zinc-500">Set a new password to continue.</p>
 
         <form className="mt-6 flex flex-col gap-4" onSubmit={handleSubmit} noValidate>
-          <label className="flex flex-col gap-1 text-xs text-zinc-400">
-            Current password
-            <input
-              type="password"
-              name="current_password"
-              autoComplete="current-password"
-              required
-              value={current}
-              onChange={(e) => setCurrent(e.target.value)}
-              className="rounded border border-carbon-700 bg-carbon-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-accent"
-            />
-          </label>
+          <FormField label="Current password" required>
+            {(controlProps) => (
+              <input
+                {...controlProps}
+                type="password"
+                name="current_password"
+                autoComplete="current-password"
+                required
+                value={current}
+                onChange={(e) => setCurrent(e.target.value)}
+                className="rounded border border-carbon-700 bg-carbon-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-accent"
+              />
+            )}
+          </FormField>
 
-          <label className="flex flex-col gap-1 text-xs text-zinc-400">
-            New password
-            <input
-              type="password"
-              name="new_password"
-              autoComplete="new-password"
-              required
-              value={next}
-              onChange={(e) => setNext(e.target.value)}
-              className="rounded border border-carbon-700 bg-carbon-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-accent"
-            />
-          </label>
+          <FormField label="New password" required error={fieldErrors.next}>
+            {(controlProps) => (
+              <input
+                {...controlProps}
+                type="password"
+                name="new_password"
+                autoComplete="new-password"
+                required
+                value={next}
+                onChange={(e) => setNext(e.target.value)}
+                className="rounded border border-carbon-700 bg-carbon-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-accent"
+              />
+            )}
+          </FormField>
 
-          <label className="flex flex-col gap-1 text-xs text-zinc-400">
-            Confirm new password
-            <input
-              type="password"
-              name="confirm_password"
-              autoComplete="new-password"
-              required
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              className="rounded border border-carbon-700 bg-carbon-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-accent"
-            />
-          </label>
+          <FormField label="Confirm new password" required error={fieldErrors.confirm}>
+            {(controlProps) => (
+              <input
+                {...controlProps}
+                type="password"
+                name="confirm_password"
+                autoComplete="new-password"
+                required
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                className="rounded border border-carbon-700 bg-carbon-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-accent"
+              />
+            )}
+          </FormField>
 
-          {error !== null && (
-            <p role="alert" className="text-xs text-red-400">
-              {error}
-            </p>
-          )}
+          {apiError !== null && <ErrorBanner error={apiError} data-testid="change-password-error" />}
 
           <button
             type="submit"
             disabled={pending}
-            className="mt-2 rounded bg-accent px-3 py-2 text-sm font-medium text-carbon-950 transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
+            className="mt-2 flex items-center justify-center gap-2 rounded bg-accent px-3 py-2 text-sm font-medium text-carbon-950 transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
           >
+            {pending && <Spinner aria-label="Changing password" />}
             {pending ? "Changing…" : "Change password"}
           </button>
         </form>

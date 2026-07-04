@@ -11,16 +11,21 @@
  *  - backend errors (e.g. wrong current password) render via the ``ApiError``
  *    detail and the user is NOT navigated away.
  *
+ *  - success pushes a toast onto the shared ui store; both inputs and the
+ *    submit spinner carry real accessible names (audit UI_UX #4/#5 — this
+ *    page previously had zero aria attributes).
+ *
  * ``../api/auth`` is mocked; navigation is asserted with a location probe.
  */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
 import { ChangePasswordPage } from "../pages/ChangePasswordPage";
 import type { UserMe } from "../stores/auth";
 import { useAuthStore } from "../stores/auth";
+import { useUiStore } from "../stores/ui";
 
 vi.mock("../api/auth", () => ({
   changePassword: vi.fn(),
@@ -54,6 +59,7 @@ function resetStore(): void {
     user: FLAGGED_USER,
     status: "authed",
   });
+  useUiStore.setState({ toasts: [] });
 }
 
 beforeEach(() => {
@@ -105,6 +111,64 @@ describe("ChangePasswordPage — successful change", () => {
     expect(changePassword).toHaveBeenCalledWith("old-pass-1", "new-pass-12");
     expect(getMe).toHaveBeenCalled();
     expect(useAuthStore.getState().user?.must_change_password).toBe(false);
+  });
+
+  it("pushes a success toast onto the shared ui store", async () => {
+    vi.mocked(changePassword).mockResolvedValue({ changed: true });
+    vi.mocked(getMe).mockResolvedValue({ ...FLAGGED_USER, must_change_password: false });
+
+    renderPage();
+    fireEvent.change(screen.getByLabelText(/current password/i), {
+      target: { value: "old-pass-1" },
+    });
+    fireEvent.change(screen.getByLabelText(/^new password/i), {
+      target: { value: "new-pass-12" },
+    });
+    fireEvent.change(screen.getByLabelText(/confirm/i), { target: { value: "new-pass-12" } });
+    fireEvent.click(screen.getByRole("button", { name: /change password/i }));
+
+    await waitFor(() => {
+      expect(useUiStore.getState().toasts).toHaveLength(1);
+    });
+    expect(useUiStore.getState().toasts[0]).toMatchObject({
+      kind: "success",
+      message: "Password changed.",
+    });
+  });
+});
+
+describe("ChangePasswordPage — accessible form labels and pending spinner", () => {
+  it("associates all three inputs with real <label> elements", () => {
+    renderPage();
+    expect(screen.getByLabelText(/current password/i)).toHaveAttribute("id");
+    expect(screen.getByLabelText(/^new password/i)).toHaveAttribute("id");
+    expect(screen.getByLabelText(/confirm/i)).toHaveAttribute("id");
+  });
+
+  it("shows a spinner on the submit button while the request is in flight", async () => {
+    let resolveChange!: (value: { changed: boolean }) => void;
+    vi.mocked(changePassword).mockReturnValue(
+      new Promise((resolve) => {
+        resolveChange = resolve;
+      }),
+    );
+    vi.mocked(getMe).mockResolvedValue({ ...FLAGGED_USER, must_change_password: false });
+
+    renderPage();
+    fireEvent.change(screen.getByLabelText(/current password/i), {
+      target: { value: "old-pass-1" },
+    });
+    fireEvent.change(screen.getByLabelText(/^new password/i), {
+      target: { value: "new-pass-12" },
+    });
+    fireEvent.change(screen.getByLabelText(/confirm/i), { target: { value: "new-pass-12" } });
+    const submit = screen.getByRole("button", { name: /change password/i });
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(submit).toBeDisabled());
+    expect(within(submit).getByRole("status")).toBeInTheDocument();
+
+    resolveChange({ changed: true });
   });
 });
 
