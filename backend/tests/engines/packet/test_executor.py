@@ -201,26 +201,50 @@ def test_install_seccomp_filter_loads(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_import_seccomp_missing_binding_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing libseccomp binding is a confinement failure, NOT a fallback
+    """BOTH binding spellings absent is a confinement failure, NOT a fallback
     trigger (ADR-0049 blocker 1 — never key confinement on an ImportError).
 
     Drives the REAL ``_import_seccomp`` (the code under test is its ImportError →
-    ConfinementError wrapping): a patched ``__import__`` makes ``import seccomp``
-    fail deterministically on any platform, so this bites on the Linux CI unit
-    runner too (where the binding IS installed).
+    ConfinementError wrapping): a patched ``__import__`` makes both ``import
+    seccomp`` and ``import pyseccomp`` fail deterministically on any platform, so
+    this bites on the Linux CI unit runner too (where the binding IS installed).
     """
     import builtins
 
     real_import = builtins.__import__
 
     def _fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "seccomp":
-            raise ImportError("No module named 'seccomp'")
+        if name in ("seccomp", "pyseccomp"):
+            raise ImportError(f"No module named {name!r}")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", _fake_import)
     with pytest.raises(ConfinementError):
         executor._import_seccomp()
+
+
+def test_import_seccomp_falls_back_to_pyseccomp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the official ``seccomp`` C binding is absent, fall back to the
+    pip-installable ``pyseccomp`` fork (pyseccomp's documented drop-in pattern).
+
+    This is the packet-analysis image's REAL runtime path — the official binding
+    is not on PyPI, so only ``pyseccomp`` is installed. Regression pin for the CI
+    build-time ``--self-check`` failure (``import seccomp`` alone → exit 90).
+    """
+    import builtins
+
+    sentinel = object()
+    real_import = builtins.__import__
+
+    def _fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "seccomp":
+            raise ImportError("No module named 'seccomp'")
+        if name == "pyseccomp":
+            return sentinel
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+    assert executor._import_seccomp() is sentinel
 
 
 # ---------------------------------------------------------------------------

@@ -186,7 +186,10 @@ module = [
     "pysnmp.*",
     # libseccomp Python binding (ADR-0049): Linux-only, no type stubs, imported
     # lazily in app.engines.packet.executor only on the enforced (Linux) path.
+    # Both spellings: the official ``seccomp`` C binding and the pip-installable
+    # ``pyseccomp`` fork the packet-analysis image ships.
     "seccomp.*",
+    "pyseccomp.*",
     "textfsm.*",
     "yaml.*",
 ]

@@ -320,11 +320,25 @@ def _import_resource() -> Any:
 def _import_seccomp() -> Any:
     """Import the libseccomp Python binding (seam). Fail CLOSED: a missing binding
     with enforcement on is a confinement-setup failure, NOT a fallback trigger
-    (ADR-0049 blocker 1)."""
+    (ADR-0049 blocker 1).
+
+    Follows pyseccomp's own documented drop-in pattern: prefer the official
+    ``seccomp`` C binding (distro ``python3-seccomp``); else the pip-installable,
+    API-compatible pure-python ``pyseccomp`` fork — which is the wheel the
+    packet-analysis image actually ships (the official binding is not on PyPI, so
+    ``import seccomp`` alone fails in the image → the CI build-time ``--self-check``
+    ``ConfinementError``, exit 90). This is NOT the blocker-1 forbidden fallback:
+    both names being absent still raises ``ConfinementError``; only the *binding's
+    two import spellings* are tried, never a fall-through to unconfined analysis."""
     try:
         import seccomp
-    except ImportError as exc:
-        raise ConfinementError(f"libseccomp binding unavailable ({type(exc).__name__})") from exc
+    except ImportError:
+        try:
+            import pyseccomp as seccomp
+        except ImportError as exc:
+            raise ConfinementError(
+                f"libseccomp binding unavailable ({type(exc).__name__})"
+            ) from exc
     return seccomp
 
 
@@ -545,7 +559,11 @@ def _run_self_check() -> int:
         module = _import_seccomp()
         build_syscall_filter(profile, module, deny_action=_DEFAULT_DENY_ACTION)
     except Exception as exc:  # noqa: BLE001 — build probe: ANY failure fails the build
-        _emit_diag(f"self-check failed ({type(exc).__name__})")
+        # Build-time only (no untrusted pcap data in scope), and the confinement
+        # errors are already sanitized to type/step names — so surfacing the
+        # message here makes a self-check failure debuggable from the build log
+        # instead of an opaque "(ConfinementError)".
+        _emit_diag(f"self-check failed ({type(exc).__name__}: {exc})")
         return int(ExitCode.SELF_CHECK_FAILED)
     return int(ExitCode.OK)
 
