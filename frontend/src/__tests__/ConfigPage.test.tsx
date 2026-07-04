@@ -32,6 +32,7 @@ const DEVICE_LIST: DeviceListResponse = {
       os_version: "17.3.4",
       serial: null,
       status: "active",
+      site: null,
       credential_id: null,
       last_discovered_at: null,
       created_at: "2024-01-01T00:00:00Z",

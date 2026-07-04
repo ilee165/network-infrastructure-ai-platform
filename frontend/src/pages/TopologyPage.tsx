@@ -9,15 +9,26 @@
  * label, offers an L2/L3 layer toggle (re-fetches with the ``layer`` query
  * param), and shows a detail side panel for the selected node. ``projected_at``
  * surfaces the projection pass the view is "as of" (ADR-0005).
+ *
+ * Loading is scoped by default (audit Wave 5, G-SCA): the page fetches one
+ * site's subgraph (first site auto-selected) or a device neighborhood at
+ * depth N (``/topology/graph/neighborhood``); the full-graph fetch is an
+ * explicit action and the server refuses it with a 413 problem over the
+ * ``NETOPS_TOPOLOGY_MAX_NODES`` cap, which this page surfaces with guidance
+ * back to the scoped modes.
  */
 
 import { useQuery } from "@tanstack/react-query";
 import cytoscape from "cytoscape";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ApiError } from "../api/client";
+import { listDevices } from "../api/devices";
 import { listRuns } from "../api/discovery";
 import {
   getTopologyDiff,
   getTopologyGraph,
+  getTopologyNeighborhood,
+  MAX_NEIGHBORHOOD_DEPTH,
   type TopologyDiff,
   type TopologyGraphParams,
   type TopologyNode,
@@ -52,6 +63,29 @@ const LAYERS: { value: Layer; label: string; title: string }[] = [
   { value: "l3", label: "L3", title: "Subnet adjacency and routing links only" },
   { value: "dns", label: "DNS", title: "DNS zone/record dependency layer (DnsZone, DnsRecord, RESOLVES_TO)" },
 ];
+
+/**
+ * Scoped-by-default topology loading (audit Wave 5, G-SCA): the page fetches a
+ * site subgraph or a device neighborhood; the full-graph fetch is an explicit
+ * action and is refused server-side (413) over the configured node cap.
+ */
+type ScopeMode = "site" | "device" | "full";
+
+const SCOPE_MODES: { value: ScopeMode; label: string; title: string }[] = [
+  { value: "site", label: "Site", title: "Devices assigned to one site (scoped query)" },
+  {
+    value: "device",
+    label: "Device",
+    title: "Everything within N hops of one device (scoped query)",
+  },
+  {
+    value: "full",
+    label: "Full graph",
+    title: "Explicit full-graph fetch — refused over the server node cap (413)",
+  },
+];
+
+const DEPTHS = Array.from({ length: MAX_NEIGHBORHOOD_DEPTH }, (_, i) => i + 1);
 
 // ── Stylesheet ──────────────────────────────────────────────────────────────
 
@@ -376,11 +410,49 @@ export function TopologyPage() {
   const [layer, setLayer] = useState<Layer>("all");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [diff, setDiff] = useState<TopologyDiff | null>(null);
+  const [scopeMode, setScopeMode] = useState<ScopeMode>("site");
+  const [selectedSite, setSelectedSite] = useState<string | null>(null);
+  const [selectedDevice, setSelectedDevice] = useState("");
+  const [depth, setDepth] = useState(2);
 
-  const { data, error, isPending } = useQuery({
-    queryKey: ["topology-graph", layer],
-    queryFn: () => getTopologyGraph({ layer }),
+  // The inventory powers both scope pickers (distinct sites + device list).
+  const { data: devicesData } = useQuery({
+    queryKey: ["devices", "topology-scope"],
+    queryFn: () => listDevices({ limit: 500 }),
   });
+  const inventory = useMemo(() => devicesData?.items ?? [], [devicesData]);
+  const sites = useMemo(
+    () =>
+      Array.from(
+        new Set(inventory.map((d) => d.site).filter((s): s is string => s !== null && s !== "")),
+      ).sort(),
+    [inventory],
+  );
+  // Default scoped view: the first site, until the operator picks one.
+  const activeSite = selectedSite ?? sites[0] ?? null;
+
+  const scopeReady =
+    scopeMode === "full" ||
+    (scopeMode === "site" ? activeSite !== null : selectedDevice !== "");
+
+  const { data, error, isLoading } = useQuery({
+    queryKey: ["topology-graph", scopeMode, activeSite, selectedDevice, depth, layer],
+    enabled: scopeReady,
+    // A 413 is deterministic (the graph is over the cap) and scoped reads are
+    // cheap to re-trigger by picking a scope — never retry automatically.
+    retry: false,
+    queryFn: () => {
+      if (scopeMode === "device") {
+        return getTopologyNeighborhood({ device: selectedDevice, depth, layer });
+      }
+      if (scopeMode === "site" && activeSite !== null) {
+        return getTopologyGraph({ layer, site: activeSite });
+      }
+      return getTopologyGraph({ layer });
+    },
+  });
+
+  const capError = error instanceof ApiError && error.status === 413 ? error : null;
 
   const elements = useMemo(() => {
     if (!data) return [];
@@ -411,6 +483,76 @@ export function TopologyPage() {
         }
       />
 
+      {/* Scope selector: scoped (site / device neighborhood) by default; the
+          full-graph fetch is explicit and server-capped (audit Wave 5). */}
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Topology scope">
+        <span className="font-mono text-[11px] uppercase tracking-widest text-zinc-500">
+          Scope
+        </span>
+        {SCOPE_MODES.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            data-testid={`topology-scope-${opt.value}`}
+            title={opt.title}
+            aria-pressed={scopeMode === opt.value}
+            onClick={() => setScopeMode(opt.value)}
+            className={`btn ${
+              scopeMode === opt.value ? "border-accent bg-accent/10 text-accent" : ""
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+        {scopeMode === "site" && sites.length > 0 ? (
+          <select
+            data-testid="topology-site-select"
+            aria-label="Site"
+            value={activeSite ?? ""}
+            onChange={(e) => setSelectedSite(e.target.value)}
+            className="input w-48"
+          >
+            {sites.map((site) => (
+              <option key={site} value={site}>
+                {site}
+              </option>
+            ))}
+          </select>
+        ) : null}
+        {scopeMode === "device" ? (
+          <>
+            <select
+              data-testid="topology-device-select"
+              aria-label="Center device"
+              value={selectedDevice}
+              onChange={(e) => setSelectedDevice(e.target.value)}
+              className="input w-56"
+            >
+              <option value="">Select a device…</option>
+              {inventory.map((device) => (
+                <option key={device.id} value={device.id}>
+                  {device.hostname}
+                </option>
+              ))}
+            </select>
+            <select
+              data-testid="topology-depth-select"
+              aria-label="Neighborhood depth"
+              title="Hop radius around the selected device"
+              value={depth}
+              onChange={(e) => setDepth(Number(e.target.value))}
+              className="input w-28"
+            >
+              {DEPTHS.map((d) => (
+                <option key={d} value={d}>
+                  {d} hop{d > 1 ? "s" : ""}
+                </option>
+              ))}
+            </select>
+          </>
+        ) : null}
+      </div>
+
       {/* Layer toggle */}
       <div className="flex items-center gap-2" role="group" aria-label="Topology layer">
         <span className="font-mono text-[11px] uppercase tracking-widest text-zinc-500">
@@ -440,13 +582,52 @@ export function TopologyPage() {
         onClear={() => setDiff(null)}
       />
 
+      {/* Scope hints: nothing is fetched until the scope is actionable. */}
+      {scopeMode === "site" && devicesData && sites.length === 0 ? (
+        <div
+          data-testid="topology-scope-empty"
+          className="flex flex-col items-start gap-2 rounded-md border border-dashed border-carbon-600 bg-carbon-900/50 px-4 py-3"
+        >
+          <p className="text-xs text-zinc-400">
+            No sites in the inventory to scope by. Pick a device neighborhood, or explicitly
+            load the full graph (server-capped).
+          </p>
+          <div className="flex gap-2">
+            <button type="button" className="btn" onClick={() => setScopeMode("device")}>
+              Device neighborhood
+            </button>
+            <button type="button" className="btn" onClick={() => setScopeMode("full")}>
+              Load full graph
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {scopeMode === "device" && selectedDevice === "" ? (
+        <p data-testid="topology-scope-hint" className="text-xs text-zinc-500">
+          Select a device to load its neighborhood.
+        </p>
+      ) : null}
+
       {/* States */}
-      {isPending ? (
+      {isLoading ? (
         <p role="status" className="text-xs text-zinc-500">
           Loading topology…
         </p>
       ) : null}
-      {error ? (
+      {capError ? (
+        <div
+          data-testid="topology-cap-alert"
+          role="alert"
+          className="panel border-status-error/40 px-4 py-3 text-xs text-zinc-300"
+        >
+          <p className="mb-1 font-medium text-status-error">Graph too large to load</p>
+          <p>{capError.problem.detail}</p>
+          <p className="mt-1 text-zinc-500">
+            Switch to a site or device-neighborhood scope above to keep the view usable.
+          </p>
+        </div>
+      ) : null}
+      {error && !capError ? (
         <div
           role="alert"
           className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
@@ -454,7 +635,7 @@ export function TopologyPage() {
           Topology load failed: {error.message}
         </div>
       ) : null}
-      {!isPending && !error && !hasNodes ? (
+      {scopeReady && !isLoading && !error && data && !hasNodes ? (
         <div
           data-testid="topology-empty-state"
           className="flex flex-1 flex-col items-center justify-center gap-2 rounded-md border border-dashed border-carbon-600 bg-carbon-900/50 px-6 py-16 text-center"

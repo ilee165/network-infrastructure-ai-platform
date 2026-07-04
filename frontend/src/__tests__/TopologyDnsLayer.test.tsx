@@ -64,15 +64,41 @@ const EMPTY_GRAPH: TopologyGraph = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// Minimal inventory for the scope pickers (audit Wave 5): one sited device so
+// the page's default scoped (site) query fires and the layer toggle refetches.
+const DEVICES = {
+  items: [
+    {
+      id: "11111111-1111-1111-1111-111111111111",
+      hostname: "core-sw-01",
+      mgmt_ip: "192.168.1.1",
+      vendor_id: "cisco",
+      model: null,
+      os_version: null,
+      serial: null,
+      status: "active",
+      site: "hq-dc",
+      credential_id: null,
+      last_discovered_at: null,
+      created_at: "2026-06-01T00:00:00Z",
+      updated_at: "2026-06-01T00:00:00Z",
+    },
+  ],
+  total: 1,
+  limit: 500,
+  offset: 0,
+};
+
 function makeFetch(body: unknown = GRAPH_WITH_DNS) {
-  return vi.fn((): Promise<Response> =>
-    Promise.resolve(
-      new Response(JSON.stringify(body), {
+  return vi.fn((input: RequestInfo | URL): Promise<Response> => {
+    const payload = String(input).includes("/devices") ? DEVICES : body;
+    return Promise.resolve(
+      new Response(JSON.stringify(payload), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
-    ),
-  );
+    );
+  });
 }
 
 function renderPage(): void {
