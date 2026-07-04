@@ -87,6 +87,13 @@ const SCOPE_MODES: { value: ScopeMode; label: string; title: string }[] = [
 
 const DEPTHS = Array.from({ length: MAX_NEIGHBORHOOD_DEPTH }, (_, i) => i + 1);
 
+/** The device list API caps ``limit`` at 500; pages are accumulated up to the
+ * G-SCA design scale so sites/devices past the first page stay selectable.
+ * Beyond that, a distinct-sites endpoint + searchable combobox are the right
+ * tools (deferred to the P5 scale work). */
+const INVENTORY_PAGE = 500;
+const INVENTORY_MAX = 5000;
+
 // ── Stylesheet ──────────────────────────────────────────────────────────────
 
 /** Stylesheet: one color rule per label plus shared node/edge defaults. */
@@ -416,9 +423,18 @@ export function TopologyPage() {
   const [depth, setDepth] = useState(2);
 
   // The inventory powers both scope pickers (distinct sites + device list).
-  const { data: devicesData } = useQuery({
+  const { data: devicesData, error: devicesError } = useQuery({
     queryKey: ["devices", "topology-scope"],
-    queryFn: () => listDevices({ limit: 500 }),
+    queryFn: async () => {
+      const first = await listDevices({ limit: INVENTORY_PAGE });
+      const items = [...first.items];
+      while (items.length < first.total && items.length < INVENTORY_MAX) {
+        const page = await listDevices({ limit: INVENTORY_PAGE, offset: items.length });
+        if (page.items.length === 0) break;
+        items.push(...page.items);
+      }
+      return { ...first, items };
+    },
   });
   const inventory = useMemo(() => devicesData?.items ?? [], [devicesData]);
   const sites = useMemo(
@@ -583,6 +599,16 @@ export function TopologyPage() {
       />
 
       {/* Scope hints: nothing is fetched until the scope is actionable. */}
+      {devicesError ? (
+        <div
+          data-testid="topology-inventory-error"
+          role="alert"
+          className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
+        >
+          Device inventory failed to load: {devicesError.message}. Site and device scoping
+          are unavailable — you can still explicitly load the full graph.
+        </div>
+      ) : null}
       {scopeMode === "site" && devicesData && sites.length === 0 ? (
         <div
           data-testid="topology-scope-empty"

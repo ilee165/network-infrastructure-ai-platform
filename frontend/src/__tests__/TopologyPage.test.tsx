@@ -430,7 +430,7 @@ describe("TopologyPage — scoped-by-default loading", () => {
     });
   });
 
-  it("surfaces the server 413 cap as guidance back to scoped modes", async () => {
+  it("surfaces the server 413 cap and recovers by switching back to a scoped mode", async () => {
     const problem = {
       type: "urn:netops:error:graph-too-large",
       title: "Graph Too Large",
@@ -440,6 +440,60 @@ describe("TopologyPage — scoped-by-default loading", () => {
         "with ?site=<name> or GET /topology/graph/neighborhood, or raise " +
         "NETOPS_TOPOLOGY_MAX_NODES",
       instance: "/api/v1/topology/graph",
+    };
+    // Only the explicit UNSCOPED fetch is over the cap; scoped reads succeed.
+    const mock = vi.fn((input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/devices")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(DEVICES), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (url.includes("/topology/graph") && !url.includes("site=")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(problem), {
+            status: 413,
+            headers: { "Content-Type": "application/problem+json" },
+          }),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(GRAPH), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    // Scoped default loads fine; the explicit full fetch hits the cap.
+    await waitFor(() => expect(cyInstances.length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByTestId("topology-scope-full"));
+
+    const alert = await screen.findByTestId("topology-cap-alert");
+    expect(alert).toHaveTextContent("Graph too large to load");
+    expect(alert).toHaveTextContent("123456 nodes");
+    expect(alert).toHaveTextContent(/site or device-neighborhood scope/);
+    // The scope controls survive the error — switching back to Site recovers.
+    fireEvent.click(screen.getByTestId("topology-scope-site"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("topology-cap-alert")).not.toBeInTheDocument(),
+    );
+    const scoped = topologyCalls(mock).filter((url) => url.includes("site=hq-dc"));
+    expect(scoped.length).toBeGreaterThan(0);
+  });
+
+  it("shows an error alert when the neighborhood device is unknown (404)", async () => {
+    const problem = {
+      type: "urn:netops:error:not-found",
+      title: "Not Found",
+      status: 404,
+      detail: `no projected device with key '${DEVICE_KEY}'`,
+      instance: "/api/v1/topology/graph/neighborhood",
     };
     const mock = vi.fn((input: RequestInfo | URL): Promise<Response> => {
       const url = String(input);
@@ -451,20 +505,34 @@ describe("TopologyPage — scoped-by-default loading", () => {
           }),
         );
       }
+      if (url.includes("/graph/neighborhood")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(problem), {
+            status: 404,
+            headers: { "Content-Type": "application/problem+json" },
+          }),
+        );
+      }
       return Promise.resolve(
-        new Response(JSON.stringify(problem), {
-          status: 413,
-          headers: { "Content-Type": "application/problem+json" },
+        new Response(JSON.stringify(GRAPH), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
         }),
       );
     });
     vi.stubGlobal("fetch", mock);
     renderPage();
 
-    const alert = await screen.findByTestId("topology-cap-alert");
-    expect(alert).toHaveTextContent("Graph too large to load");
-    expect(alert).toHaveTextContent("123456 nodes");
-    expect(alert).toHaveTextContent(/site or device-neighborhood scope/);
+    fireEvent.click(await screen.findByTestId("topology-scope-device"));
+    const select = await screen.findByTestId("topology-device-select");
+    await waitFor(() => expect(select.querySelectorAll("option").length).toBeGreaterThan(1));
+    fireEvent.change(select, { target: { value: DEVICE_KEY } });
+
+    // The stale-projection 404 surfaces as the generic load error, not a
+    // blank page and not the cap alert.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/no projected device/);
+    expect(screen.queryByTestId("topology-cap-alert")).not.toBeInTheDocument();
   });
 
   it("with no sites in inventory, nothing is fetched until full graph is explicit", async () => {
@@ -477,6 +545,64 @@ describe("TopologyPage — scoped-by-default loading", () => {
     expect(topologyCalls(mock)).toHaveLength(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Load full graph" }));
+    await waitFor(() => {
+      const unscoped = topologyCalls(mock).filter(
+        (url) => !url.includes("site=") && !url.includes("/graph/neighborhood"),
+      );
+      expect(unscoped.length).toBeGreaterThan(0);
+    });
+  });
+
+  it("accumulates inventory pages so later-page sites feed the picker", async () => {
+    // Two pages of one device each; the second page carries the sorted-first
+    // site, so the default scoped fetch proves page 2 reached the picker.
+    const page1: DeviceListResponse = { items: [makeDevice({})], total: 2, limit: 500, offset: 0 };
+    const page2: DeviceListResponse = {
+      items: [makeDevice({ id: DEVICE_2_ID, hostname: "edge-rt-01", site: "aaa-branch" })],
+      total: 2,
+      limit: 500,
+      offset: 1,
+    };
+    const mock = vi.fn((input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      let body: unknown = GRAPH;
+      if (url.includes("/devices")) body = url.includes("offset=1") ? page2 : page1;
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await waitFor(() =>
+      expect(topologyCalls(mock).some((url) => url.includes("site=aaa-branch"))).toBe(true),
+    );
+    expect(mock.mock.calls.some((c) => String(c[0]).includes("offset=1"))).toBe(true);
+  });
+
+  it("surfaces an inventory load failure and still allows the explicit full graph", async () => {
+    const mock = vi.fn((input: RequestInfo | URL): Promise<Response> => {
+      if (String(input).includes("/devices")) {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(GRAPH), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    const alert = await screen.findByTestId("topology-inventory-error");
+    expect(alert).toHaveTextContent(/Device inventory failed to load/);
+    expect(topologyCalls(mock)).toHaveLength(0);
+
+    fireEvent.click(screen.getByTestId("topology-scope-full"));
     await waitFor(() => expect(topologyCalls(mock).length).toBeGreaterThan(0));
   });
 });
