@@ -5,6 +5,7 @@
 
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { Toaster } from "./Toaster";
 import { logout } from "../api/auth";
 import { useAuthStore } from "../stores/auth";
 import { hasMinimumRole } from "../stores/roles";
@@ -184,6 +185,7 @@ export function Layout() {
           </ErrorBoundary>
         </main>
       </div>
+      <Toaster />
     </div>
   );
 }
