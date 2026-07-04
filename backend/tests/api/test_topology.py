@@ -64,6 +64,13 @@ class _FakeTx:
         self._records = records
 
     async def run(self, cypher: str, **params: Any) -> _FakeResult:
+        # Dispatch on the statement shape the read workers build: the
+        # neighborhood reader's center-device lookup and variable-length edge
+        # collection, or the full-graph edge match.
+        if "RETURN labels(d) AS labels" in cypher:
+            return _FakeResult(self._device_lookup(params["device"]))
+        if "relationships(p)" in cypher:
+            return _FakeResult(self._neighborhood_edges(cypher, params["device"]))
         # Parse the selected relationship types out of the type pattern the
         # worker built, then apply the same site/vrf predicates the Cypher does.
         rel_segment = cypher.split("[r:", 1)[1].split("]", 1)[0]
@@ -88,6 +95,62 @@ class _FakeTx:
                 continue
             out.append(rec)
         return _FakeResult(out)
+
+    def _device_lookup(self, device: str) -> list[dict[str, Any]]:
+        for rec in self._records:
+            for labels, props in (
+                (rec["a_labels"], rec["a_props"]),
+                (rec["b_labels"], rec["b_props"]),
+            ):
+                if "Device" in labels and props.get("pg_id") == device:
+                    return [{"labels": ["Device"], "props": props}]
+        return []
+
+    def _neighborhood_edges(self, cypher: str, device: str) -> list[dict[str, Any]]:
+        # Mirror variable-length path semantics: parse the validated literals
+        # (rel types + depth) out of the pattern, BFS undirected over the
+        # layer-filtered edges, and keep a relationship iff its nearer endpoint
+        # is strictly within the radius.
+        import re
+        from collections import deque
+
+        match = re.search(r"\[:([A-Z0-9_|]+)\*1\.\.(\d+)\]", cypher)
+        assert match is not None, cypher
+        selected = set(match.group(1).split("|"))
+        depth = int(match.group(2))
+
+        def _key(labels: list[str], props: dict[str, Any]) -> Any:
+            if "Device" in labels or "Interface" in labels or "IPAddress" in labels:
+                return props.get("pg_id")
+            return (
+                props.get("cidr")
+                or props.get("fqdn")
+                or props.get("record_key")
+                or props.get("name")
+            )
+
+        survivors = [rec for rec in self._records if rec["rel_type"] in selected]
+        adjacency: dict[Any, set[Any]] = {}
+        for rec in survivors:
+            a = _key(rec["a_labels"], rec["a_props"])
+            b = _key(rec["b_labels"], rec["b_props"])
+            adjacency.setdefault(a, set()).add(b)
+            adjacency.setdefault(b, set()).add(a)
+        dist: dict[Any, int] = {device: 0}
+        queue: deque[Any] = deque([device])
+        while queue:
+            here = queue.popleft()
+            for neighbor in adjacency.get(here, ()):
+                if neighbor not in dist:
+                    dist[neighbor] = dist[here] + 1
+                    queue.append(neighbor)
+        out = []
+        for rec in survivors:
+            a = _key(rec["a_labels"], rec["a_props"])
+            b = _key(rec["b_labels"], rec["b_props"])
+            if min(dist.get(a, depth + 1), dist.get(b, depth + 1)) <= depth - 1:
+                out.append(rec)
+        return out
 
 
 class FakeKnowledgeClient:
@@ -457,6 +520,124 @@ class TestGraph:
     ) -> None:
         response = await graph_client.get(
             "/api/v1/topology/graph", headers=auth_headers("inactive")
+        )
+        assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# GET /topology/graph/neighborhood
+# ---------------------------------------------------------------------------
+
+
+class TestNeighborhood:
+    async def test_depth_1_returns_direct_neighbors_only(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        response = await graph_client.get(
+            "/api/v1/topology/graph/neighborhood",
+            params={"device": "dev-b", "depth": 1},
+            headers=auth_headers("viewer"),
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert {n["key"] for n in body["nodes"]} == {"dev-a", "dev-b"}
+        assert len(body["edges"]) == 1
+        assert body["edges"][0]["type"] == REL_CONNECTED_TO
+        assert body["projected_at"] == PROJECTED_AT
+
+    async def test_depth_2_expands_the_radius(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        response = await graph_client.get(
+            "/api/v1/topology/graph/neighborhood",
+            params={"device": "dev-b", "depth": 2},
+            headers=auth_headers("viewer"),
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        # Two hops from dev-b: dev-a (1), then dev-c and the subnet (2).  The
+        # DNS island is disconnected from the device chain and must not appear.
+        assert {n["key"] for n in body["nodes"]} == {"dev-a", "dev-b", "dev-c", "10.0.0.0/24"}
+        assert len(body["edges"]) == 3
+
+    async def test_layer_filters_the_walk(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        response = await graph_client.get(
+            "/api/v1/topology/graph/neighborhood",
+            params={"device": "dev-a", "depth": 1, "layer": "l2"},
+            headers=auth_headers("viewer"),
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert {e["type"] for e in body["edges"]} == {REL_CONNECTED_TO}
+        assert "Subnet" not in {n["label"] for n in body["nodes"]}
+
+    async def test_default_depth_is_2(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        response = await graph_client.get(
+            "/api/v1/topology/graph/neighborhood",
+            params={"device": "dev-b"},
+            headers=auth_headers("viewer"),
+        )
+        assert response.status_code == 200, response.text
+        assert {n["key"] for n in response.json()["nodes"]} == {
+            "dev-a",
+            "dev-b",
+            "dev-c",
+            "10.0.0.0/24",
+        }
+
+    async def test_unknown_device_is_404_problem(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        response = await graph_client.get(
+            "/api/v1/topology/graph/neighborhood",
+            params={"device": "no-such-device"},
+            headers=auth_headers("viewer"),
+        )
+        assert response.status_code == 404
+        assert response.headers["content-type"].startswith("application/problem+json")
+
+    @pytest.mark.parametrize("depth", [0, 6, -1])
+    async def test_out_of_range_depth_is_422(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        depth: int,
+    ) -> None:
+        response = await graph_client.get(
+            "/api/v1/topology/graph/neighborhood",
+            params={"device": "dev-a", "depth": depth},
+            headers=auth_headers("viewer"),
+        )
+        assert response.status_code == 422
+
+    async def test_missing_device_param_is_422(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        response = await graph_client.get(
+            "/api/v1/topology/graph/neighborhood",
+            headers=auth_headers("viewer"),
+        )
+        assert response.status_code == 422
+
+    async def test_unauthenticated_is_401(self, graph_client: httpx.AsyncClient) -> None:
+        response = await graph_client.get(
+            "/api/v1/topology/graph/neighborhood", params={"device": "dev-a"}
         )
         assert response.status_code == 401
 

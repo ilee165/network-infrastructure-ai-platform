@@ -22,7 +22,7 @@ from app.knowledge.neo4j_client import (
     dispose_client,
     get_client,
 )
-from app.knowledge.topology_read import GraphData, fetch_graph
+from app.knowledge.topology_read import GraphData, fetch_graph, fetch_neighborhood
 
 __all__ = [
     "Chunk",
@@ -37,6 +37,7 @@ __all__ = [
     "dispose_client",
     "embed_document",
     "fetch_graph",
+    "fetch_neighborhood",
     "get_client",
     "get_default_embedder",
     "retrieve",

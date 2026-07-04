@@ -1,6 +1,6 @@
 """Topology REST API (M2-10, ADR-0005): read the projection, diff two runs.
 
-Two read endpoints, both ``viewer``-and-above (reads never mutate the graph):
+Read endpoints, all ``viewer``-and-above (reads never mutate the graph):
 
 ``GET /topology/graph``
     Returns the projected Neo4j subgraph (``nodes`` / ``edges`` /
@@ -8,6 +8,11 @@ Two read endpoints, both ``viewer``-and-above (reads never mutate the graph):
     Neo4j.  ``site`` / ``vrf`` scope the subgraph; ``layer`` (``l2`` / ``l3`` /
     ``all``) selects which relationship families are returned.  ``projected_at``
     surfaces the projection pass these answers are "as of" (ADR-0005).
+
+``GET /topology/graph/neighborhood``
+    The scoped variant (audit Wave 5, ARCH_DEBT #7): the subgraph within
+    ``depth`` hops of one device (``device`` = the projected ``Device`` key),
+    same ``layer`` semantics and wire shape as ``/graph``.
 
 ``GET /topology/diff``
     Loads the two ``topology_snapshots`` rows for ``from_run`` / ``to_run`` from
@@ -30,8 +35,8 @@ from app.api.deps import get_db, get_knowledge_client, require_role
 from app.core.errors import NotFoundError
 from app.engines.topology.diff import diff_snapshots
 from app.engines.topology.snapshots import SnapshotData
-from app.knowledge import Neo4jClient, fetch_graph
-from app.knowledge.topology_read import LAYER_ALL, LAYERS
+from app.knowledge import Neo4jClient, fetch_graph, fetch_neighborhood
+from app.knowledge.topology_read import LAYER_ALL, LAYERS, MAX_NEIGHBORHOOD_DEPTH
 from app.models import TopologySnapshot, User
 from app.schemas.topology import GraphResponse, TopologyDiffResponse
 
@@ -77,6 +82,42 @@ async def get_graph(
     if layer not in LAYERS:  # pragma: no cover - pattern enforces the set
         raise NotFoundError(f"unknown topology layer {layer!r}")
     graph = await fetch_graph(client, layer=layer, site=site, vrf=vrf)
+    return GraphResponse.model_validate(graph)
+
+
+@router.get(
+    "/graph/neighborhood",
+    response_model=GraphResponse,
+    summary="Read a device-centered neighborhood subgraph",
+)
+async def get_neighborhood(
+    client: KnowledgeClient,
+    _user: Viewer,
+    device: Annotated[
+        str,
+        Query(min_length=1, max_length=255, description="Key (pg_id) of the center device."),
+    ],
+    depth: Annotated[
+        int,
+        Query(ge=1, le=MAX_NEIGHBORHOOD_DEPTH, description="Hop radius around the device."),
+    ] = 2,
+    layer: Annotated[str, Query(pattern="^(l2|l3|dns|all)$")] = LAYER_ALL,
+) -> GraphResponse:
+    """Return the subgraph within ``depth`` hops of one projected device.
+
+    The scoped topology read (audit Wave 5, ARCH_DEBT #7): bounded by
+    construction, so it stays usable where the full projection is not.  The
+    traversal is undirected; ``layer`` selects the relationship families walked
+    (same semantics as ``GET /topology/graph``).  The center device is always
+    included, even when it has no edges in the selected layer.  404 (RFC 7807)
+    when no projected device carries ``device`` as its key; out-of-range
+    ``depth`` is rejected as 422 by FastAPI.
+    """
+    if layer not in LAYERS:  # pragma: no cover - pattern enforces the set
+        raise NotFoundError(f"unknown topology layer {layer!r}")
+    graph = await fetch_neighborhood(client, device=device, depth=depth, layer=layer)
+    if graph is None:
+        raise NotFoundError(f"no projected device with key {device!r}")
     return GraphResponse.model_validate(graph)
 
 
