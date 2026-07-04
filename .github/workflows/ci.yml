@@ -511,10 +511,14 @@ jobs:
       # build is a near-free cache replay of the images that job just validated.
       # A bare (non-registry) tag MUST NOT appear here: with push:true it would
       # resolve to docker.io/library/… and fail with 401 insufficient scopes.
-      # The moving :main tag is ALSO pushed on branch-main builds (not tags): it
-      # is what the identity-chain dry-run in the `docker` job verifies —
-      # without it that dry-run would be a permanent bootstrap skip. Both tags
-      # share one digest, so the one signature below covers both.
+      # Only the immutable :<sha> tag is pushed here. The moving :main tag —
+      # what the identity-chain dry-run in the `docker` job verifies — is NOT
+      # set in this build step: it is retagged to the signed digest AFTER cosign
+      # sign+verify below (see "Retag :main to signed digest"). Pushing :main
+      # here would expose it unsigned during the ~90s push→sign window, red-
+      # flagging every concurrent PR's cosign dry-run. Retagging post-sign means
+      # :main is never observable in an unsigned state; both tags still share one
+      # digest, so the one signature covers both.
       - name: Build + push backend image
         id: build_backend
         uses: docker/build-push-action@v7
@@ -524,7 +528,6 @@ jobs:
           push: true
           tags: |
             ${{ format('{0}:{1}', steps.meta.outputs.backend_image, github.sha) }}
-            ${{ github.ref == 'refs/heads/main' && format('{0}:main', steps.meta.outputs.backend_image) || '' }}
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
 
@@ -537,7 +540,6 @@ jobs:
           push: true
           tags: |
             ${{ format('{0}:{1}', steps.meta.outputs.frontend_image, github.sha) }}
-            ${{ github.ref == 'refs/heads/main' && format('{0}:main', steps.meta.outputs.frontend_image) || '' }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
@@ -621,6 +623,28 @@ jobs:
               --certificate-identity-regexp "^https://github\.com/ilee165/network-infrastructure-ai-platform/\.github/workflows/ci\.yml@refs/.+$" \
               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
               "${img}"
+            echo "::endgroup::"
+          done
+
+      # Only NOW, after sign+verify has proven the digest, point the moving :main
+      # tag at that same signed digest. This is the ONLY place :main is set on a
+      # main build. `imagetools create` is a registry-side manifest copy (no
+      # rebuild, no digest change), so the signature made above already covers
+      # :main. Consequence: the PR identity-chain dry-run in the `docker` job can
+      # never observe :main unsigned — closing the push→sign race that reddened
+      # concurrent PRs when several main merges landed in quick succession. A run
+      # cancelled by concurrency before this step simply leaves :main pointing at
+      # the previous (already-signed) digest — never at an unsigned one.
+      - name: Retag :main to signed digest (main only)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          for pair in \
+            "${{ steps.meta.outputs.backend_image }}|${{ steps.build_backend.outputs.digest }}" \
+            "${{ steps.meta.outputs.frontend_image }}|${{ steps.build_frontend.outputs.digest }}"; do
+            image="${pair%%|*}"; digest="${pair##*|}"
+            echo "::group::retag ${image}:main -> ${digest}"
+            docker buildx imagetools create --tag "${image}:main" "${image}@${digest}"
             echo "::endgroup::"
           done
 
