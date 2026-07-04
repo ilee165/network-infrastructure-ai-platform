@@ -644,7 +644,19 @@ jobs:
             "${{ steps.meta.outputs.frontend_image }}|${{ steps.build_frontend.outputs.digest }}"; do
             image="${pair%%|*}"; digest="${pair##*|}"
             echo "::group::retag ${image}:main -> ${digest}"
-            docker buildx imagetools create --tag "${image}:main" "${image}@${digest}"
+            # --prefer-index=false copies the single-platform manifest verbatim so
+            # :main resolves to the SAME signed ${digest}. The default wraps the
+            # source in a fresh image-index with a NEW digest that carries no
+            # signature, which would make `cosign verify :main` fail — the very
+            # race this change closes.
+            docker buildx imagetools create --prefer-index=false \
+              --tag "${image}:main" "${image}@${digest}"
+            # Prove :main now resolves to the signed digest, failing the main build
+            # loudly here instead of silently breaking every PR's :main dry-run.
+            cosign verify \
+              --certificate-identity-regexp "^https://github\.com/ilee165/network-infrastructure-ai-platform/\.github/workflows/ci\.yml@refs/.+$" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${image}:main"
             echo "::endgroup::"
           done
 
