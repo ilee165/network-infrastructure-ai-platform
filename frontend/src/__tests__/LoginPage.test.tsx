@@ -7,14 +7,17 @@
  *    ``location.state.from``) or "/".
  *  - failure → render the backend ``ApiError`` detail (generic invalid creds);
  *    the store stays anon and the user is NOT navigated away.
- *  - the submit button is disabled while the request is in flight.
+ *  - the submit button is disabled while the request is in flight, and shows
+ *    the shared Spinner (audit UI_UX #4).
  *  - an already-authed visitor is redirected away from /login.
+ *  - both inputs are real label-associated FormFields (audit UI_UX #5 — this
+ *    page previously had zero aria attributes).
  *
  * ``../api/auth`` is mocked so no network is touched; ``getMe`` resolves the
  * user the store should cache. Navigation is asserted with a location probe.
  */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
@@ -140,7 +143,7 @@ describe("LoginPage — failed sign-in", () => {
 });
 
 describe("LoginPage — pending state", () => {
-  it("disables the submit button while the request is in flight", async () => {
+  it("disables the submit button and shows a spinner while the request is in flight", async () => {
     let resolveLogin!: (value: { access_token: string; token_type: string }) => void;
     vi.mocked(login).mockReturnValue(
       new Promise((resolve) => {
@@ -156,10 +159,24 @@ describe("LoginPage — pending state", () => {
     fireEvent.click(submit);
 
     await waitFor(() => expect(submit).toBeDisabled());
+    expect(within(submit).getByRole("status")).toBeInTheDocument();
+
     resolveLogin({ access_token: "tok", token_type: "bearer" });
     await waitFor(() => {
       expect(screen.getByTestId("location")).toHaveTextContent("/");
     });
+  });
+});
+
+describe("LoginPage — accessible form labels", () => {
+  it("associates the username and password inputs with real <label> elements", () => {
+    renderLogin();
+    const username = screen.getByLabelText(/username/i);
+    const password = screen.getByLabelText(/password/i);
+    expect(username).toHaveAttribute("id");
+    expect(password).toHaveAttribute("id");
+    expect(username.tagName).toBe("INPUT");
+    expect(password.tagName).toBe("INPUT");
   });
 });
 

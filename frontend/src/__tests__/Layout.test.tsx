@@ -52,6 +52,10 @@ function renderLayout(role = "viewer", display_name: string | null = null) {
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<div data-testid="outlet-page" />} />
+          {/* Catch-all so clicking a nav link (e.g. "Devices") keeps Layout
+              mounted, mirroring the real route table, instead of falling
+              through to "no routes matched". */}
+          <Route path="*" element={<div data-testid="outlet-page" />} />
         </Route>
         <Route path="/login" element={<div data-testid="login-page" />} />
       </Routes>
@@ -119,6 +123,107 @@ describe("Layout — per-route error boundary", () => {
     for (const label of NAV_LABELS) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
+  });
+});
+
+describe("Layout — responsive drawer sidebar", () => {
+  function hamburger() {
+    return screen.getByRole("button", { name: /open navigation|close navigation/i });
+  }
+
+  it("renders the hamburger toggle collapsed with aria-expanded=false and an aria-controls link to the sidebar", () => {
+    renderLayout("engineer");
+    const toggle = hamburger();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    const controls = toggle.getAttribute("aria-controls");
+    expect(controls).toBeTruthy();
+    expect(document.getElementById(controls as string)).toBeInTheDocument();
+  });
+
+  it("opens the drawer (aria-expanded=true, backdrop present) when the hamburger is clicked", () => {
+    renderLayout("engineer");
+    fireEvent.click(hamburger());
+    expect(hamburger()).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("drawer-backdrop")).toBeInTheDocument();
+  });
+
+  it("closes the drawer when the backdrop is clicked", () => {
+    renderLayout("engineer");
+    fireEvent.click(hamburger());
+    fireEvent.click(screen.getByTestId("drawer-backdrop"));
+    expect(hamburger()).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("drawer-backdrop")).not.toBeInTheDocument();
+  });
+
+  it("closes the drawer on Escape", () => {
+    renderLayout("engineer");
+    fireEvent.click(hamburger());
+    expect(hamburger()).toHaveAttribute("aria-expanded", "true");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(hamburger()).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("drawer-backdrop")).not.toBeInTheDocument();
+  });
+
+  it("closes the drawer on nav-link navigation", () => {
+    renderLayout("engineer");
+    fireEvent.click(hamburger());
+    expect(hamburger()).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByRole("link", { name: "Devices" }));
+    expect(hamburger()).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("drawer-backdrop")).not.toBeInTheDocument();
+  });
+});
+
+describe("Layout — off-canvas sidebar a11y (mobile, drawer closed)", () => {
+  /** Install a `matchMedia` stub reporting a below-`lg:` (mobile) viewport,
+   *  matching the pattern used for the theme store's OS-preference stub. */
+  function stubMobileViewport(): void {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("marks the sidebar aria-hidden + inert while off-canvas, so its ~14 controls don't sit in the tab order ahead of the visible hamburger", () => {
+    stubMobileViewport();
+    renderLayout("engineer");
+    const sidebar = document.getElementById("app-sidebar");
+    expect(sidebar).toHaveAttribute("aria-hidden", "true");
+    expect(sidebar).toHaveAttribute("inert");
+  });
+
+  it("clears aria-hidden/inert once the drawer is opened", () => {
+    stubMobileViewport();
+    renderLayout("engineer");
+    fireEvent.click(screen.getByRole("button", { name: /open navigation/i }));
+    const sidebar = document.getElementById("app-sidebar");
+    expect(sidebar).not.toHaveAttribute("aria-hidden");
+    expect(sidebar).not.toHaveAttribute("inert");
+  });
+
+  it("never hides the sidebar at a desktop (`lg:`) viewport, drawer closed or not", () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: true,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    renderLayout("engineer");
+    const sidebar = document.getElementById("app-sidebar");
+    expect(sidebar).not.toHaveAttribute("aria-hidden");
+    expect(sidebar).not.toHaveAttribute("inert");
   });
 });
 

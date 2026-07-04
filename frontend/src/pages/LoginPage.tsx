@@ -9,32 +9,31 @@
  *
  * A failed login renders the backend ``ApiError`` detail (a single generic
  * "invalid username or password" — the backend never reveals which field was
- * wrong) and leaves the store anonymous; the submit button is disabled while
- * the request is in flight. An already-authenticated visitor is bounced away
- * from /login immediately.
+ * wrong) via the shared ``ErrorBanner``, and leaves the store anonymous; the
+ * submit button shows a ``Spinner`` and is disabled while the request is in
+ * flight. An already-authenticated visitor is bounced away from /login
+ * immediately.
+ *
+ * Both fields are wrapped in ``FormField`` for real label/control association
+ * (audit UI_UX #5 — this page previously had zero aria attributes). The
+ * credential error is a panel-level outcome, not per-field validation, so it
+ * renders via ``ErrorBanner`` rather than a FormField error slot; login stays
+ * inline-only (no toast) since it is a form-validation-shaped outcome, not a
+ * background mutation the user could navigate away from.
  */
 
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { getMe, login } from "../api/auth";
-import { ApiError } from "../api/client";
+import { ErrorBanner } from "../components/ErrorBanner";
+import { FormField } from "../components/FormField";
+import { Spinner } from "../components/Skeleton";
 import { useAuthStore } from "../stores/auth";
 
 /** Shape of the redirect origin ProtectedRoute stores in ``location.state``. */
 interface FromState {
   from?: { pathname?: string };
-}
-
-/** Generic fallback when an error is not a structured ``ApiError``. */
-const GENERIC_ERROR = "Sign-in failed. Please try again.";
-
-/** Extract a user-facing message from a thrown value (problem-details detail). */
-function errorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    return error.problem.detail;
-  }
-  return GENERIC_ERROR;
 }
 
 export function LoginPage() {
@@ -46,7 +45,7 @@ export function LoginPage() {
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [pending, setPending] = useState(false);
 
   // Already signed in: never show the login form — return to the app.
@@ -68,7 +67,7 @@ export function LoginPage() {
       const target = (location.state as FromState | null)?.from?.pathname ?? "/";
       navigate(target, { replace: true });
     } catch (err) {
-      setError(errorMessage(err));
+      setError(err);
       setPending(false);
     }
   }
@@ -83,44 +82,44 @@ export function LoginPage() {
         <p className="mt-1 text-xs text-zinc-500">NetOps Console</p>
 
         <form className="mt-6 flex flex-col gap-4" onSubmit={handleSubmit} noValidate>
-          <label className="flex flex-col gap-1 text-xs text-zinc-400">
-            Username
-            <input
-              type="text"
-              name="username"
-              autoComplete="username"
-              autoFocus
-              required
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="rounded border border-carbon-700 bg-carbon-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-accent"
-            />
-          </label>
+          <FormField label="Username" required>
+            {(controlProps) => (
+              <input
+                {...controlProps}
+                type="text"
+                name="username"
+                autoComplete="username"
+                required
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="rounded border border-carbon-700 bg-carbon-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-accent"
+              />
+            )}
+          </FormField>
 
-          <label className="flex flex-col gap-1 text-xs text-zinc-400">
-            Password
-            <input
-              type="password"
-              name="password"
-              autoComplete="current-password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="rounded border border-carbon-700 bg-carbon-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-accent"
-            />
-          </label>
+          <FormField label="Password" required>
+            {(controlProps) => (
+              <input
+                {...controlProps}
+                type="password"
+                name="password"
+                autoComplete="current-password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="rounded border border-carbon-700 bg-carbon-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-accent"
+              />
+            )}
+          </FormField>
 
-          {error !== null && (
-            <p role="alert" className="text-xs text-red-400">
-              {error}
-            </p>
-          )}
+          {error !== null && <ErrorBanner error={error} data-testid="login-error" />}
 
           <button
             type="submit"
             disabled={pending}
-            className="mt-2 rounded bg-accent px-3 py-2 text-sm font-medium text-carbon-950 transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
+            className="mt-2 flex items-center justify-center gap-2 rounded bg-accent px-3 py-2 text-sm font-medium text-carbon-950 transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
           >
+            {pending && <Spinner aria-label="Signing in" />}
             {pending ? "Signing in…" : "Sign in"}
           </button>
         </form>

@@ -20,6 +20,16 @@
  *    (403 four-eyes / RBAC, 409 wrong state) is surfaced clearly to the user.
  *
  * Wired to ``api/changes.ts`` (T15 endpoints). Engineer+ surface (ADR-0020 §5).
+ *
+ * Status pills use the shared `StatusPill` (audit UI_UX #3/#7); the
+ * kind/state → variant mapping stays here since it is page-specific. The
+ * non-statusful `kind` tag `config` and the in-progress `executing` state use
+ * the `info` (accent) variant, matching their pre-shared-primitive tone;
+ * `ddi` uses `ok` (green), also matching its prior tone. Approve/reject
+ * outcomes are routed through the toast channel (audit UI_UX #6) in addition
+ * to the existing inline decision-error panel (now `ErrorBanner`), which stays
+ * because the four-eyes/RBAC rejection detail is security-relevant and must
+ * remain visible on this surface, not just as a transient toast.
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -33,51 +43,50 @@ import {
   type ChangeRequestRead,
   type ChangeRequestState,
 } from "../api/changes";
-import { ApiError } from "../api/client";
+import { ErrorBanner } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
+import { SkeletonRows, Spinner } from "../components/Skeleton";
+import { StatusPill, type StatusPillVariant } from "../components/StatusPill";
 import { useAuthStore } from "../stores/auth";
+import { useUiStore } from "../stores/ui";
 
 // ── Constants / styling ───────────────────────────────────────────────────────
 
-const PILL_BASE =
-  "inline-flex items-center rounded border px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider";
+/** Number of columns in the CR queue table (for the loading skeleton). */
+const QUEUE_COLS = 5;
 
-const KIND_STYLES: Record<ChangeRequestKind, string> = {
-  config: "border-accent/40 bg-accent/10 text-accent",
-  ddi: "border-status-ok/40 bg-status-ok/10 text-status-ok",
+/** Page-level mapping from a CR's kind to a StatusPill tone (categorical, not a status). */
+const KIND_VARIANT: Record<ChangeRequestKind, StatusPillVariant> = {
+  config: "info",
+  ddi: "ok",
 };
 
-const STATE_STYLES: Record<ChangeRequestState, string> = {
-  draft: "border-carbon-600 bg-carbon-800 text-zinc-400",
-  pending_approval: "border-status-warn/40 bg-status-warn/10 text-status-warn",
-  approved: "border-status-ok/40 bg-status-ok/10 text-status-ok",
-  executing: "border-accent/40 bg-accent/10 text-accent",
-  completed: "border-status-ok/40 bg-status-ok/10 text-status-ok",
-  failed: "border-status-error/40 bg-status-error/10 text-status-error",
-  rolled_back: "border-status-error/40 bg-status-error/10 text-status-error",
+/** Page-level mapping from a CR's lifecycle state to a StatusPill tone. */
+const STATE_VARIANT: Record<ChangeRequestState, StatusPillVariant> = {
+  draft: "neutral",
+  pending_approval: "warn",
+  approved: "ok",
+  executing: "info",
+  completed: "ok",
+  failed: "error",
+  rolled_back: "error",
 };
-
-function errMessage(err: unknown): string {
-  if (err instanceof ApiError) return err.problem.detail || err.problem.title;
-  if (err instanceof Error) return err.message;
-  return "Request failed";
-}
 
 // ── Badges ────────────────────────────────────────────────────────────────────
 
 function KindBadge({ crId, kind }: { crId: string; kind: ChangeRequestKind }) {
   return (
-    <span data-testid={`cr-kind-${crId}`} className={`${PILL_BASE} ${KIND_STYLES[kind]}`}>
+    <StatusPill variant={KIND_VARIANT[kind]} data-testid={`cr-kind-${crId}`}>
       {kind}
-    </span>
+    </StatusPill>
   );
 }
 
 function StateBadge({ crId, state }: { crId: string; state: ChangeRequestState }) {
   return (
-    <span data-testid={`cr-state-${crId}`} className={`${PILL_BASE} ${STATE_STYLES[state]}`}>
+    <StatusPill variant={STATE_VARIANT[state]} data-testid={`cr-state-${crId}`}>
       {state.replace(/_/g, " ")}
-    </span>
+    </StatusPill>
   );
 }
 
@@ -137,7 +146,8 @@ function DetailPanel({
   onDecided: () => void;
 }) {
   const [comment, setComment] = useState("");
-  const [decisionError, setDecisionError] = useState<string | null>(null);
+  const [decisionError, setDecisionError] = useState<unknown>(null);
+  const pushToast = useUiStore((state) => state.pushToast);
 
   // Four-eyes UI guard (defence in depth; the backend is canonical): a reviewer
   // may not approve a CR they themselves requested when four_eyes_required.
@@ -150,18 +160,26 @@ function DetailPanel({
     mutationFn: () => approveChangeRequest(cr.id, { comment: comment.trim() || undefined }),
     onSuccess: () => {
       setDecisionError(null);
+      pushToast("success", "Change request approved.");
       onDecided();
     },
-    onError: (err) => setDecisionError(errMessage(err)),
+    onError: (err) => {
+      setDecisionError(err);
+      pushToast("error", "Change request approval failed.");
+    },
   });
 
   const rejectM = useMutation({
     mutationFn: () => rejectChangeRequest(cr.id, { comment: comment.trim() || undefined }),
     onSuccess: () => {
       setDecisionError(null);
+      pushToast("success", "Change request rejected.");
       onDecided();
     },
-    onError: (err) => setDecisionError(errMessage(err)),
+    onError: (err) => {
+      setDecisionError(err);
+      pushToast("error", "Change request rejection failed.");
+    },
   });
 
   const pending = approveM.isPending || rejectM.isPending;
@@ -189,11 +207,7 @@ function DetailPanel({
       <div className="flex flex-wrap items-center gap-2">
         <KindBadge crId={cr.id} kind={cr.kind} />
         <StateBadge crId={cr.id} state={cr.state} />
-        {cr.four_eyes_required && (
-          <span className={`${PILL_BASE} border-carbon-600 bg-carbon-800 text-zinc-400`}>
-            four-eyes
-          </span>
-        )}
+        {cr.four_eyes_required && <StatusPill variant="neutral">four-eyes</StatusPill>}
       </div>
 
       {/* Intent preview — id-only target_refs rendered as escaped TEXT (no HTML
@@ -245,15 +259,7 @@ function DetailPanel({
             </p>
           )}
 
-          {decisionError !== null && (
-            <div
-              role="alert"
-              data-testid="cr-decision-error"
-              className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-            >
-              Decision rejected: {decisionError}
-            </div>
-          )}
+          {decisionError !== null && <ErrorBanner error={decisionError} data-testid="cr-decision-error" />}
 
           <div className="flex items-center gap-2">
             {!approveBlocked && (
@@ -262,8 +268,9 @@ function DetailPanel({
                 data-testid="cr-approve-btn"
                 disabled={pending}
                 onClick={() => approveM.mutate()}
-                className="rounded border border-status-ok/50 bg-status-ok/10 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-status-ok transition-colors hover:bg-status-ok/20 disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex items-center gap-2 rounded border border-status-ok/50 bg-status-ok/10 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-status-ok transition-colors hover:bg-status-ok/20 disabled:cursor-not-allowed disabled:opacity-40"
               >
+                {approveM.isPending && <Spinner aria-label="Approving" />}
                 Approve
               </button>
             )}
@@ -272,8 +279,9 @@ function DetailPanel({
               data-testid="cr-reject-btn"
               disabled={pending}
               onClick={() => rejectM.mutate()}
-              className="rounded border border-status-error/50 bg-status-error/10 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-status-error transition-colors hover:bg-status-error/20 disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex items-center gap-2 rounded border border-status-error/50 bg-status-error/10 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-status-error transition-colors hover:bg-status-error/20 disabled:cursor-not-allowed disabled:opacity-40"
             >
+              {rejectM.isPending && <Spinner aria-label="Rejecting" />}
               Reject
             </button>
           </div>
@@ -319,20 +327,17 @@ export function ChangesPage() {
 
       {/* Loading */}
       {isPending && (
-        <p role="status" className="text-xs text-zinc-500">
-          Loading change requests…
-        </p>
+        <div className="panel overflow-x-auto">
+          <table className="w-full text-xs">
+            <tbody>
+              <SkeletonRows rows={4} cols={QUEUE_COLS} label="Loading change requests…" />
+            </tbody>
+          </table>
+        </div>
       )}
 
       {/* Error */}
-      {error && (
-        <div
-          role="alert"
-          className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-        >
-          Change requests load failed: {error.message}
-        </div>
-      )}
+      {error && <ErrorBanner error={error} data-testid="change-requests-error" />}
 
       {/* Empty */}
       {!isPending && !error && items.length === 0 && (
