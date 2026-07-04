@@ -19,6 +19,7 @@ import { ApiError } from "../api/client";
 import type { ChangeRequestListResponse, ChangeRequestRead } from "../api/changes";
 import { useAuthStore } from "../stores/auth";
 import type { UserMe } from "../stores/auth";
+import { useUiStore } from "../stores/ui";
 
 // ── Module mock: the changes api-client ─────────────────────────────────────
 
@@ -123,6 +124,7 @@ function problem(status: number, detail: string): ApiError {
 
 beforeEach(() => {
   useAuthStore.setState({ accessToken: "tok", user: ENGINEER, status: "authed" });
+  useUiStore.setState({ toasts: [] });
   vi.mocked(listChangeRequests).mockReset();
   vi.mocked(getChangeRequest).mockReset();
   vi.mocked(approveChangeRequest).mockReset();
@@ -135,6 +137,7 @@ beforeEach(() => {
 
 afterEach(() => {
   useAuthStore.setState({ accessToken: null, user: null, status: "anon" });
+  useUiStore.setState({ toasts: [] });
   vi.restoreAllMocks();
 });
 
@@ -163,7 +166,17 @@ describe("ChangesPage — queue", () => {
   it("surfaces a load error", async () => {
     vi.mocked(listChangeRequests).mockRejectedValue(problem(500, "boom"));
     renderPage();
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Change requests load failed/);
+    // ErrorBanner (audit UI_UX #3) renders the RFC 7807 `detail`, not a
+    // page-specific prefix.
+    expect(await screen.findByRole("alert")).toHaveTextContent("boom");
+  });
+
+  it("shows skeleton placeholder rows (not text) while the queue loads", () => {
+    vi.mocked(listChangeRequests).mockReturnValue(new Promise(() => {}));
+    renderPage();
+
+    expect(screen.queryByText(/loading change requests/i)).not.toBeInTheDocument();
+    expect(document.querySelectorAll("td .animate-pulse").length).toBeGreaterThan(0);
   });
 });
 
@@ -239,6 +252,54 @@ describe("ChangesPage — approve / reject", () => {
     expect(rejectChangeRequest).toHaveBeenCalledWith(CR_OTHER_ID, {
       comment: "needs a rollback plan",
     });
+  });
+
+  it("pushes a success toast when a CR is approved", async () => {
+    vi.mocked(listChangeRequests).mockResolvedValue(LIST_BOTH);
+    vi.mocked(approveChangeRequest).mockResolvedValue({ ...CR_OTHER, state: "approved" });
+    renderPage();
+    fireEvent.click(await screen.findByTestId(`cr-view-${CR_OTHER_ID}`));
+    fireEvent.click(await screen.findByTestId("cr-approve-btn"));
+
+    await waitFor(() => {
+      expect(useUiStore.getState().toasts).toHaveLength(1);
+    });
+    expect(useUiStore.getState().toasts[0]).toMatchObject({
+      kind: "success",
+      message: "Change request approved.",
+    });
+  });
+
+  it("pushes a success toast when a CR is rejected", async () => {
+    vi.mocked(listChangeRequests).mockResolvedValue(LIST_BOTH);
+    vi.mocked(rejectChangeRequest).mockResolvedValue({ ...CR_OTHER, state: "draft" });
+    renderPage();
+    fireEvent.click(await screen.findByTestId(`cr-view-${CR_OTHER_ID}`));
+    fireEvent.click(await screen.findByTestId("cr-reject-btn"));
+
+    await waitFor(() => {
+      expect(useUiStore.getState().toasts).toHaveLength(1);
+    });
+    expect(useUiStore.getState().toasts[0]).toMatchObject({ kind: "success" });
+  });
+
+  it("shows a spinner on the approve button while the decision is in flight", async () => {
+    vi.mocked(listChangeRequests).mockResolvedValue(LIST_BOTH);
+    let resolveApprove!: (value: ChangeRequestRead) => void;
+    vi.mocked(approveChangeRequest).mockReturnValue(
+      new Promise((resolve) => {
+        resolveApprove = resolve;
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByTestId(`cr-view-${CR_OTHER_ID}`));
+    const approveBtn = await screen.findByTestId("cr-approve-btn");
+    fireEvent.click(approveBtn);
+
+    await waitFor(() => expect(approveBtn).toBeDisabled());
+    expect(within(approveBtn).getByRole("status")).toBeInTheDocument();
+
+    resolveApprove({ ...CR_OTHER, state: "approved" });
   });
 });
 
