@@ -92,7 +92,7 @@
       "ED5_structured_output_integrity": "TestED5StructuredOutputIntegrity"
     },
     "forbidden_tool_names": ["deploy_config", "execute_change_request", "push_config"],
-    "state_changing_reachable_agents": ["automation", "configuration", "ddi"]
+    "state_changing_reachable_agents": ["ddi", "security"]
   },
   "result": {
     "roster_unchanged_vs_p2": true,

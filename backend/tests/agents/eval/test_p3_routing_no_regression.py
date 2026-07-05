@@ -249,6 +249,32 @@ def test_injection_forbidden_tool_names_absent_from_every_allow_list() -> None:
     )
 
 
+def test_state_changing_reachable_agents_matches_allow_lists() -> None:
+    """``injection_boundary.state_changing_reachable_agents`` cannot silently drift.
+
+    ADR-0033 / W5-T3: this field is the recorded claim (cited by the phase-exit
+    gate doc) of which agents can reach a STATE_CHANGING tool at all. It must
+    equal the set of agents in this SAME file's ``allow_lists`` that hold at
+    least one ``state_changing`` tool — derived independently here so a
+    hand-edit that drifts the two apart fails loudly instead of silently
+    shipping an incorrect security-boundary claim into the phase-exit gate doc.
+    """
+    baseline = _load_baseline()
+    allow_lists: dict[str, dict[str, str]] = baseline["allow_lists"]
+    recorded = set(baseline["injection_boundary"]["state_changing_reachable_agents"])
+    derived = {
+        agent
+        for agent, tools in allow_lists.items()
+        if any(classification == "state_changing" for classification in tools.values())
+    }
+    assert recorded == derived, (
+        f"injection_boundary.state_changing_reachable_agents {sorted(recorded)} != "
+        f"agents derived from this file's own allow_lists {sorted(derived)} — the "
+        "recorded security-boundary claim has drifted from the data it purports "
+        "to summarize."
+    )
+
+
 def test_behavioural_ed1_ed5_proof_still_present() -> None:
     """The behavioural ED1-ED5 proof classes are still collected in CI.
 
