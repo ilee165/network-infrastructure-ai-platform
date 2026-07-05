@@ -2290,6 +2290,17 @@ jobs:
       - name: promtool fault-injection MTTD bite proof
         run: bash deploy/observability/run-mttd-bite.sh
 
+      # W5-T1 SLO-corpus perturbation bite (ADR-0046 §5/§6; §386): the alert
+      # coverage corpus's fire-WITHIN-WINDOW floor is not vacuous. The committed
+      # slo-corpus-perturbation.test.yaml passes (a from-t0 breach fires by 8m; a
+      # delayed-onset breach stays silent) AND a copy whose FIRING cases' onset is
+      # DELAYED past the window MUST fail their firing assertion (got:[]). The
+      # corpus-DELAY counterpart to the MTTD rule-SLOW bite above; the byte-stable
+      # coverage matrix + shape guards run in the backend pytest job. Mutation on a
+      # temp copy; committed corpus untouched.
+      - name: promtool SLO-corpus perturbation bite proof (delay past window)
+        run: bash deploy/observability/run-slo-corpus-perturbation-bite.sh
+
       # W3-T4 golden-signal dashboards-as-code (ADR-0046 §4; §335). Visual
       # rendering is named-deferred (no live Grafana on the host) — the BITING
       # layer is this structural/coverage lint + the provisioning-ConfigMap

@@ -1,0 +1,116 @@
+# promtool PERTURBATION-BITE corpus — the SLO/alert fire-WITHIN-WINDOW floor
+# (P3 W5-T1, ADR-0046 §5/§6; PRODUCTION.md §6 / §11 G-OBS §386).
+#
+# WHY THIS FILE EXISTS (the P2 firewall-floor lesson)
+# ---------------------------------------------------
+# The W3-T3 alert-as-test corpus (slo-burn-rate.alerts.test.yaml) and the W5-T1
+# coverage matrix (backend/tests/agents/eval/test_slo_alert_corpus.py) prove every
+# §6 alert HAS a firing + a healthy case. Neither, alone, proves the firing
+# assertion is bound to a WINDOW: an assertion that merely required the alert to
+# "fire eventually" would stay green even if detection slid arbitrarily late — a
+# VACUOUS floor (the P2 firewall-precision lesson: a threshold that passes
+# regardless proves nothing).
+#
+# This file is the minimal, self-contained anchor the bite operates on. Each
+# gauge SLO gets a matched PAIR of cases evaluated at the SAME eval_time (8m):
+#   * "<slo> fast breach FIRES within its window"  — the breach is present from
+#     t0, so by eval_time 8m the fast alert (max_over_time[5m] > objective, for:2m)
+#     is FIRING. This is the should-fire assertion the bite delays.
+#   * "<slo> breach DELAYED past the window stays SILENT" — the SAME breach with its
+#     onset delayed to t10 (`0x9 <breach>x20`): at eval_time 8m the recorded gauge
+#     is still 0, so max_over_time[5m] is below the objective and the alert has NOT
+#     fired. This proves the delayed series is valid promtool input AND that the
+#     window is what suppresses a late breach (the semantic basis of the bite).
+#
+# THE BITE (run-slo-corpus-perturbation-bite.sh)
+# ----------------------------------------------
+# The bite script DELAYS the two FIRING cases' onset (rewrites `120x20`->`0x9 120x20`
+# and `600x20`->`0x9 600x20`) WHILE LEAVING their "exp firing at 8m" assertions
+# unchanged. A delayed breach has not fired by 8m, so `promtool test rules` on the
+# perturbed copy MUST go RED. A gate that stayed green there would be a vacuous
+# "fires eventually" floor. The mutation is applied to a temp copy; this committed
+# file is never changed.
+#
+# On-topic by design: the two gauge SLOs anchored here are the audit->SIEM export
+# lag (ADR-0045 §3, the SIEM half of W5-T1) and topology projection freshness — both
+# single-series `x`-constant gauges, so the delay is a byte-stable literal rewrite
+# (no wall-clock, compressed synthetic minutes). The burn-rate (ratio/latency) alert
+# windows are bite-proven by the sibling `for:`-slow mutation in run-mttd-bite.sh.
+#
+# Run:  promtool test rules deploy/observability/slo-corpus-perturbation.test.yaml
+# CI:   the `observability` job runs it (clean = green) then runs the bite script.
+
+rule_files:
+  - slo-recording.rules.yaml
+  - slo-burn-rate.alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ===========================================================================
+  # §6 row 8 — audit->SIEM export lag (ADR-0045 §3), fast breach objective 60 s.
+  # ===========================================================================
+  - interval: 1m
+    name: "export-lag fast breach FIRES within its window (breach from t0)"
+    input_series:
+      # Constant 120 s (> 60 s objective) from t0: max_over_time[5m] breaches from
+      # t0, the for:2m hold clears by t2, so the page alert is FIRING at eval 8m.
+      - series: 'audit_export_lag_seconds'
+        values: '120x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: NetopsAuditSiemExportLagFastBreach
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: audit_siem_export_lag
+              tier: fast
+            exp_annotations:
+              summary: "Audit->SIEM export lag breached the 60 s objective (fast)"
+              description: "slo:netops_audit_siem_export_lag:seconds exceeded 60 s (the p95 < 60 s §6 / ADR-0045 §3 objective) across the last 5m. Audit events are not reaching the customer SIEM within the lag SLO."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-audit-siem-export-lag.md"
+
+  - interval: 1m
+    name: "export-lag breach DELAYED past the window stays SILENT at 8m"
+    input_series:
+      # Same breach magnitude, onset delayed to t10 (`0x9` = ten 0s, then 200 s).
+      # At eval 8m the recorded gauge is still 0 -> max_over_time[5m]=0 -> NOT firing.
+      - series: 'audit_export_lag_seconds'
+        values: '0x9 200x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: NetopsAuditSiemExportLagFastBreach
+        exp_alerts: []
+
+  # ===========================================================================
+  # §6 row 7 — topology projection freshness, fast breach objective 300 s.
+  # ===========================================================================
+  - interval: 1m
+    name: "topology-lag fast breach FIRES within its window (breach from t0)"
+    input_series:
+      # Constant 600 s (> 300 s objective) from t0 -> FIRING at eval 8m (for:2m clear).
+      - series: 'topology_graph_age_seconds'
+        values: '600x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: NetopsTopologyProjectionLagFastBreach
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: topology_projection_lag
+              tier: fast
+            exp_annotations:
+              summary: "Topology projection lag breached the 5 min freshness objective (fast)"
+              description: "slo:netops_topology_projection_lag:seconds exceeded 300 s (the < 5 min §6 objective) across the last 5m. The Neo4j projection is stale relative to the latest discovery run."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-topology-projection-lag.md"
+
+  - interval: 1m
+    name: "topology-lag breach DELAYED past the window stays SILENT at 8m"
+    input_series:
+      # Onset delayed to t10 (`0x9`, then 700 s). At eval 8m the gauge is still 0.
+      - series: 'topology_graph_age_seconds'
+        values: '0x9 700x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: NetopsTopologyProjectionLagFastBreach
+        exp_alerts: []
