@@ -196,8 +196,10 @@ describe("SettingsPage — LLM section content (admin)", () => {
     vi.mocked(getSettings).mockResolvedValue(CURRENT_SETTINGS);
     renderSettings("/settings/llm", ADMIN_USER);
     await screen.findByTestId("settings-llm");
-    // The profile selector should show 'local'
-    expect(screen.getByDisplayValue("local")).toBeInTheDocument();
+    // The profile selector should show 'local' — findBy* waits for the
+    // GET /auth/settings query to resolve (the section wrapper renders in its
+    // loading state before the select exists, so it is not a data barrier).
+    expect(await screen.findByDisplayValue("local")).toBeInTheDocument();
   });
 
   it("submits PATCH /auth/settings with the selected profile on save", async () => {
@@ -211,8 +213,8 @@ describe("SettingsPage — LLM section content (admin)", () => {
     renderSettings("/settings/llm", ADMIN_USER);
     await screen.findByTestId("settings-llm");
 
-    // Change the profile select
-    const select = screen.getByDisplayValue("local");
+    // Change the profile select (await the query-loaded select, not the section)
+    const select = await screen.findByDisplayValue("local");
     fireEvent.change(select, { target: { value: "anthropic" } });
 
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
