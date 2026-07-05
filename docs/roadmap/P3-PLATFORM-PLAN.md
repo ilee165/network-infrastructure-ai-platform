@@ -3,7 +3,19 @@
 **Project:** AI Network Operations Platform
 **Status:** PLANNED — design (this doc). W0 not started. Entry condition satisfied: **P2-Security COMPLETE** (`docs/roadmap/P2-RELEASE-READINESS.md` — G-SEC/G-MNT/G-OBS PASS on release HEAD `6acac91`, CI run 28349836098; ADRs 0034–0041 Accepted).
 **Authority:** Bound by `CLAUDE.md`, `docs/architecture/DECISIONS-BRIEF.md` (D1–D16), and `docs/roadmap/PRODUCTION.md` §1 (phase table + 2026-06-25 amendment), §3 (HA/scale-out), §5–§6 (SIEM export + SLOs), §8 (DR), §10 (upgrade), §11 (gates).
-**Scope source:** `PRODUCTION.md` Phase **P3-Platform** = the platform tracks the 2026-06-25 re-scope moved out of P2: HA + scale-out, audit→SIEM export, observability-SLO enforcement, live failover/soak/scale DR drills, N-2 upgrade rehearsal, and promotion of the kind-harness live-enforcement run to a blocking gate. **Platform-only — no vendor wave** (Wave 3 F5/VMware is P4).
+**Scope source:** `PRODUCTION.md` Phase **P3-Platform** = the platform tracks the 2026-06-25 re-scope moved out of P2: HA + scale-out, audit→SIEM export, observability-SLO enforcement, live failover/soak/scale DR drills, N-2 upgrade rehearsal, and (as originally scoped) promotion of the kind-harness live-enforcement run to a blocking gate. **Platform-only — no vendor wave** (Wave 3 F5/VMware is P4).
+
+> **Update 2026-07-03 — ADR-0048 REJECTED; kind-harness gate promotion ABANDONED.**
+> The originally-scoped **W4-T2** promotion of the P2 kind-harness live-enforcement
+> run (mTLS handshake + collector egress-deny) to a **blocking** gate was **not
+> pursued** (audit-W2 T7 recovery; PR #94/#95). The `kind-harness` /
+> `kind-harness-ha` jobs stay **opt-in + `continue-on-error` + signal-only**; the two
+> controls remain enforced by **static rego (`conftest` pg_hba weak-hostssl) +
+> NetworkPolicy render tests + the P2 baseline**, not by a blocking kind gate. So:
+> W5-T3 flips **ADRs 0042–0047 only** (ADR-0048 stays **Rejected**), and G-SEC is
+> "continuous" with no kind-promotion sub-item. Text below that still reads "promote
+> to blocking / kind-live promotion" is the **superseded original scope** — read it
+> against this note (the load-bearing claims are corrected inline).
 
 ---
 
@@ -44,14 +56,14 @@ Standing discipline from `CLAUDE.md` "Orchestrated builds", `.claude/agents/READ
 
 | Lesson (source) | How P3 applies it |
 |---|---|
-| **A gate green-at-setup masks findings — confirm it RUNs and BITEs** (P1-W4) | Every new red gate ships a negative control: each burn-rate alert has a *firing* `promtool` case; each drill has a planted regression that turns it red; the kind-harness promotion (W4-T2) is proven to bite before it joins `all-gates`. The defining risk of an enforcement phase. |
+| **A gate green-at-setup masks findings — confirm it RUNs and BITEs** (P1-W4) | Every new red gate ships a negative control: each burn-rate alert has a *firing* `promtool` case; each drill has a planted regression that turns it red. (The kind-harness *live* run stays signal-only — ADR-0048 Rejected — so its bite is proven in each drill's own negative control, not by joining `all-gates`.) The defining risk of an enforcement phase. |
 | **Escalate every secret-surface role to the strong model; `fable` UNAVAILABLE** (P1-W0 false-clean) | P3 secret surfaces — **SIEM export** (audit spine leaving the platform), **synchronous audit write path** on failover, **WebSocket fan-out** (session tokens over pub/sub), and the **failover/audit drills** — escalate reviewers + fixer to `opus`. Never inline `model:'fable'`. |
 | **After a kill, trust git not the result object; salvage uncommitted tree; focused-rerun gaps; never `reset --hard`** (P1-W6) | Standing recovery protocol for every wave. Atomic commit per task is the save unit. |
 | **Arm a baseline-relative usage guard on long runs** (`budget.spent()` is cumulative) | W4 (8 drill tasks) is the long wave — capture `BASELINE = budget.spent()` at script top, gate on the run's own allowance, `return` partial on trip. |
 | **SQLite hides PG semantics; use the `pg-integration` layer** (P2 recurring major) | Every idempotency / audit-loss / failover assertion runs against **real PostgreSQL** via the W5-T0 `tests/pg/` + `pg-integration` job, never SQLite. |
 | **Add a dependency lockfile — drift bit twice** (P1 systemic TODO) | **W0-T8 closes it** (backend + frontend lockfile + CI assertion) *before* P3's new deps land, so drift cannot bite a third time. |
 | **Rebase before a new wave; PR-not-mid-run-edit; single combined reviewer for non-critical** (workflow README) | Standing mechanics; dual strong review only on the secret-surface set above. |
-| **The kind-harness live run is `continue-on-error` until deliberately promoted** (P2 carry) | W4-T2 is that deliberate, named promotion — not an accident. |
+| **The kind-harness live run stays `continue-on-error` / signal-only** (P2 carry) | W4-T2 promotion was evaluated and **Rejected** (ADR-0048, 2026-07-03); the live run stays opt-in — the two controls are enforced statically (rego) + at runtime (NetworkPolicy), not by a blocking kind gate. |
 
 ---
 
@@ -65,9 +77,9 @@ Standing discipline from `CLAUDE.md` "Orchestrated builds", `.claude/agents/READ
 | Observability-SLO enforcement | Recording rules for every §6 SLI; multi-window multi-burn-rate alerts with runbook links; golden-signal Grafana dashboards-as-code (api, each queue, PG, Neo4j, Redis, LLM); **fault-injection MTTD harness** (< 5 min) | §6, §11 G-OBS |
 | Reliability/scale drills | Ephemeral HA **kind** topology; Postgres failover, Neo4j rebuild, worker-kill idempotency, queue-burst KEDA, reduced-scale API load, compressed soak — each biting on a negative control | §8, §11 G-REL/G-SCA |
 | Upgrade rehearsal | N-2 → N rehearsal on a seeded dataset: expand/contract migration + rolling order + Neo4j rebuild | §10, §11 G-MNT |
-| Gate promotion | Promote the P2 kind-harness **live-enforcement** run (mTLS handshake + collector egress-deny) from `continue-on-error` to **blocking in `all-gates`** | P2 carry, `docs/runbooks/kind-harness.md` |
+| Gate promotion (ABANDONED) | ~~Promote the P2 kind-harness live-enforcement run (mTLS handshake + collector egress-deny) from `continue-on-error` to blocking in `all-gates`~~ — **not pursued; ADR-0048 Rejected (2026-07-03). Run stays opt-in signal-only; controls enforced statically (rego) + at runtime (NetworkPolicy)** | P2 carry, `docs/runbooks/kind-harness.md` |
 | Build hygiene | Dependency lockfile (backend + frontend) + CI drift assertion — closes the P1 systemic TODO | D16, §10 |
-| Gates | G-OBS full PASS; G-SCA/G-REL **mechanism PASS at reduced scale + named certified-scale ceiling**; G-SEC continuous + kind-live promotion; G-MNT continuous + N-2 rehearsal | §11 |
+| Gates | G-OBS full PASS; G-SCA/G-REL **mechanism PASS at reduced scale + named certified-scale ceiling** (drills bite under the opt-in signal-only kind job); G-SEC continuous (kind-live mTLS/collector-deny enforced statically + at runtime — **no blocking kind gate; ADR-0048 Rejected**); G-MNT continuous + N-2 rehearsal | §11 |
 
 **Out of P3-Platform (→ P4 / GA):** Wave 3 vendors (F5 BIG-IP, VMware) and
 application-dependency topology (P4); compliance & audit reporting suite (P4);
@@ -85,11 +97,11 @@ two P3 deliverable shapes have no fit in the existing roster:
 | agentType | Model | P3 use | New? |
 |---|---|---|---|
 | `wf-implementer` | strong (inherit) | Novel/security-critical **Python**: SIEM export pipeline, WebSocket pub/sub fan-out, worker idempotency, sync-audit DB wiring, expand/contract migration | reuse |
-| `wf-infra` | strong (inherit) | Declarative HA infra: CloudNativePG, PgBouncer, Sentinel, HPA/PDB, KEDA ScaledObjects, the kind HA topology, kind-gate promotion, upgrade-rehearsal Job, dependency-lockfile CI | reuse |
+| `wf-infra` | strong (inherit) | Declarative HA infra: CloudNativePG, PgBouncer, Sentinel, HPA/PDB, KEDA ScaledObjects, the kind HA topology, ~~kind-gate promotion~~ (abandoned — ADR-0048 Rejected), upgrade-rehearsal Job, dependency-lockfile CI | reuse |
 | **`wf-observability`** | **strong** | **G-OBS**: PromQL recording rules, multi-window burn-rate alerts + runbook links, Grafana dashboards-as-code, fault-injection MTTD harness. Alert-as-test gates (`promtool`), not Python-TDD | **NEW** |
 | **`wf-reliability`** | **strong** | **G-SCA/G-REL live drills**: load gen (k6/locust), chaos pod-kill failover, RTO/RPO/idempotency, queue-burst, compressed soak against kind. Drill-as-test gates with negative controls; honest reduced-scale + named ceiling | **NEW** |
 | `wf-eval-designer` | strong | SLO/alert eval corpus + SIEM-export conformance eval; cross-vendor + agent routing re-run | reuse |
-| `wf-release-auditor` | strong | Phase-exit G-* evidence + readiness doc; flips ADRs 0042–0048 + roadmap on green | reuse |
+| `wf-release-auditor` | strong | Phase-exit G-* evidence + readiness doc; flips ADRs 0042–0047 (0048 stays Rejected) + roadmap on green | reuse |
 | `wf-spec-reviewer` / `wf-quality-reviewer` | sonnet* | Spec + quality review per task | reuse |
 | `wf-fixer` / `wf-verifier` | sonnet* | Apply enumerated findings / confirm resolved | reuse |
 
@@ -124,12 +136,12 @@ task, with explicit exit criteria): `docs/roadmap/p3-tasks/README.md`.
 
 | Wave | Tasks | Owner(s) | Review tier | Notes |
 |---|---|---|---|---|
-| **W0 — ADRs / hygiene / entry** | ADR-0042 (Postgres HA + sync-audit) · 0043 (api HPA + KEDA) · 0044 (Sentinel + WS pub/sub) · 0045 (audit→SIEM export) · 0046 (SLO enforcement) · 0047 (drill harness + N-2 rehearsal; records the reduced-scale + named-ceiling stance) · 0048 (kind-harness gate promotion); **W0-T8 dependency lockfile** (backend+frontend, before new deps land); **W0-T9** `PRODUCTION.md` "P3 in progress" marker + Consultant §12 re-check (scale/HA/retention/GPU defaults) | `wf-implementer` (+ `wf-infra` for T8) | sonnet (strong for 0045/0042 secret-surface ADRs) | Design gate; unblocks all waves. Per-task specs: `docs/roadmap/p3-tasks/` |
+| **W0 — ADRs / hygiene / entry** | ADR-0042 (Postgres HA + sync-audit) · 0043 (api HPA + KEDA) · 0044 (Sentinel + WS pub/sub) · 0045 (audit→SIEM export) · 0046 (SLO enforcement) · 0047 (drill harness + N-2 rehearsal; records the reduced-scale + named-ceiling stance) · 0048 (kind-harness gate promotion — later **Rejected**, 2026-07-03); **W0-T8 dependency lockfile** (backend+frontend, before new deps land); **W0-T9** `PRODUCTION.md` "P3 in progress" marker + Consultant §12 re-check (scale/HA/retention/GPU defaults) | `wf-implementer` (+ `wf-infra` for T8) | sonnet (strong for 0045/0042 secret-surface ADRs) | Design gate; unblocks all waves. Per-task specs: `docs/roadmap/p3-tasks/` |
 | **W1 — Data-tier HA** | T1 CloudNativePG (1 primary + 2 replicas) + PgBouncer + sync-audit quorum + pgvector-on-replica (`wf-infra`); T2 app DB wiring: replica reads + sync-commit on audit session (`wf-implementer`, **escalated**); T3 Neo4j auto-rebuild Job (`wf-infra`); T4 Redis Sentinel ×3 + AOF (`wf-infra`) | `wf-infra` + `wf-implementer` | strong (T2 audit path) | **Blocks W4 failover/rebuild drills** |
 | **W2 — Compute scale-out** | T1 api HPA + PDB (`wf-infra`); T2 stateless WebSocket fan-out via Redis pub/sub (`wf-implementer`, **escalated**); T3 KEDA ScaledObjects per queue (`wf-infra`); T4 worker `acks_late` + idempotency hardening (`wf-implementer`) | `wf-infra` + `wf-implementer` | strong (T2) / sonnet | **Concurrent with W3** (disjoint files). Blocks W4 queue-burst/load drills |
 | **W3 — SIEM export + SLO enforcement** | **T0 metrics instrumentation: HTTP middleware + `netops_*` domain series + served `/metrics` (`wf-implementer`; gap closure, user-approved 2026-06-30 — ADR-0015 named the series, none were wired, so the §6 SLIs had no backing metric)**; T1 SIEM export pipeline: syslog/CEF/HTTPS, at-least-once, export-lag metric (`wf-implementer`, **escalated**); T2 recording rules (`wf-observability`); T3 burn-rate alerts + runbook links + `promtool` firing tests (`wf-observability`); T4 golden-signal dashboards-as-code (`wf-observability`); T5 fault-injection MTTD harness (`wf-observability`) | `wf-implementer` + `wf-observability` | strong (T1) / sonnet | **Concurrent with W2.** G-OBS owner. T0→T1→T2→(T3∥T4); T3→T5 |
-| **W4 — kind HA + live drills + gate promotion + upgrade** | T1 ephemeral HA kind topology (CNPG/KEDA/Sentinel/enforcing-CNI) (`wf-infra`); **T2 promote P2 kind-harness mTLS + collector-deny to BLOCKING** (`wf-infra`); T3 Postgres failover drill ≤60 s + zero audit loss (`wf-reliability`, **escalated**); T4 Neo4j rebuild drill ≤ RTO (`wf-reliability`); T5 worker-kill idempotency + Celery ≥99% (real PG) (`wf-reliability`, **escalated**); T6 queue-burst KEDA + reduced-scale API load p95 + PgBouncer budget (`wf-reliability`); T7 compressed-soak drill (`wf-reliability`); T8 N-2→N upgrade rehearsal on seeded data (`wf-infra` + `wf-implementer` migration) | `wf-infra` + `wf-reliability` + `wf-implementer` | strong (T2/T3/T5) | Needs W1+W2+W3. **Long wave — arm the usage guard.** kind drills bite at reduced scale; certified-scale named-deferred |
-| **W5 — Evals + phase-exit gate** | T1 SLO/alert eval corpus + SIEM-export conformance eval (format + lag) (`wf-eval-designer`); T2 cross-vendor + agent routing re-run, no regression (`wf-eval-designer`); T3 G-* evidence doc + P3 readiness; flip ADRs 0042–0048 Accepted; record G-SCA/G-REL mechanism-PASS + named ceiling, G-OBS PASS, kind-promotion blocking-verified; `PRODUCTION.md` P3 exit marker (`wf-release-auditor`) | `wf-eval-designer` + `wf-release-auditor` | strong | Phase-exit gate; mirrors P1-W7 / P2-W5. Builds the *proof*, not new controls |
+| **W4 — kind HA + live drills + gate promotion + upgrade** | T1 ephemeral HA kind topology (CNPG/KEDA/Sentinel/enforcing-CNI) (`wf-infra`); ~~**T2 promote P2 kind-harness mTLS + collector-deny to BLOCKING**~~ **T2 ABANDONED — ADR-0048 Rejected (2026-07-03); kind jobs stay opt-in signal-only** (`wf-infra`); T3 Postgres failover drill ≤60 s + zero audit loss (`wf-reliability`, **escalated**); T4 Neo4j rebuild drill ≤ RTO (`wf-reliability`); T5 worker-kill idempotency + Celery ≥99% (real PG) (`wf-reliability`, **escalated**); T6 queue-burst KEDA + reduced-scale API load p95 + PgBouncer budget (`wf-reliability`); T7 compressed-soak drill (`wf-reliability`); T8 N-2→N upgrade rehearsal on seeded data (`wf-infra` + `wf-implementer` migration) | `wf-infra` + `wf-reliability` + `wf-implementer` | strong (T2/T3/T5) | Needs W1+W2+W3. **Long wave — arm the usage guard.** kind drills bite at reduced scale; certified-scale named-deferred |
+| **W5 — Evals + phase-exit gate** | T1 SLO/alert eval corpus + SIEM-export conformance eval (format + lag) (`wf-eval-designer`); T2 cross-vendor + agent routing re-run, no regression (`wf-eval-designer`); T3 G-* evidence doc + P3 readiness; flip ADRs 0042–0047 Accepted (0048 stays Rejected); record G-SCA/G-REL mechanism-PASS + named ceiling, G-OBS PASS, kind drills bite under opt-in signal-only jobs (no blocking kind gate); reconcile stale kind-promotion language in this plan + `PRODUCTION.md §11`; `PRODUCTION.md` P3 exit marker (`wf-release-auditor`) | `wf-eval-designer` + `wf-release-auditor` | strong | Phase-exit gate; mirrors P1-W7 / P2-W5. Builds the *proof*, not new controls |
 
 ---
 
@@ -146,10 +158,10 @@ task, with explicit exit criteria): `docs/roadmap/p3-tasks/README.md`.
   export pipeline). KEDA (W2-T3) and the worker idempotency hardening (W2-T4)
   must land before the W4 queue-burst/idempotency drills.
 - **W4 after W1+W2+W3** — every drill needs the HA topology, the autoscalers, and
-  the metrics/alerts it asserts against. Within W4: T1 (kind topology) → T2
-  (promote gate) and T3–T7 (drills, internally parallel where the cluster allows)
-  → T8 (upgrade rehearsal). This is the **long wave**: arm the baseline-relative
-  usage guard.
+  the metrics/alerts it asserts against. Within W4: T1 (kind topology) → T3–T7
+  (drills, internally parallel where the cluster allows) → T8 (upgrade rehearsal).
+  **T2 (gate promotion) was abandoned — ADR-0048 Rejected.** This is the **long
+  wave**: arm the baseline-relative usage guard.
 - **W5 last** — needs the full machinery in place to evaluate; the release auditor
   flips ADRs/roadmap only on green.
 
@@ -157,7 +169,7 @@ task, with explicit exit criteria): `docs/roadmap/p3-tasks/README.md`.
 
 ## 5. Per-wave exit criteria
 
-**W0 (design):** ADRs 0042–0048 written (Proposed); secret-surface ADRs
+**W0 (design):** ADRs 0042–0048 written (Proposed; **0048 later Rejected**, 2026-07-03); secret-surface ADRs
 (0042 sync-audit, 0045 SIEM) reviewed at the strong bar; dependency lockfile in
 place and CI drift assertion **proven to bite** (a planted out-of-lock dep fails
 CI); `PRODUCTION.md` carries a "P3 in progress" marker; Consultant §12 defaults
@@ -188,8 +200,9 @@ has a `promtool` firing test that bites** (a perturbed series fires within the
 window); golden-signal dashboards render and lint; the fault-injection harness
 fires each alert within the **MTTD < 5 min** budget over synthetic series.
 
-**W4 (drills + promotion + upgrade):** on the ephemeral HA kind cluster, as
-**blocking** CI —
+**W4 (drills + upgrade; gate-promotion abandoned):** on the ephemeral HA kind
+cluster, as **opt-in / signal-only** drills (ADR-0048 Rejected — the kind jobs are
+not blocking `all-gates`; each drill's bite is proven by its own negative control) —
 - **Failover (G-REL):** PG primary kill → automated promotion, write service
   restored **≤ 60 s**, **zero committed-audit-entry loss** (sync path verified);
   negative control (async path) shows the assertion go red.
@@ -202,9 +215,12 @@ fires each alert within the **MTTD < 5 min** budget over synthetic series.
   reduced-scale API load shows p95 held and a 1→2-replica improvement; PgBouncer
   shows no connection exhaustion.
 - **Compressed soak:** §6 SLOs hold over the compressed window.
-- **Gate promotion:** the P2 kind-harness **mTLS-handshake + collector-egress-deny**
-  live assertions now run **inside `all-gates`** (no `continue-on-error`), and were
-  shown to **bite** on a planted regression before promotion — closing the P2 carry.
+- **Gate promotion — ABANDONED (ADR-0048 Rejected, 2026-07-03):** the P2 kind-harness
+  mTLS-handshake + collector-egress-deny live run stays `continue-on-error` / opt-in
+  signal-only; the two controls remain enforced by **static rego (`conftest` pg_hba
+  weak-hostssl) + NetworkPolicy render tests + the P2 baseline** (rationale in
+  ADR-0048). The P2 carry closes as "controls enforced statically + at runtime", not
+  as a blocking kind gate.
 - **Upgrade (G-MNT):** N-2 → N rehearsal green on a seeded dataset (expand/contract
   migration + rolling order + Neo4j rebuild).
 - Each drill states the scale it ran at; **certified-scale numbers named-deferred**.
@@ -215,19 +231,22 @@ simultaneously on the release HEAD —
   burn-rate alert + runbook link; golden-signal dashboards exist; fault-injection
   MTTD < 5 min proven; audit→SIEM export operating within the lag SLO.
 - **G-SCA — mechanism PASS at reduced scale + named ceiling:** scale-out/in,
-  queue-burst isolation, load p95, PgBouncer budget all bite on kind; the
-  500-device / 100-user / 5,000-device certified-scale numbers are
+  queue-burst isolation, load p95, PgBouncer budget all bite on kind (under the
+  opt-in / signal-only kind job — cite each drill's negative control, not a blocking
+  gate); the 500-device / 100-user / 5,000-device certified-scale numbers are
   **deferred-accepted → GA/customer cluster** (promotion path in ADR-0047 +
   readiness doc), named not silent.
 - **G-REL — mechanism PASS at reduced scale + named ceiling:** failover (≤60 s,
   zero audit loss), Neo4j rebuild, idempotency, Celery ≥99%, compressed soak all
-  bite on kind; the **30-day calendar soak** and certified-scale DR are
+  bite on kind (under the opt-in / signal-only kind job — each drill's negative
+  control is the bite); the **30-day calendar soak** and certified-scale DR are
   **deferred-accepted → GA**, named. P2 G-REL baseline holds.
-- **G-SEC — PASS (continuous + promotion):** inherits all P2 controls; the
-  kind-live mTLS-handshake + collector-egress-deny sub-items are now **blocking**
-  (the P2 PARTIAL items promoted); no regression. External pentest + 6-month
+- **G-SEC — PASS (continuous):** inherits all P2 controls; the kind-live
+  mTLS-handshake + collector-egress-deny controls stay enforced by **static rego +
+  NetworkPolicy render + the P2 baseline** — **not** a blocking kind gate (W4-T2
+  promotion Rejected, ADR-0048); no regression. External pentest + 6-month
   break-glass remain GA/operational, named.
-- **G-MNT — PASS:** D16 green; ADRs 0042–0048 Accepted; **N-2 upgrade rehearsal
+- **G-MNT — PASS:** D16 green; ADRs 0042–0047 Accepted (0048 Rejected); **N-2 upgrade rehearsal
   green** (closes the P2-deferred §11 G-MNT item); dependency lockfile added
   (closes the P1 systemic TODO); `PRODUCTION.md` amended with the P3 exit marker.
 
@@ -247,9 +266,10 @@ is confirmed to RUN and BITE (P1-W4 lesson).
 - **Certified-scale + 30-day soak** — deferred-accepted → GA / customer cluster;
   promotion path written in ADR-0047 and the W5 readiness doc (the kind drills are
   the mechanism proof; the ceiling is the calendar/hardware bit).
-- **kind-harness live enforcement** — W4-T2 promotes the P2 mTLS + collector-deny
-  live assertions to blocking; `docs/runbooks/kind-harness.md` is updated to record
-  the promotion (the P2 readiness doc named this as the P3 inheritance).
+- **kind-harness live enforcement** — the W4-T2 promotion was **evaluated and
+  Rejected** (ADR-0048, 2026-07-03); the P2 mTLS + collector-deny live run stays
+  `continue-on-error` / opt-in signal-only, controls enforced statically (rego) + at
+  runtime (NetworkPolicy); `docs/runbooks/kind-harness.md` records the rejection.
 - **Neo4j HA** — single-instance + automated rebuild is the designed path (D5);
   Neo4j Enterprise causal cluster stays a PROPOSED opt-in pending the Consultant
   HA answer (§3.2).
