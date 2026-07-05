@@ -70,7 +70,7 @@ confirmed.** Candidates evaluated:
 | Candidate | Verdict | Why |
 |---|---|---|
 | **pyVmomi** (SOAP SDK) | **Chosen** | D7 names it; actively maintained by Broadcom/VMware; complete coverage of the inventory surface this plugin needs (PropertyCollector bulk reads, standard *and* distributed vSwitch/port-group config, per-vNIC backing detail); pure-Python wheels on PyPI (lockfile- and air-gap-friendly) |
-| vSphere Automation SDK for Python (REST) | **Rejected** | Not distributed on PyPI (GitHub-only install) — breaks the lockfile discipline and offline mirroring outright; its REST surface lacks the depth this plugin needs (standard-vSwitch/port-group config and bulk property collection remain SOAP-first) |
+| vSphere Automation SDK for Python (REST) | **Rejected** | Its REST surface lacks the depth this plugin needs — standard-vSwitch/port-group config and bulk PropertyCollector-style property reads remain SOAP-first — and D7 names pyVmomi. Packaging is *not* a differentiator: the SDK's bindings ship on PyPI as `vmware-vcenter` (since 2024, now homed at `vmware/vcf-sdk-python`) and would satisfy the lockfile discipline; the coverage gap alone decides it |
 | Raw httpx against the vSphere REST API | **Rejected** | Same coverage gaps as the Automation SDK, minus the SDK; would end in hand-rolled SOAP for the missing surfaces — reinventing pyVmomi badly |
 | `govc`/PowerCLI subprocess wrappers | **Rejected** | Shelling out to a non-Python toolchain from Celery workers; no typed surface; a packaging/air-gap burden with none of the SDK's benefits |
 
@@ -551,10 +551,11 @@ exists.
 ## Alternatives considered
 
 1. **vSphere Automation SDK for Python (REST) instead of pyVmomi.** Rejected
-   (§1): not on PyPI (GitHub-only install) — incompatible with the lockfile
-   discipline and air-gapped mirrors; its REST surface lacks the
-   standard-vSwitch/port-group and bulk-PropertyCollector depth this plugin
-   is assigned; D7 names pyVmomi.
+   (§1): its REST surface lacks the standard-vSwitch/port-group and
+   bulk-PropertyCollector depth this plugin is assigned; D7 names pyVmomi.
+   Packaging is not the reason — the SDK's bindings ship on PyPI as
+   `vmware-vcenter` and would satisfy the lockfile discipline and air-gapped
+   mirrors; the coverage gap alone decides it.
 2. **Raw httpx against the vSphere REST API.** Rejected (§1): same coverage
    gaps, and closing them means hand-rolling SOAP — reimplementing pyVmomi.
 3. **Model each ESXi host as its own inventory `device`** (the ADR-0025 §6
