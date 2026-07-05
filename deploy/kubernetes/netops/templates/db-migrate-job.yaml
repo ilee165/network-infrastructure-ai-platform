@@ -74,10 +74,12 @@ spec:
             - sh
             - -c
             # ONE sh -c (L3: env vars expand HERE, never in the container argv).
-            # set -euo pipefail (L5) so a failed migration FAILS the hook -> fails the
-            # helm upgrade (fail-closed: a bad expand blocks the roll, never a silent skip).
+            # set -eu (errexit + nounset) so a failed migration FAILS the hook -> fails
+            # the helm upgrade (fail-closed: a bad expand blocks the roll, never a silent
+            # skip). No `pipefail`: the script has no pipeline, and the backend base
+            # image's /bin/sh is dash, which rejects `set -o pipefail`.
             - |
-              set -euo pipefail
+              set -eu
               echo "[db-migrate] pre-upgrade Alembic EXPAND migration (upgrade head) — rolling-order step 1 (PRODUCTION.md §10 / G-MNT §346)"
               NETOPS_PG_USER_ENC="$(python -c "import os,urllib.parse;print(urllib.parse.quote(os.environ['NETOPS_POSTGRES_USER'],safe=''))")"
               NETOPS_PG_PASS_ENC="$(python -c "import os,urllib.parse;print(urllib.parse.quote(os.environ['NETOPS_POSTGRES_PASSWORD'],safe=''))")"

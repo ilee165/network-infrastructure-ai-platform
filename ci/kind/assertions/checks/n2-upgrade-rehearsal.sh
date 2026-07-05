@@ -334,17 +334,20 @@ if [ "${FORCE_API_UNAVAIL}" = "1" ]; then
 else
   kubectl -n "${NS}" rollout restart "deployment/${API_DEPLOY}" >/dev/null 2>&1 || true
 fi
-# Sample availability across the roll; record the MINIMUM ready seen.
+# Sample availability across the roll at a ~1s cadence and record the MINIMUM ready
+# seen — so a BRIEF dip below the floor DURING the roll is caught, not just the
+# endpoints. The completion probe uses a 1s timeout that doubles as the sampling
+# cadence, so readiness is checked independently of a longer roll wait (CodeRabbit W4-T8).
 MIN_READY="${READY_BEFORE:-0}"
 roll_deadline=$(( $(date +%s) + ROLL_TIMEOUT_S ))
 rolled=0
 while [ "$(date +%s)" -lt "${roll_deadline}" ]; do
   r="$(api_ready)"
   if [ "${r:-0}" -lt "${MIN_READY}" ]; then MIN_READY="${r}"; fi
-  if kubectl -n "${NS}" rollout status "deployment/${API_DEPLOY}" --timeout=3s >/dev/null 2>&1; then
-    rolled=1
+  if kubectl -n "${NS}" rollout status "deployment/${API_DEPLOY}" --timeout=1s >/dev/null 2>&1; then
     r="$(api_ready)"
     if [ "${r:-0}" -lt "${MIN_READY}" ]; then MIN_READY="${r}"; fi
+    rolled=1
     break
   fi
 done
@@ -364,7 +367,15 @@ fi
 # the W4-T4 drill's assertion — here we require the post-upgrade rebuild to RUN clean.
 echo "ROLLING ORDER 4/4 — post-upgrade Neo4j projection rebuild (D5 re-projection from Postgres)"
 if kubectl -n "${NS}" get statefulset netops-neo4j >/dev/null 2>&1; then
-  if kubectl -n "${NS}" exec "${WORKER_POD}" -- sh -c '
+  # Re-select a LIVE Running worker pod here: the worker roll (step 4) terminated the
+  # pod picked in step 1, so ${WORKER_POD} may be gone by now — exec into a fresh one
+  # for the rebuild (CodeRabbit W4-T8). Fall back to the original only if none resolves.
+  REBUILD_WORKER_POD="$(kubectl -n "${NS}" get pods -l "${WORKER_SELECTOR}" \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  REBUILD_WORKER_POD="${REBUILD_WORKER_POD:-${WORKER_POD}}"
+  echo "post-upgrade rebuild runs on worker pod: ${REBUILD_WORKER_POD}"
+  if kubectl -n "${NS}" exec "${REBUILD_WORKER_POD}" -- sh -c '
       set -eu
       NETOPS_PG_USER_ENC="$(python -c "import os,urllib.parse;print(urllib.parse.quote(os.environ[\"NETOPS_POSTGRES_USER\"],safe=\"\"))")"
       NETOPS_PG_PASS_ENC="$(python -c "import os,urllib.parse;print(urllib.parse.quote(os.environ[\"NETOPS_POSTGRES_PASSWORD\"],safe=\"\"))")"

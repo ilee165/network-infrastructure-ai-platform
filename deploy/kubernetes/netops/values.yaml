@@ -1854,8 +1854,9 @@ migrationJob:
   preUpgrade:
     enabled: false
     # A failed migration must FAIL the hook (and the helm upgrade) — do not silently
-    # retry a broken expand into a green roll. One attempt, fail-closed.
-    backoffLimit: 1
+    # retry a broken expand into a green roll. `backoffLimit` is the RETRY count, so 0 =
+    # exactly one attempt, no retry, fail-closed.
+    backoffLimit: 0
     ttlSecondsAfterFinished: 600
     # Never absent (ADR-0029 §3). A migration is short + light; these bound it.
     resources:
