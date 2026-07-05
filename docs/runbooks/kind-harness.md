@@ -35,6 +35,9 @@ Give the two W4 enforcement tasks a deterministic, hardware-free place to BITE: 
 | Compressed-soak drill (P3 W4-T7) | `ci/kind/assertions/checks/compressed-soak.sh` + `compressed-soak-drill-probe.yaml` (G-REL §315 compressed — runs on the HA path via the assertion-runner) |
 | Compressed-soak drill bite proof (P3 W4-T7) | `ci/kind/selftest/compressed-soak-bite.sh` (hardware-free — REAL `promtool test rules` over the W3-T2/W3-T3 rules + fake-kubectl drill-flow polarity; runs in `kind-harness-ha`, no cluster) |
 | Compressed-soak SLO-held promtool fixture (P3 W4-T7) | `deploy/observability/slo-compressed-soak.test.yaml` (healthy window silent + injected-regression firing case over the real recording/alert rules) |
+| N-2 → N upgrade rehearsal drill (P3 W4-T8) | `ci/kind/assertions/checks/n2-upgrade-rehearsal.sh` + `n2-upgrade-rehearsal-drill-probe.yaml` (G-MNT §346 — runs on the HA path via the assertion-runner) |
+| Upgrade rehearsal drill bite proof (P3 W4-T8) | `ci/kind/selftest/n2-upgrade-rehearsal-bite.sh` (hardware-free fake-kubectl drill-flow polarity: additive-expand GREEN, contract-too-early + force-unavail RED; runs in `drill-bite-proofs` + `kind-harness-ha`, no cluster) |
+| Pre-upgrade Alembic migrate Job (P3 W4-T8) | `deploy/kubernetes/netops/templates/db-migrate-job.yaml` (`migrationJob.preUpgrade`, Helm `pre-install,pre-upgrade` hook weight −5; default OFF, enabled in `values-kind-ha.yaml`) |
 
 ## How the harness runs (`kind-harness.sh`)
 
@@ -563,6 +566,75 @@ NetopsApiAvailabilityFastBurn …]` — confirming the fire is genuinely asserte
   GREEN on the actual cluster) — a named prerequisite on the ADR-0047 §4 promotion
   path.
 
+## N-2 → N upgrade rehearsal drill (P3 W4-T8, G-MNT §346) — the rolling-upgrade drill on this HA topology
+
+The upgrade rehearsal (`ci/kind/assertions/checks/n2-upgrade-rehearsal.sh`) rehearses
+the **N-2 → N rolling upgrade** on the reduced-scale HA kind cluster: seed an N-2-shaped
+dataset, run the Alembic **expand** migration (`alembic upgrade head` + an additive
+`ADD COLUMN`) as the pre-upgrade step, roll the workers (warm shutdown) then the api
+(holding the ≥2-ready floor), then the post-upgrade Neo4j re-projection — asserting the
+**rolling-upgrade-without-downtime** property. It plugs into the HA assertion-runner
+(`HA=1` only; loud SKIP on the P2 tier) and drives every DB assertion through psql on the
+CNPG rw Service (real PG only; the password is fed over stdin, never argv — L3/L5).
+
+### What the drill asserts
+
+1. **N-1/N-2 reader compat** — an N-1 pod (reads only `n1_col`) still works against the
+   migrated schema. The expand is **additive** (`ADD COLUMN`), so it never breaks a
+   concurrent old reader. The **contract** (dropping the now-unused column) ships a
+   release LATER, after the prior version leaves support (PRODUCTION.md §10 — NAMED
+   deferred, not run here).
+2. **No committed-data loss** — the seeded rows all survive the migration + roll.
+3. **Audit spine intact** — `audit_log` count + `max(seq)` do not regress across the
+   migration (ADR-0038 §3).
+4. **No downtime** — the api never drops below its ≥2-ready floor through the roll.
+
+### The Helm pre-upgrade migrate Job (the automated rolling order)
+
+`deploy/kubernetes/netops/templates/db-migrate-job.yaml` runs the expand
+(`alembic upgrade head`) as a `pre-install,pre-upgrade` hook (weight −5) so the schema
+reaches release N **before** Helm rolls the workloads; the existing
+`neo4j-auto-rebuild` post-upgrade hook re-projects the topology after. Full rolling
+order: **migrate (pre-upgrade) → workers → api → Neo4j rebuild (post-upgrade)**. The Job
+is `migrationJob.preUpgrade.enabled` (default **OFF** — existing operators keep the
+documented manual `alembic upgrade head` step); it is enabled in `values-kind-ha.yaml`
+so the rehearsal exercises it. Making it the platform default is a **GA decision**
+(named, not silent).
+
+### Negative controls — PROVEN to bite (ADR-0047 §2)
+
+Two planted regressions, both proven hardware-free by
+`ci/kind/selftest/n2-upgrade-rehearsal-bite.sh` (the **real** drill against a **fake
+`kubectl`**):
+
+1. **Contract-too-early** (`N2_UPGRADE_DRILL_NEGATIVE_CONTROL=1`) — the migration
+   `DROP COLUMN n1_col` (a column an N-1 pod still reads) instead of the additive expand
+   → the N-1 reader breaks → **RED** (the exact §10 expand/contract breach).
+2. **Force-unavailability** (`N2_UPGRADE_DRILL_FORCE_API_UNAVAIL=1`) — the api is driven
+   below its ≥2-ready floor during the roll → the no-downtime assertion → **RED**.
+
+The bite was **executed on the authoring host**: `bash
+ci/kind/selftest/n2-upgrade-rehearsal-bite.sh` → `0 failure(s)` (POSITIVE additive-expand
+GREEN; both negative controls turn the drill RED via the attributable assertion). A
+rehearsal whose "no downtime / no data loss" would read green regardless is not a gate
+(P1-W4 false-green).
+
+### Reduced scale (STATED) + named ceiling (ADR-0047 §1/§4)
+
+Runs on the W4-T1 reduced-scale cluster (CNPG 1+2, api floor 2) with a small fixed
+seeded dataset — it proves the expand → rolling-order → rebuild → no-loss **mechanism**
+bites. The **prod-shaped seeded dataset** (a full-inventory upgrade) and the **contract
+migration timing** stay deferred-accepted → GA with the ADR-0047 §4 / PRODUCTION.md §10
+written promotion path — never claimed from this run.
+
+### Gate posture — SIGNAL-ONLY (live), BLOCKING (static bite proof)
+
+Same posture as the sibling drills: the **static** bite proof
+(`n2-upgrade-rehearsal-bite.sh`) runs **blocking** in `drill-bite-proofs` (and the static
+section of `kind-harness-ha`), cluster-free; the **live** in-cluster run is opt-in /
+`continue-on-error` (ADR-0048 Rejected — not promoted). Before any GA promotion of the
+live run to blocking, the live negative control MUST be re-verified on the CI runner.
+
 ## Gate status — SIGNAL-ONLY, OPT-IN (promotion REJECTED — ADR-0048)
 
 > **REJECTED (2026-07-03, audit-W2 T7).** The ADR-0048 promotion of the P2
@@ -724,3 +796,8 @@ deliberate later step (W5/GA), not W4-T2.
 | Queue-burst drill: `p95 … EXCEEDS the … budget` / `NO 1->2-replica improvement` / `HTTP 5xx` | The api did not hold under the reduced-scale load — a §327 regression. Inspect the api Deployment CPU/limits, the HPA, and the api logs; a p95 that does not improve at 2 replicas points at a shared bottleneck (DB/pooler) rather than api CPU. |
 | Queue-burst drill: `connection-exhaustion error … budget breached` | The transaction-mode PgBouncer Pooler ran out of server connections under load — a §330 / ADR-0042 §4 regression (or the negative control is active). Confirm `pgbouncer.poolMode: transaction` + the `maxClientConn`/`defaultPoolSize` budget vs the primary's `max_connections`; confirm the negative-control flag is **not** set on a real run. |
 | `queue-burst/load bite proof found N violation(s)` | `queue-burst-load-bite.sh` (no cluster) found the drill no longer bites correctly — e.g. the negative control stopped starving a sibling / breaching the budget, or the no-scale-out case passed. The drill is not a real gate until this is green; do **not** trust a live green until the bite proof passes. |
+| Upgrade rehearsal: `SKIP: CNPG Cluster … absent` / `api Deployment … absent` | The drill ran on a **non-HA** harness (no `HA=1`, so no CNPG Cluster / api tier). Expected on the P2 path — the upgrade rehearsal only asserts under `HA=1`. Not a failure. |
+| Upgrade rehearsal: `N-1 reader (SELECT n1_col) FAILED` / `expand/contract §10 breach` | A migration DROPPED a column an N-1 pod still reads (a contract shipped too early) — a real G-MNT §346 / §10 rolling-upgrade regression (or the negative control is active). Ship the **contract** a release LATER (after the prior version leaves support); confirm `N2_UPGRADE_DRILL_NEGATIVE_CONTROL` is **not** set on a real run. |
+| Upgrade rehearsal: `api availability DROPPED … rolling upgrade without downtime VIOLATED` | The api fell below its ≥2-ready floor during the roll — a real §346 downtime regression (or the force-unavail control is active). Confirm `api-pdb` `minAvailable` + the Deployment surge config keep ≥2 serving; confirm `N2_UPGRADE_DRILL_FORCE_API_UNAVAIL` is **not** set on a real run. |
+| Upgrade rehearsal: `committed DATA LOSS` / `audit spine REGRESSED` | The migration lost a committed seeded row or truncated/reordered the audit chain — a real §346 / ADR-0038 §3 durability regression. The expand must be additive-only; inspect the migration that ran (`alembic history`) and the audit hash-chain. |
+| `n2-upgrade-rehearsal bite proof found N violation(s)` | `n2-upgrade-rehearsal-bite.sh` (no cluster) found the drill no longer bites correctly — e.g. a negative control stopped turning the drill red, or the additive-expand happy path went false-red. The drill is not a real gate until this is green; do **not** trust a live green until the bite proof passes. |

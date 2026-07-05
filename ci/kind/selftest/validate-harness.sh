@@ -366,7 +366,7 @@ grep_must "${HARNESS}" 'export ASSERT_LOG_DIR CHART_NS SELFTEST_NS PROBE_HOST PR
   "harness EXPORTS HA to the assertion-runner so the HA-only drills gate on it deterministically (F4)"
 # Every HA-only drill SKIPS unless HA=1 — a uniform, timing-independent tier gate (a
 # check that keyed off incidental workload PRESENCE fell through on the P2 tier).
-for _ha_drill in pg-failover neo4j-rebuild worker-kill-idempotency queue-burst-load compressed-soak; do
+for _ha_drill in pg-failover neo4j-rebuild worker-kill-idempotency queue-burst-load compressed-soak n2-upgrade-rehearsal; do
   grep_must "${CHECKS_DIR}/${_ha_drill}.sh" 'if \[ "\$\{HA:-0\}" != "1" \]; then' \
     "HA-only drill ${_ha_drill}.sh SKIPS unless HA=1 (deterministic tier gate, F4)"
 done
@@ -922,6 +922,88 @@ grep_must_not "${SOAK_PROBE}" 'image:.*:latest' \
   "no :latest image tag in the compressed-soak drill probe pod (admission would reject)"
 grep_must "${SOAK_PROBE}" 'automountServiceAccountToken: false' \
   "compressed-soak drill probe pod drops its API token (least privilege, ADR-0029 §5)"
+
+# --- P3 W4-T8: N-2 -> N upgrade rehearsal drill invariants (G-MNT §346, ----------
+# --- PRODUCTION.md §10 expand/contract, ADR-0002/0029/0005 D5, ADR-0047 §2/§4/§5) -
+# The upgrade rehearsal (n2-upgrade-rehearsal.sh) plugs into the HA assertion-runner.
+# This validator BITES if the drill is silently weakened: it must (a) run the EXPAND
+# migration (alembic upgrade head) in the rolling order, (b) roll the api holding the
+# >=2-ready availability floor (no downtime), (c) assert the N-1 reader still works
+# against the migrated schema (expand additive) + no data loss + audit spine intact,
+# (d) SKIP loudly on a non-HA run (never false-green), (e) ship + wire the two
+# negative controls (contract-too-early column drop -> N-1 reader red; force-unavail ->
+# no-downtime red), proven by the self-test, and (f) keep the L3/L5 + secret-hygiene
+# guards. Removing any makes a check below FAIL.
+echo "== validating W4-T8 N-2 -> N upgrade rehearsal drill artifacts =="
+
+N2_UPGRADE_CHECK="${CHECKS_DIR}/n2-upgrade-rehearsal.sh"
+N2_UPGRADE_PROBE="${CHECKS_DIR}/n2-upgrade-rehearsal-drill-probe.yaml"
+N2_UPGRADE_BITE="${HERE}/n2-upgrade-rehearsal-bite.sh"
+require_file "${N2_UPGRADE_CHECK}" "W4-T8 upgrade rehearsal drill check"
+require_file "${N2_UPGRADE_PROBE}" "W4-T8 upgrade rehearsal drill probe pod manifest"
+require_file "${N2_UPGRADE_BITE}"  "W4-T8 upgrade rehearsal drill negative-control bite proof (self-test)"
+
+# (a) it runs the EXPAND migration (alembic upgrade head) as the pre-upgrade step.
+grep_must "${N2_UPGRADE_CHECK}" 'alembic .*upgrade head|upgrade head' \
+  "upgrade rehearsal runs the EXPAND migration (alembic upgrade head) as the rolling-order pre-upgrade step (ADR-0002 expand/contract)"
+grep_must "${N2_UPGRADE_CHECK}" 'ROLLING ORDER' \
+  "upgrade rehearsal drives the ADR-0029 rolling order (migrate -> workers -> api -> Neo4j rebuild)"
+grep_must "${N2_UPGRADE_CHECK}" 'ADD COLUMN' \
+  "upgrade rehearsal's positive path ships an ADDITIVE expand (ADD COLUMN) — an N-1 reader is unaffected (PRODUCTION.md §10)"
+# (b) it rolls the api holding the >=2-ready availability floor (no downtime).
+grep_must "${N2_UPGRADE_CHECK}" 'API_AVAIL_FLOOR' \
+  "upgrade rehearsal asserts the api availability floor is held through the roll (no downtime, G-MNT §346)"
+grep_must "${N2_UPGRADE_CHECK}" 'MIN_READY.*-ge.*API_AVAIL_FLOOR|MIN_READY:-0\}" -ge "\$\{API_AVAIL_FLOOR' \
+  "upgrade rehearsal PASSES only when the api never dropped below the floor and FAILS when it did (the no-downtime bite)"
+grep_must "${N2_UPGRADE_CHECK}" 'rollout restart' \
+  "upgrade rehearsal actually ROLLS the workloads (rollout restart), not a no-op"
+# (c) N-1 reader compat + no data loss + audit spine intact.
+grep_must "${N2_UPGRADE_CHECK}" 'N-1 reader' \
+  "upgrade rehearsal asserts an N-1 reader (SELECT n1_col) still works against the migrated schema (expand additive, G-MNT §346)"
+grep_must "${N2_UPGRADE_CHECK}" 'no seeded-row loss|committed DATA LOSS' \
+  "upgrade rehearsal asserts NO committed-data loss across the upgrade (G-MNT §346)"
+grep_must "${N2_UPGRADE_CHECK}" 'audit spine intact|committed-audit loss' \
+  "upgrade rehearsal asserts the audit spine survives the migration (count + max seq, ADR-0038 §3)"
+# (d) SKIP loudly on a non-HA run (never false-green) + real-PG only (no SQLite path).
+grep_must "${N2_UPGRADE_CHECK}" 'SKIP:' \
+  "upgrade rehearsal SKIPS LOUDLY when no CNPG Cluster / api tier is present (a missing tier is never a false-green pass)"
+grep_must_not "${N2_UPGRADE_CHECK}" 'sqlite://|aiosqlite|:memory:|\.sqlite' \
+  "upgrade rehearsal has NO SQLite code path — the expand/contract + audit-survival semantics need real PG (ADR-0047 §5)"
+# (e) the TWO negative controls are SHIPPED + wired, and PROVEN to bite by the self-test.
+grep_must "${N2_UPGRADE_CHECK}" 'N2_UPGRADE_DRILL_NEGATIVE_CONTROL' \
+  "upgrade rehearsal ships the contract-too-early negative control (drops a column an N-1 pod reads) as a toggle (ADR-0047 §2)"
+grep_must "${N2_UPGRADE_CHECK}" 'DROP COLUMN n1_col' \
+  "upgrade rehearsal's negative control DROPS the column the N-1 reader selects (contract shipped too early, PRODUCTION.md §10)"
+grep_must "${N2_UPGRADE_CHECK}" 'N2_UPGRADE_DRILL_FORCE_API_UNAVAIL' \
+  "upgrade rehearsal ships the force-unavailability negative control (api below the floor during the roll) as a toggle (ADR-0047 §2)"
+grep_must "${N2_UPGRADE_BITE}" 'N2_UPGRADE_DRILL_NEGATIVE_CONTROL=1' \
+  "upgrade rehearsal bite proof runs the drill WITH the contract-too-early control and asserts it goes RED"
+grep_must "${N2_UPGRADE_BITE}" 'N2_UPGRADE_DRILL_FORCE_API_UNAVAIL=1' \
+  "upgrade rehearsal bite proof runs the drill WITH the force-unavailability control and asserts it goes RED"
+grep_must "${N2_UPGRADE_BITE}" 'FALSE-GREEN' \
+  "upgrade rehearsal bite proof fails if a negative control does NOT turn the drill red (the anti-false-green guard)"
+# (f) secret hygiene + L3/L5 plumbing (audit spine + DB superuser is secret surface).
+grep_must "${N2_UPGRADE_CHECK}" 'read -r PGPASSWORD' \
+  "upgrade rehearsal feeds the DB password over stdin (kubectl exec -i), not argv (secret hygiene / N11)"
+grep_must "${N2_UPGRADE_CHECK}" 'sh -c' \
+  "upgrade rehearsal drives in-pod psql/alembic via sh -c positional args, not \$(VAR) in the exec argv (L3)"
+grep_must "${N2_UPGRADE_CHECK}" 'set -euo pipefail' \
+  "upgrade rehearsal sets pipefail so a masked in-pod psql/alembic exit cannot read green (L5)"
+grep_must "${N2_UPGRADE_CHECK}" 'register_cleanup' \
+  "upgrade rehearsal registers its probe-pod + seed-table teardown via register_cleanup (composes with the assert-exit bite, N1)"
+grep_must_not "${N2_UPGRADE_CHECK}" '^[[:space:]]*trap[[:space:]]+([^#[:space:]]+|'"'"'[^'"'"']*'"'"'|"[^"]*")[[:space:]]+EXIT' \
+  "upgrade rehearsal installs NO bare 'trap … EXIT' (would clobber lib.sh's assert-exit bite, N1)"
+grep_must "${N2_UPGRADE_CHECK}" 'reduced scale|deferred-accepted' \
+  "upgrade rehearsal STATES its reduced scale + names the deferred prod-shaped/contract ceiling (ADR-0047 §1/§4, PRODUCTION.md §10)"
+# probe pod hygiene: non-root, digest-pinned, no :latest, no API token.
+grep_must "${N2_UPGRADE_PROBE}" 'runAsNonRoot: true' \
+  "upgrade rehearsal probe pod is non-root (restricted PSA admissible, ADR-0029 §3)"
+grep_must "${N2_UPGRADE_PROBE}" 'image:.*@sha256:[0-9a-f]{64}' \
+  "upgrade rehearsal probe pod pins its image by sha256 digest, not a mutable tag (N12)"
+grep_must_not "${N2_UPGRADE_PROBE}" 'image:.*:latest' \
+  "no :latest image tag in the upgrade rehearsal probe pod (admission would reject)"
+grep_must "${N2_UPGRADE_PROBE}" 'automountServiceAccountToken: false' \
+  "upgrade rehearsal probe pod drops its API token (least privilege, ADR-0029 §5)"
 
 echo "== validator summary: ${fails} failure(s) =="
 if [ "${fails}" -ne 0 ]; then

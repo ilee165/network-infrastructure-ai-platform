@@ -8,7 +8,7 @@
 | **Depends on** | **W1**, **W2**, **W4-T1** (kind) |
 | **ADRs** | ADR-0047 (drill harness), ADR-0029 (Helm GA), ADR-0002 (Alembic expand/contract), ADR-0005 (Neo4j rebuild) |
 | **PRODUCTION.md** | §10 (upgrade), §11 G-MNT §346 |
-| **Status** | Proposed |
+| **Status** | DONE — merged pending (drill + probe + bite + Helm pre-upgrade migrate Job + CI wiring). Bite GREEN on the authoring host (POSITIVE green; contract-too-early + force-unavail negative controls both RED); validate-harness W4-T8 block 30/30; conftest hardening.rego 251/251, kubeconform strict + kube-linter clean on the rendered Job. Live kind run stays opt-in/signal-only (ADR-0048 Rejected) — the cluster-free bite is the blocking gate. |
 
 ## Objective
 
@@ -58,9 +58,9 @@ here; full prod-shaped dataset named-deferred → GA).
 
 ## Exit criteria
 
-- [ ] N-2 → N upgrade rehearsed on kind: expand migration, rolling order, post-upgrade Neo4j rebuild.
-- [ ] N-1/N-2 pods run on the expanded schema; api available through the roll; workers warm-shut; **no data loss** (real PG, audit intact).
-- [ ] Prod-shaped dataset named-deferred → GA; L3 `sh -c`; L5 pipefail; one atomic commit.
+- [x] N-2 → N upgrade rehearsed on kind: expand migration (`alembic upgrade head` + additive `ADD COLUMN`), rolling order (migrate → workers → api → post-upgrade Neo4j rebuild), post-upgrade Neo4j re-projection. Rehearsal harness: `ci/kind/assertions/checks/n2-upgrade-rehearsal.sh` + `-drill-probe.yaml`; Helm pre-upgrade migrate Job `deploy/kubernetes/netops/templates/db-migrate-job.yaml` (hook-weight −5, `migrationJob.preUpgrade`, default OFF, enabled in `values-kind-ha.yaml`).
+- [x] N-1/N-2 pods run on the expanded schema (N-1 reader `SELECT n1_col` survives the additive expand); api held ≥2 ready through the roll (no downtime); workers rolled (warm shutdown); **no committed-row loss** + audit spine intact (count + max seq), all on real PG. Two negative controls bite: contract-too-early column drop → N-1 reader RED; force-unavail → no-downtime RED (`ci/kind/selftest/n2-upgrade-rehearsal-bite.sh`, GREEN on host).
+- [x] Prod-shaped dataset + contract-migration timing named-deferred → GA (§10 / ADR-0047 §4); L3 `sh -c` positional args; L5 `set -euo pipefail`; one atomic commit. Static gate: `validate-harness.sh` W4-T8 block; CI bite step in `drill-bite-proofs` (blocking) + `kind-harness-ha` (static).
 
 ## Workflow
 

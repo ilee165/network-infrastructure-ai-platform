@@ -1,0 +1,76 @@
+# W4-T8 N-2 -> N upgrade rehearsal drill PROBE pod
+# (G-MNT §346, PRODUCTION.md §10 / ADR-0047 §1/§2/§4/§5).
+#
+# The upgrade-rehearsal drill (n2-upgrade-rehearsal.sh) execs `psql` in this pod to
+# drive every DB assertion through the CNPG rw Service (always the CURRENT primary):
+#   1. SEED the reduced-scale N-2 dataset (a drill-owned, isolated table — the drill
+#      NEVER mutates a real app table; it only READS audit_log for the no-loss check);
+#   2. run the N-1 reader compat SELECT (does the additive expand keep the schema
+#      backward-compatible?) + the no-data-loss row count;
+#   3. read the audit_log count + max(seq) before/after the migration (the
+#      no-committed-audit-loss obligation).
+# The DB superuser password is fed over STDIN (never argv), never mounted, never
+# printed. The Alembic EXPAND migration itself runs on a WORKER pod (backend image);
+# this probe carries only psql.
+#
+# The image is the SAME pgvector/pgvector:pg16 the chart's Postgres / the failover +
+# soak + queue-burst probes use (psql present; no new image ref, admission-friendly).
+# Hardened to the cluster's restricted Pod Security baseline (ADR-0029 §3): non-root,
+# drop ALL caps, read-only rootfs, seccomp RuntimeDefault, no privilege escalation, no
+# API token. N12: pinned by sha256 DIGEST so a re-push of the tag cannot swap it (same
+# pin as the sibling drill probes).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: n2-upgrade-rehearsal-drill-probe
+  labels:
+    app.kubernetes.io/name: netops
+    app.kubernetes.io/component: n2-upgrade-rehearsal-drill-probe
+spec:
+  # The probe never needs the K8s API; drop its token (least privilege, ADR-0029 §5).
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      # N12: pinned by sha256 DIGEST (tag retained for readability). pgvector carries
+      # psql for the DB assertions; the multi-arch pg16 index digest below is immutable
+      # (a re-push of the tag cannot swap it) — same pin as the failover + soak probes.
+      image: pgvector/pgvector:pg16@sha256:131dcf7ff6a900545df8e7e092c270aa8c6db2f2c818e408cb45ec21316b74e6
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65532
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      env:
+        # libpq home for any per-user files; points at the writable scratch so a
+        # RO rootfs does not break psql.
+        - name: HOME
+          value: /tmp
+      volumeMounts:
+        # Writable scratch for psql temp files (RO rootfs).
+        - name: tmp
+          mountPath: /tmp
+      resources:
+        requests:
+          cpu: 25m
+          memory: 48Mi
+        limits:
+          cpu: 250m
+          memory: 128Mi
+  volumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi

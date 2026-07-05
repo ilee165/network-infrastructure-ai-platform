@@ -211,3 +211,12 @@ services:
       limits:
         cpu: "1"
         memory: 1Gi
+
+# -- Enable the pre-upgrade Alembic migration Job on kind so the W4-T8 N-2 -> N upgrade
+#    rehearsal drill exercises the automated rolling order (migrate hook -> workload roll
+#    -> post-upgrade Neo4j rebuild). Chart default stays OFF (values.yaml) — the manual
+#    `alembic upgrade head` step is unchanged for existing operators; this overlay only
+#    turns it on for the ephemeral kind rehearsal (PRODUCTION.md §10 / G-MNT §346).
+migrationJob:
+  preUpgrade:
+    enabled: true
