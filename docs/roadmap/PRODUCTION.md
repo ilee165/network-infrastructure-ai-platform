@@ -58,8 +58,10 @@ gantt
 > live failover/soak/scale drills are **deferred-accepted → P3-Platform**; the two
 > kind-cluster **live-enforcement** sub-items (mTLS handshake, collector egress-deny)
 > are **PARTIAL / deferred-accepted** (their render/static/harness-invariant layers
-> bite and are blocking; the live `kind-harness.sh` run is `continue-on-error` until
-> promoted — `docs/runbooks/kind-harness.md`). ADRs **0034–0041** flipped Proposed →
+> bite and are blocking; the live `kind-harness.sh` run is `continue-on-error`
+> [the P3-Platform promotion of this run to blocking was **later Rejected** —
+> ADR-0048, 2026-07-03; the run stays opt-in signal-only] —
+> `docs/runbooks/kind-harness.md`). ADRs **0034–0041** flipped Proposed →
 > Accepted on their green implementing evidence. Full evidence:
 > `docs/roadmap/P2-RELEASE-READINESS.md`.
 >
@@ -67,8 +69,10 @@ gantt
 > scale-out (api HPA, KEDA workers, CloudNativePG, Redis Sentinel, PgBouncer);
 > **audit→SIEM export**; **observability-SLO enforcement** (recording rules,
 > burn-rate alerts, dashboards, fault-injection MTTD); **live failover/soak/scale DR
-> drills**; N-2 upgrade rehearsal; and promotion of the kind-harness
-> live-enforcement run to a blocking gate.
+> drills**; N-2 upgrade rehearsal; and (as originally scoped) promotion of the
+> kind-harness live-enforcement run to a blocking gate — **this promotion was
+> subsequently Rejected (ADR-0048, 2026-07-03); the run stays opt-in signal-only and
+> the two controls are enforced statically (rego) + at runtime (NetworkPolicy)**.
 
 > **P3-Platform IN PROGRESS 2026-06-29 (W0 design gate).** The P3-Platform phase
 > is open. Its design contract is the seven W0 ADRs (**Proposed** until W5-T3 flips
@@ -79,7 +83,7 @@ gantt
 >
 > - **Build plan:** `docs/roadmap/P3-PLATFORM-PLAN.md`; per-task specs
 >   `docs/roadmap/p3-tasks/README.md`.
-> - **ADRs (Proposed → Accepted on W5-T3 green):**
+> - **ADRs (Proposed → Accepted on W5-T3 green; ADR-0048 excepted — later Rejected):**
 >   [ADR-0042](../adr/0042-postgres-ha-cloudnativepg-sync-audit.md) Postgres HA
 >   (CloudNativePG 1+2) + PgBouncer + synchronous audit write path ·
 >   [ADR-0043](../adr/0043-api-hpa-keda-autoscaling.md) api HPA + KEDA per-queue
@@ -95,7 +99,10 @@ gantt
 >   drill harness + N-2 upgrade rehearsal (records the reduced-scale +
 >   named-ceiling stance) ·
 >   [ADR-0048](../adr/0048-kind-harness-gate-promotion.md) kind-harness gate
->   promotion (mTLS-handshake + collector-egress-deny → blocking).
+>   promotion (mTLS-handshake + collector-egress-deny → blocking) — **Rejected
+>   2026-07-03 (audit-W2 T7); NOT flipped Accepted. The two controls stay enforced
+>   statically (rego) + at runtime (NetworkPolicy); the kind live run stays opt-in
+>   signal-only. W5-T3 flips ADRs 0042–0047 only.**
 > - **Scale/DR posture (P3-PLATFORM-PLAN.md §0):** the drills prove the
 >   *mechanism* bites at reduced scale on an ephemeral HA kind cluster; the
 >   certified-scale numbers — **500-device discovery / 100 concurrent users /
