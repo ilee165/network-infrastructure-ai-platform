@@ -139,19 +139,28 @@ UI's "tag object X into application A" is exactly one row.
 
 ### 2. The four derivation sources (closed set for P4)
 
-Each source consumes **persisted Postgres rows only** (never live plugin
-calls — derivation must be re-runnable from the system of record), emits
-`application_dependencies` rows carrying its own `source` value, and records
-its evidence chain in `provenance`. W2-T2 implements all four behind one
-deterministic, pure derivation function mirroring the `derive_dns` /
-`derive_topology` house pattern (no I/O inside the derivation; inputs loaded
-by the caller; output independent of input ordering).
+Sources 1, 2, and 4 consume **persisted Postgres rows only** (never live
+plugin calls), so re-running their derivation needs nothing beyond the system
+of record. **Source 3 is the named input-side exception**: M5 DNS records are
+not persisted in Postgres (Context), so its evidence — the DDI-normalized
+records for each application's `fqdns` — is fetched by the **caller** at
+derivation time on the post-discovery-run trigger (§5), the same
+caller-loads-inputs shape the M5 `derive_dns` call path uses today. The
+exception is inputs only and does not touch the rebuild contract: every
+source's **results** persist as `application_dependencies` rows, and
+rebuild/projection read only those rows (§6.1) — source 3 needs DDI
+reachability to *refresh* its rows, never to rebuild the graph from them.
+Each source emits `application_dependencies` rows carrying its own `source`
+value and records its evidence chain in `provenance`. W2-T2 implements all
+four behind one deterministic, pure derivation function mirroring the
+`derive_dns` / `derive_topology` house pattern (no I/O inside the derivation;
+inputs loaded by the caller; output independent of input ordering).
 
-| # | Source | Evidence consumed (PG rows) | Applications created | Edges emitted |
+| # | Source | Evidence consumed (input contract per intro) | Applications created | Edges emitted |
 |---|---|---|---|---|
 | 1 | **F5 VIP→pool→member** | W1 persisted ADC rows (ADR-0050: virtual servers, pools, members) + inventory `Device`/`Interface`/IP rows for member-address reconciliation | One `derived` application per virtual server (`origin_ref = f5:<device_pg_id>:<vs_full_path>`), name from the VS name — the VS *is* the service identity (`PRODUCTION.md` §2.4: "the primary source of service-to-server mappings") | app → each pool member's reconciled endpoint: `ip_address` when the member IP reconciles to an inventory IP row, else `device` when it reconciles to a device; unreconcilable members emit **no edge** (mirrors unreconciled `RESOLVES_TO`) and are counted in derivation stats |
 | 2 | **VMware VM→host placement** | W1 persisted virtualization rows (ADR-0051: VMs with guest IPs, host placement) | **None** — a VM is a workload, not an application | A *chain extender*: for every application-linked VM — linked by a manual tag on the VM's endpoint or by member-IP ↔ guest-IP reconciliation with source 1 — emit app → `device` (the hypervisor host's inventory device row), provenance recording the VM hop. Where the host is not in inventory as a device, no edge (no phantom endpoints) |
-| 3 | **DNS dependencies (M5)** | The M5 reconciliation machinery (`engines/topology/dns.py` `_AddressIndex` over inventory `Device`/`Interface` rows) applied to the DDI-normalized records for each application's `fqdns` | **None** | app → the reconciled `device`/`ip_address` endpoints its FQDNs resolve to; provenance records the DNS record keys (`name\|type\|value`) walked, including CNAME hops. Because the *result rows* persist in PG, the edges survive rebuild even though M5 DNS records themselves are not persisted (Context; §2.3) |
+| 3 | **DNS dependencies (M5)** | The M5 reconciliation machinery (`engines/topology/dns.py` `_AddressIndex` over inventory `Device`/`Interface` rows) applied to the DDI-normalized records for each application's `fqdns` — **caller-fetched at derivation time** (the input-side exception; intro) | **None** | app → the reconciled `device`/`ip_address` endpoints its FQDNs resolve to; provenance records the DNS record keys (`name\|type\|value`) walked, including CNAME hops. Because the *result rows* persist in PG, the edges survive rebuild even though M5 DNS records themselves are not persisted (Context; §2.3) |
 | 4 | **Manual tagging** | User writes via the tagging API/UI (§7) | `manual`-origin applications, user-named | app → any `device`/`ip_address` the user selects; provenance is the single step `{"kind": "user", "ref": <user_id>}` |
 
 #### 2.3 Rebuild-safe targets only — `Device` and `IPAddress`
@@ -488,7 +497,10 @@ documented opt-in manual gate (P4-PLAN §0).
   (named-deferred; the brief-§6 label set stays closed in P4).
 - No Application→`DnsRecord` edges until DNS records persist in PG, and no
   Application→Application edges — both named-deferred (§2.3); the DNS source's
-  value is bounded by reconciliation coverage in the meantime.
+  value is bounded by reconciliation coverage in the meantime. And because
+  source 3's inputs are caller-fetched rather than persisted (§2 intro),
+  *refreshing* its rows — unlike sources 1/2/4 — requires live DDI
+  reachability at derivation time; rebuild from the persisted rows does not.
 - Derived-application naming (one application per F5 virtual server; VS-name
   collision-attach) is a heuristic — estates whose VS names don't map 1:1 to
   business applications will need manual curation (rename/attach), which
