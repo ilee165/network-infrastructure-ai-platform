@@ -1,6 +1,6 @@
 # ADR-0042: Postgres HA — CloudNativePG (1 primary + 2 replicas) + PgBouncer + Synchronous Audit Write Path
 
-**Status:** Proposed | **Date:** 2026-06-29 | **Milestone:** P3 W0
+**Status:** Accepted | **Date:** 2026-06-29 (Accepted 2026-07-05, W5-T3) | **Milestone:** P3 W0 (Accepted P3 W5)
 
 ## Context
 

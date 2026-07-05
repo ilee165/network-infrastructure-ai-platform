@@ -1,6 +1,6 @@
 # ADR-0047: Reliability/Scale Drill Harness + N-2 Upgrade Rehearsal — Reduced-Scale Mechanism Proof + Named Certified-Scale Ceiling
 
-**Status:** Proposed | **Date:** 2026-06-29 | **Milestone:** P3 W0
+**Status:** Accepted | **Date:** 2026-06-29 (Accepted 2026-07-05, W5-T3) | **Milestone:** P3 W0 (Accepted P3 W5)
 
 ## Context
 
