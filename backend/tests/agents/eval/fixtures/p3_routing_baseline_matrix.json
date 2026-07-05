@@ -1,0 +1,104 @@
+{
+  "_meta": {
+    "task": "P3 W5-T2 — cross-vendor + agent routing re-run (no regression vs P2 matrix)",
+    "description": "Recorded 9-way routing matrix for the P3 release HEAD. P3 ships NO new vendor and NO new agent (platform-only: HA/scale-out + WebSocket fan-out + worker changes), so the routable specialist roster and every per-agent tool allow-list are UNCHANGED from the P2 W5-T2 matrix. This file is the recorded artifact the deterministic no-regression gate (test_p3_routing_no_regression.py) pins the live P3-HEAD registry against, and the artifact the W5-T3 phase-exit gate doc (PRODUCTION.md 2.6 / G-MNT) cites. It is generated from build_default_registry() and cross-checked in-test against the P2 module's own published constants, so it is proven to BE the P2 matrix — not a tautological re-derivation of whatever the live registry happens to be.",
+    "provenance": "Introspected from app.agents.build_default_registry() on branch feat/p3-w5-evals; cross-verified against backend/tests/agents/eval/test_p2_cross_vendor_routing.py constants.",
+    "supervisor": "master_architect",
+    "roster_count": 9,
+    "adrs": ["ADR-0003 (supervisor routing)", "ADR-0033 (injection boundary)", "ADR-0037 (Security Agent)"],
+    "layers": {
+      "deterministic_ci": "This artifact + test_p3_routing_no_regression.py (roster/allow-list/injection-boundary no-regression structure) + test_p2_cross_vendor_routing.py + test_p1_prompt_injection.py ED1-ED5 (behavioural, StaticPool, in CI).",
+      "real_llm_manual": "Routing QUALITY (a real local model routes each held-out intent to the correct specialist) lives in test_routing_eval.py — module-skipped without NETOPS_RUN_ROUTING_EVAL=1; deferred-accepted when no local model is available. A scripted/registry re-run cannot prove routing quality, only roster/wiring no-regression."
+    }
+  },
+  "roster": [
+    "automation",
+    "configuration",
+    "consultant",
+    "ddi",
+    "discovery",
+    "documentation",
+    "packet_analysis",
+    "security",
+    "troubleshooting"
+  ],
+  "allow_lists": {
+    "automation": {
+      "summarize_change_request": "read_only"
+    },
+    "configuration": {
+      "assess_device_vs_policy": "read_only",
+      "explain_drift_diff": "read_only",
+      "summarize_compliance_posture": "read_only"
+    },
+    "consultant": {},
+    "ddi": {
+      "add_dhcp_range": "state_changing",
+      "add_dns_record": "state_changing",
+      "check_dhcp_conflicts": "read_only",
+      "delete_dhcp_range": "state_changing",
+      "delete_dns_record": "state_changing",
+      "dns_mismatch_vs_inventory": "read_only",
+      "lookup_dhcp_lease": "read_only",
+      "lookup_dns_records": "read_only",
+      "modify_dns_record": "state_changing",
+      "resolve_dns_path": "read_only",
+      "scope_utilization": "read_only"
+    },
+    "discovery": {
+      "get_device": "read_only",
+      "list_devices": "read_only",
+      "query_neighbors": "read_only",
+      "trigger_discovery_run": "read_only"
+    },
+    "documentation": {
+      "generate_diagram": "read_only",
+      "generate_incident_report": "read_only",
+      "generate_inventory": "read_only",
+      "generate_runbook": "read_only"
+    },
+    "packet_analysis": {
+      "query_capture": "read_only",
+      "summarize_capture": "read_only"
+    },
+    "security": {
+      "analyze_firewall_policy": "read_only",
+      "assess_security_posture": "read_only",
+      "propose_firewall_remediation": "state_changing"
+    },
+    "troubleshooting": {
+      "get_device_routes": "read_only",
+      "read_live_acls": "read_only",
+      "read_live_bgp_peers": "read_only",
+      "read_live_ospf_neighbors": "read_only"
+    }
+  },
+  "injection_boundary": {
+    "adr": "ADR-0033",
+    "fixture": "fixtures/prompt_injection_cases.json",
+    "naming_note": "ED1-ED5 are enumerated as fixture `objective` values and realized as TestED* CLASSES in test_p1_prompt_injection.py. They are NOT literal fixture case-IDs; fixture case-IDs use the pi-<target_agent>-<carrier>-<attack>-NNN scheme (plus one regression_anchor). W5-T2 spec asked to confirm the ED1-ED5 case-IDs live in the fixture — they do not appear as case-IDs; this mapping is the authoritative reconciliation.",
+    "ed_dimension_to_objective": {
+      "ED1_no_unauthorized_tool_call": "unauthorized_tool_call",
+      "ED2_approval_gate_integrity": "approval_bypass",
+      "ED3_allow_list_scope_confinement": "scope_escalation",
+      "ED4_secret_non_exfiltration": "secret_exfil",
+      "ED5_structured_output_integrity": "schema_break"
+    },
+    "ed_dimension_to_test_class": {
+      "ED1_no_unauthorized_tool_call": "TestED1NoUnauthorizedToolCall",
+      "ED2_approval_gate_integrity": "TestED2ApprovalGateIntegrity",
+      "ED3_allow_list_scope_confinement": "TestED3AllowListScopeConfinement",
+      "ED4_secret_non_exfiltration": "TestED4SecretNonExfiltration",
+      "ED5_structured_output_integrity": "TestED5StructuredOutputIntegrity"
+    },
+    "forbidden_tool_names": ["deploy_config", "execute_change_request", "push_config"],
+    "state_changing_reachable_agents": ["automation", "configuration", "ddi"]
+  },
+  "result": {
+    "roster_unchanged_vs_p2": true,
+    "allow_lists_unchanged_vs_p2": true,
+    "injection_boundary_intact": true,
+    "no_new_agent": true,
+    "no_new_vendor": true
+  }
+}
