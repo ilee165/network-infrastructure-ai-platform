@@ -86,12 +86,16 @@ else
     echo "FAIL: the DELAYED firing cases still PASSED — the fire-within-window floor is VACUOUS" >&2
     echo "${neg_out}" | sed 's/^/    /' >&2
     fail=1
-  elif ! printf '%s' "${neg_out}" | grep -qi "FAILED"; then
-    echo "FAIL: the delayed corpus failed to PARSE (no assertion 'FAILED') — mutation is not a valid bite" >&2
+  elif ! printf '%s' "${neg_out}" | grep -qiE "got:|exp:"; then
+    # promtool prints `FAILED:` for BOTH parse errors and assertion mismatches, so a
+    # bare `FAILED` match would let a parse error masquerade as a bite. Require the
+    # alert-assertion mismatch shape (`got:`/`exp:`) — only a real firing-assertion
+    # failure carries it; a parse/load error does not.
+    echo "FAIL: the delayed corpus did not fail on an ASSERTION (no got:/exp: mismatch — likely a PARSE/load error) — mutation is not a valid bite" >&2
     echo "${neg_out}" | sed 's/^/    /' >&2
     fail=1
   else
-    echo "PASS: the delayed-onset firing cases went RED on their firing assertion — the window IS the floor"
+    echo "PASS: the delayed-onset firing cases went RED on their firing assertion (got:/exp: mismatch) — the window IS the floor"
   fi
 fi
 

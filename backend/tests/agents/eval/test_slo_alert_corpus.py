@@ -252,7 +252,7 @@ def test_coverage_matrix_is_grounded_in_production_section6() -> None:
             f"§6 reconciliation-gap series {series!r} is no longer documented as "
             "flagged-deferred (add its rule + alert, or restore the named deferral)"
         )
-        assert f"slo:{series}" not in recorded, (
+        assert not any(name.startswith(f"slo:{series}") for name in recorded), (
             f"§6 gap {series!r} now has a recording rule but no coverage-matrix "
             "entry — wire its alert + firing/healthy cases before removing the note"
         )
@@ -337,7 +337,8 @@ def test_perturbation_bite_is_wired_into_ci() -> None:
     assert _PERTURBATION_SCRIPT.exists(), "perturbation bite script is missing"
     assert (_OBS / "slo-corpus-perturbation.test.yaml").exists(), "perturbation corpus is missing"
     ci_text = _CI_WORKFLOW.read_text(encoding="utf-8")
-    assert "run-slo-corpus-perturbation-bite.sh" in ci_text, (
-        "the SLO-corpus perturbation bite is not wired into .github/workflows/ci.yml "
-        "(the floor would not run on PRs)"
+    assert re.search(r"run:\s*bash\s+\S*run-slo-corpus-perturbation-bite\.sh", ci_text), (
+        "the SLO-corpus perturbation bite is not wired as a `run:` step in "
+        ".github/workflows/ci.yml — a bare mention in a comment or a step under "
+        "continue-on-error would not run the floor as a blocking PR gate"
     )

@@ -336,11 +336,14 @@ def parse_https_json(line: str) -> dict[str, Any]:
     if not isinstance(obj, dict):
         raise ValueError("HTTPS/JSON body is not an object")
     keys = set(obj)
-    if keys != set(_JSON_REQUIRED):
-        raise ValueError(f"key set drift: {sorted(keys)} != {sorted(_JSON_REQUIRED)}")
+    # Forbidden chain-output fields are checked BEFORE the exact-key-set gate: a
+    # forbidden field is always also an extra key, so the key-set check would otherwise
+    # mask it — this ordering keeps the forbidden-field branch reachable and testable.
     for forbidden in _JSON_FORBIDDEN:
         if forbidden in obj:
             raise ValueError(f"forbidden chain-output field present: {forbidden}")
+    if keys != set(_JSON_REQUIRED):
+        raise ValueError(f"key set drift: {sorted(keys)} != {sorted(_JSON_REQUIRED)}")
     for key, spec in _JSON_REQUIRED.items():
         value = obj[key]
         if spec == "uuid":
@@ -773,6 +776,14 @@ async def test_no_planted_secret_in_any_pipeline_payload_under_outage(
         maker, fmt=fmt, detail={"credential_id": "cred-1", "outcome": "ok"}
     )
     assert stream, f"{fmt}: delivered nothing"
+    # The exporter DID emit the audited detail — the id-only reference is on the wire —
+    # so the absence scan runs over real payloads that carry the credential reference;
+    # it is the secret VALUE, not the field, that must be absent (not a vacuous scan
+    # over secretless output).
+    assert any("cred-1" in payload for payload in stream), (
+        f"{fmt}: no exported payload carried the credential_id reference — "
+        "the no-leak scan would be vacuous over detail-less output"
+    )
     for payload in stream:
         assert not payload_leaks(fmt, payload, _SENTINEL_SECRET), (
             f"{fmt}: SENTINEL SECRET LEAKED into an exported payload"
@@ -815,7 +826,7 @@ def test_parsers_reject_malformed_input() -> None:
         parse_cef("NOT-CEF|a|b|c|d|e|f|g=1")
     with pytest.raises(ValueError):
         parse_https_json('{"seq": 1}')  # missing required keys
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="forbidden chain-output"):
         parse_https_json(_GOLDEN_JSON.replace('"seq":42', '"seq":42,"prev_hash":"x"'))
 
 
