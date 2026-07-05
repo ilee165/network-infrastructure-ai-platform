@@ -1,0 +1,130 @@
+{{- /*
+Helm PRE-UPGRADE Alembic migration Job (P3 W4-T8, PRODUCTION.md §10 expand/contract,
+G-MNT §346, ADR-0002 Alembic, ADR-0029 §3/§5 hardening).
+
+WHAT IT IS: the pre-upgrade rolling-order STEP 1. When enabled, `helm install`/`helm
+upgrade` runs the EXPAND migration (`alembic upgrade head`) as a pre-install/pre-upgrade
+HOOK (weight -5) — BEFORE Helm rolls the Deployments/StatefulSets — so the schema is at
+release N before any N-pod starts, while N-1/N-2 pods keep running against the (additive)
+expanded schema. The post-upgrade Neo4j projection rebuild is the EXISTING
+neo4j-auto-rebuild hook (post-install,post-upgrade), so the full rolling order is:
+  migrate (pre-upgrade, this Job) -> Helm rolls workers + api -> Neo4j rebuild (post-upgrade).
+The W4-T8 upgrade-rehearsal drill (ci/kind/assertions/checks/n2-upgrade-rehearsal.sh)
+rehearses exactly this order on the reduced-scale kind cluster and asserts no downtime /
+no data loss / audit-chain intact, biting on a contract-too-early negative control.
+
+DEFAULT OFF (migrationJob.preUpgrade.enabled=false): existing operators run the
+documented manual `alembic upgrade head` step (README Quickstart / CLAUDE.md) — this Job
+does NOT change that default. It is ENABLED in values-kind-ha.yaml so the rehearsal
+exercises it on kind. Making it the platform default is a GA decision (NAMED, not silent).
+
+CONTRACT ONLY SHIPS A RELEASE LATER (PRODUCTION.md §10): this Job runs the EXPAND
+(additive `upgrade head`) only. The CONTRACT (drop a now-unused column) ships after the
+prior version leaves support — never in the same release (a contract-too-early drop
+breaks an N-1 reader mid-roll; that is the drill's negative control).
+
+W4-LESSONS guards:
+  L3 — every $VAR lives inside ONE `sh -c` block scalar; the container argv never does
+       its own $(VAR) substitution.
+  L5 — `set -euo pipefail` so a failed migration FAILS the hook (and thus the helm
+       upgrade — the correct fail-closed behaviour: a bad migration blocks the roll).
+SECRET-SURFACE (the migration touches the audit-adjacent DB): the Postgres password is a
+valueFrom.secretKeyRef ONLY — never inlined, never argv (ADR-0029 §6). The connection
+coordinates (host/port/db/user) are non-secret configMap env.
+*/ -}}
+{{- if .Values.migrationJob.preUpgrade.enabled }}
+{{- $fullname := include "netops.fullname" . -}}
+{{- $secretName := include "netops.platformSecretName" . -}}
+{{- $p := .Values.migrationJob.preUpgrade -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-db-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.componentLabels" (dict "ctx" . "component" "db-migrate") | nindent 4 }}
+    netops.io/migration-role: pre-upgrade-alembic
+  annotations:
+    # Run BEFORE Helm rolls the workloads (weight -5 < the default 0) on both install and
+    # upgrade; reap the succeeded hook + any prior one so a re-run is clean.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $p.backoffLimit }}
+  ttlSecondsAfterFinished: {{ $p.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "netops.componentLabels" (dict "ctx" . "component" "db-migrate") | nindent 8 }}
+        netops.io/migration-role: pre-upgrade-alembic
+    spec:
+      # The migration talks to Postgres ONLY (never the K8s API) — drop the token.
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        {{- include "netops.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: db-migrate
+          image: {{ include "netops.backendImage" . }}
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          securityContext:
+            {{- include "netops.hardenedSecurityContext" . | nindent 12 }}
+          command:
+            - sh
+            - -c
+            # ONE sh -c (L3: env vars expand HERE, never in the container argv).
+            # set -euo pipefail (L5) so a failed migration FAILS the hook -> fails the
+            # helm upgrade (fail-closed: a bad expand blocks the roll, never a silent skip).
+            - |
+              set -euo pipefail
+              echo "[db-migrate] pre-upgrade Alembic EXPAND migration (upgrade head) — rolling-order step 1 (PRODUCTION.md §10 / G-MNT §346)"
+              NETOPS_PG_USER_ENC="$(python -c "import os,urllib.parse;print(urllib.parse.quote(os.environ['NETOPS_POSTGRES_USER'],safe=''))")"
+              NETOPS_PG_PASS_ENC="$(python -c "import os,urllib.parse;print(urllib.parse.quote(os.environ['NETOPS_POSTGRES_PASSWORD'],safe=''))")"
+              export NETOPS_DATABASE_URL="postgresql+asyncpg://${NETOPS_PG_USER_ENC}:${NETOPS_PG_PASS_ENC}@${NETOPS_POSTGRES_HOST}:${NETOPS_POSTGRES_PORT}/${NETOPS_POSTGRES_DB}"
+              cd /app
+              alembic -c /app/alembic.ini upgrade head
+              echo "[db-migrate] expand migration complete — Helm now rolls workers + api; the post-upgrade Neo4j rebuild hook re-projects the topology."
+          env:
+            # --- connection coordinates: NON-secret configMap env (host/port/db/user). ---
+            - name: NETOPS_POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ $fullname }}-config
+                  key: NETOPS_POSTGRES_HOST
+            - name: NETOPS_POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ $fullname }}-config
+                  key: NETOPS_POSTGRES_PORT
+            - name: NETOPS_POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ $fullname }}-config
+                  key: NETOPS_POSTGRES_DB
+            - name: NETOPS_POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ $fullname }}-config
+                  key: NETOPS_POSTGRES_USER
+            # --- credential: external-secret ref ONLY; NEVER inlined (ADR-0029 §6). ---
+            - name: NETOPS_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ .Values.secrets.keys.postgresPassword }}
+            # HOME points at the writable scratch so a RO rootfs does not break any
+            # per-user file alembic/python may touch.
+            - name: HOME
+              value: /tmp
+          resources:
+            {{- toYaml $p.resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem:true — the only writable mount is emptyDir scratch.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+{{- end }}

@@ -1841,6 +1841,30 @@ serviceAccounts:
 #    ClusterRole / ClusterRoleBinding (ADR-0029 §5). When false, no RBAC object
 #    renders at all and the secure default (no K8s API access) holds.
 migrationJob:
+  # -- The Helm PRE-UPGRADE Alembic migration Job (P3 W4-T8, PRODUCTION.md §10 / G-MNT
+  #    §346). When ON, `helm install`/`helm upgrade` runs the EXPAND migration
+  #    (`alembic upgrade head`) as a pre-install/pre-upgrade HOOK (weight -5) BEFORE the
+  #    workload roll, so the rolling order (migrate -> workers -> api -> post-upgrade
+  #    Neo4j rebuild) is automated. DEFAULT OFF: existing operators keep the documented
+  #    manual `alembic upgrade head` step (README Quickstart / CLAUDE.md) — this Job does
+  #    NOT change that default. It is ENABLED in values-kind-ha.yaml so the W4-T8 upgrade
+  #    rehearsal drill exercises it on kind. Making it the platform default is a GA
+  #    decision (NAMED, not silent). Contract migrations ship a release LATER (§10) —
+  #    this Job runs the additive expand only.
+  preUpgrade:
+    enabled: false
+    # A failed migration must FAIL the hook (and the helm upgrade) — do not silently
+    # retry a broken expand into a green roll. One attempt, fail-closed.
+    backoffLimit: 1
+    ttlSecondsAfterFinished: 600
+    # Never absent (ADR-0029 §3). A migration is short + light; these bound it.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
   rbac:
     # Render the namespaced Role + RoleBinding + migration-job SA. Default OFF:
     # the steady-state platform needs no K8s API access. Enable ONLY with a

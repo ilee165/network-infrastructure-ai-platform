@@ -1403,6 +1403,8 @@ jobs:
         run: bash ci/kind/selftest/queue-burst-load-bite.sh
       - name: W4-T7 compressed-soak drill negative-control bite proof (real promtool + fake-kubectl)
         run: bash ci/kind/selftest/compressed-soak-bite.sh
+      - name: W4-T8 N-2 -> N upgrade rehearsal drill negative-control bite proof (fake-kubectl)
+        run: bash ci/kind/selftest/n2-upgrade-rehearsal-bite.sh
 
   # Ephemeral HA kind topology (P3 W4-T1, ADR-0047 / ADR-0048 §3). This job stands
   # up the reduced-scale HA substrate the W4 drills (T3–T8) + the gate promotion
@@ -1583,6 +1585,8 @@ jobs:
       # deferred-accepted → GA (ADR-0047 §4).
       - name: W4-T7 compressed-soak drill negative-control bite proof (real promtool + fake-kubectl, no cluster)
         run: bash ci/kind/selftest/compressed-soak-bite.sh
+      - name: W4-T8 N-2 -> N upgrade rehearsal drill negative-control bite proof (fake-kubectl, no cluster)
+        run: bash ci/kind/selftest/n2-upgrade-rehearsal-bite.sh
 
       # kind brings up the throwaway cluster on the Docker backend the GH runner
       # provides; the HA harness path installs the CNPG operator + KEDA on top.
