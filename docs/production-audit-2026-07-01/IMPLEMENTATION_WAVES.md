@@ -2,7 +2,7 @@
 
 Derived from [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) and its companion reports. Five waves, risk-ordered per the remediation brief; every wave stays under 20 changed files.
 
-> **Execution status (2026-07-04):** Waves 1–3 are merged — W1 → PR #90 (2026-07-02); W2 → PRs #93/#94/#95 (2026-07-02/03, item 7 dropped per ADR-0048 Rejection); W3 → PR #108 (2026-07-03, which also carried the out-of-wave packet executor-split). Wave 4 is in progress (item 1 → PR #109, 2026-07-04). Wave 5 was revised 2026-07-04 after pre-implementation validation and implemented the same day on `claude/audit-wave-5-review-1g0o1n` (pending merge; see the Wave 5 annotation). Per-wave annotations below.
+> **Execution status (2026-07-04):** All five waves are merged. W1 → PR #90 (2026-07-02); W2 → PRs #93/#94/#95 (2026-07-02/03, item 7 dropped per ADR-0048 Rejection); W3 → PR #108 (2026-07-03, which also carried the out-of-wave packet executor-split); W4 → PR #109 (2026-07-04, all five items landed in the one squash `c87d79c` — the commit subject names only the primitives); W5 → PR #110 (2026-07-04, `05dd460`). The 2026-07-01 remediation plan is complete. One deferred success criterion remains: the W3 `pg-test-routing` gate is advisory pending its false-positive soak — promote to blocking ~2026-07-10. Per-wave annotations below.
 
 Conventions: one atomic commit per task (repo standing discipline); every wave ends with the full gate set green (`ruff check . && ruff format --check . && mypy && lint-imports`, `pytest`, `vitest/eslint/tsc`, plus wave-specific gates). Rollback unit = the task's atomic commit (`git revert`), never `reset --hard`.
 
@@ -126,7 +126,7 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 4 — UI/UX polish — 🔄 IN PROGRESS (item 1 merged 2026-07-04, PR #109)
+## Wave 4 — UI/UX polish — ✅ MERGED 2026-07-04 (PR #109, squash `c87d79c` — all five items)
 
 **Goal:** Shared component vocabulary, responsive baseline, enforced a11y floor, perceived-performance polish — concentrated on the five highest-traffic pages.
 
@@ -164,7 +164,7 @@ Conventions: one atomic commit per task (repo standing discipline); every wave e
 
 ---
 
-## Wave 5 — Performance & scale optimization — ✅ IMPLEMENTED 2026-07-04 (branch `claude/audit-wave-5-review-1g0o1n`, pending merge)
+## Wave 5 — Performance & scale optimization — ✅ MERGED 2026-07-04 (PR #110, `05dd460`)
 
 > **Implemented 2026-07-04** per the revised spec below, one atomic commit per item: neighborhood read (`319796c`), `topology_max_nodes` cap → 413 (`003358e`), frontend scoped-by-default adoption (`8101d87`). Item 4 was dropped to backlog by the revision. All gates green at each commit (ruff/format/mypy/lint-imports, backend suite, vitest/eslint/tsc). Success criteria met: UI default load is scoped (site or neighborhood), the unscoped fetch is explicit and 413-bounded, and all new Cypher lives in `app.knowledge` (lint-imports enforced).
 
