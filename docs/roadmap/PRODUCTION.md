@@ -32,7 +32,7 @@ gantt
 |---|---|---|
 | **P1** | Wave 1: Cisco NX-OS, Juniper JunOS, BlueCat | Kubernetes/Helm GA, OIDC/SSO, backup/DR baseline, K8s hardening round 1 |
 | **P2-Security** ✅ **EXIT 2026-06-29** | Wave 2: Palo Alto PAN-OS, Fortinet FortiOS; **Security Agent** ships here | Security-hardening subset (all code or kind-validatable, K8s hardening round 2): audit-log hash-chaining, device-credential rotation + per-credential scoping, mTLS (api/worker↔postgres), collector network segmentation |
-| **P3-Platform** | — (platform-only; no vendor wave) | HA + scale-out (api HPA, KEDA workers, CloudNativePG, Redis Sentinel, PgBouncer); audit→SIEM export; observability-SLO enforcement (recording rules, burn-rate alerts, dashboards, fault-injection MTTD); live failover/soak/scale DR drills; N-2 upgrade rehearsal |
+| **P3-Platform** ✅ **EXIT 2026-07-05** | — (platform-only; no vendor wave) | HA + scale-out (api HPA, KEDA workers, CloudNativePG, Redis Sentinel, PgBouncer); audit→SIEM export; observability-SLO enforcement (recording rules, burn-rate alerts, dashboards, fault-injection MTTD); live failover/soak/scale DR drills; N-2 upgrade rehearsal |
 | **P4** | Wave 3: F5 BIG-IP, VMware; **application-dependency topology** ships here | Compliance & audit reporting suite |
 | **P5** | Wave 4: AWS (incl. **Route53**), Azure | Hybrid on-prem/cloud topology stitching, scale certification |
 
@@ -73,6 +73,38 @@ gantt
 > kind-harness live-enforcement run to a blocking gate — **this promotion was
 > subsequently Rejected (ADR-0048, 2026-07-03); the run stays opt-in signal-only and
 > the two controls are enforced statically (rego) + at runtime (NetworkPolicy)**.
+
+> **P3-Platform EXIT 2026-07-05 (W5-T3 phase-exit gate).** All five §11 gates pass
+> simultaneously on release HEAD `8e11b9b` (CI run **28745257330**, `conclusion:
+> success` — the `all-gates` required aggregator + all 11 blocking jobs green; the two
+> `kind-harness*` live jobs SKIPPED by design). **G-OBS PASS (full CI-enforceable)** —
+> recording rules + multi-window burn-rate alerts + runbooks for every backed §6 SLO,
+> golden-signal dashboards, fault-injection MTTD < 5 min, and the audit→SIEM export-lag
+> SLO, each with a biting negative control (the three §6 reconciliation-job rows 5/6/9
+> are named-deferred + drift-guarded, not silent). **G-SCA and G-REL = mechanism PASS
+> at reduced scale + named certified-scale ceiling** — failover (≤ 60 s, zero
+> committed-audit loss), Neo4j rebuild, worker-kill idempotency, queue-burst KEDA
+> isolation, PgBouncer budget, and a compressed soak (Celery ≥ 99%) all bite on a
+> planted regression in the blocking `drill-bite-proofs` job; the **500-device / 100-user
+> / 5,000-device numbers and the 30-day calendar soak stay deferred-accepted → GA /
+> customer cluster** with the ADR-0047 promotion path (never silently claimed).
+> **G-SEC PASS (continuous)** — P1/P2 controls inherited and enforced; **mTLS
+> (api/worker↔postgres) + collector default-deny egress are enforced by static rego
+> (`conftest` pg_hba weak-hostssl) + render-twice L4 guards + runtime NetworkPolicy —
+> NOT a blocking kind gate** (the live-kind promotion was **Rejected**, ADR-0048
+> 2026-07-03; the run stays opt-in signal-only). **G-MNT PASS** — D16 green, N-2 upgrade
+> rehearsal green + biting, dependency lockfile added (closes the P1 systemic TODO),
+> ADR currency restored. ADRs **0042–0047** flipped Proposed → Accepted on their green,
+> biting implementing evidence; **ADR-0048 stays Rejected**. Every certified-scale /
+> calendar-time / operational / live-lab criterion is named with its promotion path
+> (ADR-0033 §1). Full evidence: `docs/roadmap/P3-RELEASE-READINESS.md`.
+>
+> **P4 inheritance (recorded so nothing is silently dropped):** Wave 3 vendors **F5
+> BIG-IP + VMware**; **application-dependency topology**; the **compliance & audit
+> reporting suite** (§7 — change report, compliance posture report, access review,
+> audit-integrity report). Riding to **GA / operational:** the certified-scale
+> G-SCA/G-REL numbers, the 30-day calendar soak, the external penetration test, and the
+> recurring 6-month break-glass drill. The P4 plan is authored when P3-Platform exits.
 
 > **P3-Platform IN PROGRESS 2026-06-29 (W0 design gate).** The P3-Platform phase
 > is open. Its design contract is the seven W0 ADRs (**Proposed** until W5-T3 flips

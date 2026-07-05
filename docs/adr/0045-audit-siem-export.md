@@ -1,6 +1,6 @@
 # ADR-0045: Audit→SIEM Export (RFC5424 syslog + CEF over TLS + HTTPS/JSON push, at-least-once, export-lag SLO)
 
-**Status:** Proposed | **Date:** 2026-06-29 | **Milestone:** P3 W0
+**Status:** Accepted | **Date:** 2026-06-29 (Accepted 2026-07-05, W5-T3) | **Milestone:** P3 W0 (Accepted P3 W5)
 
 ## Context
 
