@@ -600,11 +600,9 @@ class TestVirtualizationFilters:
     async def test_rejects_out_of_range_pagination(
         self, client: httpx.AsyncClient, auth_headers: Callable[[str], dict[str, str]]
     ) -> None:
-        too_small = await client.get(
-            "/api/v1/virtualization/vms", params={"limit": 0}, headers=auth_headers("viewer")
-        )
-        assert too_small.status_code == 422
-        negative_offset = await client.get(
-            "/api/v1/virtualization/vms", params={"offset": -1}, headers=auth_headers("viewer")
-        )
-        assert negative_offset.status_code == 422
+        # Both bounds of the ge=1/le=500 limit validation, plus the ge=0 offset.
+        for params in ({"limit": 0}, {"limit": 501}, {"offset": -1}):
+            response = await client.get(
+                "/api/v1/virtualization/vms", params=params, headers=auth_headers("viewer")
+            )
+            assert response.status_code == 422, f"expected 422 for {params}"

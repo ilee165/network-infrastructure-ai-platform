@@ -156,12 +156,14 @@ class TestVirtualServerList:
     async def test_rejects_out_of_range_limit(
         self, client: httpx.AsyncClient, auth_headers: Callable[[str], dict[str, str]]
     ) -> None:
-        response = await client.get(
-            "/api/v1/adc/virtual-servers",
-            params={"limit": 0},
-            headers=auth_headers("viewer"),
-        )
-        assert response.status_code == 422
+        # Both bounds of the ge=1/le=500 limit validation, plus the ge=0 offset.
+        for params in ({"limit": 0}, {"limit": 501}, {"offset": -1}):
+            response = await client.get(
+                "/api/v1/adc/virtual-servers",
+                params=params,
+                headers=auth_headers("viewer"),
+            )
+            assert response.status_code == 422, f"expected 422 for {params}"
 
     async def test_empty_inventory_renders_as_empty_list_not_error(
         self, client: httpx.AsyncClient, auth_headers: Callable[[str], dict[str, str]]
