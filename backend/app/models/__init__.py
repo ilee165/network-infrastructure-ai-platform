@@ -5,6 +5,7 @@ moment ``app.models`` is imported — Alembic autogenerate and the test-suite
 ``create_all`` both rely on this. One module per aggregate (REPO-STRUCTURE §2).
 """
 
+from app.models.adc import NormalizedPoolRow, NormalizedVirtualServerRow
 from app.models.agents import (
     AgentSession,
     AgentSessionStatus,
@@ -49,6 +50,12 @@ from app.models.inventory import (
 from app.models.mixins import TimestampMixin, UuidPkMixin
 from app.models.pcap_metadata import PcapMetadata
 from app.models.topology import TopologySnapshot
+from app.models.virtualization import (
+    NormalizedComputeClusterRow,
+    NormalizedHypervisorHostRow,
+    NormalizedPortGroupRow,
+    NormalizedVirtualMachineRow,
+)
 
 __all__ = [
     "EMBEDDING_DIM",
@@ -78,9 +85,15 @@ __all__ = [
     "DocumentFormat",
     "DocumentKind",
     "Embedding",
+    "NormalizedComputeClusterRow",
+    "NormalizedHypervisorHostRow",
     "NormalizedInterfaceRow",
     "NormalizedNeighborRow",
+    "NormalizedPoolRow",
+    "NormalizedPortGroupRow",
     "NormalizedRouteRow",
+    "NormalizedVirtualMachineRow",
+    "NormalizedVirtualServerRow",
     "PcapMetadata",
     "RawArtifact",
     "ReasoningTraceRow",

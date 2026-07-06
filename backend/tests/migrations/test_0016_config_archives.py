@@ -6,8 +6,8 @@ dialect (no DB/Docker/network) and assert the emitted DDL creates the
 (``ciphertext`` / ``nonce`` / ``wrapped_dek`` / ``dek_nonce`` / ``kek_version``)
 alongside the log-safe metadata (device, format, size, sha256, passphrase_ref).
 This is an **expand-only** migration (a new table, no edits to existing ones).
-``alembic heads`` is asserted to be the SINGLE head ``0016`` chaining after
-``0015`` — 0016 is now the LATEST migration and owns the single-head invariant.
+``0016`` chains after ``0015``; the single-head invariant now belongs to
+``0017`` (see ``test_0017_p4_adc_virtualization_inventory.py``).
 """
 
 from __future__ import annotations
@@ -56,11 +56,18 @@ def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_single_head_is_0016() -> None:
-    """`alembic heads` resolves to exactly one head, revision 0016 (no branch)."""
+def test_0016_is_an_ancestor_of_the_single_head() -> None:
+    """0016 stays on the single linear chain below the current head (no branch).
+
+    The single-head invariant now belongs to the LATEST migration
+    (``tests/migrations/test_0017_p4_adc_virtualization_inventory.py``); 0016 no
+    longer owns the head but must remain on the single, unbranched chain.
+    """
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert heads == ["0016"], f"expected single head 0016, got {heads}"
+    assert len(heads) == 1, f"expected a single unbranched head, got {heads}"
+    ancestry = {rev.revision for rev in script.walk_revisions("base", heads[0])}
+    assert "0016" in ancestry
 
 
 def test_0016_revises_0015() -> None:
