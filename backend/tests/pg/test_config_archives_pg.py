@@ -23,6 +23,7 @@ throwaway KEK is an in-memory :class:`FakeKmsKeyProvider`.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import uuid
 
@@ -125,11 +126,17 @@ async def test_no_secret_or_key_bytes_in_audit_under_pg(pg_session: AsyncSession
     await pg_session.flush()
     await config_archives.load_archive_bytes(pg_session, provider, row, actor="user:alice")
 
+    # Cover hex, repr, AND base64 encodings of every secret/key byte string, so a
+    # serializer that re-encodes bytes differently cannot slip a leak past the
+    # check (ADR-0050 §7.3 — the guarantee is "in no persisted audit row").
     forbidden = (
         _UCS.hex(),
         repr(_UCS),
+        base64.b64encode(_UCS).decode(),
         bytes(row.wrapped_dek).hex(),
         bytes(row.dek_nonce).hex(),
+        base64.b64encode(bytes(row.wrapped_dek)).decode(),
+        base64.b64encode(bytes(row.dek_nonce)).decode(),
     )
     rows = list((await pg_session.execute(select(AuditLog))).scalars())
     assert rows, "the pass must have written audit rows"
@@ -153,6 +160,11 @@ async def test_persisted_row_survives_reload_under_pg(pg_session: AsyncSession) 
         pg_session, provider, device_id=device_id, archive=_payload(), actor="user:alice"
     )
     await pg_session.commit()
+    # ``pg_session`` uses ``expire_on_commit=False``, so without expiring the
+    # identity map ``get()`` could return the in-memory instance without touching
+    # Postgres — this test would then pass even if the persisted bytea were wrong.
+    # Force a real database round-trip.
+    pg_session.expire_all()
 
     fetched = await pg_session.get(ConfigArchiveRow, row.id)
     assert fetched is not None

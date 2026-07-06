@@ -127,7 +127,11 @@ class TestF5LiveGoldenPath:
         services = F5Services(live_client, device_id)
         vips = services.get_virtual_servers()
         pools = services.get_pools()
-        # Every record re-validates against its normalized model by construction.
+        # The golden-path lab is configured with ADC objects (ADR-0050 §8), so an
+        # empty result is itself a failure — assert non-empty before the per-record
+        # checks, which would otherwise pass vacuously.
+        assert vips, "golden-path lab must define at least one virtual server (ADR-0050 §8)"
+        assert pools, "golden-path lab must define at least one pool (ADR-0050 §8)"
         for vip in vips:
             assert vip.source_vendor == "f5_bigip"
         for pool in pools:
@@ -160,12 +164,15 @@ class TestF5LiveGoldenPath:
         plan = ChangePlan(change_request_id=uuid.uuid4(), cr_state="executing")
         result = restore.restore_archive(ref, plan=plan)
         assert result.outcome in {ChangeOutcome.APPLIED, ChangeOutcome.ROLLED_BACK}
-        # A metadata-only result — never archive contents (ADR-0050 §7.4).
-        assert all(
-            archive.sha256 in d or "archive" in d or "baseline" in d
-            for d in result.applied_diff
-            if "sha256" in d or d == "archive loaded"
-        )
+        # A metadata-only result — never archive contents (ADR-0050 §7.4). Assert
+        # the specific expected metadata entries are PRESENT: a filtered ``all()``
+        # is vacuously true on an empty diff, so check membership directly.
+        assert "archive loaded" in result.applied_diff
+        assert f"target_sha256={archive.sha256}" in result.applied_diff
+        assert any(d.startswith("baseline_sha256=") for d in result.applied_diff)
+        # The opaque UCS bytes never appear in the metadata-only diff.
+        diff_blob = " ".join(result.applied_diff)
+        assert archive.content.get_secret_value().hex() not in diff_blob
 
 
 def _archive_ref(archive: object, device_id: uuid.UUID) -> ConfigArchiveRef:

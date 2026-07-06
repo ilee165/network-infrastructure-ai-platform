@@ -709,12 +709,16 @@ class F5ConfigArchiveBackup(_F5Capability, ConfigArchiveBackupCapability):
         #    STATUS the client returns (it carries no passphrase), never the request.
         self._record_raw("f5_bigip:ucs_save", self._client.save_ucs(name, passphrase))
         # 2. Download the binary (NOT a raw artifact — opaque secret material).
-        content = self._client.download_ucs(name)
-        # 3. Best-effort delete the on-box residue (non-fatal, ADR-0050 §7.2).
+        #    Cleanup runs in ``finally`` so a download failure never leaves the
+        #    passphrase-encrypted UCS behind on-box (ADR-0050 §7.2).
         try:
-            self._record_raw("f5_bigip:ucs_delete", self._client.delete_ucs(name))
-        except PluginError:
-            self._record_raw("f5_bigip:ucs_delete", '{"status":"delete_failed_nonfatal"}')
+            content = self._client.download_ucs(name)
+        finally:
+            # 3. Best-effort delete the on-box residue (non-fatal, ADR-0050 §7.2).
+            try:
+                self._record_raw("f5_bigip:ucs_delete", self._client.delete_ucs(name))
+            except PluginError:
+                self._record_raw("f5_bigip:ucs_delete", '{"status":"delete_failed_nonfatal"}')
         sha256 = hashlib.sha256(content).hexdigest()
         return ConfigArchive(
             format=_ARCHIVE_FORMAT,
@@ -756,65 +760,87 @@ class F5ConfigArchiveRestore(_F5Capability, ConfigArchiveRestoreCapability):
         #    on-box under its own name so the rollback can load it.
         baseline_ref, baseline_pass = vault.issue_passphrase()
         baseline_name = _archive_name()
-        self._record_raw(
-            "f5_bigip:baseline_ucs_save", self._client.save_ucs(baseline_name, baseline_pass)
-        )
-        baseline_content = self._client.download_ucs(baseline_name)
-        baseline_sha = hashlib.sha256(baseline_content).hexdigest()
+        # ``target_name`` is set only once the target upload begins; the ``finally``
+        # cleanup skips it while it is still ``None`` (nothing on-box to remove).
+        target_name: str | None = None
+        try:
+            self._record_raw(
+                "f5_bigip:baseline_ucs_save", self._client.save_ucs(baseline_name, baseline_pass)
+            )
+            baseline_content = self._client.download_ucs(baseline_name)
+            baseline_sha = hashlib.sha256(baseline_content).hexdigest()
 
-        # 2. Upload + load the target archive under its vault-materialized passphrase.
-        target_pass = vault.materialize_passphrase(archive.passphrase_ref)
-        target_name = _archive_name()
-        self._record_raw(
-            "f5_bigip:target_ucs_upload",
-            self._client.upload_ucs(target_name, archive.content.get_secret_value()),
-        )
-        self._record_raw(
-            "f5_bigip:target_ucs_load", self._client.load_ucs(target_name, target_pass)
-        )
+            # 2. Upload + load the target archive under its vault-materialized passphrase.
+            target_pass = vault.materialize_passphrase(archive.passphrase_ref)
+            target_name = _archive_name()
+            self._record_raw(
+                "f5_bigip:target_ucs_upload",
+                self._client.upload_ucs(target_name, archive.content.get_secret_value()),
+            )
+            self._record_raw(
+                "f5_bigip:target_ucs_load", self._client.load_ucs(target_name, target_pass)
+            )
 
-        applied_diff = (
-            "archive loaded",
-            f"target_sha256={archive.sha256}",
-            f"baseline_archive_id={baseline_ref}",
-            f"baseline_sha256={baseline_sha}",
-        )
+            applied_diff = (
+                "archive loaded",
+                f"target_sha256={archive.sha256}",
+                f"baseline_archive_id={baseline_ref}",
+                f"baseline_sha256={baseline_sha}",
+            )
 
-        # 3. Verify-after (reachability + HA-not-degraded, ADR-0050 §7.4).
-        if self._verify():
+            # 3. Verify-after (reachability + HA-not-degraded, ADR-0050 §7.4).
+            if self._verify():
+                return ChangeResult(
+                    change_request_id=plan.change_request_id,
+                    outcome=ChangeOutcome.APPLIED,
+                    verified=True,
+                    applied_diff=applied_diff,
+                    rollback=None,
+                )
+
+            # 4. Verify failed -> load the baseline (rollback) and verify IT.
+            with contextlib.suppress(PluginError):
+                self._record_raw(
+                    "f5_bigip:baseline_ucs_load",
+                    self._client.load_ucs(baseline_name, baseline_pass),
+                )
+            rolled_back_ok = self._verify()
+            rollback = RollbackResult(
+                attempted=True,
+                succeeded=rolled_back_ok,
+                verified=rolled_back_ok,
+                detail=(
+                    "baseline UCS reloaded; management reachable and HA not degraded"
+                    if rolled_back_ok
+                    else "baseline reload did not restore a reachable/healthy device"
+                ),
+            )
+            outcome = ChangeOutcome.ROLLED_BACK if rolled_back_ok else ChangeOutcome.ROLLBACK_FAILED
             return ChangeResult(
                 change_request_id=plan.change_request_id,
-                outcome=ChangeOutcome.APPLIED,
-                verified=True,
+                outcome=outcome,
+                verified=False,
                 applied_diff=applied_diff,
-                rollback=None,
+                rollback=rollback,
             )
-
-        # 4. Verify failed -> load the baseline (rollback) and verify IT.
-        with contextlib.suppress(PluginError):
-            self._record_raw(
-                "f5_bigip:baseline_ucs_load",
-                self._client.load_ucs(baseline_name, baseline_pass),
-            )
-        rolled_back_ok = self._verify()
-        rollback = RollbackResult(
-            attempted=True,
-            succeeded=rolled_back_ok,
-            verified=rolled_back_ok,
-            detail=(
-                "baseline UCS reloaded; management reachable and HA not degraded"
-                if rolled_back_ok
-                else "baseline reload did not restore a reachable/healthy device"
-            ),
-        )
-        outcome = ChangeOutcome.ROLLED_BACK if rolled_back_ok else ChangeOutcome.ROLLBACK_FAILED
-        return ChangeResult(
-            change_request_id=plan.change_request_id,
-            outcome=outcome,
-            verified=False,
-            applied_diff=applied_diff,
-            rollback=rollback,
-        )
+        finally:
+            # 5. Best-effort delete on-box UCS residue for BOTH the target and the
+            #    baseline, on the success and rollback paths alike — neither
+            #    secret-bearing archive is ever left behind (ADR-0050 §7.2/§7.4).
+            #    The baseline is loaded (rollback) inside the ``try`` above before
+            #    this runs, so deleting it here is safe. Delete failures are
+            #    non-fatal and are recorded, never silent (ADR-0021).
+            for cleanup_name, tag in ((target_name, "target"), (baseline_name, "baseline")):
+                if cleanup_name is None:
+                    continue
+                try:
+                    self._record_raw(
+                        f"f5_bigip:{tag}_ucs_delete", self._client.delete_ucs(cleanup_name)
+                    )
+                except PluginError:
+                    self._record_raw(
+                        f"f5_bigip:{tag}_ucs_delete", '{"status":"delete_failed_nonfatal"}'
+                    )
 
     def _verify(self) -> bool:
         """Reachability + HA-not-degraded verify predicate (ADR-0050 §7.4).

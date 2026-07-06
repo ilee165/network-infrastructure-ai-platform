@@ -671,6 +671,46 @@ class TestF5ConfigArchive:
         assert result.rollback.attempted is True
         assert result.rollback.succeeded is False  # never reported as rolled_back
 
+    def test_backup_deletes_residue_when_download_fails(self) -> None:
+        """A ``download_ucs`` failure after ``save_ucs`` must still delete the on-box
+        UCS — a download error must never orphan passphrase-encrypted residue
+        (ADR-0050 §7.2; the ``finally`` cleanup path)."""
+
+        def _handle(request: httpx.Request) -> httpx.Response:
+            base = _make_handler()
+            if request.url.path.startswith("/mgmt/shared/file-transfer/ucs-downloads/"):
+                # The just-saved UCS fails to download.
+                return httpx.Response(503, text="{}")
+            return base(request)
+
+        http = httpx.Client(transport=httpx.MockTransport(_handle))
+        client = F5Client(
+            host="bigip.example.com", username=_FAKE_USERNAME, password=_FAKE_PASSWORD, client=http
+        )
+        cap = F5ConfigArchiveBackup(client, uuid4(), _FakeVault())
+        with pytest.raises(PluginError):
+            cap.fetch_config_archive()
+        # The residue delete ran despite the download failure (no on-box leftover).
+        commands = [r.command for r in cap.raw_outputs]
+        assert any("ucs_save" in c for c in commands)
+        assert any("ucs_delete" in c for c in commands), (
+            "on-box UCS residue must be deleted even when download_ucs fails (ADR-0050 §7.2)"
+        )
+
+    def test_restore_deletes_baseline_and_target_residue(self) -> None:
+        """Restore leaves NO on-box UCS behind: both the baseline and the target
+        archive are deleted on the success path (ADR-0050 §7.2/§7.4)."""
+        vault = _FakeVault()
+        client = _make_client()
+        archive = F5ConfigArchiveBackup(client, uuid4(), vault).fetch_config_archive()
+        restore = F5ConfigArchiveRestore(client, uuid4(), vault)
+        plan = ChangePlan(change_request_id=uuid4(), cr_state="executing")
+        result = restore.restore_archive(_ref_from_archive(archive), plan=plan)
+        assert result.outcome == ChangeOutcome.APPLIED
+        commands = [r.command for r in restore.raw_outputs]
+        assert any("target_ucs_delete" in c for c in commands), "target UCS residue not deleted"
+        assert any("baseline_ucs_delete" in c for c in commands), "baseline UCS residue not deleted"
+
 
 # ---------------------------------------------------------------------------
 # Zero-plaintext-leakage (password, token, passphrase, archive bytes).

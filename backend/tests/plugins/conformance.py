@@ -538,7 +538,8 @@ def _check_archive_backup_outputs(
     # The archive bytes must NOT surface in repr or a JSON dump (SecretBytes mask).
     plaintext_bytes = result.content.get_secret_value()
     assert plaintext_bytes, f"{ctx}: archive content must be non-empty"
-    assert plaintext_bytes.hex() not in repr(result), (
+    rendered = repr(result)
+    assert plaintext_bytes.hex() not in rendered and str(plaintext_bytes) not in rendered, (
         f"{ctx}: archive bytes must be masked in repr (SecretBytes), ADR-0050 §7.3"
     )
     dumped = str(result.model_dump())
