@@ -158,6 +158,63 @@ gantt
 >   re-check"). The G-SCA ceiling numbers stay tied to the Q1 "scale targets"
 >   item so a future owner answer re-bases them cleanly.
 
+> **P4 IN PROGRESS 2026-07-05 (W0 design gate).** The P4 phase is open. Its
+> design contract is the four W0 ADRs (**Proposed** until W4-T4 flips them
+> Accepted on green) and the build plan; this marker is the roadmap mirror of
+> `P4-PLAN.md` §0/§1/§5 — **the two must agree** (the P2 "the two must agree"
+> rule). The **green phase-exit marker is deferred to W4-T4**; this is the
+> entry marker, not an exit claim.
+>
+> - **Build plan:** `docs/roadmap/P4-PLAN.md`; per-task specs
+>   `docs/roadmap/p4-tasks/README.md`.
+> - **ADRs (Proposed → Accepted on W4-T4 green):**
+>   [ADR-0050](../adr/0050-f5-bigip-plugin.md) F5 BIG-IP plugin (plain-httpx
+>   iControl REST per D7, NEW `ADC_SERVICES` capability +
+>   `NormalizedVirtualServer`/`NormalizedPool`/`NormalizedPoolMember` models,
+>   UCS backup as opaque secret material with CR-gated restore) ·
+>   [ADR-0051](../adr/0051-vmware-plugin.md) VMware vSphere plugin (pyVmomi
+>   per D7, NEW `VIRTUALIZATION_INVENTORY` capability + normalized
+>   VM/host/cluster/port-group models, read-only vCenter role, **no write
+>   path**) ·
+>   [ADR-0052](../adr/0052-application-dependency-topology.md)
+>   application-dependency topology (PG-backed `Application`/`DEPENDS_ON` per
+>   D5, four provenance-carrying derivation sources, direct-write tagging
+>   under RBAC — CR-gating declined, owner decision 2026-07-05; mandatory
+>   projection pass + rebuild-drill compatibility) ·
+>   [ADR-0053](../adr/0053-compliance-audit-reporting.md) compliance & audit
+>   reporting suite (report engine on Celery beat, stdlib-CSV + WeasyPrint PDF
+>   with zero render-time egress, fail-closed redaction contract, SOC 2
+>   CC-series PROPOSED default).
+> - **Validation posture (`P4-PLAN.md` §0):** no live F5 BIG-IP / vCenter lab
+>   on the authoring host — plugin validation = the conformance suite over
+>   recorded fixtures; the §2.6 live-lab criterion is **named
+>   deferred-accepted → live lab** with golden-path scripts shipped
+>   ready-to-run (the posture every prior wave recorded). No LLM provider on
+>   the host — agent-facing evals run as the deterministic CI layer; real-LLM
+>   runs stay the documented opt-in manual gate. Everything else (graph
+>   derivation, projection, rebuild compatibility, report
+>   generation/formats/redaction, RBAC) is CI-enforceable and gated as a
+>   true, biting PASS with negative controls. **Flow-telemetry enrichment
+>   (NetFlow/gNMI) stays out of the dependency graph** until the Consultant
+>   telemetry item is answered (§2.4).
+> - **Consultant §12 re-check (the §11 G-MNT per-phase requirement, recorded
+>   2026-07-05):** the four P4-relevant open items were reviewed at this
+>   kickoff — **compliance regimes** (Q7 → §12 "Compliance regimes"; **SOC 2
+>   CC-series stays the PROPOSED default** evidence structure — shapes W3-T6
+>   and the ADR-0053 §8 regime tags; tags are metadata, so an ISO 27001/NIST
+>   answer re-maps without redesign), **data retention** (Q13 → §12 "Data
+>   retention"; the **7-year audit retention default stays PROPOSED** and now
+>   also governs report-artifact retention — ADR-0053 §4), **flow telemetry**
+>   (Q10 → §12 "Telemetry"; **NetFlow/gNMI stays OUT of the dependency
+>   graph** until answered — the ADR-0052 source set is closed at four), and
+>   **application-tagging ownership** (new §12 row below; the write-path is
+>   **DECIDED** — direct write under RBAC (`engineer`+) with a full audit
+>   entry per mutation, CR-gating declined (owner decision 2026-07-05,
+>   ADR-0052 §7) — the remaining open item is the **role floor only**;
+>   `engineer` stays the PROPOSED floor). The owner remains offline; no other
+>   answered item to convert, no silent carry. Recorded with the re-check
+>   note in `docs/consultant/QUESTIONS.md` ("P4 kickoff — 2026-07-05").
+
 ---
 
 ## 2. Vendor rollout — all 13 vendor families
@@ -450,5 +507,6 @@ These open items materially shape this roadmap; defaults above are conservative 
 | Air-gapped operation | §5 image supply chain, §8 object-storage choice (MinIO default) |
 | GPU availability | §3.2 Ollama pool, §6 first-token SLO |
 | Telemetry (gNMI/NetFlow) | §2.4 app-dependency enrichment (out until answered) |
-| Data retention | §6 log retention, §7 audit retention, §8 pcap retention |
+| Data retention | §6 log retention, §7 audit retention (also governs report-artifact retention, ADR-0053 §4), §8 pcap retention |
+| Application-tagging ownership (role floor) | §2.4 tagging write path — mechanism **DECIDED** (direct write under RBAC + full audit, ADR-0052 §7; owner 2026-07-05); the answer refines the role floor only (`engineer` PROPOSED) |
 | Multi-tenancy, NetBox integration, commercial API licensing | Backlog — none scheduled in P1–P5 without an answer |
