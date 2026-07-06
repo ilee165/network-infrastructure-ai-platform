@@ -104,8 +104,11 @@ class TestVmwareLiveGoldenPath:
     def test_discover_then_virtualization_inventory(self, live_client: VsphereClient) -> None:
         device_id = uuid.uuid4()
 
-        # 1. Discover vCenter identity over the genuine pyVmomi surface.
-        facts = VmwareDiscoveryApi(live_client, device_id).get_device_facts()
+        # 1. Discover vCenter identity over the genuine pyVmomi surface. Keep the
+        #    instance — the secret-hygiene check below inspects the raw artifacts
+        #    THIS call produced (a fresh instance has empty raw_outputs, ADR-0051 §2).
+        discovery = VmwareDiscoveryApi(live_client, device_id)
+        facts = discovery.get_device_facts()
         assert facts.vendor_id == "vmware"
         assert facts.hostname
 
@@ -115,6 +118,12 @@ class TestVmwareLiveGoldenPath:
         hosts = inv.get_hypervisor_hosts()
         clusters = inv.get_compute_clusters()
         port_groups = inv.get_port_groups()
+
+        # vcsim ships VMs and hosts by default (ADR-0051 §8), so an empty result is
+        # itself a failure — assert non-empty before the per-record loops, which
+        # would otherwise pass vacuously.
+        assert vms, "golden-path vCenter/vcsim must expose at least one VM (ADR-0051 §8)"
+        assert hosts, "golden-path vCenter/vcsim must expose at least one host (ADR-0051 §8)"
 
         # Every record re-validates against its normalized model by construction.
         for vm in vms:
@@ -137,7 +146,10 @@ class TestVmwareLiveGoldenPath:
                 assert vm.host_name in host_names
 
         # Secret hygiene: the password never lands in a raw artifact (ADR-0051 §2).
-        for source in (inv, VmwareDiscoveryApi(live_client, device_id)):
+        # Inspect the instances that actually made calls — ``discovery`` (step 1)
+        # and ``inv`` (step 2) both carry populated ``raw_outputs``.
+        for source in (inv, discovery):
+            assert source.raw_outputs, "secret-hygiene check needs exercised raw artifacts"
             for raw in source.raw_outputs:
                 assert _PASS not in raw.output
                 assert _PASS not in raw.command

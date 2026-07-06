@@ -119,9 +119,20 @@ hatch**; vendor-unique richness lives only in the verbatim raw artifact.
 the same commit, so the blocking drift gate + pip-audit/Trivy supply-chain
 scanning cover it from day one. The pin tracks client-side currency, not the
 estate's vCenter version (pyVmomi is backward-compatible with supported vCenter
-API levels, so one pinned client serves mixed vCenter 7/8 estates). pyVmomi
-ships pure-Python wheels — an air-gapped index mirrors one artifact with no
-build toolchain.
+API levels, so one pinned client serves mixed vCenter 7/8 estates).
+
+**Upstream publishes the 8.x line as an sdist only** (no wheel exists for any
+`8.x` release; the first wheel is `9.0`). The major cap `<9` is retained
+deliberately — the plugin is written and fixture-tested against 8.x SOAP
+semantics, and bumping to the 9.0 major is a compatibility change gated by
+ADR-0051, not a lockfile tweak. This is safe: pyVmomi is **pure Python**, so the
+sdist install needs only `setuptools` (no C toolchain), and `8.0.3.0.1` builds
+cleanly on the CI interpreter (Python 3.12, setuptools ≥79 — well past the
+setuptools-71 `canonicalize_version` regression that affected some older
+sdists). The lockfile hash-pins the sdist, so an air-gapped index mirrors one
+artifact and the build is reproducible; pip-audit/Trivy scan it like any other
+pinned dependency. When upstream ships an 8.x wheel, the drift gate will pick it
+up on the next re-lock with no code change.
 
 ## Fixtures, tests, live path
 
