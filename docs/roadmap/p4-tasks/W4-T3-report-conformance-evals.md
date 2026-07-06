@@ -60,7 +60,10 @@ authoritative); SIEM/report-distribution surfaces (out of P4).
 
 - Full gate suite; report evals green in CI at HEAD; `tests/pg/` where the
   checks query run history.
-- Bite proofs recorded (planted-secret red; filter-disabled red).
+- Bite proofs recorded (planted-secret red; filter-disabled red). The
+  fail-closed redaction assertion goes beyond the red result: the typed
+  `error_class` is asserted, NO artifact row is written, and the failure
+  counter increments.
 
 ## Exit criteria
 

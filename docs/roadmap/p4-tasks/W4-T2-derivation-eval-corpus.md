@@ -57,6 +57,9 @@ real-LLM agent runs (opt-in gate).
 ## Test & gate plan
 
 - Full gate suite; the derivation eval green in CI at HEAD.
+- Derive-twice idempotency (its own eval check): running derivation twice
+  over the corpus yields a byte-identical expected graph — no dupes, no
+  unstable IDs.
 - Bite proofs: planted wrong edge red; threshold trip red on a degraded
   fixture set.
 

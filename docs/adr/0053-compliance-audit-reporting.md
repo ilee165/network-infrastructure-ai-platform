@@ -305,14 +305,21 @@ period + the **append-only grant attestation**. Two sources:
 - **`audit_chain_verification_runs`** (named here; written by the ADR-0038
   daily CronJob as a small additive change): `started_at`/`finished_at`,
   verified range (from/to entry id), `outcome` (`clean` \| `break`),
-  checkpoint before/after. Today the CronJob emits only a metric + exit code —
-  metrics retention cannot back a 7-year evidence trail; this table can.
-  A **missing day is surfaced as a gap** in the report (a verification that
-  never ran is a finding, not a blank).
-- **Grant attestation at generation time:** the generator queries the PG
-  catalog and attests no `UPDATE`/`DELETE` grant exists on `audit_log`
-  (the G-SEC "append-only attested (grant check)" criterion), recording the
-  attestation result + timestamp in the report.
+  checkpoint before/after, plus the **grant-attestation outcome for that
+  run** — the CronJob additionally queries the PG catalog daily and persists
+  whether any `UPDATE`/`DELETE` grant existed on `audit_log`. Today the
+  CronJob emits only a metric + exit code — metrics retention cannot back a
+  7-year evidence trail; this table can. A **missing day is surfaced as a
+  gap** in the report (a verification that never ran is a finding, not a
+  blank).
+- **Grant attestation — historical over the window, plus generation time:**
+  the report attests the append-only posture **over the reporting window**
+  from the persisted daily rows above — a transient `UPDATE`/`DELETE` grant
+  mid-period surfaces as a failed day, never a clean report, and a missing
+  day stays a finding (the gap rule above) — PLUS the generator re-queries
+  the PG catalog at generation time and attests no `UPDATE`/`DELETE` grant
+  exists on `audit_log` (the G-SEC "append-only attested (grant check)"
+  criterion), recording the attestation result + timestamp in the report.
 
 Evidence claim: the integrity root is tamper-evident and verified daily
 (G-SEC).

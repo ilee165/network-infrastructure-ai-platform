@@ -55,6 +55,9 @@ II-*aligned*, no formal claims).
 
 - Full gate suite (docs + the small tag-default wiring); a test asserting each
   kind's generated run carries its default tags + mapping version.
+- Drift guard: a change to the mapping doc without a corresponding
+  mapping-version bump fails the check — artifacts cannot be mislabeled by a
+  doc-only revision.
 
 ## Exit criteria
 

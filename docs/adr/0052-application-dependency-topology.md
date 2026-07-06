@@ -226,17 +226,27 @@ exists. The conflict rules:
    `updated_at == derived-managed watermark`, else leaves attributes and
    refreshes edges only). Scalar precedence order, where it ever matters:
    `manual > f5 > vmware > dns`.
-4. **Name collision = same application.** If derivation would create a
-   `derived` application whose case-insensitive name equals an existing
-   application's, it does **not** create a duplicate — it attaches its edges
-   to the existing row (recording `origin_ref` on first attach if the row
-   lacks one). A user naming an application "payroll" and an F5 VS named
-   "payroll" are the same service; two nodes would split the impact picture.
-5. **Deletion scope.** Users may delete `manual`-origin applications (cascade
-   deletes their dependency rows, audited). `derived` applications are
-   lifecycle-owned by derivation: they disappear when their `origin_ref`
-   source object disappears (next pass), not by user delete — a user delete
-   would silently resurrect on re-derivation. A user-facing "suppress derived
+4. **Name collision = same application; manual rows stay manual.** If
+   derivation would create a `derived` application whose case-insensitive
+   name equals an existing application's, it does **not** create a
+   duplicate — it attaches its edges to the existing row. When that row is
+   `derived`-origin, the pass records `origin_ref` on first attach if the row
+   lacks one. When it is **`manual`-origin, the row stays manual**:
+   derivation attaches edges but records **no** `origin_ref` and transfers
+   **no** lifecycle ownership — the deletion lifecycle keys on the `origin`
+   column (rule 5), so a collision can never convert a user-owned application
+   into a derivation-deletable one. A user naming an application "payroll"
+   and an F5 VS named "payroll" are the same service; two nodes would split
+   the impact picture.
+5. **Deletion scope — keyed on the `origin` column.** Users may delete
+   `manual`-origin applications (cascade deletes their dependency rows,
+   audited). `derived` applications are lifecycle-owned by derivation: they
+   disappear when their `origin_ref` source object disappears (next pass),
+   not by user delete — a user delete would silently resurrect on
+   re-derivation. `manual` applications are **never** derivation-deleted —
+   including one a derivation pass attached edges to under rule 4: when the
+   source object disappears, only its derived edge rows retract (rule 2); the
+   manual application row remains user-owned. A user-facing "suppress derived
    application" flag is named-deferred, not P4.
 
 ### 4. Idempotent re-derivation — no dupes, asserted under real PG

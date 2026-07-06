@@ -78,6 +78,9 @@ host-config/vCenter-profile backup (named deferral).
   dv-portgroup (`vlan_id=None`); disconnected vNIC; dv key→name resolution;
   teaming-override uplink resolution.
 - Secret-leak assertions extended to the session cookie.
+- Session-expiry regression case: a mid-run `NotAuthenticated` fault triggers
+  exactly one re-auth attempt; a second failure raises the typed
+  `PluginError` (both asserted).
 - Existing cross-vendor suite shows no regression (full re-run is W4-T1).
 
 ## Exit criteria

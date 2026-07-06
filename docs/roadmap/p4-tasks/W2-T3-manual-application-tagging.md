@@ -64,6 +64,10 @@ refines the floor only, later).
   agent-session tokens have no tagging tool to call.
 - Audit tests: entry per mutation with before/after; `tests/pg/` where PG
   semantics bind (cascade delete + audit ordering).
+- Hash-chain membership: tagging audit entries are part of the ADR-0038
+  chain — chain verification passes over a sequence containing tagging
+  mutations, and a tampered tagging entry breaks verification (negative
+  control).
 - Derived-row protection: API refuses delete of `origin='derived'` rows.
 
 ## Exit criteria

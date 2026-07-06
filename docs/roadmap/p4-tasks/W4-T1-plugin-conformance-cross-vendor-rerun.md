@@ -51,6 +51,10 @@ P4-PLAN §0); derivation/report evals (W4-T2/T3).
 ## Test & gate plan
 
 - Full gate suite; the extended eval suites green in CI.
+- Baseline-comparison mechanics: the recorded pre-P4 (P3-era) result set is
+  pinned as a fixture and the suite explicitly compares current results
+  against it, failing on any regression delta — green-in-CI alone is
+  insufficient.
 - Bite proof: the completeness check red on a planted missing spec entry;
   restored green at HEAD (evidence with run URLs — verify before trusting,
   2026-07 audit lesson).

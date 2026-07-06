@@ -84,6 +84,9 @@ webhook distribution, legal holds, MinIO (named deferrals); the RAG-embedded
 - Render tests: templates render offline (fetcher denies all remote); CSV
   neutralization cases; PDF structure extraction smoke.
 - Import-linter boundary + no-SELECT-deny-set test green.
+- Download-time RBAC regression: a user generates (or is granted access to) a
+  report, the role is revoked, and a subsequent artifact download is DENIED —
+  no stale-authz caching.
 - `promtool test rules` incl. should-fire cases; metrics exposed.
 
 ## Exit criteria

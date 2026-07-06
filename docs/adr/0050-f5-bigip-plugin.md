@@ -558,7 +558,16 @@ with the three case families (`metadata:*`, `implementation:<capability>`,
   password, the auth token, and the UCS passphrase appear in no log record,
   no raw artifact, no exception message, and no `repr` — the existing
   credential-leak test pattern extended to the two new secrets (P4-PLAN §5
-  W1 exit criterion: "zero plaintext leakage").
+  W1 exit criterion: "zero plaintext leakage"). The leak check additionally
+  covers the **archive content surface, not just the secret strings**: the
+  UCS archive payload bytes (asserted via the synthetic blob's content) must
+  appear in no log record, no API response, and no task result — the §7.4
+  metadata-only `ChangeResult` contract, negatively controlled.
+- **Restore-gating negative control:** a `ChangeRequest`/`ChangePlan` that is
+  unapproved or not in `executing` state is REJECTED by the UCS restore path
+  with the typed `PluginError` **before any device call** (the fixture-replay
+  transport records zero requests) — the §7.4 never-self-authorizes contract,
+  asserted in tests.
 - **Coverage ≥80%** on the plugin module (D16), enforced in CI; plugin + API
   docs published (CLAUDE.md Development Standards).
 - **Live golden path** (discover → ADC inventory → UCS backup → CR-approved

@@ -23,8 +23,10 @@ app-dependency UI view with per-edge source badges.**
 `rel_types_for_layer` → `(REL_DEPENDS_ON,)`, included in `LAYER_ALL`;
 `fetch_impact(client, *, target_label, target_key, depth)` (name PROPOSED in
 the ADR — this task binds it): applications reachable against `DEPENDS_ON`
-direction for `Device`/`IPAddress`/`Interface`/`Subnet` targets incl. indirect
-impact through the physical chain, and the reverse direction; depth bounded by
+direction for `Device`/`IPAddress`/`Interface`/`Subnet`/`Application` targets
+incl. indirect impact through the physical chain, and the reverse direction
+(an `Application` target is the entry point for both directions:
+dependents-of-application-A and what-application-A-depends-on); depth bounded by
 `MAX_NEIGHBORHOOD_DEPTH`; JSON-safe results carrying per edge `sources`,
 compact provenance summary, and the `projected_at` watermark; `topology`
 router impact endpoint at viewer+; Troubleshooting-Agent tool

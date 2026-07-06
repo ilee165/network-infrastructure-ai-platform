@@ -58,6 +58,8 @@ existing on-demand engineer+ endpoint); the history-table migration itself
 - Full gate suite; `tests/pg/`: trend aggregation across runs, severity
   roll-up, out-of-scope classification, empty history, sweep idempotency per
   day.
+- Skipped-day fixture: a day with no engine sweep renders as an explicit gap
+  in the trend — never interpolated or smoothed over.
 - Redaction sanity: payload passes `enforce_redaction`.
 - Golden CSV/PDF structure fixture green.
 

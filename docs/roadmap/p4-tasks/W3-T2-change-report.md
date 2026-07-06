@@ -50,6 +50,9 @@ changes (T1 owns the render/redaction path).
 
 - Full gate suite; `tests/pg/` for the roll-up queries (multi-CR periods,
   empty period, agent-executor rows, rejected/rolled-back CRs).
+- Closed-open period boundaries: a CR stamped exactly at window start is
+  included, exactly at window end is excluded, and a non-UTC-stored timestamp
+  normalizes correctly — no double-count or omission at the edges.
 - Redaction: payload passes `enforce_redaction`; a planted config-text field
   in a test payload is rejected (engine-level, sanity-checked here).
 - Golden CSV/PDF structure fixture green.
