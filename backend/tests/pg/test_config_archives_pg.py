@@ -159,6 +159,10 @@ async def test_persisted_row_survives_reload_under_pg(pg_session: AsyncSession) 
     row = await config_archives.store_archive(
         pg_session, provider, device_id=device_id, archive=_payload(), actor="user:alice"
     )
+    # Capture the key BEFORE expiring: attribute access on an expired instance
+    # triggers a synchronous lazy refresh, which raises MissingGreenlet on an
+    # AsyncSession.
+    row_id = row.id
     await pg_session.commit()
     # ``pg_session`` uses ``expire_on_commit=False``, so without expiring the
     # identity map ``get()`` could return the in-memory instance without touching
@@ -166,7 +170,7 @@ async def test_persisted_row_survives_reload_under_pg(pg_session: AsyncSession) 
     # Force a real database round-trip.
     pg_session.expire_all()
 
-    fetched = await pg_session.get(ConfigArchiveRow, row.id)
+    fetched = await pg_session.get(ConfigArchiveRow, row_id)
     assert fetched is not None
     loaded = await config_archives.load_archive_bytes(
         pg_session, provider, fetched, actor="user:alice"
