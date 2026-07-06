@@ -64,6 +64,7 @@ _RESET_TABLES = (
     "audit_chain_checkpoint",
     "audit_export_cursor",
     "audit_log",
+    "config_archives",
     "config_backup_runs",
     "config_snapshots",
     "approvals",

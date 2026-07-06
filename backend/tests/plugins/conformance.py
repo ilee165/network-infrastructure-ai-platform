@@ -55,10 +55,14 @@ from pydantic import ValidationError
 from app.core.errors import PluginError
 from app.plugins.base import (
     AclCapability,
+    AdcServicesCapability,
     BgpCapability,
     Capability,
     ChangeOutcome,
     ChangeResult,
+    ConfigArchive,
+    ConfigArchiveBackupCapability,
+    ConfigArchiveRestoreCapability,
     ConfigBackupCapability,
     ConfigDeployCapability,
     ConfigRestoreCapability,
@@ -76,24 +80,31 @@ from app.plugins.base import (
     PluginCapability,
     RoutesCapability,
     VendorPlugin,
+    VirtualizationInventoryCapability,
 )
 from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     NeighborProtocol,
     NormalizedAclEntry,
     NormalizedBgpPeer,
+    NormalizedComputeCluster,
     NormalizedDhcpLease,
     NormalizedDiscoveredObject,
     NormalizedDnsRecord,
     NormalizedFirewallRule,
     NormalizedHaStatus,
+    NormalizedHypervisorHost,
     NormalizedInterface,
     NormalizedNatRule,
     NormalizedNeighbor,
     NormalizedNetwork,
     NormalizedOspfNeighbor,
+    NormalizedPool,
+    NormalizedPortGroup,
     NormalizedRecord,
     NormalizedRoute,
+    NormalizedVirtualMachine,
+    NormalizedVirtualServer,
 )
 
 __all__ = [
@@ -150,6 +161,12 @@ class _InterfaceSpec:
     facts_model: type[DeviceFacts] | None = None
     change_write: bool = False
     extra_records: tuple[tuple[str, type[NormalizedRecord]], ...] = ()
+    #: Marks a binary-archive backup capability (CONFIG_BACKUP_ARCHIVE, ADR-0050
+    #: §7.1): its data method returns a :class:`ConfigArchive` (secret-bearing
+    #: :class:`~pydantic.SecretBytes` content), not a normalized-record list, so
+    #: the fixture case asserts the archive metadata shape + that the content is
+    #: masked in ``repr``/serialization rather than a record list.
+    archive_backup: bool = False
 
 
 #: Capability -> typed-interface contract from app.plugins.base. Extend this
@@ -204,6 +221,41 @@ _INTERFACE_SPECS: dict[Capability, _InterfaceSpec] = {
     # HA status (ADR-0025 §8). First implemented by cisco_nxos (vPC); reused by
     # PAN-OS/FortiOS/F5 in later waves.
     Capability.HA_STATUS: _InterfaceSpec(HaStatusCapability, "get_ha_status", NormalizedHaStatus),
+    # ADC services (ADR-0050 §4). Two normalized-record methods: virtual servers
+    # (primary, must be non-empty) + pools (extra, may be empty). First and only
+    # implemented by f5_bigip; validated by the fixtures + the W2 derivation as
+    # the second consumer (ADR-0050 §4.6).
+    Capability.ADC_SERVICES: _InterfaceSpec(
+        AdcServicesCapability,
+        "get_virtual_servers",
+        NormalizedVirtualServer,
+        extra_records=(("get_pools", NormalizedPool),),
+    ),
+    # Binary config archive (UCS) backup + restore (ADR-0050 §7). Backup returns a
+    # secret-bearing ConfigArchive; restore is CR-gated and returns a ChangeResult
+    # (the change_write shape) invoked with a ConfigArchiveRef + executing plan.
+    Capability.CONFIG_BACKUP_ARCHIVE: _InterfaceSpec(
+        ConfigArchiveBackupCapability, "fetch_config_archive", None, archive_backup=True
+    ),
+    Capability.CONFIG_RESTORE_ARCHIVE: _InterfaceSpec(
+        ConfigArchiveRestoreCapability, "restore_archive", None, change_write=True
+    ),
+    # Virtualization inventory (ADR-0051 §5.8). Four normalized-record methods:
+    # virtual machines (primary, must be non-empty) + hosts/clusters/port groups
+    # (extras, may be empty). First and only implemented by vmware; validated by
+    # the recorded property-set fixtures + the W2 derivation as the second
+    # consumer (ADR-0051 §5.7). Without this entry the fixtures case is silently
+    # skipped (the three-file lesson, ADR-0025 §8).
+    Capability.VIRTUALIZATION_INVENTORY: _InterfaceSpec(
+        VirtualizationInventoryCapability,
+        "get_virtual_machines",
+        NormalizedVirtualMachine,
+        extra_records=(
+            ("get_hypervisor_hosts", NormalizedHypervisorHost),
+            ("get_compute_clusters", NormalizedComputeCluster),
+            ("get_port_groups", NormalizedPortGroup),
+        ),
+    ),
 }
 
 
@@ -307,6 +359,13 @@ def make_conformance_cases(
                     partial(
                         _check_change_write_outputs, plugin, capability, invokers.get(capability)
                     ),
+                )
+            )
+        elif spec.archive_backup:
+            cases.append(
+                ConformanceCase(
+                    f"fixtures:{capability.value}",
+                    partial(_check_archive_backup_outputs, plugin, capability, capability_factory),
                 )
             )
         else:
@@ -445,6 +504,48 @@ def _check_change_write_outputs(
         f"{ctx}: a successful write must report verify-after success (verified=True)"
     )
     assert result.rollback is None, f"{ctx}: a successful write must not carry a rollback result"
+
+
+def _check_archive_backup_outputs(
+    plugin: VendorPlugin, capability: Capability, capability_factory: CapabilityFactory
+) -> None:
+    """Certify a binary-archive backup capability over its bundled fixtures (ADR-0050 §7).
+
+    The capability returns a secret-bearing :class:`ConfigArchive`, not a
+    normalized-record list: the contract asserts the archive metadata shape
+    (format / sha256 / size) AND that the archive bytes are masked in ``repr`` and
+    serialization (the :class:`~pydantic.SecretBytes` no-leak posture) over a
+    recorded control-plane fixture — never a live device (D16).
+    """
+    spec = _INTERFACE_SPECS[capability]
+    impl = _resolve(plugin, capability)
+    ctx = f"{plugin.vendor_id}: capability {capability.value!r} ({impl.__name__}.{spec.method})"
+
+    instance = capability_factory(impl)
+    result = getattr(instance, spec.method)()
+
+    assert isinstance(result, ConfigArchive), (
+        f"{ctx}: must return ConfigArchive, got {type(result).__name__}"
+    )
+    assert result.format.strip(), f"{ctx}: archive format must be non-empty"
+    assert len(result.sha256) == 64, (
+        f"{ctx}: archive sha256 must be a 64-char hex digest, got {len(result.sha256)} chars"
+    )
+    assert result.size_bytes > 0, f"{ctx}: archive size_bytes must be positive"
+    assert result.passphrase_ref.strip(), (
+        f"{ctx}: archive must carry a vault passphrase_ref (never the passphrase itself)"
+    )
+    # The archive bytes must NOT surface in repr or a JSON dump (SecretBytes mask).
+    plaintext_bytes = result.content.get_secret_value()
+    assert plaintext_bytes, f"{ctx}: archive content must be non-empty"
+    rendered = repr(result)
+    assert plaintext_bytes.hex() not in rendered and str(plaintext_bytes) not in rendered, (
+        f"{ctx}: archive bytes must be masked in repr (SecretBytes), ADR-0050 §7.3"
+    )
+    dumped = str(result.model_dump())
+    assert plaintext_bytes.hex() not in dumped and str(plaintext_bytes) not in dumped, (
+        f"{ctx}: archive bytes must be masked in serialization (SecretBytes), ADR-0050 §7.3"
+    )
 
 
 def _check_fixture_outputs(

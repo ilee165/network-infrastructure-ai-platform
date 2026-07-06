@@ -26,6 +26,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Layout } from "./components/Layout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { RoleRoute } from "./components/RoleRoute";
+import { AdcPage } from "./pages/AdcPage";
 import { AuditPage } from "./pages/AuditPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { ChangesPage } from "./pages/ChangesPage";
@@ -41,6 +42,7 @@ import { ProfilePage } from "./pages/ProfilePage";
 import { SettingsLlmSection, SettingsPage } from "./pages/SettingsPage";
 import { TopologyPage } from "./pages/TopologyPage";
 import { UsersPage } from "./pages/UsersPage";
+import { VirtualizationPage } from "./pages/VirtualizationPage";
 
 export function App() {
   // ErrorBoundary at the app level, per-route (audit UI_UX #1): a render
@@ -62,6 +64,8 @@ export function App() {
           <Route element={<Layout />}>
             <Route index element={<DashboardPage />} />
             <Route path="devices" element={<DevicesPage />} />
+            <Route path="adc" element={<AdcPage />} />
+            <Route path="virtualization" element={<VirtualizationPage />} />
             <Route path="config" element={<ConfigPage />} />
             <Route path="documents" element={<DocumentsPage />} />
             <Route path="topology" element={<TopologyPage />} />

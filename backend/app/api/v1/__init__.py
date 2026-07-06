@@ -4,13 +4,15 @@
 ``/api/v1`` prefix. Router set per REPO-STRUCTURE §2 / DECISIONS-BRIEF §5;
 ``health`` (M0), ``auth``/``devices``/``credentials``/``discovery`` (M1),
 ``topology`` (M2), ``agents`` (M3) exist — M4 adds ``config_snapshots``
-sub-resources under ``devices`` and a ``docs`` router.
+sub-resources under ``devices`` and a ``docs`` router. P4-W1-T3 adds ``adc``
+and ``virtualization`` (read-only ADC/virtualization inventory surfacing).
 """
 
 from fastapi import APIRouter, Depends
 
 from app.api.deps import enforce_api_rate_limit
 from app.api.v1 import (
+    adc,
     agents,
     auth,
     config_snapshots,
@@ -20,6 +22,7 @@ from app.api.v1 import (
     docs,
     health,
     topology,
+    virtualization,
 )
 
 #: W6-T6 per-principal/per-token API rate limit (PRODUCTION.md §5). Applied to
@@ -39,6 +42,7 @@ from app.api.v1 import (
 _api_rate_limit = [Depends(enforce_api_rate_limit)]
 
 api_router = APIRouter()
+api_router.include_router(adc.router, dependencies=_api_rate_limit)
 api_router.include_router(agents.router)
 api_router.include_router(auth.router)
 api_router.include_router(config_snapshots.router, prefix="/devices", dependencies=_api_rate_limit)
@@ -48,5 +52,6 @@ api_router.include_router(discovery.router, dependencies=_api_rate_limit)
 api_router.include_router(docs.router, dependencies=_api_rate_limit)
 api_router.include_router(health.router)
 api_router.include_router(topology.router, dependencies=_api_rate_limit)
+api_router.include_router(virtualization.router, dependencies=_api_rate_limit)
 
 __all__ = ["api_router"]

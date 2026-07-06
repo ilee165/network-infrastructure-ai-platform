@@ -44,6 +44,8 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Dashboard", abbr: "DB", end: true },
   { to: "/devices", label: "Devices", abbr: "DV" },
+  { to: "/adc", label: "ADC", abbr: "AD" },
+  { to: "/virtualization", label: "Virtualization", abbr: "VZ" },
   { to: "/config", label: "Config", abbr: "CF" },
   { to: "/documents", label: "Documents", abbr: "DC" },
   { to: "/topology", label: "Topology", abbr: "TP" },
