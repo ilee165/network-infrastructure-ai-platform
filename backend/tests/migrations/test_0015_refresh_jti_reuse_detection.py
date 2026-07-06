@@ -61,11 +61,19 @@ def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_single_head_is_0015() -> None:
-    """`alembic heads` resolves to exactly one head, revision 0015 (no branch)."""
+def test_single_head_no_branch() -> None:
+    """`alembic heads` resolves to exactly one head (no branch).
+
+    The single-head invariant now belongs to the LATEST migration
+    (``tests/migrations/test_0016_config_archives.py``); 0015 no longer owns the
+    head but must remain on the single, unbranched chain.
+    """
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert heads == ["0015"], f"expected single head 0015, got {heads}"
+    assert len(heads) == 1, f"expected a single unbranched head, got {heads}"
+    # 0015 must still be a reachable ancestor of that head.
+    ancestry = {rev.revision for rev in script.walk_revisions("base", heads[0])}
+    assert "0015" in ancestry
 
 
 def test_0015_revises_0014() -> None:

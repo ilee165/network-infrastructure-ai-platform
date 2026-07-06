@@ -201,6 +201,14 @@ KEK_ROTATE_COMPLETE: Final = "kek.rotate.complete"
 # versions/counts + coarse reason class only, never key/DEK/wrapped bytes.
 KEK_ROTATE_INTERRUPTED: Final = "kek.rotate.interrupted"
 
+# P4 W1-T1 secret-bearing binary config archive (UCS) persistence (ADR-0050 §7.3).
+# ``detail`` carries LOG-SAFE identifiers ONLY — archive id, device id, size,
+# sha256, kek_version — NEVER the archive bytes, the passphrase, or the wrapped
+# DEK. Archive create + delete are audited; the pair (archive row + vault
+# passphrase row) is atomic (ADR-0050 §7.3).
+CONFIG_ARCHIVE_CREATED: Final = "config_archive.created"
+CONFIG_ARCHIVE_DELETED: Final = "config_archive.deleted"
+
 
 async def record(
     session: AsyncSession,

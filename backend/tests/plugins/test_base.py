@@ -19,7 +19,10 @@ from app.plugins.base import (
 )
 from app.schemas.normalized import NormalizedInterface
 
-#: The 19 members fixed by brief §4 / ADR-0006 — order-free, name-exact.
+#: The 19 members fixed by brief §4 / ADR-0006, plus the 3 additive members
+#: ratified by ADR-0050 (ADC + binary config archive) — order-free, name-exact.
+#: Adding an enum member is additive and zero-edit for existing plugins
+#: (ADR-0006 §6); this set grows as new capability surfaces are ratified.
 EXPECTED_CAPABILITY_NAMES = {
     "DISCOVERY_SSH",
     "DISCOVERY_SNMP",
@@ -40,6 +43,10 @@ EXPECTED_CAPABILITY_NAMES = {
     "DDI_IPAM",
     "PACKET_CAPTURE",
     "HA_STATUS",
+    # ADR-0050 (P4 W1-T1): ADC services + full-fidelity binary config archive.
+    "ADC_SERVICES",
+    "CONFIG_BACKUP_ARCHIVE",
+    "CONFIG_RESTORE_ARCHIVE",
 }
 
 
@@ -58,9 +65,9 @@ class _DummyPlugin(VendorPlugin):
 
 
 class TestCapabilityEnum:
-    def test_capability_has_exactly_the_19_brief_members(self) -> None:
+    def test_capability_has_exactly_the_ratified_members(self) -> None:
         assert {member.name for member in Capability} == EXPECTED_CAPABILITY_NAMES
-        assert len(Capability) == 19
+        assert len(Capability) == len(EXPECTED_CAPABILITY_NAMES)
 
     def test_capability_wire_values_are_lowercase_member_names(self) -> None:
         for member in Capability:

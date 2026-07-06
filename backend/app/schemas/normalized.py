@@ -35,6 +35,9 @@ from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
 __all__ = [
     "AclAction",
+    "AdcAdminState",
+    "AdcAvailability",
+    "AdcProtocol",
     "BgpPeerState",
     "DhcpLeaseState",
     "DiscoveredObjectKind",
@@ -62,8 +65,11 @@ __all__ = [
     "NormalizedNetwork",
     "NormalizedNeighbor",
     "NormalizedOspfNeighbor",
+    "NormalizedPool",
+    "NormalizedPoolMember",
     "NormalizedRecord",
     "NormalizedRoute",
+    "NormalizedVirtualServer",
     "NormalizedVlan",
     "OspfNeighborState",
     "RouteProtocol",
@@ -270,6 +276,49 @@ class DiscoveredObjectKind(StrEnum):
     DNS_ZONE = "dns_zone"
     MEMBER = "member"
     OTHER = "other"
+
+
+class AdcProtocol(StrEnum):
+    """L4 protocol of an ADC virtual server (ADR-0050 §4.4).
+
+    F5 ``ipProtocol`` values map directly; ``OTHER`` covers the long tail so an
+    exotic protocol never breaks normalization (the ``DiscoveredObjectKind.OTHER``
+    pattern).
+    """
+
+    TCP = "tcp"
+    UDP = "udp"
+    SCTP = "sctp"
+    ANY = "any"
+    OTHER = "other"
+
+
+class AdcAvailability(StrEnum):
+    """Monitor-reported availability of an ADC object (ADR-0050 §4.4).
+
+    Maps F5 ``status.availabilityState`` (plus ``enabledState`` for ``disabled``);
+    ``UNKNOWN`` is the safe default (an unmonitored object reports the F5 "blue"
+    unknown state).
+    """
+
+    AVAILABLE = "available"
+    OFFLINE = "offline"
+    DISABLED = "disabled"
+    UNKNOWN = "unknown"
+
+
+class AdcAdminState(StrEnum):
+    """Administrative session state of an ADC pool member (ADR-0050 §4.4).
+
+    F5's three member session states map 1:1; a future ADC-style source without a
+    forced-offline concept uses only the first two. Kept **separate** from
+    :class:`AdcAvailability` on purpose (ADR-0050 §4.4): a member can be
+    admin-enabled yet monitor-down, or admin-disabled yet monitor-up.
+    """
+
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    FORCED_OFFLINE = "forced_offline"
 
 
 # ---------------------------------------------------------------------------
@@ -583,3 +632,76 @@ class NormalizedHaStatus(NormalizedRecord):
         description="Whether the HA consistency parameters agree across peers; None if unreported.",
     )
     peer_address: IPv4Address | IPv6Address | None = None
+
+
+class NormalizedPoolMember(BaseModel):
+    """A pool member (real server) nested inside a :class:`NormalizedPool` (ADR-0050 §4.3/§4.5).
+
+    Not a :class:`NormalizedRecord`: members inherit their pool's provenance
+    triple, and F5 returns them as a subcollection of the pool — nesting keeps
+    the W2 derivation's VIP->pool->member chain traversable with no string
+    re-join (ADR-0050 §4.5). No field carries a secret (ADR-0050 §4.3).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, description="Full-path member name (e.g. /Common/web01:80).")
+    address: IPv4Address | IPv6Address | None = Field(
+        default=None,
+        description="Member address, route-domain suffix stripped (§5); None only for an "
+        "unresolved FQDN node.",
+    )
+    fqdn: str | None = Field(
+        default=None, description="FQDN for FQDN-type nodes — the W2 DNS-dependency bridge."
+    )
+    port: int = Field(ge=0, le=65535, description="Service port; 0 = any.")
+    vrf: str | None = Field(default=None, description="Route domain of the member address (§5).")
+    admin_state: AdcAdminState
+    availability: AdcAvailability
+
+
+class NormalizedVirtualServer(NormalizedRecord):
+    """An ADC virtual server (VIP) (ADR-0050 §4.3).
+
+    The primary input to the W2 application-dependency derivation (ADR-0052):
+    VIP address, port, protocol, and the ``pool_name`` join key. Names carry the
+    F5 full-path, partition-qualified form (``/Common/vs_web``) verbatim. No
+    field carries a secret — this is config/state metadata (ADR-0050 §4.3).
+    """
+
+    name: str = Field(min_length=1, description="Full-path virtual-server name.")
+    vip_address: IPv4Address | IPv6Address | None = Field(
+        default=None,
+        description="Destination address, route-domain suffix stripped (§5); None when the "
+        "destination is non-literal (e.g. an address list).",
+    )
+    port: int | None = Field(
+        default=None, ge=0, le=65535, description="Service port; None = any (F5 0/any -> None)."
+    )
+    protocol: AdcProtocol
+    vrf: str | None = Field(default=None, description="F5 route domain (§5); reuses the house vrf.")
+    enabled: bool = Field(description="Disabled virtual servers are collected, not dropped.")
+    availability: AdcAvailability
+    pool_name: str | None = Field(
+        default=None,
+        description="Full-path default-pool name — the VIP->pool join key; None when the VS "
+        "has no default pool (iRule/policy-only).",
+    )
+    description: str | None = None
+
+
+class NormalizedPool(NormalizedRecord):
+    """An ADC pool with nested members (ADR-0050 §4.3/§4.5).
+
+    ``name`` is the join target of :attr:`NormalizedVirtualServer.pool_name`.
+    ``members`` nests :class:`NormalizedPoolMember` sub-models (F5's own
+    pool->member subcollection shape). No field carries a secret (ADR-0050 §4.3).
+    """
+
+    name: str = Field(min_length=1, description="Full-path pool name.")
+    monitors: tuple[str, ...] = Field(default=(), description="Health-monitor names; () = none.")
+    availability: AdcAvailability
+    members: tuple[NormalizedPoolMember, ...] = Field(
+        default=(), description="Nested members (§4.5); () = empty pool."
+    )
+    description: str | None = None

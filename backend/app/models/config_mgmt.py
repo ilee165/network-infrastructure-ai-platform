@@ -40,7 +40,7 @@ from enum import StrEnum
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, ForeignKey, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy import Enum as SaEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -50,6 +50,7 @@ from app.models.mixins import JSON_VARIANT, TimestampMixin, UtcDateTime, UuidPkM
 __all__ = [
     "EMBEDDING_DIM",
     "CompliancePolicy",
+    "ConfigArchive",
     "ConfigBackupRun",
     "ConfigSnapshot",
     "ConfigSource",
@@ -158,6 +159,49 @@ class ConfigSnapshot(UuidPkMixin, TimestampMixin, Base):
     source: Mapped[ConfigSource] = mapped_column(_wire_enum(ConfigSource), nullable=False)
     capture_run_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     baseline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class ConfigArchive(UuidPkMixin, TimestampMixin, Base):
+    """A secret-bearing full-fidelity binary config archive (UCS) at rest (ADR-0050 §7.3).
+
+    The archive is **double-encrypted**: it arrives already passphrase-encrypted
+    on-box (the per-backup passphrase lives in the credential vault, referenced by
+    ``passphrase_ref``), and this row stores that ciphertext **envelope-encrypted a
+    second time** with the D11/ADR-0032 machinery (per-archive DEK wrapped by the
+    KEK, AAD = this row id). Reading the DB alone yields double-encrypted bytes;
+    the vault passphrase row AND the KEK are both required to reconstruct a usable
+    UCS. Metadata columns (device, format, ``size_bytes``, ``sha256``) are log-safe;
+    ``ciphertext`` never appears on any API/log surface (metadata-only, no download
+    endpoint in P4). ``sha256`` is the digest of the passphrase-encrypted archive
+    (integrity verification at restore). The archive row + its vault passphrase row
+    are an atomic pair — deleting one deletes the other (ADR-0050 §7.3).
+    """
+
+    __tablename__ = "config_archives"
+
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("devices.id"), nullable=False, index=True
+    )
+    captured_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False, default=utcnow)
+    archive_format: Mapped[str] = mapped_column(String(16), nullable=False, default="ucs")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    passphrase_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Second (platform) envelope over the already-passphrase-encrypted UCS bytes.
+    # Mirrors the DeviceCredential envelope columns (ADR-0032 §1).
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    wrapped_dek: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    dek_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    kek_version: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    def __repr__(self) -> str:
+        # Never render ciphertext / passphrase_ref bytes — metadata-only surface.
+        return (
+            f"ConfigArchive(id={self.id!r}, device_id={self.device_id!r}, "
+            f"format={self.archive_format!r}, size_bytes={self.size_bytes!r}, "
+            f"sha256={self.sha256!r})"
+        )
 
 
 class CompliancePolicy(UuidPkMixin, TimestampMixin, Base):

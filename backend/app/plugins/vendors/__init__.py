@@ -28,6 +28,7 @@ def iter_builtin_plugins() -> Iterator[VendorPlugin]:
     from app.plugins.vendors.bluecat.plugin import BluecatPlugin
     from app.plugins.vendors.cisco_ios.plugin import CiscoIosPlugin
     from app.plugins.vendors.cisco_nxos.plugin import CiscoNxosPlugin
+    from app.plugins.vendors.f5_bigip.plugin import F5BigipPlugin
     from app.plugins.vendors.fortios.plugin import FortiosPlugin
     from app.plugins.vendors.junos.plugin import JunosPlugin
     from app.plugins.vendors.panos.plugin import PanosPlugin
@@ -36,6 +37,7 @@ def iter_builtin_plugins() -> Iterator[VendorPlugin]:
     yield BluecatPlugin()
     yield CiscoIosPlugin()
     yield CiscoNxosPlugin()
+    yield F5BigipPlugin()
     yield FortiosPlugin()
     yield JunosPlugin()
     yield PanosPlugin()

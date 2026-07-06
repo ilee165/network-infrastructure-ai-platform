@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import ClassVar, Protocol, runtime_checkable
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretBytes
 
 from app.core.errors import PluginError
 from app.schemas.discovery import DeviceFacts
@@ -54,11 +54,14 @@ from app.schemas.normalized import (
     NormalizedNeighbor,
     NormalizedNetwork,
     NormalizedOspfNeighbor,
+    NormalizedPool,
     NormalizedRoute,
+    NormalizedVirtualServer,
 )
 
 __all__ = [
     "AclCapability",
+    "AdcServicesCapability",
     "BgpCapability",
     "Capability",
     "ChangeOutcome",
@@ -67,6 +70,10 @@ __all__ = [
     "ChangeResult",
     "ChangeVerb",
     "CommandTransport",
+    "ConfigArchive",
+    "ConfigArchiveBackupCapability",
+    "ConfigArchiveRef",
+    "ConfigArchiveRestoreCapability",
     "ConfigBackupCapability",
     "ConfigDeployCapability",
     "ConfigRestoreCapability",
@@ -122,6 +129,11 @@ class Capability(StrEnum):
     DDI_IPAM = "ddi_ipam"
     PACKET_CAPTURE = "packet_capture"
     HA_STATUS = "ha_status"
+    # ADC + full-fidelity binary config archive (ADR-0050). Additive: adding an
+    # enum member is zero-edit for existing plugins (ADR-0006 §6).
+    ADC_SERVICES = "adc_services"
+    CONFIG_BACKUP_ARCHIVE = "config_backup_archive"
+    CONFIG_RESTORE_ARCHIVE = "config_restore_archive"
 
 
 class TransportKind(StrEnum):
@@ -777,6 +789,145 @@ class HaStatusCapability(PluginCapability):
     @abstractmethod
     def get_ha_status(self) -> list[NormalizedHaStatus]:
         """Return high-availability peer state (vPC/HA) as normalized records."""
+
+
+# ---------------------------------------------------------------------------
+# ADC services + binary config archive capabilities (ADR-0050)
+# ---------------------------------------------------------------------------
+
+
+class AdcServicesCapability(PluginCapability):
+    """``Capability.ADC_SERVICES`` — virtual-server/pool/member (VIP) inventory (ADR-0050 §4.1).
+
+    The first ADC capability (F5 BIG-IP). Returns the normalized ADC models
+    :class:`~app.schemas.normalized.NormalizedVirtualServer` /
+    :class:`~app.schemas.normalized.NormalizedPool` (with nested
+    :class:`~app.schemas.normalized.NormalizedPoolMember`) — the primary input to
+    the W2 application-dependency derivation (ADR-0052), never dicts/raw
+    (ADR-0006 §3). Adding this typed capability is additive — no change to
+    existing plugins (ADR-0006 §6).
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.ADC_SERVICES})
+
+    @abstractmethod
+    def get_virtual_servers(self) -> list[NormalizedVirtualServer]:
+        """Return virtual servers (VIPs) as normalized records."""
+
+    @abstractmethod
+    def get_pools(self) -> list[NormalizedPool]:
+        """Return pools with nested members as normalized records."""
+
+
+class ConfigArchive(BaseModel):
+    """A full-fidelity binary config archive (UCS) as opaque secret material (ADR-0050 §7.1).
+
+    The restore artifact is total — it contains device credentials, password
+    hashes, SSL/TLS private keys, and device master-key material — so the bytes
+    are wrapped in :class:`~pydantic.SecretBytes`: masked in ``repr`` and
+    serialization so they cannot leak through a stray log, trace, task result, or
+    API response (ADR-0050 §7.3). ``content`` is the **passphrase-encrypted**
+    archive as downloaded; ``sha256`` is the digest of that ciphertext (safe to
+    log, used for integrity verification at restore). ``passphrase_ref`` is a
+    vault credential **reference** — never the passphrase itself. Vendor-neutral:
+    a future archive-shaped backup reuses the model unchanged.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    format: str = Field(min_length=1, description="Archive format discriminator (e.g. 'ucs').")
+    content: SecretBytes = Field(
+        description="Passphrase-encrypted archive bytes; masked in repr/serialization."
+    )
+    sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        description="SHA-256 hex digest of the passphrase-encrypted archive (safe to log).",
+    )
+    size_bytes: int = Field(ge=0, description="Size of the passphrase-encrypted archive in bytes.")
+    passphrase_ref: str = Field(
+        min_length=1,
+        description="Vault reference to the per-backup passphrase — never the passphrase itself.",
+    )
+
+
+@runtime_checkable
+class ConfigArchiveRef(Protocol):
+    """Read-only handle to a persisted config archive a restore replays (ADR-0050 §7.4).
+
+    Mirrors :class:`ConfigSnapshotRef`: the persisted archive row structurally
+    satisfies this protocol. The restore capability materializes the
+    passphrase-encrypted bytes (``content``) and the vault ``passphrase_ref``
+    from it; the passphrase itself is materialized in-process by the restore
+    path only, never carried on the handle (ADR-0050 §7.3).
+    """
+
+    @property
+    def archive_id(self) -> uuid.UUID:
+        """Persisted-archive id (log-safe identifier)."""
+        ...
+
+    @property
+    def device_id(self) -> uuid.UUID:
+        """Owning device id."""
+        ...
+
+    @property
+    def archive_format(self) -> str:
+        """Archive format discriminator (e.g. ``ucs``)."""
+        ...
+
+    @property
+    def sha256(self) -> str:
+        """SHA-256 of the passphrase-encrypted archive (integrity verify at restore)."""
+        ...
+
+    @property
+    def content(self) -> SecretBytes:
+        """The passphrase-encrypted archive bytes to upload (masked in repr)."""
+        ...
+
+    @property
+    def passphrase_ref(self) -> str:
+        """Vault reference to the per-backup passphrase — never the passphrase itself."""
+        ...
+
+
+class ConfigArchiveBackupCapability(PluginCapability):
+    """``Capability.CONFIG_BACKUP_ARCHIVE`` — full-fidelity binary config archive (ADR-0050 §7.1).
+
+    A read (not a CR — creating an archive mutates no device config, ADR-0050
+    §7.5). The archive is passphrase-encrypted on-box before download and is
+    opaque secret material end-to-end (ADR-0050 §7): only the JSON control-plane
+    exchanges are raw-recorded, never the binary body.
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.CONFIG_BACKUP_ARCHIVE})
+
+    @abstractmethod
+    def fetch_config_archive(self) -> ConfigArchive:
+        """Create, download, and return the device's config archive (secret-bearing)."""
+
+
+class ConfigArchiveRestoreCapability(PluginCapability):
+    """``Capability.CONFIG_RESTORE_ARCHIVE`` — CR-gated full-device archive restore (ADR-0050 §7.4).
+
+    The device-write path for archives. It **never self-authorizes**: it refuses
+    (typed :class:`~app.core.errors.PluginError`) unless the :class:`ChangePlan`
+    attests an ``executing``, four-eyes-approved CR — identical gating to
+    :class:`ConfigRestoreCapability`. Sequence: capture a fresh pre-change
+    baseline archive (the rollback artifact) -> restore the target -> verify-after
+    (reachability + identity + HA-health) -> on failure load the baseline and
+    verify; ``rollback_failed`` is surfaced, never reported as ``rolled_back``
+    (ADR-0021 never-silent contract). The :class:`ChangeResult` carries metadata
+    only (archive ids, sha256s, verify outcomes) — never contents (ADR-0050 §7.4).
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.CONFIG_RESTORE_ARCHIVE})
+
+    @abstractmethod
+    def restore_archive(self, archive: ConfigArchiveRef, *, plan: ChangePlan) -> ChangeResult:
+        """Restore the device from *archive* under the approved-CR *plan* (ADR-0021 contract)."""
 
 
 class VendorPlugin(ABC):

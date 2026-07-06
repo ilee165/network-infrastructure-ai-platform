@@ -24,6 +24,7 @@ from app.models.change_requests import (
 from app.models.config_mgmt import (
     EMBEDDING_DIM,
     CompliancePolicy,
+    ConfigArchive,
     ConfigBackupRun,
     ConfigSnapshot,
     ConfigSource,
@@ -63,6 +64,7 @@ __all__ = [
     "ChangeRequestKind",
     "ChangeRequestState",
     "CompliancePolicy",
+    "ConfigArchive",
     "ConfigBackupRun",
     "ConfigSnapshot",
     "ConfigSource",
