@@ -285,3 +285,24 @@ PROGRESS 2026-06-29".
 | **Q13 — Data retention** | (b) Per-class: pcaps 30 d + 50 GB cap; `raw_artifacts` 90 d; `reasoning_traces` 365 d; `config_snapshots` indefinite; `audit_log` never auto-purged (7-yr guidance); `discovery_runs` 180 d | §6 **log retention 90 d hot / 1 yr archived** (incl. the audit→SIEM export stream); §7 **audit retention 7 yr**; §8 pcap retention | **Re-confirmed (default holds)** |
 
 *Register of the working assumptions these defaults create: `docs/consultant/ASSUMPTIONS.md` (A1–A19).*
+
+### P4 kickoff — 2026-07-05
+
+The P4 phase (Vendor Wave 3 F5 BIG-IP + VMware, application-dependency
+topology, compliance & audit reporting suite) opened at W0. The four open items
+that materially shape this phase (`PRODUCTION.md` §12 rows: *Compliance
+regimes*, *Data retention*, *Telemetry (gNMI/NetFlow)*, *Application-tagging
+ownership*) were reviewed. **One item was partially converted by an owner
+decision (2026-07-05): the application-tagging write-path mechanism is DECIDED
+(direct write under RBAC + full audit; CR-gating declined — ADR-0052 §7,
+`P4-PLAN.md` §3 W0-T3); only its role floor remains open. The other three
+PROPOSED defaults are re-confirmed unchanged as the confirmed working defaults
+for P4** — no new numbers invented, no silent carry. Mirror marker:
+`PRODUCTION.md` §1 "P4 IN PROGRESS 2026-07-05".
+
+| Question | Default re-confirmed / decision recorded | Where it binds in P4 | Verdict |
+|---|---|---|---|
+| **Q7 — Compliance regimes** | (a) SOC 2 Type II-aligned controls, no formal certification claims | §7 regime mapping: **SOC 2 CC-series stays the PROPOSED default evidence structure** (ADR-0053 §8; W3-T6 mapping doc); regime tags are metadata only, so an ISO 27001/NIST answer re-tags and re-maps without redesigning reports or invalidating artifacts | **Re-confirmed (default holds)** |
+| **Q13 — Data retention** | (b) Per-class retention; `audit_log` never auto-purged (7-yr guidance) | §7 **audit retention 7 yr stays PROPOSED** and now also governs report-artifact retention (`report_runs`/`report_artifacts` `expires_at` default + scheduled purge — ADR-0053 §4; per-kind override via settings) | **Re-confirmed (default holds)** |
+| **Q10 — Streaming telemetry** | (b) Out of scope through M5; capability names reserved; telemetry engine needs its own ADR | §2.4: **NetFlow/gNMI flow-telemetry enrichment stays OUT of the application-dependency graph** until answered — the ADR-0052 derivation source set is **closed at four** (F5, VMware, DNS, manual); P4 does not smuggle it in | **Re-confirmed (stays out)** |
+| **Application-tagging ownership** (new item, raised at P4 planning; §12 row added at this kickoff) | Write-path mechanism **DECIDED by the owner (2026-07-05)**: manual tagging is a **direct write under RBAC (`engineer`+) with a full audit entry per mutation**; CR-gating considered and **declined** (tags never touch a device — ADR-0052 §7) | W2-T3 tagging API/UI; the mechanism is settled and not re-openable by a Consultant answer — the open remainder is the **role floor only** (`engineer` stays the PROPOSED floor, e.g. refinable to `operator`) | **Converted (mechanism); role floor stays PROPOSED** |
