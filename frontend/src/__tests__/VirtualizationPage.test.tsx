@@ -6,7 +6,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ComputeClusterListResponse,
@@ -220,11 +220,13 @@ describe("VirtualizationPage — virtual machines", () => {
     vi.stubGlobal("fetch", fetchRouted({ vms: templateVm }));
     renderPage();
 
-    await screen.findByText("web-vm-01");
-    expect(screen.getByText("powered_off")).toBeInTheDocument();
-    // "Yes" under the Template column, independent of power state.
-    const cells = screen.getAllByText("Yes");
-    expect(cells.length).toBeGreaterThan(0);
+    const nameCell = await screen.findByText("web-vm-01");
+    // Scope to THIS VM's row so the "Yes" match confirms the Template column
+    // reflects is_template, not some unrelated "Yes" elsewhere in the DOM.
+    const row = nameCell.closest("tr");
+    expect(row).not.toBeNull();
+    expect(within(row!).getByText("powered_off")).toBeInTheDocument();
+    expect(within(row!).getByText("Yes")).toBeInTheDocument();
   });
 });
 
@@ -260,8 +262,13 @@ describe("VirtualizationPage — hosts", () => {
     vi.stubGlobal("fetch", fetchRouted({ hosts: drained }));
     renderPage();
 
-    await screen.findByText("esxi-01.corp.example");
-    expect(screen.getByText("connected")).toBeInTheDocument();
+    const nameCell = await screen.findByText("esxi-01.corp.example");
+    // Scope to the host's row so both columns are asserted independently:
+    // connection_state renders "connected" AND in_maintenance_mode renders "Yes".
+    const row = nameCell.closest("tr");
+    expect(row).not.toBeNull();
+    expect(within(row!).getByText("connected")).toBeInTheDocument();
+    expect(within(row!).getByText("Yes")).toBeInTheDocument();
   });
 });
 
@@ -297,5 +304,49 @@ describe("VirtualizationPage — port groups", () => {
     renderPage();
 
     expect(await screen.findByTestId("port-groups-empty-state")).toBeInTheDocument();
+  });
+});
+
+describe("VirtualizationPage — pagination", () => {
+  it("surfaces the true VM total and pages beyond the first 100 (no silent truncation)", async () => {
+    const page0: VirtualMachineListResponse = { ...VMS, total: 150, offset: 0 };
+    const page1: VirtualMachineListResponse = {
+      ...VMS,
+      items: [{ ...VMS.items[0]!, id: "99999999-9999-9999-9999-999999999999", name: "vm-page2" }],
+      total: 150,
+      offset: 100,
+    };
+    const fetchByOffset = vi.fn((url: string): Promise<Response> => {
+      const path = String(url);
+      const offset = new URL(path, "http://t").searchParams.get("offset") ?? "0";
+      let body: unknown = EMPTY_HOSTS;
+      if (path.includes("/virtualization/clusters")) body = EMPTY_CLUSTERS;
+      else if (path.includes("/virtualization/port-groups")) body = EMPTY_PORT_GROUPS;
+      else if (path.includes("/virtualization/hosts")) body = EMPTY_HOSTS;
+      else body = offset === "100" ? page1 : page0;
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchByOffset);
+    renderPage();
+
+    expect(await screen.findByTestId("vms-pagination-range")).toHaveTextContent(
+      "Showing 1–100 of 150",
+    );
+    fireEvent.click(screen.getByTestId("vms-pagination-next"));
+    expect(await screen.findByText("vm-page2")).toBeInTheDocument();
+    expect(screen.getByTestId("vms-pagination-range")).toHaveTextContent("Showing 101–150 of 150");
+  });
+
+  it("renders no pager when the whole result fits on one page", async () => {
+    vi.stubGlobal("fetch", fetchRouted({ vms: VMS }));
+    renderPage();
+
+    await screen.findByText("web-vm-01");
+    expect(screen.queryByTestId("vms-pagination")).not.toBeInTheDocument();
   });
 });

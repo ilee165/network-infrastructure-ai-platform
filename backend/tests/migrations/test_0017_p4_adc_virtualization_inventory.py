@@ -84,13 +84,28 @@ _EXPECTED_TABLES_AND_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _table_ddl_segment(sql: str, table: str) -> str:
+    """The ``CREATE TABLE {table}`` statement's own DDL span.
+
+    Column tokens repeat across tables (e.g. ``PORT`` in VIRT_PORT_GROUPS,
+    ``AVAILABILITY`` in ADC_POOLS), so a whole-SQL ``column in sql`` check would
+    pass even if the column were dropped from *this* table. Narrow to the segment
+    running from this table's ``CREATE TABLE`` to the next one (or end of SQL).
+    """
+    marker = f"CREATE TABLE {table}"
+    start = sql.index(marker)
+    nxt = sql.find("CREATE TABLE ", start + len(marker))
+    return sql[start:] if nxt == -1 else sql[start:nxt]
+
+
 @pytest.mark.usefixtures("_postgres_dialect_env")
 def test_offline_sql_creates_all_six_inventory_tables() -> None:
     sql = _offline_sql_0017("upgrade").upper()
     for table, columns in _EXPECTED_TABLES_AND_COLUMNS.items():
         assert f"CREATE TABLE {table}" in sql, f"missing CREATE TABLE {table}"
+        segment = _table_ddl_segment(sql, table)
         for column in columns:
-            assert column in sql, f"missing column {column} on {table}"
+            assert column in segment, f"missing column {column} on {table}"
     # Every table carries the shared provenance triple + raw-artifact link.
     for provenance_column in ("DEVICE_ID", "RAW_ARTIFACT_ID", "COLLECTED_AT", "SOURCE_VENDOR"):
         assert provenance_column in sql, f"missing provenance column {provenance_column}"

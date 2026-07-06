@@ -10,6 +10,7 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import {
   listComputeClusters,
   listHypervisorHosts,
@@ -24,6 +25,7 @@ import {
 } from "../api/virtualization";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
+import { Pagination } from "../components/Pagination";
 import { SkeletonRows } from "../components/Skeleton";
 import { StatusPill, type StatusPillVariant } from "../components/StatusPill";
 
@@ -31,6 +33,8 @@ const VM_COLS = 6;
 const HOST_COLS = 5;
 const CLUSTER_COLS = 4;
 const PORT_GROUP_COLS = 4;
+/** Rows fetched per page (matches the server-side list cap). */
+const PAGE_SIZE = 100;
 
 const POWER_STATE_VARIANT: Record<VmPowerState, StatusPillVariant> = {
   powered_on: "ok",
@@ -99,9 +103,10 @@ function VirtualMachineTable({ items }: { items: VirtualMachineRead[] }) {
 }
 
 function VirtualMachinesSection() {
+  const [offset, setOffset] = useState(0);
   const { data, error, isPending } = useQuery({
-    queryKey: ["virtualization-vms"],
-    queryFn: () => listVirtualMachines({ limit: 100 }),
+    queryKey: ["virtualization-vms", offset],
+    queryFn: () => listVirtualMachines({ limit: PAGE_SIZE, offset }),
   });
   const items = data?.items ?? [];
 
@@ -128,6 +133,15 @@ function VirtualMachinesSection() {
         />
       ) : null}
       {items.length > 0 ? <VirtualMachineTable items={items} /> : null}
+      {data ? (
+        <Pagination
+          offset={offset}
+          limit={PAGE_SIZE}
+          total={data.total}
+          onChange={setOffset}
+          label="vms"
+        />
+      ) : null}
     </section>
   );
 }
@@ -170,9 +184,10 @@ function HypervisorHostTable({ items }: { items: HypervisorHostRead[] }) {
 }
 
 function HypervisorHostsSection() {
+  const [offset, setOffset] = useState(0);
   const { data, error, isPending } = useQuery({
-    queryKey: ["virtualization-hosts"],
-    queryFn: () => listHypervisorHosts({ limit: 100 }),
+    queryKey: ["virtualization-hosts", offset],
+    queryFn: () => listHypervisorHosts({ limit: PAGE_SIZE, offset }),
   });
   const items = data?.items ?? [];
 
@@ -199,6 +214,15 @@ function HypervisorHostsSection() {
         />
       ) : null}
       {items.length > 0 ? <HypervisorHostTable items={items} /> : null}
+      {data ? (
+        <Pagination
+          offset={offset}
+          limit={PAGE_SIZE}
+          total={data.total}
+          onChange={setOffset}
+          label="hosts"
+        />
+      ) : null}
     </section>
   );
 }
@@ -237,9 +261,10 @@ function ComputeClusterTable({ items }: { items: ComputeClusterRead[] }) {
 }
 
 function ComputeClustersSection() {
+  const [offset, setOffset] = useState(0);
   const { data, error, isPending } = useQuery({
-    queryKey: ["virtualization-clusters"],
-    queryFn: () => listComputeClusters({ limit: 100 }),
+    queryKey: ["virtualization-clusters", offset],
+    queryFn: () => listComputeClusters({ limit: PAGE_SIZE, offset }),
   });
   const items = data?.items ?? [];
 
@@ -266,6 +291,15 @@ function ComputeClustersSection() {
         />
       ) : null}
       {items.length > 0 ? <ComputeClusterTable items={items} /> : null}
+      {data ? (
+        <Pagination
+          offset={offset}
+          limit={PAGE_SIZE}
+          total={data.total}
+          onChange={setOffset}
+          label="clusters"
+        />
+      ) : null}
     </section>
   );
 }
@@ -300,9 +334,10 @@ function PortGroupTable({ items }: { items: PortGroupRead[] }) {
 }
 
 function PortGroupsSection() {
+  const [offset, setOffset] = useState(0);
   const { data, error, isPending } = useQuery({
-    queryKey: ["virtualization-port-groups"],
-    queryFn: () => listPortGroups({ limit: 100 }),
+    queryKey: ["virtualization-port-groups", offset],
+    queryFn: () => listPortGroups({ limit: PAGE_SIZE, offset }),
   });
   const items = data?.items ?? [];
 
@@ -329,6 +364,15 @@ function PortGroupsSection() {
         />
       ) : null}
       {items.length > 0 ? <PortGroupTable items={items} /> : null}
+      {data ? (
+        <Pagination
+          offset={offset}
+          limit={PAGE_SIZE}
+          total={data.total}
+          onChange={setOffset}
+          label="port-groups"
+        />
+      ) : null}
     </section>
   );
 }

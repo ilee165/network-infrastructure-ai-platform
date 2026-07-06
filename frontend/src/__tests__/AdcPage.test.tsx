@@ -195,3 +195,58 @@ describe("AdcPage — pools", () => {
     expect(detail).toHaveTextContent("No members in this pool.");
   });
 });
+
+describe("AdcPage — pagination", () => {
+  function fetchByOffset(page0: unknown, page1: unknown) {
+    return vi.fn((url: string): Promise<Response> => {
+      const offset = new URL(String(url), "http://t").searchParams.get("offset") ?? "0";
+      const body = String(url).includes("/adc/pools")
+        ? EMPTY_POOLS
+        : offset === "100"
+          ? page1
+          : page0;
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+  }
+
+  it("surfaces the true total and pages beyond the first 100 (no silent truncation)", async () => {
+    const page0: VirtualServerListResponse = { ...VIRTUAL_SERVERS, total: 150, offset: 0 };
+    const page1: VirtualServerListResponse = {
+      ...VIRTUAL_SERVERS,
+      items: [
+        {
+          ...VIRTUAL_SERVERS.items[0]!,
+          id: "99999999-9999-9999-9999-999999999999",
+          name: "/Common/vs_page2",
+        },
+      ],
+      total: 150,
+      offset: 100,
+    };
+    vi.stubGlobal("fetch", fetchByOffset(page0, page1));
+    renderPage();
+
+    // The pager shows the real total — items beyond the first page are reachable.
+    expect(await screen.findByTestId("virtual-servers-pagination-range")).toHaveTextContent(
+      "Showing 1–100 of 150",
+    );
+    fireEvent.click(screen.getByTestId("virtual-servers-pagination-next"));
+    expect(await screen.findByText("/Common/vs_page2")).toBeInTheDocument();
+    expect(screen.getByTestId("virtual-servers-pagination-range")).toHaveTextContent(
+      "Showing 101–150 of 150",
+    );
+  });
+
+  it("renders no pager when the whole result fits on one page", async () => {
+    vi.stubGlobal("fetch", fetchRouted(VIRTUAL_SERVERS, EMPTY_POOLS));
+    renderPage();
+
+    await screen.findByText("/Common/vs_web");
+    expect(screen.queryByTestId("virtual-servers-pagination")).not.toBeInTheDocument();
+  });
+});

@@ -467,3 +467,144 @@ class TestPortGroupDetail:
             f"/api/v1/virtualization/port-groups/{uuid.uuid4()}", headers=auth_headers("viewer")
         )
         assert response.status_code == 404
+
+
+class TestVirtualizationFilters:
+    """Filter-branch + pagination-bound coverage for all four list endpoints.
+
+    The unfiltered success paths are covered above; these exercise each
+    ``query.where(...)`` branch so a regression that filters on the wrong column
+    or drops a filter fails a test, plus the ``limit``/``offset`` bounds.
+    """
+
+    async def test_vms_filter_by_device_power_and_cluster(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        session: AsyncSession,
+    ) -> None:
+        device_a = await _make_device(session)
+        device_b = await _make_device(session, hostname="vc-02", mgmt_ip="192.0.2.61")
+        session.add(
+            _vm(
+                device_a.id,
+                name="vm-on",
+                moref="vm-1",
+                power_state="powered_on",
+                cluster_name="cluster-a",
+            )
+        )
+        session.add(
+            _vm(
+                device_a.id,
+                name="vm-off",
+                moref="vm-2",
+                power_state="powered_off",
+                cluster_name="cluster-b",
+            )
+        )
+        session.add(_vm(device_b.id, name="vm-other", moref="vm-3"))
+        await session.flush()
+
+        base = "/api/v1/virtualization/vms"
+        by_device = await client.get(
+            base, params={"device_id": str(device_a.id)}, headers=auth_headers("viewer")
+        )
+        assert by_device.json()["total"] == 2
+        by_power = await client.get(
+            base, params={"power_state": "powered_off"}, headers=auth_headers("viewer")
+        )
+        assert [i["name"] for i in by_power.json()["items"]] == ["vm-off"]
+        by_cluster = await client.get(
+            base, params={"cluster_name": "cluster-b"}, headers=auth_headers("viewer")
+        )
+        assert [i["name"] for i in by_cluster.json()["items"]] == ["vm-off"]
+
+    async def test_hosts_filter_by_connection_and_cluster(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        session: AsyncSession,
+    ) -> None:
+        device = await _make_device(session)
+        session.add(
+            _host(
+                device.id,
+                name="h-up",
+                moref="host-1",
+                connection_state="connected",
+                cluster_name="c1",
+            )
+        )
+        session.add(
+            _host(
+                device.id,
+                name="h-down",
+                moref="host-2",
+                connection_state="disconnected",
+                cluster_name="c2",
+            )
+        )
+        await session.flush()
+
+        base = "/api/v1/virtualization/hosts"
+        by_conn = await client.get(
+            base, params={"connection_state": "disconnected"}, headers=auth_headers("viewer")
+        )
+        assert [i["name"] for i in by_conn.json()["items"]] == ["h-down"]
+        by_cluster = await client.get(
+            base, params={"cluster_name": "c1"}, headers=auth_headers("viewer")
+        )
+        assert [i["name"] for i in by_cluster.json()["items"]] == ["h-up"]
+
+    async def test_clusters_filter_by_datacenter(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        session: AsyncSession,
+    ) -> None:
+        device = await _make_device(session)
+        session.add(_cluster(device.id, name="cl-east", moref="domain-1", datacenter="dc-east"))
+        session.add(_cluster(device.id, name="cl-west", moref="domain-2", datacenter="dc-west"))
+        await session.flush()
+
+        response = await client.get(
+            "/api/v1/virtualization/clusters",
+            params={"datacenter": "dc-west"},
+            headers=auth_headers("viewer"),
+        )
+        assert [i["name"] for i in response.json()["items"]] == ["cl-west"]
+
+    async def test_port_groups_filter_by_switch_type(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        session: AsyncSession,
+    ) -> None:
+        device = await _make_device(session)
+        session.add(
+            _port_group(device.id, name="pg-dvs", switch_type="distributed", moref="dvpg-1")
+        )
+        session.add(
+            _port_group(device.id, name="pg-std", switch_type="standard", moref="", vlan_id=0)
+        )
+        await session.flush()
+
+        response = await client.get(
+            "/api/v1/virtualization/port-groups",
+            params={"switch_type": "standard"},
+            headers=auth_headers("viewer"),
+        )
+        assert [i["name"] for i in response.json()["items"]] == ["pg-std"]
+
+    async def test_rejects_out_of_range_pagination(
+        self, client: httpx.AsyncClient, auth_headers: Callable[[str], dict[str, str]]
+    ) -> None:
+        too_small = await client.get(
+            "/api/v1/virtualization/vms", params={"limit": 0}, headers=auth_headers("viewer")
+        )
+        assert too_small.status_code == 422
+        negative_offset = await client.get(
+            "/api/v1/virtualization/vms", params={"offset": -1}, headers=auth_headers("viewer")
+        )
+        assert negative_offset.status_code == 422

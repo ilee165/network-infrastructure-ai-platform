@@ -103,6 +103,66 @@ class TestVirtualServerList:
         response = await client.get("/api/v1/adc/virtual-servers")
         assert response.status_code == 401
 
+    async def test_inactive_authenticated_user_is_rejected(
+        self, client: httpx.AsyncClient, auth_headers: Callable[[str], dict[str, str]]
+    ) -> None:
+        """An authenticated-but-inactive user is rejected — a valid token is not
+        sufficient (viewer is the lowest rank, so this is the meaningful
+        authenticated-failure case for a viewer floor)."""
+        response = await client.get("/api/v1/adc/virtual-servers", headers=auth_headers("inactive"))
+        assert response.status_code == 401
+
+    async def test_filters_by_device_id(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        session: AsyncSession,
+    ) -> None:
+        device_a = await _make_device(session)
+        device_b = await _make_device(session, hostname="f5-lb-02", mgmt_ip="192.0.2.51")
+        session.add(_virtual_server(device_a.id, name="/Common/vs_a"))
+        session.add(_virtual_server(device_b.id, name="/Common/vs_b"))
+        await session.flush()
+
+        response = await client.get(
+            "/api/v1/adc/virtual-servers",
+            params={"device_id": str(device_a.id)},
+            headers=auth_headers("viewer"),
+        )
+        body = response.json()
+        assert body["total"] == 1
+        assert [item["name"] for item in body["items"]] == ["/Common/vs_a"]
+
+    async def test_filters_by_availability(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        session: AsyncSession,
+    ) -> None:
+        device = await _make_device(session)
+        session.add(_virtual_server(device.id, name="/Common/vs_up", availability="available"))
+        session.add(_virtual_server(device.id, name="/Common/vs_down", availability="offline"))
+        await session.flush()
+
+        response = await client.get(
+            "/api/v1/adc/virtual-servers",
+            params={"availability": "offline"},
+            headers=auth_headers("viewer"),
+        )
+        body = response.json()
+        assert body["total"] == 1
+        assert [item["name"] for item in body["items"]] == ["/Common/vs_down"]
+
+    async def test_rejects_out_of_range_limit(
+        self, client: httpx.AsyncClient, auth_headers: Callable[[str], dict[str, str]]
+    ) -> None:
+        response = await client.get(
+            "/api/v1/adc/virtual-servers",
+            params={"limit": 0},
+            headers=auth_headers("viewer"),
+        )
+        assert response.status_code == 422
+
     async def test_empty_inventory_renders_as_empty_list_not_error(
         self, client: httpx.AsyncClient, auth_headers: Callable[[str], dict[str, str]]
     ) -> None:
@@ -214,6 +274,34 @@ class TestPoolList:
     async def test_below_viewer_is_401(self, client: httpx.AsyncClient) -> None:
         response = await client.get("/api/v1/adc/pools")
         assert response.status_code == 401
+
+    async def test_filters_by_device_id_and_availability(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        session: AsyncSession,
+    ) -> None:
+        device_a = await _make_device(session)
+        device_b = await _make_device(session, hostname="f5-lb-02", mgmt_ip="192.0.2.51")
+        session.add(_pool(device_a.id, name="/Common/pool_a", availability="available"))
+        session.add(_pool(device_a.id, name="/Common/pool_a_down", availability="offline"))
+        session.add(_pool(device_b.id, name="/Common/pool_b"))
+        await session.flush()
+
+        by_device = await client.get(
+            "/api/v1/adc/pools",
+            params={"device_id": str(device_a.id)},
+            headers=auth_headers("viewer"),
+        )
+        assert by_device.json()["total"] == 2
+
+        by_avail = await client.get(
+            "/api/v1/adc/pools",
+            params={"device_id": str(device_a.id), "availability": "offline"},
+            headers=auth_headers("viewer"),
+        )
+        body = by_avail.json()
+        assert [item["name"] for item in body["items"]] == ["/Common/pool_a_down"]
 
 
 class TestPoolDetail:

@@ -23,6 +23,7 @@ import {
 } from "../api/adc";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
+import { Pagination } from "../components/Pagination";
 import { SkeletonRows } from "../components/Skeleton";
 import { StatusPill, type StatusPillVariant } from "../components/StatusPill";
 
@@ -30,6 +31,8 @@ import { StatusPill, type StatusPillVariant } from "../components/StatusPill";
 const VS_COLS = 6;
 /** Number of columns in the pools table (for the loading skeleton). */
 const POOL_COLS = 4;
+/** Rows fetched per page (matches the server-side list cap). */
+const PAGE_SIZE = 100;
 
 /** Page-level mapping from an ADC availability state to a StatusPill tone. */
 const AVAILABILITY_VARIANT: Record<AdcAvailability, StatusPillVariant> = {
@@ -84,9 +87,10 @@ function VirtualServerTable({ items }: { items: VirtualServerRead[] }) {
 }
 
 function VirtualServersSection() {
+  const [offset, setOffset] = useState(0);
   const { data, error, isPending } = useQuery({
-    queryKey: ["adc-virtual-servers"],
-    queryFn: () => listVirtualServers({ limit: 100 }),
+    queryKey: ["adc-virtual-servers", offset],
+    queryFn: () => listVirtualServers({ limit: PAGE_SIZE, offset }),
   });
 
   const items = data?.items ?? [];
@@ -118,6 +122,15 @@ function VirtualServersSection() {
         </div>
       ) : null}
       {items.length > 0 ? <VirtualServerTable items={items} /> : null}
+      {data ? (
+        <Pagination
+          offset={offset}
+          limit={PAGE_SIZE}
+          total={data.total}
+          onChange={setOffset}
+          label="virtual-servers"
+        />
+      ) : null}
     </section>
   );
 }
@@ -238,9 +251,10 @@ function PoolTable({ pools }: { pools: PoolRead[] }) {
 }
 
 function PoolsSection() {
+  const [offset, setOffset] = useState(0);
   const { data, error, isPending } = useQuery({
-    queryKey: ["adc-pools"],
-    queryFn: () => listPools({ limit: 100 }),
+    queryKey: ["adc-pools", offset],
+    queryFn: () => listPools({ limit: PAGE_SIZE, offset }),
   });
 
   const pools = data?.items ?? [];
@@ -272,6 +286,15 @@ function PoolsSection() {
         </div>
       ) : null}
       {pools.length > 0 ? <PoolTable pools={pools} /> : null}
+      {data ? (
+        <Pagination
+          offset={offset}
+          limit={PAGE_SIZE}
+          total={data.total}
+          onChange={setOffset}
+          label="pools"
+        />
+      ) : null}
     </section>
   );
 }
