@@ -45,6 +45,7 @@ __all__ = [
     "FirewallAction",
     "HaPeerRole",
     "HaPeerLinkState",
+    "HostConnectionState",
     "InterfaceAdminStatus",
     "InterfaceDuplex",
     "InterfaceOperStatus",
@@ -54,27 +55,35 @@ __all__ = [
     "NormalizedAclEntry",
     "NormalizedArpEntry",
     "NormalizedBgpPeer",
+    "NormalizedComputeCluster",
     "NormalizedDhcpLease",
     "NormalizedDhcpRange",
     "NormalizedDiscoveredObject",
     "NormalizedDnsRecord",
     "NormalizedFirewallRule",
     "NormalizedHaStatus",
+    "NormalizedHypervisorHost",
     "NormalizedInterface",
     "NormalizedNatRule",
     "NormalizedNetwork",
     "NormalizedNeighbor",
     "NormalizedOspfNeighbor",
+    "NormalizedPhysicalNic",
     "NormalizedPool",
     "NormalizedPoolMember",
+    "NormalizedPortGroup",
     "NormalizedRecord",
     "NormalizedRoute",
+    "NormalizedVirtualMachine",
+    "NormalizedVirtualNic",
     "NormalizedVirtualServer",
     "NormalizedVlan",
     "OspfNeighborState",
     "RouteProtocol",
+    "VirtualSwitchType",
     "VlanId",
     "VlanStatus",
+    "VmPowerState",
     "normalize_mac",
 ]
 
@@ -319,6 +328,48 @@ class AdcAdminState(StrEnum):
     ENABLED = "enabled"
     DISABLED = "disabled"
     FORCED_OFFLINE = "forced_offline"
+
+
+class VmPowerState(StrEnum):
+    """Runtime power state of a virtual machine (ADR-0051 §5.4).
+
+    vSphere's three runtime power states map 1:1; ``UNKNOWN`` is the safe
+    default for unreachable/inconsistent state (the
+    :class:`DiscoveredObjectKind.OTHER` pattern). ``power_state`` is a separate
+    dimension from ``is_template`` on purpose — a template is always powered
+    off, but a powered-off VM is usually not a template.
+    """
+
+    POWERED_ON = "powered_on"
+    POWERED_OFF = "powered_off"
+    SUSPENDED = "suspended"
+    UNKNOWN = "unknown"
+
+
+class HostConnectionState(StrEnum):
+    """vCenter-reported connection state of a hypervisor host (ADR-0051 §5.4).
+
+    Kept separate from ``in_maintenance_mode`` (a drained host is not a failed
+    host): the W2 derivation needs each distinction to decide whether an edge
+    represents a live workload path.
+    """
+
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+    NOT_RESPONDING = "not_responding"
+    UNKNOWN = "unknown"
+
+
+class VirtualSwitchType(StrEnum):
+    """Kind of virtual switch a port group belongs to (ADR-0051 §5.4).
+
+    ``standard`` port groups exist per host (a name may repeat across hosts);
+    ``distributed`` port groups are vCenter-wide and keyed by a moref. The type
+    disambiguates the vNIC → port-group join scope (§5.5).
+    """
+
+    STANDARD = "standard"
+    DISTRIBUTED = "distributed"
 
 
 # ---------------------------------------------------------------------------
@@ -705,3 +756,184 @@ class NormalizedPool(NormalizedRecord):
         default=(), description="Nested members (§4.5); () = empty pool."
     )
     description: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Virtualization inventory (ADR-0051): VM / host / cluster / port-group models.
+# vNICs / pNICs are nested frozen sub-models (not NormalizedRecords) — they
+# inherit their parent record's provenance and are intrinsically hierarchical
+# (the NormalizedPoolMember precedent, ADR-0050 §4.2/§4.5).
+# ---------------------------------------------------------------------------
+
+
+class NormalizedVirtualNic(BaseModel):
+    """A VM virtual NIC nested inside a :class:`NormalizedVirtualMachine` (ADR-0051 §5.3).
+
+    ``mac_address`` is the physical-L2 join key (switch MAC/forwarding tables).
+    ``port_group_name`` joins :attr:`NormalizedPortGroup.name`; distributed
+    portgroup keys are resolved to names at collection time so consumers join
+    on one field. ``switch_type`` disambiguates that join's scope (§5.5): a
+    ``standard`` name scopes to the VM's host, a ``distributed`` name is
+    vCenter-wide. No field carries a secret.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    label: str = Field(min_length=1, description="Device label (e.g. 'Network adapter 1').")
+    mac_address: MacAddress = Field(description="House-canonical MAC — the physical-L2 join key.")
+    port_group_name: str | None = Field(
+        default=None,
+        description="Join to NormalizedPortGroup.name; None when the backing is unresolvable.",
+    )
+    switch_type: VirtualSwitchType | None = Field(
+        default=None, description="Disambiguates the port-group join scope (§5.5)."
+    )
+    connected: bool = Field(description="vNIC link state.")
+    ip_addresses: tuple[IPv4Address | IPv6Address, ...] = Field(
+        default=(), description="Per-NIC Tools-reported IPs; () when unreported."
+    )
+
+
+class NormalizedPhysicalNic(BaseModel):
+    """A host physical NIC nested inside a :class:`NormalizedHypervisorHost` (ADR-0051 §5.3).
+
+    ``name`` (e.g. ``vmnic0``) is the join target of
+    :attr:`NormalizedPortGroup.uplink_pnic_names`; ``mac_address`` is the MAC a
+    physical switch sees. No field carries a secret.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, description="Physical adapter name (e.g. 'vmnic0').")
+    mac_address: MacAddress = Field(description="House-canonical MAC — the physical-L2 join key.")
+    link_speed_mbps: int | None = Field(
+        default=None, ge=0, description="Link speed in Mbps; None = link down or unreported."
+    )
+
+
+class NormalizedVirtualMachine(NormalizedRecord):
+    """A virtual machine with placement + vNICs (ADR-0051 §5.3).
+
+    Identity is ``moref`` (names collide across folders); the derivation's VM
+    node key is ``(device_id, moref)``. ``host_name`` / ``cluster_name`` are the
+    placement join keys (scoped by ``datacenter``, §5.5). ``guest_hostname`` /
+    ``guest_ip_addresses`` bridge to the DNS-dependency layer and to F5 pool
+    members (the VIP→pool→member→VM chain). No field carries a secret — guest
+    credentials and certificate material are never collected (§5.3).
+    """
+
+    name: str = Field(min_length=1, description="VM display name — not unique per vCenter.")
+    moref: str = Field(min_length=1, description="vCenter managed-object id (e.g. 'vm-1042').")
+    instance_uuid: str | None = Field(
+        default=None, description="vCenter instanceUuid — survives vMotion; cross-collection id."
+    )
+    is_template: bool = Field(description="Templates are collected, not dropped (§5.3).")
+    power_state: VmPowerState
+    guest_hostname: str | None = Field(
+        default=None, description="VMware-Tools hostname; None when Tools absent."
+    )
+    guest_ip_addresses: tuple[IPv4Address | IPv6Address, ...] = Field(
+        default=(),
+        description="Deduplicated, sorted union of Tools-reported IPs; () when Tools absent.",
+    )
+    host_name: str | None = Field(
+        default=None,
+        description="Placement: host the VM runs on (joins NormalizedHypervisorHost.name); "
+        "None for unplaced/orphaned VMs.",
+    )
+    cluster_name: str | None = Field(
+        default=None,
+        description="Placement: cluster of that host; None for standalone hosts. Denormalized "
+        "onto the VM so derivation survives a partial collection (§5.3).",
+    )
+    datacenter: str | None = Field(
+        default=None, description="Disambiguation scope for name joins (§5.5)."
+    )
+    nics: tuple[NormalizedVirtualNic, ...] = Field(
+        default=(), description="Nested vNICs; () = none."
+    )
+    description: str | None = Field(default=None, description="vSphere annotation, free text.")
+
+
+class NormalizedHypervisorHost(NormalizedRecord):
+    """A hypervisor host with cluster membership + pNICs (ADR-0051 §5.3).
+
+    Keyed on ``(device_id, moref)`` with ``name`` the human join field.
+    ``name`` is the join target of :attr:`NormalizedVirtualMachine.host_name`
+    and the LLDP/CDP system-name bridge to physical-switch neighbor tables. No
+    field carries a secret (host root credentials are never collected).
+    """
+
+    name: str = Field(min_length=1, description="Host name as inventoried (typically FQDN).")
+    moref: str = Field(min_length=1, description="e.g. 'host-123'.")
+    cluster_name: str | None = Field(default=None, description="None = standalone host.")
+    datacenter: str | None = None
+    vendor: str | None = Field(default=None, description="Hardware vendor.")
+    model: str | None = Field(default=None, description="Hardware model.")
+    hypervisor_version: str | None = Field(
+        default=None, description="e.g. 'VMware ESXi 8.0.2 build-…'."
+    )
+    connection_state: HostConnectionState
+    in_maintenance_mode: bool = Field(description="Drained host ≠ failed host (impact analysis).")
+    management_ip: IPv4Address | IPv6Address | None = Field(
+        default=None, description="Management vmkernel address."
+    )
+    pnics: tuple[NormalizedPhysicalNic, ...] = Field(
+        default=(), description="Nested physical adapters; () = none."
+    )
+
+
+class NormalizedComputeCluster(NormalizedRecord):
+    """A compute cluster (ADR-0051 §5.3).
+
+    Keyed on ``(device_id, moref)``; ``name`` is the join target of the
+    ``cluster_name`` fields (unique per datacenter, not per vCenter, §5.5). No
+    field carries a secret.
+    """
+
+    name: str = Field(min_length=1, description="Cluster name — join target of cluster_name.")
+    moref: str = Field(min_length=1, description="e.g. 'domain-c8'.")
+    datacenter: str | None = Field(
+        default=None, description="Cluster names are unique per datacenter (§5.5)."
+    )
+    drs_enabled: bool | None = Field(
+        default=None, description="Placement volatility signal — DRS moves VMs between hosts."
+    )
+    ha_enabled: bool | None = Field(
+        default=None, description="HA cluster ⇒ VM restarts elsewhere on host failure."
+    )
+
+
+class NormalizedPortGroup(NormalizedRecord):
+    """A standard or distributed port group (ADR-0051 §5.3).
+
+    ``name`` is the join target of :attr:`NormalizedVirtualNic.port_group_name`.
+    Standard port groups exist per host (``host_name`` set; same name may repeat
+    across hosts, §5.5) and have no ``moref``; distributed port groups are
+    vCenter-wide (``host_name`` None) and keyed on ``(device_id, moref)``.
+    ``uplink_pnic_names`` completes the vNIC → port group → pNIC →
+    physical-switchport chain. No field carries a secret.
+    """
+
+    name: str = Field(min_length=1, description="Join target of a vNIC's port_group_name.")
+    switch_name: str = Field(min_length=1, description="Parent vSwitch / distributed vSwitch name.")
+    switch_type: VirtualSwitchType
+    datacenter: str | None = None
+    host_name: str | None = Field(
+        default=None,
+        description="Scope: standard port groups exist per host; None for distributed (§5.5).",
+    )
+    vlan_id: int | None = Field(
+        default=None,
+        ge=0,
+        le=4094,
+        description="Access VLAN; None for trunk/private-VLAN port groups (richness in raw).",
+    )
+    moref: str | None = Field(
+        default=None,
+        description="Distributed portgroup key (e.g. 'dvportgroup-123'); None for standard.",
+    )
+    uplink_pnic_names: tuple[str, ...] = Field(
+        default=(),
+        description="Effective uplink pNICs (per-portgroup teaming override respected); () = none.",
+    )

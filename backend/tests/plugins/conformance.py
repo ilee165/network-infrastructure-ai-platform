@@ -80,25 +80,30 @@ from app.plugins.base import (
     PluginCapability,
     RoutesCapability,
     VendorPlugin,
+    VirtualizationInventoryCapability,
 )
 from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     NeighborProtocol,
     NormalizedAclEntry,
     NormalizedBgpPeer,
+    NormalizedComputeCluster,
     NormalizedDhcpLease,
     NormalizedDiscoveredObject,
     NormalizedDnsRecord,
     NormalizedFirewallRule,
     NormalizedHaStatus,
+    NormalizedHypervisorHost,
     NormalizedInterface,
     NormalizedNatRule,
     NormalizedNeighbor,
     NormalizedNetwork,
     NormalizedOspfNeighbor,
     NormalizedPool,
+    NormalizedPortGroup,
     NormalizedRecord,
     NormalizedRoute,
+    NormalizedVirtualMachine,
     NormalizedVirtualServer,
 )
 
@@ -234,6 +239,22 @@ _INTERFACE_SPECS: dict[Capability, _InterfaceSpec] = {
     ),
     Capability.CONFIG_RESTORE_ARCHIVE: _InterfaceSpec(
         ConfigArchiveRestoreCapability, "restore_archive", None, change_write=True
+    ),
+    # Virtualization inventory (ADR-0051 §5.8). Four normalized-record methods:
+    # virtual machines (primary, must be non-empty) + hosts/clusters/port groups
+    # (extras, may be empty). First and only implemented by vmware; validated by
+    # the recorded property-set fixtures + the W2 derivation as the second
+    # consumer (ADR-0051 §5.7). Without this entry the fixtures case is silently
+    # skipped (the three-file lesson, ADR-0025 §8).
+    Capability.VIRTUALIZATION_INVENTORY: _InterfaceSpec(
+        VirtualizationInventoryCapability,
+        "get_virtual_machines",
+        NormalizedVirtualMachine,
+        extra_records=(
+            ("get_hypervisor_hosts", NormalizedHypervisorHost),
+            ("get_compute_clusters", NormalizedComputeCluster),
+            ("get_port_groups", NormalizedPortGroup),
+        ),
     ),
 }
 

@@ -67,6 +67,13 @@ dependencies = [
     # Device transports (D7): SSH CLI + SNMP v2c/v3
     "netmiko",
     "pysnmp",
+    # Virtualization SDK (D7, ADR-0051): pyVmomi is the named VMware transport —
+    # the vCenter (SOAP) client behind the `vmware` plugin. Floor + major-cap
+    # tracks client-side currency (one pinned client serves mixed vCenter 7/8
+    # estates); the exact version is resolved in requirements.lock.txt (same
+    # commit) so the drift gate + supply-chain scanning cover it from day one.
+    # pyVmomi ships pure-Python wheels (air-gap-mirrorable, no build toolchain).
+    "pyvmomi>=8.0,<9",
     # Declarative compliance policies (M4, ADR-0018): YAML rule documents
     "pyyaml",
     # Packet-analysis self-confining executor (ADR-0049): libseccomp Python
@@ -119,6 +126,7 @@ infoblox = "app.plugins.vendors.infoblox.plugin:InfobloxPlugin"
 junos = "app.plugins.vendors.junos.plugin:JunosPlugin"
 panos = "app.plugins.vendors.panos.plugin:PanosPlugin"
 spatiumddi = "app.plugins.vendors.spatiumddi.plugin:SpatiumddiPlugin"
+vmware = "app.plugins.vendors.vmware.plugin:VmwarePlugin"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
@@ -195,6 +203,16 @@ module = [
     "yaml.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# pyVmomi (ADR-0051): the VMware SOAP SDK ships partial/untyped surfaces (its
+# managed-object/data-object types are dynamically generated). The vmware client
+# isolates it behind typed fetch_* methods (ADR-0006 §6); treat the SDK itself
+# as untyped (Any) so its dynamic constructors are not flagged as untyped calls.
+module = ["pyVmomi.*", "pyVim.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+follow_imports_for_stubs = true
 
 # ---------------------------------------------------------------------------
 # Tests (D16)

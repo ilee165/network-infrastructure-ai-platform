@@ -33,6 +33,7 @@ def iter_builtin_plugins() -> Iterator[VendorPlugin]:
     from app.plugins.vendors.junos.plugin import JunosPlugin
     from app.plugins.vendors.panos.plugin import PanosPlugin
     from app.plugins.vendors.spatiumddi.plugin import SpatiumddiPlugin
+    from app.plugins.vendors.vmware.plugin import VmwarePlugin
 
     yield BluecatPlugin()
     yield CiscoIosPlugin()
@@ -42,3 +43,4 @@ def iter_builtin_plugins() -> Iterator[VendorPlugin]:
     yield JunosPlugin()
     yield PanosPlugin()
     yield SpatiumddiPlugin()
+    yield VmwarePlugin()

@@ -43,19 +43,23 @@ from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     NormalizedAclEntry,
     NormalizedBgpPeer,
+    NormalizedComputeCluster,
     NormalizedDhcpLease,
     NormalizedDhcpRange,
     NormalizedDiscoveredObject,
     NormalizedDnsRecord,
     NormalizedFirewallRule,
     NormalizedHaStatus,
+    NormalizedHypervisorHost,
     NormalizedInterface,
     NormalizedNatRule,
     NormalizedNeighbor,
     NormalizedNetwork,
     NormalizedOspfNeighbor,
     NormalizedPool,
+    NormalizedPortGroup,
     NormalizedRoute,
+    NormalizedVirtualMachine,
     NormalizedVirtualServer,
 )
 
@@ -98,6 +102,7 @@ __all__ = [
     "SnmpReadTransport",
     "TransportKind",
     "VendorPlugin",
+    "VirtualizationInventoryCapability",
 ]
 
 _VENDOR_ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -134,6 +139,9 @@ class Capability(StrEnum):
     ADC_SERVICES = "adc_services"
     CONFIG_BACKUP_ARCHIVE = "config_backup_archive"
     CONFIG_RESTORE_ARCHIVE = "config_restore_archive"
+    # Virtualization inventory (ADR-0051). First implemented by vmware (pyVmomi).
+    # Additive: adding an enum member is zero-edit for existing plugins.
+    VIRTUALIZATION_INVENTORY = "virtualization_inventory"
 
 
 class TransportKind(StrEnum):
@@ -928,6 +936,47 @@ class ConfigArchiveRestoreCapability(PluginCapability):
     @abstractmethod
     def restore_archive(self, archive: ConfigArchiveRef, *, plan: ChangePlan) -> ChangeResult:
         """Restore the device from *archive* under the approved-CR *plan* (ADR-0021 contract)."""
+
+
+# ---------------------------------------------------------------------------
+# Virtualization inventory capability (ADR-0051 §5.1)
+# ---------------------------------------------------------------------------
+
+
+class VirtualizationInventoryCapability(PluginCapability):
+    """``Capability.VIRTUALIZATION_INVENTORY`` — VM/host/cluster/port-group inventory (§5.1).
+
+    The first virtualization capability (VMware vCenter via pyVmomi). Returns the
+    normalized virtualization models
+    :class:`~app.schemas.normalized.NormalizedVirtualMachine` /
+    :class:`~app.schemas.normalized.NormalizedHypervisorHost` /
+    :class:`~app.schemas.normalized.NormalizedComputeCluster` /
+    :class:`~app.schemas.normalized.NormalizedPortGroup` (with nested
+    :class:`~app.schemas.normalized.NormalizedVirtualNic` /
+    :class:`~app.schemas.normalized.NormalizedPhysicalNic`) — the placement +
+    port-group input to the W2 application-dependency derivation (ADR-0052),
+    never dicts/raw (ADR-0006 §3). Read-only: no write path (ADR-0051 §3).
+    Adding this typed capability is additive — no change to existing plugins
+    (ADR-0006 §6).
+    """
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.VIRTUALIZATION_INVENTORY})
+
+    @abstractmethod
+    def get_virtual_machines(self) -> list[NormalizedVirtualMachine]:
+        """Return virtual machines (with placement + vNICs) as normalized records."""
+
+    @abstractmethod
+    def get_hypervisor_hosts(self) -> list[NormalizedHypervisorHost]:
+        """Return hypervisor hosts (with cluster membership + pNICs) as normalized records."""
+
+    @abstractmethod
+    def get_compute_clusters(self) -> list[NormalizedComputeCluster]:
+        """Return compute clusters as normalized records."""
+
+    @abstractmethod
+    def get_port_groups(self) -> list[NormalizedPortGroup]:
+        """Return standard and distributed port groups as normalized records."""
 
 
 class VendorPlugin(ABC):
