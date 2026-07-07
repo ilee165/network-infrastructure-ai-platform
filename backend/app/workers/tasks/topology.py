@@ -5,8 +5,10 @@
 :func:`app.workers.tasks.discovery.run_discovery`).  It is the bridge between
 the Postgres ``normalized_*`` tables and the Neo4j projection (ADR-0005): it
 
-1. loads the devices + normalized interface/route/neighbor rows from Postgres,
-2. derives the typed node/edge sets (:func:`app.engines.topology.sync`),
+1. loads the devices + normalized interface/route/neighbor rows AND the
+   application-dependency rows (``applications`` + ``application_dependencies``,
+   ADR-0052 §5 — the layer is part of EVERY projection pass) from Postgres,
+2. derives the typed node/edge/application sets (:func:`app.engines.topology.sync`),
 3. ensures the graph uniqueness constraints,
 4. runs one *incremental* projection pass
    (:func:`app.engines.topology.projector.project`), and
@@ -45,6 +47,7 @@ from app.engines.topology.sync import derive_topology, snapshot_lists
 from app.knowledge.neo4j_client import Neo4jClient, create_client
 from app.knowledge.schema import ensure_constraints
 from app.models import DiscoveryRun
+from app.models.applications import Application, ApplicationDependency
 from app.models.inventory import (
     Device,
     NormalizedInterfaceRow,
@@ -91,9 +94,16 @@ async def _session() -> AsyncIterator[AsyncSession]:
 
 
 class _Inventory:
-    """The four row sets a projection pass derives from."""
+    """The row sets a projection pass derives from (inventory + app layer)."""
 
-    __slots__ = ("devices", "interfaces", "neighbors", "routes")
+    __slots__ = (
+        "application_dependencies",
+        "applications",
+        "devices",
+        "interfaces",
+        "neighbors",
+        "routes",
+    )
 
     def __init__(
         self,
@@ -101,20 +111,32 @@ class _Inventory:
         interfaces: list[NormalizedInterfaceRow],
         routes: list[NormalizedRouteRow],
         neighbors: list[NormalizedNeighborRow],
+        applications: list[Application],
+        application_dependencies: list[ApplicationDependency],
     ) -> None:
         self.devices = devices
         self.interfaces = interfaces
         self.routes = routes
         self.neighbors = neighbors
+        self.applications = applications
+        self.application_dependencies = application_dependencies
 
 
 async def _load_inventory(session: AsyncSession) -> _Inventory:
-    """Load every device + normalized row (whole-inventory projection)."""
+    """Load every device + normalized row + application row (whole inventory).
+
+    The application layer is part of EVERY projection pass (ADR-0052 §5), and
+    this single loader reads ``applications`` AND ``application_dependencies``
+    together — both or neither — so a pass can never sweep one side's valid
+    graph elements because only the other was loaded.
+    """
     devices = list((await session.execute(select(Device))).scalars())
     interfaces = list((await session.execute(select(NormalizedInterfaceRow))).scalars())
     routes = list((await session.execute(select(NormalizedRouteRow))).scalars())
     neighbors = list((await session.execute(select(NormalizedNeighborRow))).scalars())
-    return _Inventory(devices, interfaces, routes, neighbors)
+    applications = list((await session.execute(select(Application))).scalars())
+    dependencies = list((await session.execute(select(ApplicationDependency))).scalars())
+    return _Inventory(devices, interfaces, routes, neighbors, applications, dependencies)
 
 
 # ---------------------------------------------------------------------------
@@ -139,11 +161,21 @@ async def _project_run(run_id: UUID) -> dict[str, Any]:
                 inventory.interfaces,
                 inventory.routes,
                 inventory.neighbors,
+                inventory.applications,
+                inventory.application_dependencies,
             )
-            node_list, edge_list = snapshot_lists(derived.nodes, derived.edges)
+            node_list, edge_list = snapshot_lists(
+                derived.nodes, derived.edges, derived.applications
+            )
 
             await ensure_constraints(client)
-            await project(client, derived.nodes, derived.edges, projected_at)
+            await project(
+                client,
+                derived.nodes,
+                derived.edges,
+                projected_at,
+                applications=derived.applications,
+            )
 
             await upsert_snapshot(session, run_id=run_id, nodes=node_list, edges=edge_list)
             await session.commit()

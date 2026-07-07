@@ -20,12 +20,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.engines.topology import rebuild as rebuild_mod
-from app.engines.topology.projector import DerivedEdges
 from app.engines.topology.sync import derive_topology, snapshot_lists
 from app.models import (
     Base,
     DiscoveryRun,
     DiscoveryRunStatus,
+)
+from app.models.applications import (
+    Application,
+    ApplicationDependency,
+    ApplicationOrigin,
+    DependencySource,
+    DependencyTargetKind,
 )
 from app.models.inventory import (
     Device,
@@ -48,6 +54,7 @@ DEV1 = UUID("00000000-0000-0000-0000-000000000001")
 DEV2 = UUID("00000000-0000-0000-0000-000000000002")
 IF1 = UUID("00000000-0000-0000-0000-000000000a01")
 IF2 = UUID("00000000-0000-0000-0000-000000000a02")
+APP1 = UUID("00000000-0000-0000-0000-000000000f01")
 
 
 # ---------------------------------------------------------------------------
@@ -188,13 +195,48 @@ def _routes() -> list[NormalizedRouteRow]:
     return [make_route(DEV1, "192.168.5.0/24", vrf="prod")]
 
 
+def _applications() -> list[Application]:
+    return [
+        Application(
+            id=APP1,
+            name="payroll",
+            origin=ApplicationOrigin.DERIVED,
+            origin_ref="f5:test:payroll",
+            fqdns=["payroll.corp.example.com"],
+        )
+    ]
+
+
+def _app_dependencies() -> list[ApplicationDependency]:
+    return [
+        ApplicationDependency(
+            application_id=APP1,
+            target_kind=DependencyTargetKind.DEVICE,
+            target_ref=str(DEV1),
+            source=DependencySource.F5,
+            provenance=[{"kind": "virtual_server", "ref": "vs-1"}],
+            derived_at=COLLECTED_AT,
+        ),
+        ApplicationDependency(
+            application_id=APP1,
+            target_kind=DependencyTargetKind.IP_ADDRESS,
+            target_ref=str(IF1),
+            source=DependencySource.DNS,
+            provenance=[{"kind": "record", "ref": "payroll|a|10.0.0.1"}],
+            derived_at=COLLECTED_AT,
+        ),
+    ]
+
+
 # ===========================================================================
 # Pure derivation glue
 # ===========================================================================
 
 
-def test_derive_topology_combines_l2_and_l3_into_one_edge_set() -> None:
-    derived = derive_topology(_devices(), _interfaces(), _routes(), _neighbors())
+def test_derive_topology_combines_l2_l3_and_applications_into_one_pass() -> None:
+    derived = derive_topology(
+        _devices(), _interfaces(), _routes(), _neighbors(), _applications(), _app_dependencies()
+    )
 
     # Two devices, two interfaces both derive nodes; the route prefix + the
     # interface subnet derive Subnet nodes.
@@ -210,25 +252,38 @@ def test_derive_topology_combines_l2_and_l3_into_one_edge_set() -> None:
     assert len(derived.edges.routes_to) == 1
     assert derived.l2_report.unresolved_neighbors == 0
 
+    # The REQUIRED application layer (ADR-0052 §5) derives alongside.
+    assert [str(n.pg_id) for n in derived.applications.applications] == [str(APP1)]
+    assert {(e.target_label, e.target_key) for e in derived.applications.depends_on} == {
+        ("Device", str(DEV1)),
+        ("IPAddress", str(IF1)),
+    }
+
 
 def test_snapshot_lists_emit_canonical_label_key_and_rel_triples() -> None:
-    derived = derive_topology(_devices(), _interfaces(), _routes(), _neighbors())
-    node_list, edge_list = snapshot_lists(derived.nodes, derived.edges)
+    derived = derive_topology(
+        _devices(), _interfaces(), _routes(), _neighbors(), _applications(), _app_dependencies()
+    )
+    node_list, edge_list = snapshot_lists(derived.nodes, derived.edges, derived.applications)
 
     # Every node row is [label, key]; the VLAN id is stringified.
     assert ["Device", str(DEV1)] in node_list
     assert ["Vlan", "10"] in node_list
     assert ["Subnet", "192.168.5.0/24"] in node_list
+    assert ["Application", str(APP1)] in node_list
     assert all(len(pair) == 2 for pair in node_list)
 
     # Every edge row is [rel_type, src, dst]; the routes_to edge lands on the
-    # route-prefix Subnet key.
+    # route-prefix Subnet key; DEPENDS_ON lands on the target's pg_id key.
     assert all(len(triple) == 3 for triple in edge_list)
     assert ["HAS_INTERFACE", str(DEV1), str(IF1)] in edge_list
     assert ["ROUTES_TO", str(DEV1), "192.168.5.0/24"] in edge_list
+    assert ["DEPENDS_ON", str(APP1), str(DEV1)] in edge_list
+    assert ["DEPENDS_ON", str(APP1), str(IF1)] in edge_list
     rel_types = {triple[0] for triple in edge_list}
     assert rel_types == {
         "CONNECTED_TO",
+        "DEPENDS_ON",
         "HAS_INTERFACE",
         "IN_SUBNET",
         "L3_ADJACENT",
@@ -237,9 +292,26 @@ def test_snapshot_lists_emit_canonical_label_key_and_rel_triples() -> None:
 
 
 def test_snapshot_lists_on_empty_derivation_are_empty() -> None:
-    node_list, edge_list = snapshot_lists(derive_topology([], [], [], []).nodes, DerivedEdges())
+    derived = derive_topology([], [], [], [], [], [])
+    node_list, edge_list = snapshot_lists(derived.nodes, derived.edges, derived.applications)
     assert node_list == []
     assert edge_list == []
+
+
+def test_derive_topology_and_snapshot_lists_require_the_application_inputs() -> None:
+    """Optional-kwarg relapse guard (ADR-0052 §5): the application inputs have
+    NO defaults, so no derivation/snapshot pass can silently omit the layer."""
+    import inspect
+
+    for fn, names in (
+        (derive_topology, ("applications", "application_dependencies")),
+        (snapshot_lists, ("applications",)),
+    ):
+        signature = inspect.signature(fn)
+        for name in names:
+            assert signature.parameters[name].default is inspect.Parameter.empty, (
+                f"{fn.__name__}(...{name}=) must be REQUIRED (ADR-0052 §5)"
+            )
 
 
 # ===========================================================================
@@ -273,6 +345,8 @@ def _seed_inventory(db_url: str, *, with_run: bool = True) -> UUID:
             session.add_all(_interfaces())
             session.add_all(_neighbors())
             session.add_all(_routes())
+            session.add_all(_applications())
+            session.add_all(_app_dependencies())
             run_id = uuid4()
             if with_run:
                 run = DiscoveryRun(
@@ -340,6 +414,11 @@ def test_sync_after_run_projects_and_snapshots(
     assert any("UNWIND" in s for s in client.statements)
     assert any("CREATE CONSTRAINT" in s for s in client.statements)
 
+    # The application layer rode the SAME pass (ADR-0052 §5 mandatory wiring):
+    # the production loader read the app tables and the projector upserted them.
+    assert any("MERGE (n:Application" in s for s in client.statements)
+    assert any(":DEPENDS_ON" in s and "UNWIND" in s for s in client.statements)
+
     # Exactly one snapshot row for the run, with canonical node/edge multisets.
     snaps = _fetch_snapshots(db_url)
     assert len(snaps) == 1
@@ -347,6 +426,8 @@ def test_sync_after_run_projects_and_snapshots(
     assert snap.run_id == run_id
     assert ["Device", str(DEV1)] in snap.nodes
     assert ["ROUTES_TO", str(DEV1), "192.168.5.0/24"] in snap.edges
+    assert ["Application", str(APP1)] in snap.nodes
+    assert ["DEPENDS_ON", str(APP1), str(DEV1)] in snap.edges
 
     # The sync outcome was recorded on the run without changing its status.
     run = _fetch_run(db_url, run_id)
@@ -431,6 +512,10 @@ def test_rebuild_wipes_then_projects_and_snapshots(
     assert any("DETACH DELETE" in s for s in stmts)
     assert any("CREATE CONSTRAINT" in s for s in stmts)
     assert any("UNWIND" in s for s in stmts)
+    # The application layer is part of the rebuild pass too (ADR-0052 §5/§6.1):
+    # rebuilt from the PG tables alone, no re-derivation, no plugin access.
+    assert any("MERGE (n:Application" in s for s in stmts)
+    assert any(":DEPENDS_ON" in s and "UNWIND" in s for s in stmts)
     # Wipe precedes the first upsert (drop-and-reproject order).
     first_wipe = next(i for i, s in enumerate(stmts) if "DETACH DELETE" in s)
     first_upsert = next(i for i, s in enumerate(stmts) if "UNWIND" in s)

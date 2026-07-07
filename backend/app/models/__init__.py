@@ -13,6 +13,13 @@ from app.models.agents import (
     ReasoningTraceStep,
     TraceStepKind,
 )
+from app.models.applications import (
+    Application,
+    ApplicationDependency,
+    ApplicationOrigin,
+    DependencySource,
+    DependencyTargetKind,
+)
 from app.models.audit import AuditChainCheckpoint, AuditExportCursor, AuditLog
 from app.models.base import Base
 from app.models.change_requests import (
@@ -61,6 +68,9 @@ __all__ = [
     "EMBEDDING_DIM",
     "AgentSession",
     "AgentSessionStatus",
+    "Application",
+    "ApplicationDependency",
+    "ApplicationOrigin",
     "Approval",
     "ApprovalDecision",
     "AuditChainCheckpoint",
@@ -76,6 +86,8 @@ __all__ = [
     "ConfigSnapshot",
     "ConfigSource",
     "CredentialKind",
+    "DependencySource",
+    "DependencyTargetKind",
     "Device",
     "DeviceCredential",
     "DeviceStatus",

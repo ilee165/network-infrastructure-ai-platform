@@ -85,10 +85,11 @@ class GraphNode(BaseModel):
     def neo4j_properties(self, last_projected_at: datetime) -> dict[str, Any]:
         """Flat Neo4j property map: driver-safe values + projection stamp.
 
-        UUIDs become strings (the Bolt protocol has no UUID type) and
-        StrEnums collapse to their wire values. *last_projected_at* must be
-        timezone-aware (ADR-0005: every projected node carries the tz-aware
-        UTC instant of the projection pass).
+        UUIDs become strings (the Bolt protocol has no UUID type), StrEnums
+        collapse to their wire values, and tuples become lists (Neo4j array
+        properties). *last_projected_at* must be timezone-aware (ADR-0005:
+        every projected node carries the tz-aware UTC instant of the
+        projection pass).
         """
         if last_projected_at.tzinfo is None:
             raise ValueError("last_projected_at must be timezone-aware")
@@ -99,6 +100,8 @@ class GraphNode(BaseModel):
                 value = str(value)
             elif isinstance(value, StrEnum):
                 value = str(value.value)
+            elif isinstance(value, tuple):
+                value = list(value)
             props[field_name] = value
         props["last_projected_at"] = last_projected_at
         return props

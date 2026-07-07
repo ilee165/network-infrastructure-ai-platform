@@ -58,6 +58,13 @@ from app.engines.topology.rebuild import rebuild
 from app.engines.topology.snapshots import build_snapshot
 from app.knowledge.neo4j_client import Neo4jClient
 from app.models import Base, DiscoveryRun, DiscoveryRunStatus
+from app.models.applications import (
+    Application,
+    ApplicationDependency,
+    ApplicationOrigin,
+    DependencySource,
+    DependencyTargetKind,
+)
 from app.models.inventory import (
     Device,
     NormalizedInterfaceRow,
@@ -82,6 +89,7 @@ DEV2 = UUID("00000000-0000-0000-0000-00000000c002")
 IF1 = UUID("00000000-0000-0000-0000-00000000c0a1")
 IF2 = UUID("00000000-0000-0000-0000-00000000c0a2")
 RAW = UUID("00000000-0000-0000-0000-00000000c0ff")
+APP1 = UUID("00000000-0000-0000-0000-00000000c0f1")
 
 _DEVICE_IDS = (DEV1, DEV2)
 
@@ -184,6 +192,41 @@ def _discovery_run() -> DiscoveryRun:
     )
 
 
+def _applications() -> list[Application]:
+    """One derived application (P4 W2, ADR-0052) joining the fixed inventory."""
+    return [
+        Application(
+            id=APP1,
+            name="m2-exit-payroll",
+            origin=ApplicationOrigin.DERIVED,
+            origin_ref="f5:m2-exit:payroll",
+            fqdns=["payroll.corp.example.com"],
+        )
+    ]
+
+
+def _app_dependencies() -> list[ApplicationDependency]:
+    """Per-source rows targeting the seeded rebuild-safe kinds (§2.3)."""
+    return [
+        ApplicationDependency(
+            application_id=APP1,
+            target_kind=DependencyTargetKind.DEVICE,
+            target_ref=str(DEV1),
+            source=DependencySource.F5,
+            provenance=[{"kind": "virtual_server", "ref": "vs-1"}],
+            derived_at=COLLECTED_AT,
+        ),
+        ApplicationDependency(
+            application_id=APP1,
+            target_kind=DependencyTargetKind.IP_ADDRESS,
+            target_ref=str(IF1),
+            source=DependencySource.DNS,
+            provenance=[{"kind": "record", "ref": "payroll.corp.example.com|a|10.20.0.1"}],
+            derived_at=COLLECTED_AT,
+        ),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Live-store reachability + lifecycle helpers
 # ---------------------------------------------------------------------------
@@ -212,8 +255,10 @@ async def _seed_postgres(sessionmaker: async_sessionmaker[Any]) -> None:
         session.add(_discovery_run())
         for device in _devices():
             session.add(device)
+        for application in _applications():
+            session.add(application)
         await session.flush()
-        for row in (*_interfaces(), *_routes(), *_neighbors()):
+        for row in (*_interfaces(), *_routes(), *_neighbors(), *_app_dependencies()):
             session.add(row)
         await session.commit()
 
@@ -228,6 +273,10 @@ async def _purge_postgres(sessionmaker: async_sessionmaker[Any]) -> None:
             NormalizedNeighborRow,
         ):
             await session.execute(delete(model).where(model.device_id.in_(_DEVICE_IDS)))
+        await session.execute(
+            delete(ApplicationDependency).where(ApplicationDependency.application_id == APP1)
+        )
+        await session.execute(delete(Application).where(Application.id == APP1))
         await session.execute(delete(Device).where(Device.id.in_(_DEVICE_IDS)))
         await session.execute(delete(DiscoveryRun).where(DiscoveryRun.id == RUN_ID))
         await session.commit()
@@ -334,9 +383,23 @@ async def test_full_rebuild_is_isomorphic_after_total_graph_loss() -> None:
         nodes_a, edges_a = await _export_graph_multisets(client)
         snapshot_a = build_snapshot(nodes_a, edges_a)
 
-        # Sanity: the graph is non-empty (otherwise equality is vacuous).
+        # Sanity: the graph is non-empty (otherwise equality is vacuous), and
+        # the application layer was part of the rebuild pass (ADR-0052 §5/§6.1
+        # — reproduced from the PG tables alone, no re-derivation).
         assert snapshot_a["nodes"], "first rebuild projected no nodes"
         assert snapshot_a["edges"], "first rebuild projected no edges"
+        assert ["Application", str(APP1)] in snapshot_a["nodes"], (
+            "rebuild did not project the Application node (ADR-0052 §6.1)"
+        )
+        # The export prefixes edge endpoints with their label (see _edge_key).
+        assert ["DEPENDS_ON", f"Application:{APP1}", f"Device:{DEV1}"] in snapshot_a["edges"], (
+            "rebuild did not project the DEPENDS_ON edge (ADR-0052 §6.1)"
+        )
+        assert [
+            "DEPENDS_ON",
+            f"Application:{APP1}",
+            f"IPAddress:{IF1}",
+        ] in snapshot_a["edges"], "rebuild did not project the IPAddress DEPENDS_ON edge"
 
         # Simulate total Neo4j volume loss, then rebuild from Postgres alone.
         await _destroy_graph(client)
@@ -387,12 +450,15 @@ async def test_every_projected_pg_id_resolves_to_a_postgres_row() -> None:
             device_ids = await _pg_ids(session, "Device")
             interface_ids = await _pg_ids(session, "Interface")
             ip_ids = await _pg_ids(session, "IPAddress")
+            application_ids = await _pg_ids(session, "Application")
 
         assert device_ids, "rebuild projected no Device nodes"
         assert interface_ids, "rebuild projected no Interface nodes"
         assert ip_ids, "rebuild projected no IPAddress nodes"
+        assert application_ids, "rebuild projected no Application nodes (ADR-0052 §5)"
 
-        # Device.pg_id -> devices.id; Interface/IPAddress.pg_id -> interfaces.id.
+        # Device.pg_id -> devices.id; Interface/IPAddress.pg_id -> interfaces.id;
+        # Application.pg_id -> applications.id (ADR-0052 §5).
         async with sessionmaker() as session:
             for pg_id in device_ids:
                 row = await session.get(Device, UUID(pg_id))
@@ -400,6 +466,9 @@ async def test_every_projected_pg_id_resolves_to_a_postgres_row() -> None:
             for pg_id in interface_ids | ip_ids:
                 row = await session.get(NormalizedInterfaceRow, UUID(pg_id))
                 assert row is not None, f"Interface/IPAddress pg_id {pg_id} absent from Postgres"
+            for pg_id in application_ids:
+                app_row = await session.get(Application, UUID(pg_id))
+                assert app_row is not None, f"Application pg_id {pg_id} absent from Postgres"
     finally:
         await _destroy_graph(client)
         await _purge_postgres(sessionmaker)

@@ -72,6 +72,10 @@ _RESET_TABLES = (
     "devices",
     "device_credentials",
     "users",
+    # W2-T1 application-dependency layer (ADR-0052 §1): CASCADE removes the
+    # dependency rows with their applications.
+    "application_dependencies",
+    "applications",
 )
 
 

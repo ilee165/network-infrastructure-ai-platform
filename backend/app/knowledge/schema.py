@@ -44,6 +44,10 @@ LABEL_SITE: str = "Site"
 #: type/value stay distinct.
 LABEL_DNS_ZONE: str = "DnsZone"
 LABEL_DNS_RECORD: str = "DnsRecord"
+#: Application-dependency layer (P4 W2, ADR-0052 §5): ``Application`` projects
+#: directly from the ``applications`` Postgres row, keyed by ``pg_id`` exactly
+#: like Device/Interface/IPAddress.
+LABEL_APPLICATION: str = "Application"
 
 # ---------------------------------------------------------------------------
 # Relationship type constants
@@ -60,6 +64,10 @@ REL_ROUTES_TO: str = "ROUTES_TO"
 #: ``Device``), or carries only the literal value when unreconciled.
 REL_IN_ZONE: str = "IN_ZONE"
 REL_RESOLVES_TO: str = "RESOLVES_TO"
+#: Application-dependency layer (P4 W2, ADR-0052 §3.2/§5): one union
+#: ``DEPENDS_ON`` edge per (application, target) pair, targets restricted to
+#: the rebuild-safe ``Device``/``IPAddress`` kinds (§2.3).
+REL_DEPENDS_ON: str = "DEPENDS_ON"
 
 # ---------------------------------------------------------------------------
 # Key property per label
@@ -85,6 +93,7 @@ NODE_KEY_PROPERTY: dict[str, str] = {
     LABEL_SITE: "name",
     LABEL_DNS_ZONE: "fqdn",
     LABEL_DNS_RECORD: "record_key",
+    LABEL_APPLICATION: "pg_id",
 }
 
 # ---------------------------------------------------------------------------

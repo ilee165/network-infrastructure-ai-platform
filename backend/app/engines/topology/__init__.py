@@ -5,6 +5,12 @@ package derives the typed graph nodes (and, in later tasks, relationships
 and projection plumbing) from inventory rows.
 """
 
+from app.engines.topology.applications import (
+    ApplicationNode,
+    DependsOnEdge,
+    DerivedApplications,
+    derive_applications,
+)
 from app.engines.topology.diff import (
     TopologyDiff,
     diff_snapshots,
@@ -66,7 +72,10 @@ __all__ = [
     "DEFAULT_BATCH_SIZE",
     "PROJECTED_NODE_LABELS",
     "PROJECTED_REL_TYPES",
+    "ApplicationNode",
     "ConnectedToEdge",
+    "DependsOnEdge",
+    "DerivedApplications",
     "DerivedDns",
     "DerivedEdges",
     "DerivedL3Edges",
@@ -96,6 +105,7 @@ __all__ = [
     "build_l2_edges",
     "build_l3_edges",
     "build_snapshot",
+    "derive_applications",
     "derive_dns",
     "derive_nodes",
     "derive_topology",

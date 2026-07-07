@@ -13,14 +13,19 @@ single source of truth and this module merely makes the graph converge to it.
 2. **Upsert** every derived edge — endpoints are ``MATCH``-ed (never created:
    no phantom nodes), the relationship is ``MERGE``-d by endpoint keys + type,
    and ``SET r = row.props`` stamps ``last_projected_at`` on the edge too.
-3. **Sweep stale elements** — any node of the 7 projected labels or edge of
-   the 5 projected relationship types *not* stamped in this pass is deleted.
-   The sweep is scoped strictly to the projected labels / types; everything
-   else in the graph is never touched.
+3. **Sweep stale elements** — any node of the projected labels or edge of the
+   projected relationship types *not* stamped in this pass is deleted. The
+   sweep is scoped strictly to the projected labels / types; everything else
+   in the graph is never touched.
 
 :func:`full_rebuild` is the drop-and-reproject path: ``DETACH DELETE`` every
-node of the 7 projected labels, re-run
+node of the projected labels, re-run
 :func:`app.knowledge.schema.ensure_constraints`, then :func:`project`.
+
+The application layer (P4 W2, ADR-0052 §5) is a **required** component of
+every pass: *applications* has no default on either entry point, so no caller
+can run a projection that silently sweeps ``Application``/``DEPENDS_ON`` clean
+— the optional-``dns=`` deletion hazard must not recur.
 
 All writes are batched ``UNWIND`` statements — one round trip per
 (label / relationship-group, batch) — never one per row.
@@ -35,6 +40,7 @@ from typing import Any
 import structlog
 from pydantic import BaseModel, ConfigDict
 
+from app.engines.topology.applications import DerivedApplications
 from app.engines.topology.dns import (
     DerivedDns,
     DnsRecordNode,
@@ -59,6 +65,7 @@ from app.engines.topology.nodes import (
     VrfNode,
 )
 from app.knowledge.schema import (
+    LABEL_APPLICATION,
     LABEL_DEVICE,
     LABEL_DNS_RECORD,
     LABEL_DNS_ZONE,
@@ -66,6 +73,7 @@ from app.knowledge.schema import (
     LABEL_SUBNET,
     NODE_KEY_PROPERTY,
     REL_CONNECTED_TO,
+    REL_DEPENDS_ON,
     REL_HAS_INTERFACE,
     REL_IN_SUBNET,
     REL_IN_ZONE,
@@ -86,10 +94,11 @@ __all__ = [
     "project",
 ]
 
-#: The seven node labels this projector owns (and is allowed to delete from).
+#: The node labels this projector owns (and is allowed to delete from).
 PROJECTED_NODE_LABELS: tuple[str, ...] = tuple(NODE_KEY_PROPERTY)
 
-#: The relationship types this projector owns (M2 L2/L3 + M5 DNS-dependency).
+#: The relationship types this projector owns (M2 L2/L3 + M5 DNS-dependency +
+#: P4 W2 application-dependency).
 PROJECTED_REL_TYPES: tuple[str, ...] = (
     REL_CONNECTED_TO,
     REL_HAS_INTERFACE,
@@ -98,6 +107,7 @@ PROJECTED_REL_TYPES: tuple[str, ...] = (
     REL_ROUTES_TO,
     REL_IN_ZONE,
     REL_RESOLVES_TO,
+    REL_DEPENDS_ON,
 )
 
 #: Rows per UNWIND statement; bounds transaction size on large inventories.
@@ -169,12 +179,13 @@ def _chunks(rows: list[dict[str, Any]], size: int) -> Iterator[list[dict[str, An
 
 
 def _node_sets(
-    nodes: DerivedNodes, dns: DerivedDns | None = None
+    nodes: DerivedNodes, applications: DerivedApplications, dns: DerivedDns | None = None
 ) -> tuple[tuple[str, Sequence[GraphNode]], ...]:
     """The (label, node tuple) pairs in deterministic projection order.
 
     The seven M2 labels first, then the two DNS-dependency labels (M5 task #13)
-    when *dns* is supplied — empty otherwise so a non-DNS pass is unchanged.
+    when *dns* is supplied — empty otherwise so a non-DNS pass is unchanged —
+    then the REQUIRED application layer (P4 W2, ADR-0052 §5).
     """
     dns = dns or DerivedDns()
     return (
@@ -187,6 +198,7 @@ def _node_sets(
         (SiteNode.label, nodes.sites),
         (DnsZoneNode.label, dns.zones),
         (DnsRecordNode.label, dns.records),
+        (LABEL_APPLICATION, applications.applications),
     )
 
 
@@ -206,14 +218,20 @@ _EdgeGroup = tuple[str, str, str, list[dict[str, Any]]]
 
 
 def _edge_groups(
-    edges: DerivedEdges, dns: DerivedDns | None, projected_at: datetime
+    edges: DerivedEdges,
+    applications: DerivedApplications,
+    dns: DerivedDns | None,
+    projected_at: datetime,
 ) -> Iterator[_EdgeGroup]:
     """Yield ``(rel_type, label_a, label_b, rows)`` upsert groups.
 
     ``CONNECTED_TO`` endpoints mix Device/Interface labels, so its edges are
     grouped per (label_a, label_b) pair — one UNWIND statement each. The four
-    L3 types have fixed endpoint labels.  The DNS-dependency edges (M5 task #13)
-    are appended when *dns* is supplied: ``IN_ZONE`` (DnsZone -> DnsRecord) and
+    L3 types have fixed endpoint labels.  The REQUIRED application layer's
+    ``DEPENDS_ON`` union edges (P4 W2, ADR-0052 §3.2/§5) land on either
+    Device or IPAddress, so — like ``RESOLVES_TO`` — they group per target
+    label, one UNWIND each.  The DNS-dependency edges (M5 task #13) are
+    appended when *dns* is supplied: ``IN_ZONE`` (DnsZone -> DnsRecord) and
     ``RESOLVES_TO`` (DnsRecord -> the reconciled IPAddress/Device endpoint, one
     UNWIND per target label; unreconciled records carry no edge).
     """
@@ -294,6 +312,26 @@ def _edge_groups(
         ],
     )
 
+    # DEPENDS_ON union edges (ADR-0052 §3.2): one edge per (application,
+    # target) pair, endpoints MATCH-ed only (a dependency row whose target was
+    # not projected this pass carries no edge — no phantom endpoints, §5).
+    depends_on_groups: dict[str, list[dict[str, Any]]] = {}
+    for dep in applications.depends_on:
+        depends_on_groups.setdefault(dep.target_label, []).append(
+            {
+                "a_key": dep.application_pg_id,
+                "b_key": dep.target_key,
+                "props": {
+                    "sources": list(dep.sources),
+                    "derived_at": dep.derived_at,
+                    "provenance": list(dep.provenance),
+                    "last_projected_at": projected_at,
+                },
+            }
+        )
+    for target_label, rows in sorted(depends_on_groups.items()):
+        yield (REL_DEPENDS_ON, LABEL_APPLICATION, target_label, rows)
+
     if dns is None:
         return
 
@@ -341,6 +379,7 @@ async def project(
     edges: DerivedEdges,
     projected_at: datetime,
     *,
+    applications: DerivedApplications,
     dns: DerivedDns | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> None:
@@ -362,6 +401,13 @@ async def project(
     projected_at:
         tz-aware UTC instant stamped as ``last_projected_at`` on every
         upserted element; also the staleness watermark for the sweep.
+    applications:
+        REQUIRED application-dependency layer (``derive_applications``, P4 W2,
+        ADR-0052 §5 — never an optional kwarg: the stale sweep would silently
+        destroy the layer for any caller that omitted it, the observed fate of
+        the optional ``dns=`` pattern). An empty
+        :class:`~app.engines.topology.applications.DerivedApplications` is a
+        legitimate derivation result (no rows in Postgres), not an omission.
     dns:
         Optional DNS-dependency derivation (``derive_dns``, M5 task #13).  When
         supplied its ``DnsZone``/``DnsRecord`` nodes and ``IN_ZONE``/``RESOLVES_TO``
@@ -378,14 +424,16 @@ async def project(
     node_count = 0
     edge_count = 0
     async with client.session() as session:
-        for label, node_set in _node_sets(nodes, dns):
+        for label, node_set in _node_sets(nodes, applications, dns):
             rows = _node_rows(label, node_set, projected_at)
             node_count += len(rows)
             cypher = _node_upsert_cypher(label)
             for batch in _chunks(rows, batch_size):
                 await session.run(cypher, rows=batch)
 
-        for rel_type, label_a, label_b, rows in _edge_groups(edges, dns, projected_at):
+        for rel_type, label_a, label_b, rows in _edge_groups(
+            edges, applications, dns, projected_at
+        ):
             edge_count += len(rows)
             cypher = _edge_upsert_cypher(rel_type, label_a, label_b)
             for batch in _chunks(rows, batch_size):
@@ -412,6 +460,7 @@ async def full_rebuild(
     edges: DerivedEdges,
     projected_at: datetime,
     *,
+    applications: DerivedApplications,
     dns: DerivedDns | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> None:
@@ -420,10 +469,19 @@ async def full_rebuild(
     ``DETACH DELETE`` every node of the projected labels (their edges go with
     them), re-assert the uniqueness constraints, then run a normal
     :func:`project` pass. Labels outside the projection are never touched.
+    *applications* is REQUIRED exactly as on :func:`project` (ADR-0052 §5).
     """
     async with client.session() as session:
         for label in PROJECTED_NODE_LABELS:
             await session.run(_wipe_label_cypher(label))
     logger.info("topology_projection_wiped", labels=list(PROJECTED_NODE_LABELS))
     await ensure_constraints(client)
-    await project(client, nodes, edges, projected_at, dns=dns, batch_size=batch_size)
+    await project(
+        client,
+        nodes,
+        edges,
+        projected_at,
+        applications=applications,
+        dns=dns,
+        batch_size=batch_size,
+    )
