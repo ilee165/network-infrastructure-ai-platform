@@ -8,7 +8,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ApplicationDependencyRead,
@@ -213,5 +213,191 @@ describe("derived_application_shows_origin_badge_and_no_delete_control", () => {
     // Derivation owns the lifecycle of derived rows — the UI must not offer to
     // delete one (the backend refuses it with a 409 regardless).
     expect(screen.queryByTestId(`application-delete-${DERIVED_APP.id}`)).not.toBeInTheDocument();
+  });
+});
+
+// ── Write-flow helpers (rider P3) ──────────────────────────────────────────────
+
+interface RecordedCall {
+  method: string;
+  url: string;
+  body: unknown;
+}
+
+/**
+ * A fetch mock that records every request and answers reads with the fixtures
+ * and writes with a synthetic success — so a test can both drive the UI and
+ * assert the exact mutation the client issued.
+ */
+function fetchWriting(
+  list: unknown,
+  deps: Record<string, unknown[]>,
+): { mock: ReturnType<typeof vi.fn>; calls: RecordedCall[] } {
+  const calls: RecordedCall[] = [];
+  const mock = vi.fn((url: string, init?: RequestInit): Promise<Response> => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    const path = String(url);
+    calls.push({
+      method,
+      url: path,
+      body: init?.body !== undefined && init?.body !== null ? JSON.parse(String(init.body)) : undefined,
+    });
+    if (method === "DELETE") {
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    if (method === "POST" || method === "PATCH") {
+      return Promise.resolve(
+        new Response(JSON.stringify({ ...MANUAL_APP, ...MANUAL_DEP }), {
+          status: method === "POST" ? 201 : 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    }
+    let body: unknown = list;
+    const depMatch = path.match(/\/applications\/([^/?]+)\/dependencies/);
+    if (depMatch) {
+      body = deps[depMatch[1]!] ?? [];
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  });
+  return { mock, calls };
+}
+
+function writeCalls(calls: RecordedCall[]): RecordedCall[] {
+  return calls.filter((c) => c.method !== "GET");
+}
+
+// ── engineer_can_create_edit_delete_manual_application ─────────────────────────
+
+describe("engineer_can_create_edit_delete_manual_application", () => {
+  it("creates a manual application via the create modal (POST /applications)", async () => {
+    const { mock, calls } = fetchWriting(LIST, {});
+    vi.stubGlobal("fetch", mock);
+    renderPage("engineer");
+
+    fireEvent.click(await screen.findByTestId("application-create-button"));
+    fireEvent.change(screen.getByTestId("application-form-name"), {
+      target: { value: "new-app" },
+    });
+    fireEvent.click(screen.getByTestId("application-form-submit"));
+
+    await waitFor(() => {
+      const post = writeCalls(calls).find((c) => c.method === "POST");
+      expect(post).toBeDefined();
+      expect(post!.url).toContain("/api/v1/applications");
+      expect(post!.body).toMatchObject({ name: "new-app" });
+    });
+  });
+
+  it("edits a manual application via the edit modal (PATCH /applications/{id})", async () => {
+    const { mock, calls } = fetchWriting(LIST, {});
+    vi.stubGlobal("fetch", mock);
+    renderPage("engineer");
+
+    fireEvent.click(await screen.findByTestId(`application-edit-${MANUAL_APP.id}`));
+    fireEvent.change(screen.getByTestId("application-form-owner"), {
+      target: { value: "new-owner" },
+    });
+    fireEvent.click(screen.getByTestId("application-form-submit"));
+
+    await waitFor(() => {
+      const patch = writeCalls(calls).find((c) => c.method === "PATCH");
+      expect(patch).toBeDefined();
+      expect(patch!.url).toContain(`/api/v1/applications/${MANUAL_APP.id}`);
+      expect(patch!.body).toMatchObject({ owner: "new-owner" });
+    });
+  });
+
+  it("deletes a manual application after confirmation (DELETE /applications/{id})", async () => {
+    const { mock, calls } = fetchWriting(LIST, {});
+    vi.stubGlobal("fetch", mock);
+    renderPage("engineer");
+
+    fireEvent.click(await screen.findByTestId(`application-delete-${MANUAL_APP.id}`));
+    fireEvent.click(await screen.findByTestId("confirm-action"));
+
+    await waitFor(() => {
+      const del = writeCalls(calls).find((c) => c.method === "DELETE");
+      expect(del).toBeDefined();
+      expect(del!.url).toContain(`/api/v1/applications/${MANUAL_APP.id}`);
+    });
+  });
+});
+
+// ── engineer_can_add_and_remove_manual_dependency_row ──────────────────────────
+
+describe("engineer_can_add_and_remove_manual_dependency_row", () => {
+  it("adds a manual dependency via the tag form (POST /{id}/dependencies)", async () => {
+    const { mock, calls } = fetchWriting(LIST, { [MANUAL_APP.id]: [] });
+    vi.stubGlobal("fetch", mock);
+    renderPage("engineer");
+
+    fireEvent.click(await screen.findByTestId(`application-row-${MANUAL_APP.id}`));
+    fireEvent.click(await screen.findByTestId(`dependency-add-${MANUAL_APP.id}`));
+    fireEvent.change(screen.getByTestId("dependency-form-ref"), {
+      target: { value: "dddddddd-dddd-dddd-dddd-dddddddddddd" },
+    });
+    fireEvent.click(screen.getByTestId("dependency-form-submit"));
+
+    await waitFor(() => {
+      const post = writeCalls(calls).find((c) => c.method === "POST");
+      expect(post).toBeDefined();
+      expect(post!.url).toContain(`/api/v1/applications/${MANUAL_APP.id}/dependencies`);
+      expect(post!.body).toMatchObject({
+        target_kind: "device",
+        target_ref: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+      });
+    });
+  });
+
+  it("removes a manual dependency row but never a derivation-owned one", async () => {
+    const { mock, calls } = fetchWriting(LIST, { [MANUAL_APP.id]: [MANUAL_DEP, F5_DEP] });
+    vi.stubGlobal("fetch", mock);
+    renderPage("engineer");
+
+    fireEvent.click(await screen.findByTestId(`application-row-${MANUAL_APP.id}`));
+    // The manual row has a remove control; the f5 (derivation-owned) row does not.
+    const removeManual = await screen.findByTestId(`dependency-remove-${MANUAL_DEP.id}`);
+    expect(screen.queryByTestId(`dependency-remove-${F5_DEP.id}`)).not.toBeInTheDocument();
+
+    fireEvent.click(removeManual);
+    fireEvent.click(await screen.findByTestId("confirm-action"));
+
+    await waitFor(() => {
+      const del = writeCalls(calls).find((c) => c.method === "DELETE");
+      expect(del).toBeDefined();
+      expect(del!.url).toContain(
+        `/api/v1/applications/${MANUAL_APP.id}/dependencies/${MANUAL_DEP.id}`,
+      );
+    });
+  });
+});
+
+// ── viewer_sees_read_only_tagging_surface_without_write_controls ───────────────
+
+describe("viewer_sees_read_only_tagging_surface_without_write_controls", () => {
+  it("shows no create/edit/delete controls to a viewer", async () => {
+    vi.stubGlobal("fetch", fetchRouted(LIST, {}));
+    renderPage("viewer");
+
+    await screen.findByText("billing-web");
+    expect(screen.queryByTestId("application-create-button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId(`application-edit-${MANUAL_APP.id}`)).not.toBeInTheDocument();
+    expect(screen.queryByTestId(`application-delete-${MANUAL_APP.id}`)).not.toBeInTheDocument();
+  });
+
+  it("shows no add/remove dependency controls to a viewer in the expanded detail", async () => {
+    vi.stubGlobal("fetch", fetchRouted(LIST, { [MANUAL_APP.id]: [MANUAL_DEP] }));
+    renderPage("viewer");
+
+    fireEvent.click(await screen.findByTestId(`application-row-${MANUAL_APP.id}`));
+    await screen.findByTestId(`dependency-source-${MANUAL_DEP.id}`);
+    expect(screen.queryByTestId(`dependency-add-${MANUAL_APP.id}`)).not.toBeInTheDocument();
+    expect(screen.queryByTestId(`dependency-remove-${MANUAL_DEP.id}`)).not.toBeInTheDocument();
   });
 });
