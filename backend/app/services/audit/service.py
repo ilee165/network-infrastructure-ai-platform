@@ -209,6 +209,21 @@ KEK_ROTATE_INTERRUPTED: Final = "kek.rotate.interrupted"
 CONFIG_ARCHIVE_CREATED: Final = "config_archive.created"
 CONFIG_ARCHIVE_DELETED: Final = "config_archive.deleted"
 
+# P4 W2-T3 manual application tagging (ADR-0052 §7): tagging is a direct write
+# at the ``engineer`` role floor, and EVERY mutation writes one of these
+# hash-chained entries with actor, target ids, and before/after state — audit
+# answers who/what/when for every edge that ever influenced an impact answer.
+# The action strings are EXACTLY the ADR-0052 §7 vocabulary (present-tense —
+# deliberately verbatim from the ADR, unlike the older past-tense ``device.*``
+# trio). ``detail`` carries names/descriptions/FQDNs/owner strings and row
+# references only; no credential field exists on either table (§7 "no secret
+# surface"), and provenance references rows by id, never content.
+APPLICATION_CREATE: Final = "application.create"
+APPLICATION_UPDATE: Final = "application.update"
+APPLICATION_DELETE: Final = "application.delete"
+APPLICATION_DEPENDENCY_CREATE: Final = "application_dependency.create"
+APPLICATION_DEPENDENCY_DELETE: Final = "application_dependency.delete"
+
 
 async def record(
     session: AsyncSession,
