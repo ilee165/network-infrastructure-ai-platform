@@ -47,10 +47,15 @@ from app.agents.framework.tools import ToolClassification, netops_tool
 
 if TYPE_CHECKING:
     from app.core.crypto import KeyProvider
+    from app.knowledge import Neo4jClient
     from app.plugins.transport import SshParams, SshTransport
 
 #: Audit actor recorded for every credential decryption by the live-read tools.
 _ACTOR = "agent:troubleshooting"
+
+#: Hop bound for the impact read's physical-neighborhood expansion (matches the
+#: ``GET /topology/impact`` default; ADR-0052 §8 bounded traversal).
+_IMPACT_DEPTH = 2
 
 # ---------------------------------------------------------------------------
 # get_device_routes — normalized store (persisted routing table)
@@ -326,6 +331,100 @@ async def read_live_acls(
 
 
 # ---------------------------------------------------------------------------
+# get_application_impact — application-dependency graph read (ADR-0052 §8)
+# ---------------------------------------------------------------------------
+
+
+def _knowledge_client() -> Neo4jClient:
+    """The process-wide Neo4j read client used by the impact tool (test seam)."""
+    from app.knowledge import get_client
+
+    return get_client()
+
+
+@netops_tool(classification=ToolClassification.READ_ONLY)
+async def get_application_impact(
+    target: Annotated[
+        str,
+        Field(
+            description=(
+                "The impact target as '<kind>:<ref>' — kind is one of device, "
+                "ip_address, interface, subnet, application; ref is the node's "
+                "pg_id UUID (or the CIDR string for a subnet). "
+                "E.g. 'device:6f1c…' or 'application:2a9b…'."
+            ),
+        ),
+    ],
+) -> str:
+    """Answer "what depends on X" from the application-dependency graph, on demand.
+
+    Returns a JSON object with the target, an ``as_of`` graph watermark, and a
+    ``dependents`` list (applications impacted by the target — directly or
+    indirectly through the physical chain); for an ``application`` target it also
+    returns ``dependencies`` (what that application depends on). EVERY entry cites
+    its evidence: the asserting ``sources``, a compact ``provenance`` summary
+    (refs only), and ``derived_at`` — grounded in the projection the ``as_of``
+    watermark names. Read-only: it only reads the projected graph and never
+    mutates anything. Returns ``{"error": ...}`` if the target string is
+    unresolvable or the graph is unavailable, so a missing evidence source
+    degrades the diagnosis instead of aborting it.
+    """
+    from neo4j.exceptions import DriverError, Neo4jError
+
+    from app.knowledge.schema import (
+        LABEL_APPLICATION,
+        LABEL_DEVICE,
+        LABEL_INTERFACE,
+        LABEL_IPADDRESS,
+        LABEL_SUBNET,
+    )
+    from app.knowledge.topology_read import fetch_impact
+
+    kind_to_label = {
+        "device": LABEL_DEVICE,
+        "ip_address": LABEL_IPADDRESS,
+        "interface": LABEL_INTERFACE,
+        "subnet": LABEL_SUBNET,
+        "application": LABEL_APPLICATION,
+    }
+    kind, separator, ref = target.partition(":")
+    kind = kind.strip().lower()
+    ref = ref.strip()
+    if not separator or kind not in kind_to_label or not ref:
+        return json.dumps(
+            {
+                "error": (
+                    f"unresolvable target {target!r}; expected '<kind>:<ref>' where kind is "
+                    f"one of {sorted(kind_to_label)} and ref is the node pg_id "
+                    "(or a CIDR for a subnet)"
+                )
+            }
+        )
+
+    try:
+        result = await fetch_impact(
+            _knowledge_client(),
+            target_label=kind_to_label[kind],
+            target_key=ref,
+            depth=_IMPACT_DEPTH,
+        )
+    except (Neo4jError, DriverError, OSError) as exc:
+        return json.dumps(
+            {"error": f"application-dependency graph unavailable: {type(exc).__name__}"}
+        )
+
+    return json.dumps(
+        {
+            "target": {"kind": kind, "ref": ref},
+            "as_of": result["projected_at"],
+            "depth_used": result["depth_used"],
+            "dependents": result["dependents"],
+            "dependencies": result["dependencies"],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public surface for the agent package
 # ---------------------------------------------------------------------------
 
@@ -334,10 +433,12 @@ TROUBLESHOOTING_TOOLS = [
     read_live_bgp_peers,
     read_live_ospf_neighbors,
     read_live_acls,
+    get_application_impact,
 ]
 
 __all__ = [
     "TROUBLESHOOTING_TOOLS",
+    "get_application_impact",
     "get_device_routes",
     "read_live_acls",
     "read_live_bgp_peers",
