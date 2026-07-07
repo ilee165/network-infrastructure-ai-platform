@@ -477,15 +477,23 @@ async def _read_impact(
 
     - **dependents** (every target kind): expand the target's *physical*
       neighborhood ``0..depth`` hops (``0`` = the target itself → direct
-      dependents; ``1..depth`` = indirect impact through the L2/L3 chain), then
-      every ``Application`` with a ``DEPENDS_ON`` edge into that neighborhood.
-      Known limitation (ADR-0052 §8): ``IPAddress`` nodes carry no *physical*
-      edge (only ``DEPENDS_ON``/``RESOLVES_TO`` touch them), so an IP-address-
-      bound dependency is surfaced only when the ``IPAddress`` is itself the
-      target — it is **not** reached transitively from a ``Device``/``Subnet``/
-      ``Interface`` target. Transitive IP-bound impact is a tracked follow-up
-      (needs an ``Interface``→``IPAddress`` projection edge or a co-key join,
-      validated under the Neo4j rebuild-bite job).
+      dependents; ``1..depth`` = indirect impact through the L2/L3 chain).
+      ``IPAddress`` nodes carry no *physical* edge of their own (only
+      ``DEPENDS_ON``/``RESOLVES_TO`` touch them), so every physically-reached
+      ``Interface`` node ``n`` is also matched against its co-keyed
+      ``IPAddress`` (``ip.pg_id = n.pg_id`` — both are projected from the SAME
+      ``normalized_interfaces`` row for the "winning", lowest-``pg_id``
+      interface of a given address; see :mod:`app.engines.topology.nodes`
+      L286-304) and that ``IPAddress`` substituted in when present. This makes
+      a ``Device``/``Subnet``/``Interface`` target's transitive reach include
+      IP-bound dependents (e.g. an F5 VIP) whenever the address's winning
+      interface itself falls within the ``depth`` bound — not only when the
+      ``IPAddress`` is the direct target. **Residual boundary** (documented,
+      not a bug): if the winning interface for a shared address lies outside
+      the queried target's ``depth``-bounded neighborhood, that ``IPAddress``
+      is not reached either — mirrors the existing "unreconcilable" absence
+      semantics elsewhere in this layer. Every ``Application`` with a
+      ``DEPENDS_ON`` edge into the resulting candidate set is a dependent.
     - **dependencies** (``Application`` target only): the direct ``DEPENDS_ON``
       edges out of the application — "what does application A depend on".
 
@@ -506,9 +514,16 @@ async def _read_impact(
         f"MATCH (x:{target_label}) WHERE x.{key_prop} = $key "
         f"MATCH (x)-[:{phys_pattern}*0..{depth}]-(n) "
         "WITH DISTINCT n "
-        f"MATCH (app:{LABEL_APPLICATION})-[r:{REL_DEPENDS_ON}]->(n) "
+        # Co-key join (rider 2026-07-07-1540): every physically-reached
+        # Interface is also matched against its co-keyed IPAddress (same
+        # pg_id, projected from the same normalized_interfaces row for the
+        # address's winning interface) so IP-bound dependents surface
+        # transitively — no new relationship type, no projector change.
+        f"OPTIONAL MATCH (ip:{LABEL_IPADDRESS}) WHERE n:{LABEL_INTERFACE} AND ip.pg_id = n.pg_id "
+        "WITH DISTINCT CASE WHEN ip IS NOT NULL THEN ip ELSE n END AS n2 "
+        f"MATCH (app:{LABEL_APPLICATION})-[r:{REL_DEPENDS_ON}]->(n2) "
         "RETURN labels(app) AS app_labels, properties(app) AS app_props, "
-        "       labels(n) AS target_labels, properties(n) AS target_props, "
+        "       labels(n2) AS target_labels, properties(n2) AS target_props, "
         "       properties(r) AS rel_props"
     )
     result = await tx.run(dependents_cypher, key=target_key)
@@ -575,7 +590,8 @@ async def fetch_impact(
     (what that application depends on). Absence is an answer, not an error: an
     unprojected target yields empty ``dependents``/``dependencies`` with a
     ``null`` watermark, never a raise. See :func:`_read_impact` for the
-    IPAddress-bound-dependency reachability limitation.
+    co-key join that surfaces IP-bound dependents transitively and its
+    residual reachability boundary.
 
     Args:
         client:       The Neo4j access wrapper (:class:`Neo4jClient`).
