@@ -8,7 +8,7 @@
 | **Depends on** | **W2-T1** (projection), **W2-T2** (derived edges) |
 | **ADRs** | ADR-0052 §8 (binding), ADR-0005 (knowledge/ = sole Neo4j reader) |
 | **PRODUCTION.md** | §2.4 ("impact-analysis query surface"), §11 G-OBS (explainability) |
-| **Status** | Proposed |
+| **Status** | Implemented — `e20a697`/`f2b0090`/`bf35868`/`0d6f8a4`/`c316fec` (P4 W2) |
 
 ## Objective
 

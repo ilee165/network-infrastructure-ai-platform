@@ -8,7 +8,7 @@
 | **Depends on** | **W0-T3** (ADR-0052, the contract) — can start alongside W1 |
 | **ADRs** | ADR-0052 §1/§3/§5/§6 (binding), ADR-0005 D5, ADR-0004 |
 | **PRODUCTION.md** | §2.4, §11 G-REL, §6 (projection-lag SLO) |
-| **Status** | Proposed |
+| **Status** | Implemented — `e0a9af5` (P4 W2) |
 
 ## Objective
 

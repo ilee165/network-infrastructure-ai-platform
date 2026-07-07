@@ -81,7 +81,7 @@ with an in-transcript command.
 ### Wave close
 
 - [x] Full backend + frontend gate suites green at final HEAD. → P10: backend `pytest` 3576 passed / 0 failed / 80 skipped; `ruff check .`, `ruff format --check .` (510 files), `mypy`, `lint-imports` (2 kept, 0 broken) all clean. Frontend `vitest` 453 passed, `tsc --noEmit` clean, `eslint` 0 errors (2 pre-existing ErrorBoundary warnings).
-- [ ] Docs: API docs for tagging + impact; W2 task-spec Status lines flipped to Implemented. → P11
+- [x] Docs: API docs for tagging + impact; W2 task-spec Status lines flipped to Implemented. → P11: API surface is the FastAPI OpenAPI at `/docs` (README §Quickstart) — verified `GET /topology/impact` + `ImpactResponse` + the applications endpoints render from their route docstrings/schemas; W2-T1..T4 spec Status lines flipped to Implemented with landing SHAs.
 - [ ] PR to main opened by the operator after the round (not by the executor — no push).
 
 ## Data model (files, not fields)
