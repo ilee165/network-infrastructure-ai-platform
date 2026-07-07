@@ -67,20 +67,20 @@ with an in-transcript command.
 - [x] Direct-write tagging API live at `engineer`+ with full audit per mutation; reads at viewer+ (`backend/app/api/v1/applications.py`).
 - [x] Derived-application delete refused; manual-row ownership asserted; hash-chain membership tested (`backend/tests/pg/test_application_tagging_pg.py`).
 - [x] No agent tagging tool exposed; standard rate limiting covers the endpoints.
-- [ ] UI tag/create/edit/remove flows working; frontend tests green. → P1–P3
-- [ ] Write controls hidden below `engineer`; viewer sees a read-only surface. → P3
+- [x] UI tag/create/edit/remove flows working; frontend tests green. → P1 `1a59567` (client), P2 `c920f48` (read surface), P3 `8f9961d` (write flows).
+- [x] Write controls hidden below `engineer`; viewer sees a read-only surface. → P3 `8f9961d` (`viewer_sees_read_only_tagging_surface_without_write_controls`).
 
-### W2-T4 — impact analysis (OPEN; this round P4–P9)
+### W2-T4 — impact analysis (COMPLETE this round; P4–P9)
 
-- [ ] `app` layer served by the existing graph/neighborhood surfaces; `LAYER_ALL` includes `DEPENDS_ON`. → P4
-- [ ] `fetch_impact` answers both directions with per-edge provenance + `projected_at` watermark, depth-bounded. → P5–P6
-- [ ] Impact endpoint live on the topology router at viewer+. → P7
-- [ ] Troubleshooting Agent exposes the READ_ONLY impact tool; every claim cites source + evidence refs + watermark; failures return `{"error": ...}`. → P8
-- [ ] UI app-dependency view renders with per-edge source badges; frontend tests green. → P9
+- [x] `app` layer served by the existing graph/neighborhood surfaces; `LAYER_ALL` includes `DEPENDS_ON`. → P4 `e20a697`.
+- [x] `fetch_impact` answers both directions with per-edge provenance + `projected_at` watermark, depth-bounded. → P5+P6 `f2b0090`.
+- [x] Impact endpoint live on the topology router at viewer+. → P7 `bf35868` (`GET /topology/impact`).
+- [x] Troubleshooting Agent exposes the READ_ONLY impact tool; every claim cites source + evidence refs + watermark; failures return `{"error": ...}`. → P8 `0d6f8a4` (baseline reconciled `15034f3`).
+- [x] UI app-dependency view renders with per-edge source badges; frontend tests green. → P9 `c316fec`.
 
 ### Wave close
 
-- [ ] Full backend + frontend gate suites green at final HEAD. → P10
+- [x] Full backend + frontend gate suites green at final HEAD. → P10: backend `pytest` 3576 passed / 0 failed / 80 skipped; `ruff check .`, `ruff format --check .` (510 files), `mypy`, `lint-imports` (2 kept, 0 broken) all clean. Frontend `vitest` 453 passed, `tsc --noEmit` clean, `eslint` 0 errors (2 pre-existing ErrorBoundary warnings).
 - [ ] Docs: API docs for tagging + impact; W2 task-spec Status lines flipped to Implemented. → P11
 - [ ] PR to main opened by the operator after the round (not by the executor — no push).
 
