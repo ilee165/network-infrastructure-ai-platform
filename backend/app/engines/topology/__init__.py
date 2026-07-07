@@ -5,6 +5,19 @@ package derives the typed graph nodes (and, in later tasks, relationships
 and projection plumbing) from inventory rows.
 """
 
+from app.engines.topology.app_derivation import (
+    DerivationPlan,
+    DerivationStats,
+    PlannedApplication,
+    PlannedDependency,
+    ProvenanceStep,
+    derive_application_dependencies,
+)
+from app.engines.topology.app_derivation_store import (
+    DerivationApplyStats,
+    SourceApplyStats,
+    apply_derivation_plan,
+)
 from app.engines.topology.applications import (
     ApplicationNode,
     DependsOnEdge,
@@ -75,6 +88,9 @@ __all__ = [
     "ApplicationNode",
     "ConnectedToEdge",
     "DependsOnEdge",
+    "DerivationApplyStats",
+    "DerivationPlan",
+    "DerivationStats",
     "DerivedApplications",
     "DerivedDns",
     "DerivedEdges",
@@ -94,17 +110,23 @@ __all__ = [
     "L2BuildReport",
     "L2BuildResult",
     "L3AdjacentEdge",
+    "PlannedApplication",
+    "PlannedDependency",
+    "ProvenanceStep",
     "ResolvesToEdge",
     "RoutesToEdge",
     "SiteNode",
     "SnapshotData",
+    "SourceApplyStats",
     "SubnetNode",
     "TopologyDiff",
     "VlanNode",
     "VrfNode",
+    "apply_derivation_plan",
     "build_l2_edges",
     "build_l3_edges",
     "build_snapshot",
+    "derive_application_dependencies",
     "derive_applications",
     "derive_dns",
     "derive_nodes",

@@ -26,6 +26,7 @@ from app.models import (
     DiscoveryRun,
     DiscoveryRunStatus,
 )
+from app.models.adc import NormalizedPoolRow, NormalizedVirtualServerRow
 from app.models.applications import (
     Application,
     ApplicationDependency,
@@ -41,9 +42,13 @@ from app.models.inventory import (
 )
 from app.models.topology import TopologySnapshot
 from app.schemas.normalized import (
+    AdcAvailability,
+    AdcProtocol,
+    DnsRecordType,
     InterfaceAdminStatus,
     InterfaceOperStatus,
     NeighborProtocol,
+    NormalizedDnsRecord,
     RouteProtocol,
 )
 from app.workers.tasks import topology as tasks
@@ -196,12 +201,16 @@ def _routes() -> list[NormalizedRouteRow]:
 
 
 def _applications() -> list[Application]:
+    # MANUAL origin: the W2-T2 derivation pass (sync step 0) lifecycle-owns
+    # derived ``f5:*`` applications and diff-replaces automated-source rows,
+    # so the seeded fixture rows are user-owned — untouchable by every pass
+    # (ADR-0052 §3.3.1/§3.3.5) — and survive into the projection unchanged.
     return [
         Application(
             id=APP1,
             name="payroll",
-            origin=ApplicationOrigin.DERIVED,
-            origin_ref="f5:test:payroll",
+            origin=ApplicationOrigin.MANUAL,
+            origin_ref=None,
             fqdns=["payroll.corp.example.com"],
         )
     ]
@@ -213,16 +222,16 @@ def _app_dependencies() -> list[ApplicationDependency]:
             application_id=APP1,
             target_kind=DependencyTargetKind.DEVICE,
             target_ref=str(DEV1),
-            source=DependencySource.F5,
-            provenance=[{"kind": "virtual_server", "ref": "vs-1"}],
+            source=DependencySource.MANUAL,
+            provenance=[{"kind": "user", "ref": "00000000-0000-0000-0000-0000000000aa"}],
             derived_at=COLLECTED_AT,
         ),
         ApplicationDependency(
             application_id=APP1,
             target_kind=DependencyTargetKind.IP_ADDRESS,
             target_ref=str(IF1),
-            source=DependencySource.DNS,
-            provenance=[{"kind": "record", "ref": "payroll|a|10.0.0.1"}],
+            source=DependencySource.MANUAL,
+            provenance=[{"kind": "user", "ref": "00000000-0000-0000-0000-0000000000aa"}],
             derived_at=COLLECTED_AT,
         ),
     ]
@@ -626,3 +635,210 @@ def test_sync_after_run_creates_fresh_client_each_invocation(
     assert clients[0] is not clients[1]
     assert clients[0].closed is True
     assert clients[1].closed is True
+
+
+# ===========================================================================
+# W2-T2 — post-discovery-run derivation trigger (ADR-0052 §2/§5, step 0)
+# ===========================================================================
+
+
+def _seed_adc(db_url: str) -> None:
+    """Insert one F5 virtual server + pool whose member is IF1's address."""
+
+    async def _go() -> None:
+        engine = create_async_engine(db_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            provenance = {
+                "raw_artifact_id": uuid4(),
+                "collected_at": COLLECTED_AT,
+                "source_vendor": "f5_bigip",
+            }
+            session.add(
+                NormalizedVirtualServerRow(
+                    device_id=DEV1,
+                    **provenance,
+                    name="/Common/portal.corp.example.com",
+                    vip_address="192.0.2.10",
+                    port=443,
+                    protocol=AdcProtocol.TCP,
+                    enabled=True,
+                    availability=AdcAvailability.AVAILABLE,
+                    pool_name="/Common/portal_pool",
+                )
+            )
+            session.add(
+                NormalizedPoolRow(
+                    device_id=DEV1,
+                    **provenance,
+                    name="/Common/portal_pool",
+                    monitors=[],
+                    availability=AdcAvailability.AVAILABLE,
+                    members=[
+                        {
+                            "name": "/Common/core-1:443",
+                            "address": "10.0.0.1",  # reconciles to IF1 (IPAddress)
+                            "fqdn": None,
+                            "port": 443,
+                            "vrf": None,
+                            "admin_state": "enabled",
+                            "availability": "available",
+                        }
+                    ],
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_go())
+
+
+def _fetch_applications(db_url: str) -> list[Application]:
+    async def _go() -> list[Application]:
+        engine = create_async_engine(db_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            rows = list((await session.execute(select(Application))).scalars())
+        await engine.dispose()
+        return rows
+
+    return asyncio.run(_go())
+
+
+def _fetch_dependencies(db_url: str) -> list[ApplicationDependency]:
+    async def _go() -> list[ApplicationDependency]:
+        engine = create_async_engine(db_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            rows = list((await session.execute(select(ApplicationDependency))).scalars())
+        await engine.dispose()
+        return rows
+
+    return asyncio.run(_go())
+
+
+def test_sync_after_run_derives_applications_before_projecting(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The trigger wiring: derivation (step 0) writes the PG rows, then the
+    SAME pass projects them — the new node reaches Neo4j without any second
+    task, and the derivation never touches the seeded manual rows."""
+    run_id = _seed_inventory(db_url)
+    _seed_adc(db_url)
+    client = FakeClient()
+    monkeypatch.setattr(tasks, "_neo4j_client", lambda: client)
+
+    result = tasks.sync_after_run(str(run_id))
+
+    assert result["ok"] is True
+    derivation = result["application_derivation"]
+    assert derivation["ok"] is True
+    assert derivation["dns_pass_ran"] is False  # default seam: no DDI fetch
+    assert derivation["planned"]["f5_applications"] == 1
+    assert derivation["applied"]["applications_created"] == 1
+    assert derivation["applied"]["f5"] == {"inserted": 1, "updated": 0, "deleted": 0}
+
+    apps = _fetch_applications(db_url)
+    derived = next(a for a in apps if a.origin is ApplicationOrigin.DERIVED)
+    assert derived.origin_ref == f"f5:{DEV1}:/Common/portal.corp.example.com"
+    assert derived.fqdns == ["portal.corp.example.com"]  # VS-leaf FQDN seed
+    manual = next(a for a in apps if a.id == APP1)
+    assert manual.origin is ApplicationOrigin.MANUAL  # untouched
+
+    deps = _fetch_dependencies(db_url)
+    f5_rows = [d for d in deps if str(d.source) == "f5"]
+    assert [(str(d.application_id), d.target_ref) for d in f5_rows] == [(str(derived.id), str(IF1))]
+    manual_rows = [d for d in deps if str(d.source) == "manual"]
+    assert len(manual_rows) == 2  # per-source ownership: manual untouched
+
+    # The freshly-derived rows rode the SAME projection pass.
+    snaps = _fetch_snapshots(db_url)
+    assert ["Application", str(derived.id)] in snaps[0].nodes
+    assert ["DEPENDS_ON", str(derived.id), str(IF1)] in snaps[0].edges
+
+    # And the derivation outcome is recorded on the run.
+    run = _fetch_run(db_url, run_id)
+    assert run.stats["application_derivation"]["ok"] is True
+    assert run.stats["topology_sync"]["ok"] is True
+
+
+def test_sync_after_run_is_idempotent_across_derivation_reruns(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second run on unchanged inputs: derivation is a no-op (no new rows,
+    nothing rewritten) and no duplicate applications appear."""
+    run_id = _seed_inventory(db_url)
+    _seed_adc(db_url)
+    monkeypatch.setattr(tasks, "_neo4j_client", lambda: FakeClient())
+
+    tasks.sync_after_run(str(run_id))
+    first_apps = {a.id: a.updated_at for a in _fetch_applications(db_url)}
+
+    result = tasks.sync_after_run(str(run_id))
+    derivation = result["application_derivation"]
+    assert derivation["applied"]["applications_created"] == 0
+    assert derivation["applied"]["f5"] == {"inserted": 0, "updated": 0, "deleted": 0}
+
+    second_apps = {a.id: a.updated_at for a in _fetch_applications(db_url)}
+    assert second_apps == first_apps  # stable UUIDs, zero updated_at churn
+
+
+def test_sync_after_run_isolates_derivation_failure_from_projection(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A derivation failure records ok=False in its own block; the projection
+    still runs on the previous rows and the discovery run is untouched."""
+    run_id = _seed_inventory(db_url)
+
+    def _boom() -> None:
+        raise RuntimeError("adc load failed")
+
+    monkeypatch.setattr(tasks, "_fetch_dns_records", _boom)
+    monkeypatch.setattr(tasks, "_neo4j_client", lambda: FakeClient())
+
+    result = tasks.sync_after_run(str(run_id))
+
+    assert result["ok"] is True  # the projection succeeded
+    assert result["application_derivation"]["ok"] is False
+    assert "RuntimeError" in result["application_derivation"]["error"]
+
+    run = _fetch_run(db_url, run_id)
+    assert run.status is DiscoveryRunStatus.SUCCEEDED
+    assert run.stats["application_derivation"]["ok"] is False
+    assert run.stats["topology_sync"]["ok"] is True
+
+
+def test_fetch_dns_records_seam_feeds_source_3(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the seam returns records, the dns pass runs in the same trigger:
+    the seeded manual app's fqdn reconciles through the M5 machinery and a
+    ``source='dns'`` row persists (rebuild never needs DDI reachability)."""
+    run_id = _seed_inventory(db_url)
+    monkeypatch.setattr(tasks, "_neo4j_client", lambda: FakeClient())
+    monkeypatch.setattr(
+        tasks,
+        "_fetch_dns_records",
+        lambda: [
+            NormalizedDnsRecord(
+                device_id=DEV1,
+                collected_at=COLLECTED_AT,
+                source_vendor="infoblox",
+                name="payroll.corp.example.com",
+                record_type=DnsRecordType.A,
+                value="10.0.0.1",
+                zone="corp.example.com",
+            )
+        ],
+    )
+
+    result = tasks.sync_after_run(str(run_id))
+    derivation = result["application_derivation"]
+    assert derivation["dns_pass_ran"] is True
+    assert derivation["applied"]["dns"] == {"inserted": 1, "updated": 0, "deleted": 0}
+
+    deps = _fetch_dependencies(db_url)
+    (dns_row,) = [d for d in deps if str(d.source) == "dns"]
+    assert dns_row.application_id == APP1
+    assert dns_row.target_ref == str(IF1)
+    assert dns_row.provenance[0]["kind"] == "dns_record"

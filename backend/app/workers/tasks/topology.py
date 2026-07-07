@@ -5,6 +5,18 @@
 :func:`app.workers.tasks.discovery.run_discovery`).  It is the bridge between
 the Postgres ``normalized_*`` tables and the Neo4j projection (ADR-0005): it
 
+0. runs the **application-dependency derivation pass** (ADR-0052 §2/§5 —
+   the post-discovery-run trigger for sources 1-3): loads the persisted ADC
+   (W1-T1) and virtualization (W1-T2) rows plus inventory and the current
+   application tables, fetches the DDI record set for source 3 through the
+   :func:`_fetch_dns_records` seam (``None`` = skip, preserving persisted
+   source-3 rows), computes the pure
+   :func:`~app.engines.topology.app_derivation.derive_application_dependencies`
+   plan, and persists it in one transaction via
+   :func:`~app.engines.topology.app_derivation_store.apply_derivation_plan`.
+   Derivation only WRITES the PG tables — it never projects (writes flow one
+   way, ADR-0005 §5) — and a derivation failure never blocks the projection
+   (the pass then projects the previous rows),
 1. loads the devices + normalized interface/route/neighbor rows AND the
    application-dependency rows (``applications`` + ``application_dependencies``,
    ADR-0052 §5 — the layer is part of EVERY projection pass) from Postgres,
@@ -18,7 +30,9 @@ Failure isolation (ADR-0005 / M2 plan): the discovery run is already finished
 and committed before this task runs.  A projection failure here must therefore
 **never** be allowed to surface as a discovery failure — the task swallows the
 exception, logs it, and records a ``topology_sync`` block in ``run.stats`` so
-the outcome is observable without touching the run's terminal status.
+the outcome is observable without touching the run's terminal status.  The
+derivation step is isolated the same way, under its own
+``application_derivation`` stats block.
 
 Async DB / Neo4j from sync Celery: like the discovery tasks, each invocation
 opens a fresh engine + event loop via ``asyncio.run``.  Module-level seams
@@ -41,12 +55,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app import db
 from app.core.config import get_settings
+from app.engines.topology.app_derivation import derive_application_dependencies
+from app.engines.topology.app_derivation_store import apply_derivation_plan
 from app.engines.topology.projector import project
 from app.engines.topology.snapshots import upsert_snapshot
 from app.engines.topology.sync import derive_topology, snapshot_lists
 from app.knowledge.neo4j_client import Neo4jClient, create_client
 from app.knowledge.schema import ensure_constraints
 from app.models import DiscoveryRun
+from app.models.adc import NormalizedPoolRow, NormalizedVirtualServerRow
 from app.models.applications import Application, ApplicationDependency
 from app.models.inventory import (
     Device,
@@ -55,6 +72,8 @@ from app.models.inventory import (
     NormalizedRouteRow,
 )
 from app.models.mixins import utcnow
+from app.models.virtualization import NormalizedHypervisorHostRow, NormalizedVirtualMachineRow
+from app.schemas.normalized import NormalizedDnsRecord
 from app.workers.celery_app import celery_app
 
 __all__ = ["sync_after_run"]
@@ -140,6 +159,79 @@ async def _load_inventory(session: AsyncSession) -> _Inventory:
 
 
 # ---------------------------------------------------------------------------
+# Application-dependency derivation pass (ADR-0052 §2/§5 — step 0)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_dns_records() -> list[NormalizedDnsRecord] | None:
+    """Caller-side DDI fetch for source 3 (the ADR-0052 §2 input-side exception).
+
+    Returns the full DDI-normalized record set, or ``None`` when no DDI read
+    is available — the derivation then SKIPS the dns pass, preserving the
+    persisted source-3 rows (an outage must never read as "no DNS evidence"
+    and delete results the rebuild contract depends on).
+
+    No worker-side DDI REST read path exists yet: it is the same W1-T3 named
+    deferral that leaves the ``adc_*``/``virt_*`` tables to a future
+    collection task (the SSH/SNMP-only ``collect_device`` dispatch covers
+    neither, see :mod:`app.models.adc`). Until that collection pass lands,
+    the production default is ``None``; tests (and a future composition
+    root) monkeypatch/override this seam — the derivation and diff-replace
+    of source 3 are fully exercised against fixture records either way.
+    """
+    return None
+
+
+async def _derive_applications() -> dict[str, Any]:
+    """Run the pre-projection derivation for sources 1-3 and persist it.
+
+    Loads every input on this side (the derivation function is pure: no
+    session, no plugin, no DDI call inside), applies the plan in ONE
+    transaction, and returns a JSON-safe stats block (planned counters per
+    source + rows actually written). Raised exceptions propagate to
+    :func:`sync_after_run`, which isolates them from the projection and the
+    discovery run.
+    """
+    dns_records = _fetch_dns_records()
+    async with _session() as session:
+        virtual_servers = list(
+            (await session.execute(select(NormalizedVirtualServerRow))).scalars()
+        )
+        pools = list((await session.execute(select(NormalizedPoolRow))).scalars())
+        virtual_machines = list(
+            (await session.execute(select(NormalizedVirtualMachineRow))).scalars()
+        )
+        hypervisor_hosts = list(
+            (await session.execute(select(NormalizedHypervisorHostRow))).scalars()
+        )
+        devices = list((await session.execute(select(Device))).scalars())
+        interfaces = list((await session.execute(select(NormalizedInterfaceRow))).scalars())
+        applications = list((await session.execute(select(Application))).scalars())
+        dependencies = list((await session.execute(select(ApplicationDependency))).scalars())
+
+        plan = derive_application_dependencies(
+            virtual_servers=virtual_servers,
+            pools=pools,
+            virtual_machines=virtual_machines,
+            hypervisor_hosts=hypervisor_hosts,
+            devices=devices,
+            interfaces=interfaces,
+            applications=applications,
+            dependencies=dependencies,
+            dns_records=dns_records,
+        )
+        applied = await apply_derivation_plan(session, plan)
+        await session.commit()
+
+    return {
+        "ok": True,
+        "dns_pass_ran": plan.dns_pass_ran,
+        "planned": plan.stats.model_dump(),
+        "applied": applied.model_dump(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Projection pass
 # ---------------------------------------------------------------------------
 
@@ -191,8 +283,11 @@ async def _project_run(run_id: UUID) -> dict[str, Any]:
     }
 
 
-async def _record_sync_stats(run_id: UUID, sync_stats: dict[str, Any]) -> None:
-    """Merge a ``topology_sync`` block into the run's stats (best-effort).
+async def _record_sync_stats(
+    run_id: UUID, sync_stats: dict[str, Any], derivation_stats: dict[str, Any]
+) -> None:
+    """Merge the ``topology_sync`` + ``application_derivation`` blocks into
+    the run's stats (best-effort).
 
     Never raises for a missing run: the run is the parent FK of any snapshot,
     but recording is purely observational and must not mask the sync outcome.
@@ -204,6 +299,7 @@ async def _record_sync_stats(run_id: UUID, sync_stats: dict[str, Any]) -> None:
             return
         stats = dict(run.stats or {})
         stats["topology_sync"] = sync_stats
+        stats["application_derivation"] = derivation_stats
         run.stats = stats
         await session.commit()
 
@@ -215,14 +311,35 @@ async def _record_sync_stats(run_id: UUID, sync_stats: dict[str, Any]) -> None:
 
 @celery_app.task(name="topology.sync_after_run")
 def sync_after_run(run_id: str) -> dict[str, Any]:
-    """Project the current inventory into Neo4j and snapshot it for *run_id*.
+    """Derive application dependencies, project the inventory, snapshot it.
 
-    Always returns a JSON-safe summary and never re-raises: a projection
-    failure is logged and recorded in ``run.stats['topology_sync']`` with
+    Always returns a JSON-safe summary and never re-raises: a derivation or
+    projection failure is logged and recorded in the run's
+    ``application_derivation`` / ``topology_sync`` stats blocks with
     ``ok=False`` so the already-finished discovery run is never degraded by a
     graph-side problem (ADR-0005 failure isolation).
     """
     run_uuid = uuid.UUID(run_id)
+
+    # Step 0 — the post-discovery-run derivation trigger for sources 1-3
+    # (ADR-0052 §5). Isolated exactly like the projection: a derivation
+    # failure only means this pass projects the previous rows.
+    try:
+        derivation_stats = asyncio.run(_derive_applications())
+        logger.info(
+            "topology.derivation_complete",
+            run_id=run_id,
+            planned=derivation_stats["planned"],
+            applied=derivation_stats["applied"],
+        )
+    except Exception as exc:  # derivation must not fail the sync or the run
+        derivation_stats = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        logger.warning(
+            "topology.derivation_failed",
+            run_id=run_id,
+            error_type=type(exc).__name__,
+        )
+
     try:
         sync_stats = asyncio.run(_project_run(run_uuid))
         logger.info(
@@ -240,8 +357,8 @@ def sync_after_run(run_id: str) -> dict[str, Any]:
         )
 
     try:
-        asyncio.run(_record_sync_stats(run_uuid, sync_stats))
+        asyncio.run(_record_sync_stats(run_uuid, sync_stats, derivation_stats))
     except Exception:  # stat recording is best-effort, never fatal
         logger.warning("topology.sync_stats_unrecorded", run_id=run_id)
 
-    return {"run_id": run_id, **sync_stats}
+    return {"run_id": run_id, "application_derivation": derivation_stats, **sync_stats}
