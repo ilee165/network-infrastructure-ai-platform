@@ -328,6 +328,13 @@ def test_recorded_artifact_metadata_matches_live() -> None:
     assert baseline["_meta"]["roster_count"] == len(_live_matrix()) == 9
     result = baseline["result"]
     assert result["roster_unchanged_vs_p2"] is True
-    assert result["allow_lists_unchanged_vs_p2"] is True
+    # P4 W2-T4 added exactly ONE sanctioned READ_ONLY tool
+    # (troubleshooting.get_application_impact, ADR-0052 §8). The allow-list flag
+    # therefore records that reconciliation rather than claiming a byte-identity
+    # the data no longer holds — while the load-bearing security invariants
+    # (roster, Security-Agent allow-list, state-changing-reachable set, injection
+    # boundary) stay hard-True below and in the sibling tests.
+    assert isinstance(result["allow_lists_unchanged_vs_p2"], str)
+    assert "get_application_impact" in result["allow_lists_unchanged_vs_p2"]
     assert result["injection_boundary_intact"] is True
     assert result["no_new_agent"] is True and result["no_new_vendor"] is True
