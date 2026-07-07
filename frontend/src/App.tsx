@@ -27,6 +27,7 @@ import { Layout } from "./components/Layout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { RoleRoute } from "./components/RoleRoute";
 import { AdcPage } from "./pages/AdcPage";
+import { ApplicationsPage } from "./pages/ApplicationsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { ChangesPage } from "./pages/ChangesPage";
@@ -69,6 +70,7 @@ export function App() {
             <Route path="config" element={<ConfigPage />} />
             <Route path="documents" element={<DocumentsPage />} />
             <Route path="topology" element={<TopologyPage />} />
+            <Route path="applications" element={<ApplicationsPage />} />
 
             {/* /incidents: viewer+ (incident reports contain agent-generated
                 network-failure evidence; defense-in-depth over the backend
