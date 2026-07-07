@@ -23,7 +23,8 @@ Filtering
 (and the interfaces/addresses/subnets reachable from them); ``vrf`` scopes it
 to the subnet endpoints of ``ROUTES_TO`` edges in that VRF.  ``layer`` selects
 which relationship families are returned (``l2`` → ``CONNECTED_TO``; ``l3`` →
-the four L3 types; ``all`` → every projected type).  The node set is always the
+the four L3 types; ``dns`` → the DNS-dependency types; ``app`` → ``DEPENDS_ON``;
+``all`` → every projected type).  The node set is always the
 union of every endpoint that survives the active filters, so the returned
 subgraph is internally consistent (no dangling edges).
 """
@@ -39,6 +40,7 @@ from app.knowledge.schema import (
     LABEL_DEVICE,
     NODE_KEY_PROPERTY,
     REL_CONNECTED_TO,
+    REL_DEPENDS_ON,
     REL_HAS_INTERFACE,
     REL_IN_SUBNET,
     REL_IN_ZONE,
@@ -50,6 +52,7 @@ from app.knowledge.schema import (
 __all__ = [
     "GraphData",
     "LAYER_ALL",
+    "LAYER_APP",
     "LAYER_DNS",
     "LAYER_L2",
     "LAYER_L3",
@@ -66,8 +69,10 @@ LAYER_L2 = "l2"
 LAYER_L3 = "l3"
 #: DNS-dependency layer (M5 task #13): ``IN_ZONE`` + ``RESOLVES_TO``.
 LAYER_DNS = "dns"
+#: Application-dependency layer (P4 W2-T4, ADR-0052 §8): ``DEPENDS_ON`` only.
+LAYER_APP = "app"
 LAYER_ALL = "all"
-LAYERS: tuple[str, ...] = (LAYER_L2, LAYER_L3, LAYER_DNS, LAYER_ALL)
+LAYERS: tuple[str, ...] = (LAYER_L2, LAYER_L3, LAYER_DNS, LAYER_APP, LAYER_ALL)
 
 #: Upper bound on the ``depth`` of a device-neighborhood read (audit Wave 5,
 #: ARCH_DEBT #7).  The bound is interpolated into the variable-length Cypher
@@ -93,6 +98,9 @@ _DNS_REL_TYPES: tuple[str, ...] = (
     REL_RESOLVES_TO,
 )
 
+#: The application-dependency relationship family (P4 W2-T4): one union edge type.
+_APP_REL_TYPES: tuple[str, ...] = (REL_DEPENDS_ON,)
+
 #: Property name every projected element carries (the projection watermark).
 _PROJECTED_AT_PROP = "last_projected_at"
 
@@ -111,7 +119,9 @@ def rel_types_for_layer(layer: str) -> tuple[str, ...]:
         return _L3_REL_TYPES
     if layer == LAYER_DNS:
         return _DNS_REL_TYPES
-    return (REL_CONNECTED_TO, *_L3_REL_TYPES, *_DNS_REL_TYPES)
+    if layer == LAYER_APP:
+        return _APP_REL_TYPES
+    return (REL_CONNECTED_TO, *_L3_REL_TYPES, *_DNS_REL_TYPES, *_APP_REL_TYPES)
 
 
 def _node_key(label: str, properties: dict[str, Any]) -> Any:

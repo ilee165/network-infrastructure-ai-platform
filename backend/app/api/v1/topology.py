@@ -71,7 +71,7 @@ async def get_graph(
     _user: Viewer,
     site: Annotated[str | None, Query(max_length=255)] = None,
     vrf: Annotated[str | None, Query(max_length=255)] = None,
-    layer: Annotated[str, Query(pattern="^(l2|l3|dns|all)$")] = LAYER_ALL,
+    layer: Annotated[str, Query(pattern="^(l2|l3|dns|app|all)$")] = LAYER_ALL,
 ) -> GraphResponse:
     """Return the projected subgraph as of the latest projection pass.
 
@@ -129,7 +129,7 @@ async def get_neighborhood(
         int,
         Query(ge=1, le=MAX_NEIGHBORHOOD_DEPTH, description="Hop radius around the device."),
     ] = 2,
-    layer: Annotated[str, Query(pattern="^(l2|l3|dns|all)$")] = LAYER_ALL,
+    layer: Annotated[str, Query(pattern="^(l2|l3|dns|app|all)$")] = LAYER_ALL,
 ) -> GraphResponse:
     """Return the subgraph within ``depth`` hops of one projected device.
 
