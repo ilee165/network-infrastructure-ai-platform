@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,6 +62,11 @@ from tests.engines.topology.test_app_derivation import (
     make_vs,
     member,
 )
+
+#: Selected by the blocking ``pg-integration`` CI job (``pytest -m integration``);
+#: without it this file is DESELECTED (not skipped) and its PG-semantics
+#: assertions run in no CI job at all (PR #119 review).
+pytestmark = pytest.mark.integration
 
 NOW1 = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
 NOW2 = datetime(2026, 7, 6, 13, 0, tzinfo=UTC)

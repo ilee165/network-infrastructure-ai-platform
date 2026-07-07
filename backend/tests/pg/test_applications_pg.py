@@ -42,6 +42,11 @@ from app.models.applications import (
     stamp_derived_watermark,
 )
 
+#: Selected by the blocking ``pg-integration`` CI job (``pytest -m integration``);
+#: without it this file is DESELECTED (not skipped) and its PG-semantics
+#: assertions run in no CI job at all (PR #119 review).
+pytestmark = pytest.mark.integration
+
 DERIVED_AT = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
 
 
