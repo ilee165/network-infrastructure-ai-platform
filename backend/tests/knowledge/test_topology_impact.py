@@ -186,17 +186,23 @@ class TestFetchImpactDependents:
         # A device target has no "what it depends on" direction.
         assert result["dependencies"] == []
 
-    async def test_fetch_impact_reaches_indirect_impact_through_physical_chain(self) -> None:
-        # Querying a Subnet returns an app whose DEPENDS_ON edge lands on an
-        # IPAddress inside that subnet — reached by expanding the target's
-        # physical neighborhood.
+    async def test_fetch_impact_reaches_indirect_dependents_through_physical_chain(self) -> None:
+        # Querying a Device returns an app whose DEPENDS_ON edge lands on a
+        # *second* physically-reachable node (e.g. an L3-adjacent device) — the
+        # indirect-impact contract.  NB: the endpoint here is a Device, not an
+        # IPAddress: IPAddress nodes carry no physical edge, so an IP-bound
+        # dependency is reached only when the IPAddress is the direct target,
+        # not transitively from a Device/Subnet target (topology_read._read_impact
+        # known limitation).  This fake tx cannot model graph reachability, so the
+        # assertions below verify only what is verifiable at unit level: the
+        # emitted traversal is depth-bounded and walks the physical families.
         tx = _FakeImpactTx(
             dependents=[
-                _dependent_record(app_key="a2", target_label=LABEL_IPADDRESS, target_key="ip-9")
+                _dependent_record(app_key="a2", target_label=LABEL_DEVICE, target_key="dev-2")
             ]
         )
         result = await fetch_impact(
-            _FakeClient(tx), target_label=LABEL_SUBNET, target_key="10.0.0.0/24", depth=3
+            _FakeClient(tx), target_label=LABEL_DEVICE, target_key="dev-1", depth=3
         )
         assert [d["application"]["key"] for d in result["dependents"]] == ["a2"]
         # The dependents traversal is depth-bounded and walks the physical
@@ -204,6 +210,7 @@ class TestFetchImpactDependents:
         dependents_cypher = next(c for c in tx.cyphers if "app_labels" in c)
         assert "*0..3" in dependents_cypher
         assert "HAS_INTERFACE" in dependents_cypher and "IN_SUBNET" in dependents_cypher
+        assert "DEPENDS_ON" not in dependents_cypher.split("WITH DISTINCT n")[0]
 
     async def test_fetch_impact_depth_bounded_by_max_neighborhood_depth(self) -> None:
         client = _FakeClient(_FakeImpactTx())

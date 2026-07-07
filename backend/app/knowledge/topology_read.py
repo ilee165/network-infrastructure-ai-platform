@@ -106,6 +106,13 @@ _DNS_REL_TYPES: tuple[str, ...] = (
 #: The application-dependency relationship family (P4 W2-T4): one union edge type.
 _APP_REL_TYPES: tuple[str, ...] = (REL_DEPENDS_ON,)
 
+#: Relationship families the ``site`` predicate must not filter on: their
+#: endpoints (DnsZone/DnsRecord/IPAddress; Application/IPAddress) carry no
+#: ``.site`` property, so ``a.site = $site OR b.site = $site`` is null/false for
+#: every one of their edges and a site scope would silently drop them all. Both
+#: the DNS family (M5) and the application-dependency family (P4 W2) are exempt.
+_SITELESS_REL_TYPES: tuple[str, ...] = (*_DNS_REL_TYPES, *_APP_REL_TYPES)
+
 #: The physical relationship families an impact read expands through (L2 + L3):
 #: a device/subnet/interface's neighborhood is walked over these, never over the
 #: ``DEPENDS_ON`` impact edge itself (that is the answer, not a traversal hop).
@@ -229,23 +236,24 @@ async def _read_graph(
     # Relationship types are validated module constants — safe to interpolate
     # into the type pattern (the driver cannot parameterize a rel-type literal).
     rel_pattern = "|".join(rel_types)
-    # DNS-family edges (IN_ZONE, RESOLVES_TO) connect DnsZone/DnsRecord/IPAddress
-    # nodes which carry no .site property; Neo4j evaluates a missing property as
-    # null, so `null = $site` is always false and would silently drop every DNS
-    # edge whenever site is non-null.  The guard `OR type(r) IN $dns_rel_types`
-    # short-circuits the site predicate for those relationship types, mirroring
-    # the existing VRF guard for ROUTES_TO.
-    dns_rel_types = list(_DNS_REL_TYPES)
+    # DNS-family (IN_ZONE, RESOLVES_TO) and application-dependency (DEPENDS_ON)
+    # edges connect nodes that carry no .site property (DnsZone/DnsRecord/
+    # IPAddress; Application/IPAddress); Neo4j evaluates a missing property as
+    # null, so `null = $site` is always false and a site scope would silently
+    # drop every one of those edges.  The guard `OR type(r) IN $siteless_rel_types`
+    # short-circuits the site predicate for those families, mirroring the
+    # existing VRF guard for ROUTES_TO.
+    siteless_rel_types = list(_SITELESS_REL_TYPES)
     cypher = (
         f"MATCH (a)-[r:{rel_pattern}]->(b) "
         "WHERE ($site IS NULL OR a.site = $site OR b.site = $site "
-        "       OR type(r) IN $dns_rel_types) "
+        "       OR type(r) IN $siteless_rel_types) "
         "  AND ($vrf IS NULL OR r.vrf = $vrf OR NOT type(r) = 'ROUTES_TO') "
         "RETURN labels(a) AS a_labels, properties(a) AS a_props, "
         "       labels(b) AS b_labels, properties(b) AS b_props, "
         "       type(r) AS rel_type, properties(r) AS rel_props"
     )
-    result = await tx.run(cypher, site=site, vrf=vrf, dns_rel_types=dns_rel_types)
+    result = await tx.run(cypher, site=site, vrf=vrf, siteless_rel_types=siteless_rel_types)
 
     nodes: dict[tuple[str, Any], dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
@@ -380,16 +388,16 @@ async def _count_graph_nodes(
     graph never leaves Neo4j: only the count crosses the wire.
     """
     rel_pattern = "|".join(rel_types)
-    dns_rel_types = list(_DNS_REL_TYPES)
+    siteless_rel_types = list(_SITELESS_REL_TYPES)
     cypher = (
         f"MATCH (a)-[r:{rel_pattern}]->(b) "
         "WHERE ($site IS NULL OR a.site = $site OR b.site = $site "
-        "       OR type(r) IN $dns_rel_types) "
+        "       OR type(r) IN $siteless_rel_types) "
         "  AND ($vrf IS NULL OR r.vrf = $vrf OR NOT type(r) = 'ROUTES_TO') "
         "UNWIND [a, b] AS n "
         "RETURN count(DISTINCT n) AS node_count"
     )
-    result = await tx.run(cypher, site=site, vrf=vrf, dns_rel_types=dns_rel_types)
+    result = await tx.run(cypher, site=site, vrf=vrf, siteless_rel_types=siteless_rel_types)
     async for record in result:
         return int(record["node_count"])
     return 0
@@ -471,6 +479,13 @@ async def _read_impact(
       neighborhood ``0..depth`` hops (``0`` = the target itself → direct
       dependents; ``1..depth`` = indirect impact through the L2/L3 chain), then
       every ``Application`` with a ``DEPENDS_ON`` edge into that neighborhood.
+      Known limitation (ADR-0052 §8): ``IPAddress`` nodes carry no *physical*
+      edge (only ``DEPENDS_ON``/``RESOLVES_TO`` touch them), so an IP-address-
+      bound dependency is surfaced only when the ``IPAddress`` is itself the
+      target — it is **not** reached transitively from a ``Device``/``Subnet``/
+      ``Interface`` target. Transitive IP-bound impact is a tracked follow-up
+      (needs an ``Interface``→``IPAddress`` projection edge or a co-key join,
+      validated under the Neo4j rebuild-bite job).
     - **dependencies** (``Application`` target only): the direct ``DEPENDS_ON``
       edges out of the application — "what does application A depend on".
 
@@ -559,7 +574,8 @@ async def fetch_impact(
     physical chain), plus — for an ``Application`` target — the reverse direction
     (what that application depends on). Absence is an answer, not an error: an
     unprojected target yields empty ``dependents``/``dependencies`` with a
-    ``null`` watermark, never a raise.
+    ``null`` watermark, never a raise. See :func:`_read_impact` for the
+    IPAddress-bound-dependency reachability limitation.
 
     Args:
         client:       The Neo4j access wrapper (:class:`Neo4jClient`).
