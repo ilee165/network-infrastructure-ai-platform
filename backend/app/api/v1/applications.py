@@ -287,7 +287,12 @@ async def update_application(
         await _ensure_name_free(session, updates["name"], exclude_id=application.id)
     for field, value in updates.items():
         setattr(application, field, value)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:  # concurrent rename slipping past the pre-check
+        await session.rollback()
+        name = updates.get("name", application.name)
+        raise ConflictError(f"an application named {name!r} already exists") from exc
     await audit.record(
         session,
         actor=_actor(user),

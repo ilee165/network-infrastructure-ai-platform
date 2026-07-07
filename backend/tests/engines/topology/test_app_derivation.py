@@ -683,3 +683,26 @@ def test_duplicate_member_endpoints_dedupe_to_one_row() -> None:
     assert len(f5) == 1  # one row per (app, target, source) natural key
     # Deterministic evidence: the first member in sorted order.
     assert ("member", "/Common/web01:80") in _steps(f5[0])
+
+
+def test_duplicate_member_names_mixed_address_presence_do_not_crash() -> None:
+    # Regression (PR #119 review): two pool members sharing a computed
+    # member_name where one carries an address and the other is fqdn-only
+    # (address=None). The pre-fix ``sorted(parsed)`` compared ``str`` vs
+    # ``None`` on the tie-break tuple element and raised ``TypeError``, aborting
+    # the whole derivation pass. The None-safe sort key must keep it ordered.
+    plan = _derive(
+        virtual_servers=[make_vs("/Common/payroll.corp.example.com")],
+        pools=[
+            make_pool(
+                [
+                    member("/Common/dup", "10.0.0.11", 80),
+                    member("/Common/dup", None, 80, fqdn="dup.corp.example.com"),
+                ]
+            )
+        ],
+    )
+    # No crash. The address-bearing member reconciles to its interface-IP edge;
+    # the fqdn-only member has no address to resolve, so it is edge-less.
+    f5 = _deps(plan, "f5")
+    assert len(f5) == 1

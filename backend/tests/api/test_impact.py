@@ -86,6 +86,19 @@ def _dependent_record(app_key: str, target_key: str) -> dict[str, Any]:
     }
 
 
+def _dependency_record(target_key: str) -> dict[str, Any]:
+    return {
+        "target_labels": [LABEL_DEVICE],
+        "target_props": {"pg_id": target_key, "last_projected_at": PROJECTED_AT},
+        "rel_props": {
+            "sources": ["f5"],
+            "provenance": ["f5:adc_vs:/Common/vs_x"],
+            "derived_at": PROJECTED_AT,
+            "last_projected_at": PROJECTED_AT,
+        },
+    }
+
+
 def _override(app: FastAPI, client: FakeImpactClient) -> None:
     app.dependency_overrides[deps.get_knowledge_client] = lambda: client
 
@@ -114,6 +127,27 @@ class TestImpactEndpoint:
                 IMPACT_URL, params={"target_kind": "device", "target_ref": "dev-1"}
             )
             assert anon.status_code == 401
+
+    async def test_impact_application_target_serializes_populated_dependencies(
+        self, app: FastAPI, auth_headers: Callable[[str], dict[str, str]]
+    ) -> None:
+        # An Application target drives the reverse direction: assert a non-empty
+        # ``dependencies`` list round-trips through the ``ImpactDependency``
+        # (extra="forbid") schema, not just the empty case (PR #119 review).
+        _override(app, FakeImpactClient(dependencies=[_dependency_record("dev-7")]))
+        async with _http(app) as client:
+            resp = await client.get(
+                IMPACT_URL,
+                params={"target_kind": "application", "target_ref": "app-1"},
+                headers=auth_headers("viewer"),
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert [d["target"]["key"] for d in body["dependencies"]] == ["dev-7"]
+            dep = body["dependencies"][0]
+            assert dep["target"]["label"] == LABEL_DEVICE
+            assert dep["sources"] == ["f5"]
+            assert dep["provenance"] == ["f5:adc_vs:/Common/vs_x"]
 
     async def test_impact_endpoint_validates_target_kind_and_depth(
         self, app: FastAPI, auth_headers: Callable[[str], dict[str, str]]

@@ -410,7 +410,14 @@ def derive_application_dependencies(
             )
             parsed.append((member_name, address, fqdn_key))
 
-        for member_name, address, fqdn_key in sorted(parsed):
+        # None-safe key: address/fqdn_key are ``str | None``, so a bare
+        # ``sorted`` compares ``str`` vs ``None`` on the tie-break elements when
+        # two members share a ``member_name`` (e.g. an address-bearing member
+        # colliding with an fqdn-only one) and raises ``TypeError``, aborting the
+        # whole pass (PR #119 review). Coerce ``None`` to ``""`` for ordering.
+        for member_name, address, fqdn_key in sorted(
+            parsed, key=lambda t: (t[0], t[1] or "", t[2] or "")
+        ):
             member_step = ProvenanceStep(kind="member", ref=member_name)
             member_evidence.append(
                 _MemberEvidence(app_key, (vs_step, member_step), member_name, address, fqdn_key)
