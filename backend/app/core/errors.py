@@ -101,6 +101,34 @@ class ConflictError(NetOpsError):
     slug = "conflict"
 
 
+class PreconditionRequiredError(NetOpsError):
+    """The request must be conditional (If-Match) to avoid a lost update (RFC 6585).
+
+    Raised by a write endpoint that mandates optimistic-concurrency control when
+    the caller omits the ``If-Match`` header carrying the resource's current
+    ETag. Surfaces as ``428 Precondition Required`` — a client error the caller
+    fixes by reading the resource, then re-issuing the write conditionally.
+    """
+
+    status_code = 428
+    title = "Precondition Required"
+    slug = "precondition-required"
+
+
+class StalePreconditionError(ConflictError):
+    """The If-Match precondition did not match the current row (optimistic-concurrency 409).
+
+    A distinct-slug subclass of :class:`ConflictError` so it keeps the parent's
+    ``409`` status and RFC 7807 handler while carrying its own discriminator
+    ``type`` (``urn:netops:error:stale-precondition``). This is a conscious,
+    documented deviation from RFC 7232's 412: the URN — not the status — is the
+    load-bearing signal, letting a client tell a lost-update conflict apart from
+    the sibling name-collision :class:`ConflictError` (slug ``conflict``).
+    """
+
+    slug = "stale-precondition"
+
+
 class GraphTooLargeError(NetOpsError):
     """The requested topology subgraph exceeds the configured node cap.
 

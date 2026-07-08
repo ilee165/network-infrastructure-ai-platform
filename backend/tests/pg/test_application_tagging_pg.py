@@ -117,6 +117,9 @@ async def _run_tagging_sequence(
     )
     assert created.status_code == 201, created.text
     app_id = created.json()["id"]
+    # The create ETag is still current: tagging a dependency below does not touch
+    # the application row, so it preconditions the PATCH that follows.
+    etag = created.json()["updated_at"]
 
     dep = await client.post(
         f"{BASE}/{app_id}/dependencies",
@@ -126,7 +129,11 @@ async def _run_tagging_sequence(
     assert dep.status_code == 201, dep.text
     dep_id = dep.json()["id"]
 
-    patched = await client.patch(f"{BASE}/{app_id}", json={"owner": "team-fin"}, headers=headers)
+    patched = await client.patch(
+        f"{BASE}/{app_id}",
+        json={"owner": "team-fin"},
+        headers={**headers, "If-Match": f'"{etag}"'},
+    )
     assert patched.status_code == 200, patched.text
 
     removed = await client.delete(f"{BASE}/{app_id}/dependencies/{dep_id}", headers=headers)
