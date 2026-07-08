@@ -594,6 +594,20 @@ class TestApplicationDelete:
         assert await session.get(Application, uuid.UUID(created["id"])) is not None
         assert await _audit_rows(session, audit.APPLICATION_DELETE) == []
 
+    async def test_delete_with_malformed_if_match_is_400(
+        self, client: httpx.AsyncClient, auth_headers: Headers, session: AsyncSession
+    ) -> None:
+        """A DELETE carrying an unparseable ``If-Match`` token is refused 400 —
+        the row survives and no delete audit row is written."""
+        created = await _create_application(client, auth_headers("engineer"))
+        response = await client.delete(
+            f"{BASE}/{created['id']}",
+            headers={**auth_headers("engineer"), "If-Match": "not-a-timestamp"},
+        )
+        assert response.status_code == 400, response.text
+        assert await session.get(Application, uuid.UUID(created["id"])) is not None
+        assert await _audit_rows(session, audit.APPLICATION_DELETE) == []
+
     @pytest.mark.parametrize("role", ["viewer", "operator"])
     async def test_below_engineer_is_403(
         self, client: httpx.AsyncClient, auth_headers: Headers, role: str

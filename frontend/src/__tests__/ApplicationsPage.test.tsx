@@ -443,6 +443,27 @@ function fetchEditReturns(list: unknown, status: number, problem?: unknown) {
   });
 }
 
+/** Answer reads with the list and the delete DELETE with a fixed status/problem. */
+function fetchDeleteReturns(list: unknown, status: number, problem?: unknown) {
+  return vi.fn((_url: string, init?: RequestInit): Promise<Response> => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "DELETE") {
+      return Promise.resolve(
+        new Response(problem !== undefined ? JSON.stringify(problem) : null, {
+          status,
+          headers: { "Content-Type": "application/problem+json" },
+        }),
+      );
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify(list), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  });
+}
+
 async function openEditAndSubmit(): Promise<void> {
   fireEvent.click(await screen.findByTestId(`application-edit-${MANUAL_APP.id}`));
   fireEvent.change(screen.getByTestId("application-form-owner"), {
@@ -495,5 +516,31 @@ describe("application_edit_uses_optimistic_concurrency_if_match", () => {
     await waitFor(() => {
       expect(screen.queryByLabelText("Edit application")).not.toBeInTheDocument();
     });
+  });
+
+  it("(e) sends the row's updated_at as the If-Match precondition on delete", async () => {
+    const { mock, calls } = fetchWriting(LIST, {});
+    vi.stubGlobal("fetch", mock);
+    renderPage("engineer");
+
+    fireEvent.click(await screen.findByTestId(`application-delete-${MANUAL_APP.id}`));
+    fireEvent.click(await screen.findByTestId("confirm-action"));
+
+    await waitFor(() => {
+      const del = writeCalls(calls).find((c) => c.method === "DELETE");
+      expect(del).toBeDefined();
+      expect(del!.headers["If-Match"]).toBe(`"${MANUAL_APP.updated_at}"`);
+    });
+  });
+
+  it("(f) a stale-precondition 409 on delete shows the reload message and keeps the confirm dialog open", async () => {
+    vi.stubGlobal("fetch", fetchDeleteReturns(LIST, 409, STALE_PROBLEM));
+    renderPage("engineer");
+
+    fireEvent.click(await screen.findByTestId(`application-delete-${MANUAL_APP.id}`));
+    fireEvent.click(await screen.findByTestId("confirm-action"));
+
+    expect(await screen.findByText(/changed by someone else/i)).toBeInTheDocument();
+    expect(screen.getByTestId("confirm-action")).toBeInTheDocument();
   });
 });
