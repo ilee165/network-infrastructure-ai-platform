@@ -234,9 +234,7 @@ class TestFetchImpactDependents:
         # IP-bound dependency (e.g. an F5 VIP) is reachable transitively from a
         # Device/Subnet/Interface target, not only when IPAddress is the target.
         tx = _FakeImpactTx(dependents=[])
-        await fetch_impact(
-            _FakeClient(tx), target_label=LABEL_DEVICE, target_key="dev-1", depth=2
-        )
+        await fetch_impact(_FakeClient(tx), target_label=LABEL_DEVICE, target_key="dev-1", depth=2)
         dependents_cypher = next(c for c in tx.cyphers if "app_labels" in c)
         assert f"OPTIONAL MATCH (ip:{LABEL_IPADDRESS})" in dependents_cypher
         assert "ip.pg_id = n.pg_id" in dependents_cypher
@@ -458,7 +456,9 @@ async def _seed_single_device_ip_dependency(client: Any) -> dict[str, Any]:
     app = _live_application(uuid4(), "impact-test-app")
     dep = _live_ip_dependency(app.id, interface.id)
     topo = derive_topology([device], [interface], [], [], [app], [dep])
-    await full_rebuild(client, topo.nodes, topo.edges, LIVE_COLLECTED_AT, applications=topo.applications)
+    await full_rebuild(
+        client, topo.nodes, topo.edges, LIVE_COLLECTED_AT, applications=topo.applications
+    )
     return {
         "device_id": device.id,
         "interface_id": interface.id,
@@ -483,7 +483,9 @@ async def _seed_cross_device_shared_address(client: Any) -> dict[str, Any]:
     app = _live_application(uuid4(), "impact-shared-addr-app")
     dep = _live_ip_dependency(app.id, lower_id)  # the winning (lower-pg_id) interface
     topo = derive_topology([device_a, device_b], [iface_a, iface_b], [], [], [app], [dep])
-    await full_rebuild(client, topo.nodes, topo.edges, LIVE_COLLECTED_AT, applications=topo.applications)
+    await full_rebuild(
+        client, topo.nodes, topo.edges, LIVE_COLLECTED_AT, applications=topo.applications
+    )
     return {"device_a_id": device_a.id, "device_b_id": device_b.id, "app_id": app.id}
 
 
@@ -510,7 +512,9 @@ class TestLiveImpactIpReach:
         finally:
             await client.close()
 
-    async def test_live_neo4j_integration_test_skips_cleanly_without_reachable_service(self) -> None:
+    async def test_live_neo4j_integration_test_skips_cleanly_without_reachable_service(
+        self,
+    ) -> None:
         from app.core.config import get_settings
         from app.knowledge.neo4j_client import Neo4jClient
 
@@ -547,7 +551,7 @@ class TestLiveImpactIpReach:
         finally:
             await client.close()
 
-    async def test_live_impact_shared_address_winner_interface_on_different_reachable_device_still_surfaces_dependent(
+    async def test_live_impact_shared_addr_winner_on_other_reachable_device_surfaces_dependent(
         self,
     ) -> None:
         client = await _skip_if_unreachable()
@@ -560,7 +564,7 @@ class TestLiveImpactIpReach:
         finally:
             await client.close()
 
-    async def test_live_impact_shared_address_winner_on_unreachable_device_yields_no_dependent_not_error(
+    async def test_live_impact_shared_addr_winner_on_unreachable_device_no_dependent(
         self,
     ) -> None:
         client = await _skip_if_unreachable()
