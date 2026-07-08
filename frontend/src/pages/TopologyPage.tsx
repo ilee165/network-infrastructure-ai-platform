@@ -30,6 +30,8 @@ import {
   getTopologyNeighborhood,
   MAX_NEIGHBORHOOD_DEPTH,
   type TopologyDiff,
+  type TopologyEdge,
+  type TopologyGraph,
   type TopologyGraphParams,
   type TopologyNode,
 } from "../api/topology";
@@ -62,7 +64,86 @@ const LAYERS: { value: Layer; label: string; title: string }[] = [
   { value: "l2", label: "L2", title: "LLDP/CDP neighbor links only" },
   { value: "l3", label: "L3", title: "Subnet adjacency and routing links only" },
   { value: "dns", label: "DNS", title: "DNS zone/record dependency layer (DnsZone, DnsRecord, RESOLVES_TO)" },
+  { value: "app", label: "App", title: "Application-dependency layer (Application nodes, DEPENDS_ON edges with per-source provenance)" },
 ];
+
+/** Tailwind tone per dependency source, so a DEPENDS_ON edge's provenance reads at a glance. */
+const APP_SOURCE_TONE: Record<string, string> = {
+  manual: "bg-accent/15 text-accent",
+  f5: "bg-sky-500/15 text-sky-300",
+  vmware: "bg-emerald-500/15 text-emerald-300",
+  dns: "bg-amber-500/15 text-amber-300",
+};
+
+/** The sources asserting one DEPENDS_ON edge (empty when the property is absent). */
+function edgeSources(edge: TopologyEdge): string[] {
+  const raw = edge.properties.sources;
+  return Array.isArray(raw) ? raw.map((s) => String(s)) : [];
+}
+
+/**
+ * The application-dependency panel (P4 W2-T4): the DEPENDS_ON edges of the
+ * current ``app``-layer graph, each with per-source provenance badges, plus the
+ * projection watermark these answers are "as of" and an honest empty state.
+ * Complements the cytoscape canvas (which cannot render DOM badges) so an
+ * operator can read each dependency's provenance at a glance.
+ */
+function AppDependencyPanel({ graph }: { graph: TopologyGraph }) {
+  const dependsOn = graph.edges.filter((edge) => edge.type === "DEPENDS_ON");
+  return (
+    <section
+      data-testid="app-dependency-panel"
+      aria-label="Application dependencies"
+      className="panel flex flex-col gap-3 p-4"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">
+          Application dependencies
+        </h3>
+        {graph.projected_at ? (
+          <span data-testid="app-impact-watermark" className="badge">
+            as of {new Date(graph.projected_at).toLocaleString()}
+          </span>
+        ) : null}
+      </div>
+      {dependsOn.length === 0 ? (
+        <p data-testid="app-impact-empty" className="text-xs leading-relaxed text-zinc-500">
+          No application dependencies in this scope. Derived edges (F5 / VMware / DNS) appear
+          after a derivation pass; manual edges after tagging on the Applications page.
+        </p>
+      ) : (
+        <ul className="flex flex-col">
+          {dependsOn.map((edge, index) => (
+            <li
+              key={`${edge.source}->${edge.target}-${index}`}
+              data-testid={`app-dependency-edge-${index}`}
+              className="flex items-center justify-between gap-3 border-b border-carbon-800 py-1.5 text-xs last:border-0"
+            >
+              <span className="font-mono text-zinc-300">
+                <span className="text-zinc-100">{String(edge.source)}</span>
+                <span className="text-zinc-600"> → </span>
+                <span className="text-zinc-100">{String(edge.target)}</span>
+              </span>
+              <span className="flex flex-wrap gap-1">
+                {edgeSources(edge).map((source) => (
+                  <span
+                    key={source}
+                    data-testid={`app-edge-${index}-source-${source}`}
+                    className={`inline-block rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
+                      APP_SOURCE_TONE[source] ?? "bg-carbon-700 text-zinc-300"
+                    }`}
+                  >
+                    {source}
+                  </span>
+                ))}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
 
 /**
  * Scoped-by-default topology loading (audit Wave 5, G-SCA): the page fetches a
@@ -590,6 +671,10 @@ export function TopologyPage() {
           </button>
         ))}
       </div>
+
+      {/* Application-dependency panel: the DEPENDS_ON edges + per-source badges
+          for the current app-layer graph (P4 W2-T4). */}
+      {layer === "app" && data ? <AppDependencyPanel graph={data} /> : null}
 
       {/* Run-to-run diff selector */}
       <DiffControls

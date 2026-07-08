@@ -8,7 +8,7 @@
 | **Depends on** | **W0-T3** (ADR-0052 §7, the decided write path), **W2-T1** (tables). ∥ W2-T2; no W1 dependency |
 | **ADRs** | ADR-0052 §1/§3.3/§7 (binding), ADR-0010 (RBAC), ADR-0038 (audit spine) |
 | **PRODUCTION.md** | §2.4, §11 G-SEC |
-| **Status** | Proposed |
+| **Status** | Implemented — backend `7d64a29`, UI `1a59567`/`c920f48`/`8f9961d` (P4 W2) |
 
 ## Objective
 

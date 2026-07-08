@@ -8,7 +8,7 @@
 | **Depends on** | **W2-T1** (tables), **W1-T1** (persisted ADC rows), **W1-T2** (persisted virtualization rows) |
 | **ADRs** | ADR-0052 §2/§3/§4 (binding), ADR-0050 §4 / ADR-0051 §5.5 (upstream field contracts) |
 | **PRODUCTION.md** | §2.4, §11 G-REL |
-| **Status** | Proposed |
+| **Status** | Implemented — `1e8d16f` (P4 W2) |
 
 ## Objective
 

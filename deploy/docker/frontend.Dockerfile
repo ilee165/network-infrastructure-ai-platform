@@ -39,7 +39,7 @@ FROM nginx:alpine AS runtime
 # layer ships stale packages and the Trivy gate fails even though a patch
 # exists. Bump the cache-bust date below to invalidate this layer so
 # `apk upgrade` re-fetches the latest patched packages.
-RUN apk upgrade --no-cache  # cache-bust: 2026-06-21 (libexpat CVE-2026-45186)
+RUN apk upgrade --no-cache  # cache-bust: 2026-07-08 (libexpat CVE-2026-56131/56407/56408)
 
 # Full nginx configuration (replaces the stock root-oriented config): SPA on
 # 8080, /api/ reverse proxy, pid + temp paths under /tmp so the non-root

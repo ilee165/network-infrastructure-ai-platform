@@ -8,7 +8,7 @@
 | **Depends on** | **W2-T1** (projection), **W2-T2** (derived edges) |
 | **ADRs** | ADR-0052 §8 (binding), ADR-0005 (knowledge/ = sole Neo4j reader) |
 | **PRODUCTION.md** | §2.4 ("impact-analysis query surface"), §11 G-OBS (explainability) |
-| **Status** | Proposed |
+| **Status** | Implemented — `e20a697`/`f2b0090`/`bf35868`/`0d6f8a4`/`c316fec` (P4 W2) |
 
 ## Objective
 
@@ -72,6 +72,22 @@ PG-side deep provenance drill-down UI beyond the compact summary
 - [ ] Troubleshooting Agent exposes the read-only impact tool; answers cite graph evidence.
 - [ ] UI app-dependency view renders with per-edge source badges; frontend tests green.
 - [ ] One atomic commit.
+- [x] **Transitive IP-bound reach** (PR #119 B3 follow-up, rider
+      2026-07-07-1540): a Device/Subnet/Interface impact target's dependents
+      now include IP-bound Applications (the F5-VIP shape) reached through the
+      physical chain, not only when the `IPAddress` is the direct target.
+      `_read_impact`'s dependents Cypher co-key-joins every physically-reached
+      `Interface` to its projected `IPAddress` (`ip.pg_id == n.pg_id` — both
+      project from the same `normalized_interfaces` row for an address's
+      winning interface); no new relationship type, no projector/migration
+      change. Proven red→green against a real compose Neo4j. Residual
+      boundary (documented, not a defect): if the winning interface for a
+      shared address falls outside the queried target's `depth`-bounded
+      neighborhood, that `IPAddress` is not reached either. **Follow-up
+      (out of scope this round):** wire a `neo4j:` service into the
+      `pg-integration` (or a new) CI job so the live-Neo4j proof
+      (`TestLiveImpactIpReach` in `test_topology_impact.py`) runs on every PR
+      instead of only locally.
 
 ## Workflow
 

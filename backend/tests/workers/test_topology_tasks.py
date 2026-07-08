@@ -20,12 +20,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.engines.topology import rebuild as rebuild_mod
-from app.engines.topology.projector import DerivedEdges
 from app.engines.topology.sync import derive_topology, snapshot_lists
 from app.models import (
     Base,
     DiscoveryRun,
     DiscoveryRunStatus,
+)
+from app.models.adc import NormalizedPoolRow, NormalizedVirtualServerRow
+from app.models.applications import (
+    Application,
+    ApplicationDependency,
+    ApplicationOrigin,
+    DependencySource,
+    DependencyTargetKind,
 )
 from app.models.inventory import (
     Device,
@@ -35,9 +42,13 @@ from app.models.inventory import (
 )
 from app.models.topology import TopologySnapshot
 from app.schemas.normalized import (
+    AdcAvailability,
+    AdcProtocol,
+    DnsRecordType,
     InterfaceAdminStatus,
     InterfaceOperStatus,
     NeighborProtocol,
+    NormalizedDnsRecord,
     RouteProtocol,
 )
 from app.workers.tasks import topology as tasks
@@ -48,6 +59,7 @@ DEV1 = UUID("00000000-0000-0000-0000-000000000001")
 DEV2 = UUID("00000000-0000-0000-0000-000000000002")
 IF1 = UUID("00000000-0000-0000-0000-000000000a01")
 IF2 = UUID("00000000-0000-0000-0000-000000000a02")
+APP1 = UUID("00000000-0000-0000-0000-000000000f01")
 
 
 # ---------------------------------------------------------------------------
@@ -188,13 +200,52 @@ def _routes() -> list[NormalizedRouteRow]:
     return [make_route(DEV1, "192.168.5.0/24", vrf="prod")]
 
 
+def _applications() -> list[Application]:
+    # MANUAL origin: the W2-T2 derivation pass (sync step 0) lifecycle-owns
+    # derived ``f5:*`` applications and diff-replaces automated-source rows,
+    # so the seeded fixture rows are user-owned — untouchable by every pass
+    # (ADR-0052 §3.3.1/§3.3.5) — and survive into the projection unchanged.
+    return [
+        Application(
+            id=APP1,
+            name="payroll",
+            origin=ApplicationOrigin.MANUAL,
+            origin_ref=None,
+            fqdns=["payroll.corp.example.com"],
+        )
+    ]
+
+
+def _app_dependencies() -> list[ApplicationDependency]:
+    return [
+        ApplicationDependency(
+            application_id=APP1,
+            target_kind=DependencyTargetKind.DEVICE,
+            target_ref=str(DEV1),
+            source=DependencySource.MANUAL,
+            provenance=[{"kind": "user", "ref": "00000000-0000-0000-0000-0000000000aa"}],
+            derived_at=COLLECTED_AT,
+        ),
+        ApplicationDependency(
+            application_id=APP1,
+            target_kind=DependencyTargetKind.IP_ADDRESS,
+            target_ref=str(IF1),
+            source=DependencySource.MANUAL,
+            provenance=[{"kind": "user", "ref": "00000000-0000-0000-0000-0000000000aa"}],
+            derived_at=COLLECTED_AT,
+        ),
+    ]
+
+
 # ===========================================================================
 # Pure derivation glue
 # ===========================================================================
 
 
-def test_derive_topology_combines_l2_and_l3_into_one_edge_set() -> None:
-    derived = derive_topology(_devices(), _interfaces(), _routes(), _neighbors())
+def test_derive_topology_combines_l2_l3_and_applications_into_one_pass() -> None:
+    derived = derive_topology(
+        _devices(), _interfaces(), _routes(), _neighbors(), _applications(), _app_dependencies()
+    )
 
     # Two devices, two interfaces both derive nodes; the route prefix + the
     # interface subnet derive Subnet nodes.
@@ -210,25 +261,38 @@ def test_derive_topology_combines_l2_and_l3_into_one_edge_set() -> None:
     assert len(derived.edges.routes_to) == 1
     assert derived.l2_report.unresolved_neighbors == 0
 
+    # The REQUIRED application layer (ADR-0052 §5) derives alongside.
+    assert [str(n.pg_id) for n in derived.applications.applications] == [str(APP1)]
+    assert {(e.target_label, e.target_key) for e in derived.applications.depends_on} == {
+        ("Device", str(DEV1)),
+        ("IPAddress", str(IF1)),
+    }
+
 
 def test_snapshot_lists_emit_canonical_label_key_and_rel_triples() -> None:
-    derived = derive_topology(_devices(), _interfaces(), _routes(), _neighbors())
-    node_list, edge_list = snapshot_lists(derived.nodes, derived.edges)
+    derived = derive_topology(
+        _devices(), _interfaces(), _routes(), _neighbors(), _applications(), _app_dependencies()
+    )
+    node_list, edge_list = snapshot_lists(derived.nodes, derived.edges, derived.applications)
 
     # Every node row is [label, key]; the VLAN id is stringified.
     assert ["Device", str(DEV1)] in node_list
     assert ["Vlan", "10"] in node_list
     assert ["Subnet", "192.168.5.0/24"] in node_list
+    assert ["Application", str(APP1)] in node_list
     assert all(len(pair) == 2 for pair in node_list)
 
     # Every edge row is [rel_type, src, dst]; the routes_to edge lands on the
-    # route-prefix Subnet key.
+    # route-prefix Subnet key; DEPENDS_ON lands on the target's pg_id key.
     assert all(len(triple) == 3 for triple in edge_list)
     assert ["HAS_INTERFACE", str(DEV1), str(IF1)] in edge_list
     assert ["ROUTES_TO", str(DEV1), "192.168.5.0/24"] in edge_list
+    assert ["DEPENDS_ON", str(APP1), str(DEV1)] in edge_list
+    assert ["DEPENDS_ON", str(APP1), str(IF1)] in edge_list
     rel_types = {triple[0] for triple in edge_list}
     assert rel_types == {
         "CONNECTED_TO",
+        "DEPENDS_ON",
         "HAS_INTERFACE",
         "IN_SUBNET",
         "L3_ADJACENT",
@@ -237,9 +301,26 @@ def test_snapshot_lists_emit_canonical_label_key_and_rel_triples() -> None:
 
 
 def test_snapshot_lists_on_empty_derivation_are_empty() -> None:
-    node_list, edge_list = snapshot_lists(derive_topology([], [], [], []).nodes, DerivedEdges())
+    derived = derive_topology([], [], [], [], [], [])
+    node_list, edge_list = snapshot_lists(derived.nodes, derived.edges, derived.applications)
     assert node_list == []
     assert edge_list == []
+
+
+def test_derive_topology_and_snapshot_lists_require_the_application_inputs() -> None:
+    """Optional-kwarg relapse guard (ADR-0052 §5): the application inputs have
+    NO defaults, so no derivation/snapshot pass can silently omit the layer."""
+    import inspect
+
+    for fn, names in (
+        (derive_topology, ("applications", "application_dependencies")),
+        (snapshot_lists, ("applications",)),
+    ):
+        signature = inspect.signature(fn)
+        for name in names:
+            assert signature.parameters[name].default is inspect.Parameter.empty, (
+                f"{fn.__name__}(...{name}=) must be REQUIRED (ADR-0052 §5)"
+            )
 
 
 # ===========================================================================
@@ -273,6 +354,8 @@ def _seed_inventory(db_url: str, *, with_run: bool = True) -> UUID:
             session.add_all(_interfaces())
             session.add_all(_neighbors())
             session.add_all(_routes())
+            session.add_all(_applications())
+            session.add_all(_app_dependencies())
             run_id = uuid4()
             if with_run:
                 run = DiscoveryRun(
@@ -340,6 +423,11 @@ def test_sync_after_run_projects_and_snapshots(
     assert any("UNWIND" in s for s in client.statements)
     assert any("CREATE CONSTRAINT" in s for s in client.statements)
 
+    # The application layer rode the SAME pass (ADR-0052 §5 mandatory wiring):
+    # the production loader read the app tables and the projector upserted them.
+    assert any("MERGE (n:Application" in s for s in client.statements)
+    assert any(":DEPENDS_ON" in s and "UNWIND" in s for s in client.statements)
+
     # Exactly one snapshot row for the run, with canonical node/edge multisets.
     snaps = _fetch_snapshots(db_url)
     assert len(snaps) == 1
@@ -347,6 +435,8 @@ def test_sync_after_run_projects_and_snapshots(
     assert snap.run_id == run_id
     assert ["Device", str(DEV1)] in snap.nodes
     assert ["ROUTES_TO", str(DEV1), "192.168.5.0/24"] in snap.edges
+    assert ["Application", str(APP1)] in snap.nodes
+    assert ["DEPENDS_ON", str(APP1), str(DEV1)] in snap.edges
 
     # The sync outcome was recorded on the run without changing its status.
     run = _fetch_run(db_url, run_id)
@@ -431,6 +521,10 @@ def test_rebuild_wipes_then_projects_and_snapshots(
     assert any("DETACH DELETE" in s for s in stmts)
     assert any("CREATE CONSTRAINT" in s for s in stmts)
     assert any("UNWIND" in s for s in stmts)
+    # The application layer is part of the rebuild pass too (ADR-0052 §5/§6.1):
+    # rebuilt from the PG tables alone, no re-derivation, no plugin access.
+    assert any("MERGE (n:Application" in s for s in stmts)
+    assert any(":DEPENDS_ON" in s and "UNWIND" in s for s in stmts)
     # Wipe precedes the first upsert (drop-and-reproject order).
     first_wipe = next(i for i, s in enumerate(stmts) if "DETACH DELETE" in s)
     first_upsert = next(i for i, s in enumerate(stmts) if "UNWIND" in s)
@@ -541,3 +635,210 @@ def test_sync_after_run_creates_fresh_client_each_invocation(
     assert clients[0] is not clients[1]
     assert clients[0].closed is True
     assert clients[1].closed is True
+
+
+# ===========================================================================
+# W2-T2 — post-discovery-run derivation trigger (ADR-0052 §2/§5, step 0)
+# ===========================================================================
+
+
+def _seed_adc(db_url: str) -> None:
+    """Insert one F5 virtual server + pool whose member is IF1's address."""
+
+    async def _go() -> None:
+        engine = create_async_engine(db_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            provenance = {
+                "raw_artifact_id": uuid4(),
+                "collected_at": COLLECTED_AT,
+                "source_vendor": "f5_bigip",
+            }
+            session.add(
+                NormalizedVirtualServerRow(
+                    device_id=DEV1,
+                    **provenance,
+                    name="/Common/portal.corp.example.com",
+                    vip_address="192.0.2.10",
+                    port=443,
+                    protocol=AdcProtocol.TCP,
+                    enabled=True,
+                    availability=AdcAvailability.AVAILABLE,
+                    pool_name="/Common/portal_pool",
+                )
+            )
+            session.add(
+                NormalizedPoolRow(
+                    device_id=DEV1,
+                    **provenance,
+                    name="/Common/portal_pool",
+                    monitors=[],
+                    availability=AdcAvailability.AVAILABLE,
+                    members=[
+                        {
+                            "name": "/Common/core-1:443",
+                            "address": "10.0.0.1",  # reconciles to IF1 (IPAddress)
+                            "fqdn": None,
+                            "port": 443,
+                            "vrf": None,
+                            "admin_state": "enabled",
+                            "availability": "available",
+                        }
+                    ],
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_go())
+
+
+def _fetch_applications(db_url: str) -> list[Application]:
+    async def _go() -> list[Application]:
+        engine = create_async_engine(db_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            rows = list((await session.execute(select(Application))).scalars())
+        await engine.dispose()
+        return rows
+
+    return asyncio.run(_go())
+
+
+def _fetch_dependencies(db_url: str) -> list[ApplicationDependency]:
+    async def _go() -> list[ApplicationDependency]:
+        engine = create_async_engine(db_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            rows = list((await session.execute(select(ApplicationDependency))).scalars())
+        await engine.dispose()
+        return rows
+
+    return asyncio.run(_go())
+
+
+def test_sync_after_run_derives_applications_before_projecting(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The trigger wiring: derivation (step 0) writes the PG rows, then the
+    SAME pass projects them — the new node reaches Neo4j without any second
+    task, and the derivation never touches the seeded manual rows."""
+    run_id = _seed_inventory(db_url)
+    _seed_adc(db_url)
+    client = FakeClient()
+    monkeypatch.setattr(tasks, "_neo4j_client", lambda: client)
+
+    result = tasks.sync_after_run(str(run_id))
+
+    assert result["ok"] is True
+    derivation = result["application_derivation"]
+    assert derivation["ok"] is True
+    assert derivation["dns_pass_ran"] is False  # default seam: no DDI fetch
+    assert derivation["planned"]["f5_applications"] == 1
+    assert derivation["applied"]["applications_created"] == 1
+    assert derivation["applied"]["f5"] == {"inserted": 1, "updated": 0, "deleted": 0}
+
+    apps = _fetch_applications(db_url)
+    derived = next(a for a in apps if a.origin is ApplicationOrigin.DERIVED)
+    assert derived.origin_ref == f"f5:{DEV1}:/Common/portal.corp.example.com"
+    assert derived.fqdns == ["portal.corp.example.com"]  # VS-leaf FQDN seed
+    manual = next(a for a in apps if a.id == APP1)
+    assert manual.origin is ApplicationOrigin.MANUAL  # untouched
+
+    deps = _fetch_dependencies(db_url)
+    f5_rows = [d for d in deps if str(d.source) == "f5"]
+    assert [(str(d.application_id), d.target_ref) for d in f5_rows] == [(str(derived.id), str(IF1))]
+    manual_rows = [d for d in deps if str(d.source) == "manual"]
+    assert len(manual_rows) == 2  # per-source ownership: manual untouched
+
+    # The freshly-derived rows rode the SAME projection pass.
+    snaps = _fetch_snapshots(db_url)
+    assert ["Application", str(derived.id)] in snaps[0].nodes
+    assert ["DEPENDS_ON", str(derived.id), str(IF1)] in snaps[0].edges
+
+    # And the derivation outcome is recorded on the run.
+    run = _fetch_run(db_url, run_id)
+    assert run.stats["application_derivation"]["ok"] is True
+    assert run.stats["topology_sync"]["ok"] is True
+
+
+def test_sync_after_run_is_idempotent_across_derivation_reruns(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second run on unchanged inputs: derivation is a no-op (no new rows,
+    nothing rewritten) and no duplicate applications appear."""
+    run_id = _seed_inventory(db_url)
+    _seed_adc(db_url)
+    monkeypatch.setattr(tasks, "_neo4j_client", lambda: FakeClient())
+
+    tasks.sync_after_run(str(run_id))
+    first_apps = {a.id: a.updated_at for a in _fetch_applications(db_url)}
+
+    result = tasks.sync_after_run(str(run_id))
+    derivation = result["application_derivation"]
+    assert derivation["applied"]["applications_created"] == 0
+    assert derivation["applied"]["f5"] == {"inserted": 0, "updated": 0, "deleted": 0}
+
+    second_apps = {a.id: a.updated_at for a in _fetch_applications(db_url)}
+    assert second_apps == first_apps  # stable UUIDs, zero updated_at churn
+
+
+def test_sync_after_run_isolates_derivation_failure_from_projection(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A derivation failure records ok=False in its own block; the projection
+    still runs on the previous rows and the discovery run is untouched."""
+    run_id = _seed_inventory(db_url)
+
+    def _boom() -> None:
+        raise RuntimeError("adc load failed")
+
+    monkeypatch.setattr(tasks, "_fetch_dns_records", _boom)
+    monkeypatch.setattr(tasks, "_neo4j_client", lambda: FakeClient())
+
+    result = tasks.sync_after_run(str(run_id))
+
+    assert result["ok"] is True  # the projection succeeded
+    assert result["application_derivation"]["ok"] is False
+    assert "RuntimeError" in result["application_derivation"]["error"]
+
+    run = _fetch_run(db_url, run_id)
+    assert run.status is DiscoveryRunStatus.SUCCEEDED
+    assert run.stats["application_derivation"]["ok"] is False
+    assert run.stats["topology_sync"]["ok"] is True
+
+
+def test_fetch_dns_records_seam_feeds_source_3(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the seam returns records, the dns pass runs in the same trigger:
+    the seeded manual app's fqdn reconciles through the M5 machinery and a
+    ``source='dns'`` row persists (rebuild never needs DDI reachability)."""
+    run_id = _seed_inventory(db_url)
+    monkeypatch.setattr(tasks, "_neo4j_client", lambda: FakeClient())
+    monkeypatch.setattr(
+        tasks,
+        "_fetch_dns_records",
+        lambda: [
+            NormalizedDnsRecord(
+                device_id=DEV1,
+                collected_at=COLLECTED_AT,
+                source_vendor="infoblox",
+                name="payroll.corp.example.com",
+                record_type=DnsRecordType.A,
+                value="10.0.0.1",
+                zone="corp.example.com",
+            )
+        ],
+    )
+
+    result = tasks.sync_after_run(str(run_id))
+    derivation = result["application_derivation"]
+    assert derivation["dns_pass_ran"] is True
+    assert derivation["applied"]["dns"] == {"inserted": 1, "updated": 0, "deleted": 0}
+
+    deps = _fetch_dependencies(db_url)
+    (dns_row,) = [d for d in deps if str(d.source) == "dns"]
+    assert dns_row.application_id == APP1
+    assert dns_row.target_ref == str(IF1)
+    assert dns_row.provenance[0]["kind"] == "dns_record"

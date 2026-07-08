@@ -17,9 +17,15 @@
 #               the source → completeness assertion RED → drill RED (exit != 0)
 #   PARTIAL   — the reconcile projects only SOME of the topology (a projection-source
 #               gap) → counts < source → RED (the ADR-0047 §2 "projection gap" case)
+#   APP GAP   — P4 W2 (ADR-0052 §6.2): the source counts now include the application
+#               layer (Application nodes + DEPENDS_ON edges seeded by the extended
+#               topology_counts.py); a rebuild that projects everything EXCEPT the
+#               application layer reads short of the source → the SAME completeness
+#               assertion goes RED. This is the "layer missing from a rebuild" case
+#               the mandatory-pass wiring exists to prevent — proven to bite here.
 #
-# The NEGATIVE / PARTIAL scenarios are the planted regressions; POSITIVE is the
-# revert-to-green. This is the executed plant→red→revert the live kind run would
+# The NEGATIVE / PARTIAL / APP-GAP scenarios are the planted regressions; POSITIVE is
+# the revert-to-green. This is the executed plant→red→revert the live kind run would
 # otherwise be the only place to observe (recorded here as a runnable proof; the
 # live CI run corroborates it on the reduced-scale cluster).
 #
@@ -56,8 +62,12 @@ trap 'rm -rf "${WORK}"' EXIT
 # A stand-in `kubectl` on PATH simulating just enough of the Neo4j StatefulSet + a
 # worker pod running topology_counts.py + the auto_rebuild reconcile. State lives in
 # $FAKE_STATE: the seeded source counts + a "rebuilt" flag set when an auto_rebuild
-# exec is seen. SRC_NODES/SRC_EDGES define the source of record; PARTIAL_NODES lets
-# a scenario model a projection-source gap (rebuild projects fewer than the source).
+# exec is seen. SRC_NODES/SRC_EDGES define the source of record (the defaults model
+# the extended P4 W2 seed: 9 inventory nodes + 1 Application, 7 inventory edges +
+# 2 DEPENDS_ON — ADR-0052 §6.2); PARTIAL_NODES lets a scenario model a
+# projection-source gap (rebuild projects fewer than the source); APP_MISSING=1
+# models a rebuild that projects everything EXCEPT the application layer
+# (APP_NODES/APP_EDGES short of the source).
 FAKE_BIN="${WORK}/bin"
 mkdir -p "${FAKE_BIN}"
 cat > "${FAKE_BIN}/kubectl" <<'FAKE'
@@ -66,19 +76,26 @@ cat > "${FAKE_BIN}/kubectl" <<'FAKE'
 set -uo pipefail
 S="${FAKE_STATE:?FAKE_STATE unset}"
 joined="$*"
-SRC_NODES="${SRC_NODES:-9}"
-SRC_EDGES="${SRC_EDGES:-7}"
+SRC_NODES="${SRC_NODES:-10}"
+SRC_EDGES="${SRC_EDGES:-9}"
+APP_NODES="${APP_NODES:-1}"
+APP_EDGES="${APP_EDGES:-2}"
 
 # Emit a topology_counts-style line the drill parses.
 emit() { echo "DRILL neo4j_rebuild $1 nodes=$2 edges=$3 result=$4"; }
 
 # Live graph counts: EMPTY until a rebuild (auto_rebuild exec) has run. After a
-# rebuild the graph holds the (possibly PARTIAL) projected counts. A destroy resets
-# the rebuilt flag (graph lost) so a subsequent skipped reconcile stays empty.
+# rebuild the graph holds the (possibly PARTIAL / application-layer-short)
+# projected counts. A destroy resets the rebuilt flag (graph lost) so a
+# subsequent skipped reconcile stays empty.
 graph_counts() {
   if [ -f "${S}/rebuilt" ]; then
     if [ "${PARTIAL:-0}" = "1" ]; then
       echo "${PARTIAL_NODES:-4} ${PARTIAL_EDGES:-3}"      # projection-source gap
+    elif [ "${APP_MISSING:-0}" = "1" ]; then
+      # Rebuild missing ONLY the application layer (ADR-0052 §6.2): every
+      # inventory kind re-projected, Application/DEPENDS_ON absent.
+      echo "$(( SRC_NODES - APP_NODES )) $(( SRC_EDGES - APP_EDGES ))"
     else
       echo "${SRC_NODES} ${SRC_EDGES}"                    # full re-projection
     fi
@@ -193,9 +210,28 @@ else
   bad "FALSE-GREEN: a partial rebuild (fewer nodes/edges than Postgres) passed (exit 0) — the completeness assertion does not bite"
 fi
 
+# --- 4. APP-LAYER GAP — rebuild missing ONLY the application layer → RED --------
+# P4 W2 (ADR-0052 §6.2): the Postgres source now includes the application tables
+# (Application node + DEPENDS_ON edges in the seeded counts). A rebuild that
+# re-projects every inventory kind but OMITS the application layer — the exact
+# regression the mandatory-pass wiring (no optional kwarg) exists to prevent —
+# reads short of the source, and the completeness assertion must go RED.
+run_scenario export APP_MISSING=1
+rc_app=$?
+if [ "${rc_app}" -ne 0 ]; then
+  ok "APP-LAYER GAP: a rebuild missing the application layer (Application/DEPENDS_ON counts short of the Postgres source) → drill RED (exit ${rc_app}) — the completeness assertion bites on the ADR-0052 §6.2 layer-missing case"
+else
+  bad "FALSE-GREEN: a rebuild missing the application layer passed (exit 0) — the count comparison does not cover the application tables (ADR-0052 §6.2)"
+fi
+if grep -q "does NOT match the Postgres source\|NOT fully restored from Postgres\|NOT fully re-projected\|topology NOT" "${LAST_LOG}"; then
+  ok "app-layer-gap RED is the rebuild-from-Postgres completeness assertion (not an incidental failure)"
+else
+  bad "app-layer-gap turned red but NOT via the completeness assertion — check the bite is attributable (${LAST_LOG})"
+fi
+
 echo "== neo4j-rebuild-bite summary: ${fails} failure(s) =="
 if [ "${fails}" -ne 0 ]; then
   echo "::error::neo4j-rebuild bite proof found ${fails} violation(s)" >&2
   exit 1
 fi
-echo "neo4j-rebuild bite proof: the drill is GREEN on full rebuild-from-Postgres and RED on disabled-rebuild / partial-projection (ADR-0047 §2 negative control bites; ADR-0005 D5)."
+echo "neo4j-rebuild bite proof: the drill is GREEN on full rebuild-from-Postgres and RED on disabled-rebuild / partial-projection / missing-application-layer (ADR-0047 §2 negative control bites; ADR-0005 D5; ADR-0052 §6.2)."

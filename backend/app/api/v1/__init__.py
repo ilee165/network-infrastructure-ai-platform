@@ -5,7 +5,8 @@
 ``health`` (M0), ``auth``/``devices``/``credentials``/``discovery`` (M1),
 ``topology`` (M2), ``agents`` (M3) exist — M4 adds ``config_snapshots``
 sub-resources under ``devices`` and a ``docs`` router. P4-W1-T3 adds ``adc``
-and ``virtualization`` (read-only ADC/virtualization inventory surfacing).
+and ``virtualization`` (read-only ADC/virtualization inventory surfacing);
+P4-W2-T3 adds ``applications`` (manual application tagging, ADR-0052 §7).
 """
 
 from fastapi import APIRouter, Depends
@@ -14,6 +15,7 @@ from app.api.deps import enforce_api_rate_limit
 from app.api.v1 import (
     adc,
     agents,
+    applications,
     auth,
     config_snapshots,
     credentials,
@@ -44,6 +46,7 @@ _api_rate_limit = [Depends(enforce_api_rate_limit)]
 api_router = APIRouter()
 api_router.include_router(adc.router, dependencies=_api_rate_limit)
 api_router.include_router(agents.router)
+api_router.include_router(applications.router, dependencies=_api_rate_limit)
 api_router.include_router(auth.router)
 api_router.include_router(config_snapshots.router, prefix="/devices", dependencies=_api_rate_limit)
 api_router.include_router(credentials.router, dependencies=_api_rate_limit)

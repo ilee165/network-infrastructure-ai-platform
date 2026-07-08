@@ -24,6 +24,10 @@ __all__ = [
     "GraphEdge",
     "GraphNode",
     "GraphResponse",
+    "ImpactDependency",
+    "ImpactDependent",
+    "ImpactResponse",
+    "ImpactTarget",
     "TopologyDiffResponse",
 ]
 
@@ -69,6 +73,63 @@ class GraphResponse(BaseModel):
         default=None,
         description="Most recent projection timestamp across the returned nodes.",
     )
+
+
+class ImpactTarget(BaseModel):
+    """A node addressed by label + key (the impact endpoint's minimal endpoint form)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(description="Projected node label (e.g. Device, IPAddress, Application).")
+    key: Any = Field(description="Value of the label's key property (pg_id / natural key).")
+
+
+class ImpactDependent(BaseModel):
+    """One application impacted by the target, with the edge's provenance (§8).
+
+    ``application`` is the dependent application node; ``target`` is the endpoint
+    it depends on (the target itself for a direct dependent, or a neighborhood
+    node for an indirect one). ``sources``/``provenance``/``derived_at`` are the
+    compact, refs-only explainability summary carried on the ``DEPENDS_ON`` edge.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    application: GraphNode
+    target: ImpactTarget
+    sources: list[str] = Field(default_factory=list)
+    provenance: list[str] = Field(default_factory=list)
+    derived_at: str | None = None
+
+
+class ImpactDependency(BaseModel):
+    """One endpoint an Application target depends on, with the edge's provenance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target: GraphNode
+    sources: list[str] = Field(default_factory=list)
+    provenance: list[str] = Field(default_factory=list)
+    derived_at: str | None = None
+
+
+class ImpactResponse(BaseModel):
+    """The bounded impact answer for ``GET /topology/impact`` (ADR-0052 §8).
+
+    ``dependents`` answers "what depends on X" (every target kind); for an
+    ``Application`` target ``dependencies`` also answers "what does A depend on".
+    ``projected_at`` is the watermark these answers are "as of" (``None`` when
+    the target is absent from the projection); ``depth_used`` is the hop bound
+    the physical-neighborhood expansion ran with.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    target: ImpactTarget
+    dependents: list[ImpactDependent] = Field(default_factory=list)
+    dependencies: list[ImpactDependency] = Field(default_factory=list)
+    projected_at: str | None = None
+    depth_used: int
 
 
 class TopologyDiffResponse(BaseModel):

@@ -23,7 +23,8 @@ Filtering
 (and the interfaces/addresses/subnets reachable from them); ``vrf`` scopes it
 to the subnet endpoints of ``ROUTES_TO`` edges in that VRF.  ``layer`` selects
 which relationship families are returned (``l2`` → ``CONNECTED_TO``; ``l3`` →
-the four L3 types; ``all`` → every projected type).  The node set is always the
+the four L3 types; ``dns`` → the DNS-dependency types; ``app`` → ``DEPENDS_ON``;
+``all`` → every projected type).  The node set is always the
 union of every endpoint that survives the active filters, so the returned
 subgraph is internally consistent (no dangling edges).
 """
@@ -36,9 +37,14 @@ from neo4j import AsyncManagedTransaction
 
 from app.knowledge.neo4j_client import Neo4jClient
 from app.knowledge.schema import (
+    LABEL_APPLICATION,
     LABEL_DEVICE,
+    LABEL_INTERFACE,
+    LABEL_IPADDRESS,
+    LABEL_SUBNET,
     NODE_KEY_PROPERTY,
     REL_CONNECTED_TO,
+    REL_DEPENDS_ON,
     REL_HAS_INTERFACE,
     REL_IN_SUBNET,
     REL_IN_ZONE,
@@ -50,6 +56,7 @@ from app.knowledge.schema import (
 __all__ = [
     "GraphData",
     "LAYER_ALL",
+    "LAYER_APP",
     "LAYER_DNS",
     "LAYER_L2",
     "LAYER_L3",
@@ -57,6 +64,7 @@ __all__ = [
     "MAX_NEIGHBORHOOD_DEPTH",
     "count_graph_nodes",
     "fetch_graph",
+    "fetch_impact",
     "fetch_neighborhood",
     "rel_types_for_layer",
 ]
@@ -66,8 +74,10 @@ LAYER_L2 = "l2"
 LAYER_L3 = "l3"
 #: DNS-dependency layer (M5 task #13): ``IN_ZONE`` + ``RESOLVES_TO``.
 LAYER_DNS = "dns"
+#: Application-dependency layer (P4 W2-T4, ADR-0052 §8): ``DEPENDS_ON`` only.
+LAYER_APP = "app"
 LAYER_ALL = "all"
-LAYERS: tuple[str, ...] = (LAYER_L2, LAYER_L3, LAYER_DNS, LAYER_ALL)
+LAYERS: tuple[str, ...] = (LAYER_L2, LAYER_L3, LAYER_DNS, LAYER_APP, LAYER_ALL)
 
 #: Upper bound on the ``depth`` of a device-neighborhood read (audit Wave 5,
 #: ARCH_DEBT #7).  The bound is interpolated into the variable-length Cypher
@@ -93,6 +103,28 @@ _DNS_REL_TYPES: tuple[str, ...] = (
     REL_RESOLVES_TO,
 )
 
+#: The application-dependency relationship family (P4 W2-T4): one union edge type.
+_APP_REL_TYPES: tuple[str, ...] = (REL_DEPENDS_ON,)
+
+#: Relationship families the ``site`` predicate must not filter on: their
+#: endpoints (DnsZone/DnsRecord/IPAddress; Application/IPAddress) carry no
+#: ``.site`` property, so ``a.site = $site OR b.site = $site`` is null/false for
+#: every one of their edges and a site scope would silently drop them all. Both
+#: the DNS family (M5) and the application-dependency family (P4 W2) are exempt.
+_SITELESS_REL_TYPES: tuple[str, ...] = (*_DNS_REL_TYPES, *_APP_REL_TYPES)
+
+#: The physical relationship families an impact read expands through (L2 + L3):
+#: a device/subnet/interface's neighborhood is walked over these, never over the
+#: ``DEPENDS_ON`` impact edge itself (that is the answer, not a traversal hop).
+_PHYSICAL_REL_TYPES: tuple[str, ...] = (REL_CONNECTED_TO, *_L3_REL_TYPES)
+
+#: Node labels a ``fetch_impact`` target may be (ADR-0052 §8): the physical
+#: endpoints impact flows through, plus ``Application`` as the reverse-direction
+#: entry point ("what does application A depend on").
+_IMPACT_TARGET_LABELS: frozenset[str] = frozenset(
+    {LABEL_DEVICE, LABEL_IPADDRESS, LABEL_INTERFACE, LABEL_SUBNET, LABEL_APPLICATION}
+)
+
 #: Property name every projected element carries (the projection watermark).
 _PROJECTED_AT_PROP = "last_projected_at"
 
@@ -111,7 +143,9 @@ def rel_types_for_layer(layer: str) -> tuple[str, ...]:
         return _L3_REL_TYPES
     if layer == LAYER_DNS:
         return _DNS_REL_TYPES
-    return (REL_CONNECTED_TO, *_L3_REL_TYPES, *_DNS_REL_TYPES)
+    if layer == LAYER_APP:
+        return _APP_REL_TYPES
+    return (REL_CONNECTED_TO, *_L3_REL_TYPES, *_DNS_REL_TYPES, *_APP_REL_TYPES)
 
 
 def _node_key(label: str, properties: dict[str, Any]) -> Any:
@@ -163,6 +197,27 @@ def _primary_label(labels: list[str] | tuple[str, ...]) -> str | None:
     return None
 
 
+def _collect_stamp(stamps: list[str], props: dict[str, Any]) -> None:
+    """Append *props*' ``last_projected_at`` (coerced) to *stamps* if present."""
+    stamp = props.get(_PROJECTED_AT_PROP)
+    if stamp is not None:
+        stamps.append(_coerce(stamp))
+
+
+def _impact_edge_provenance(rel_props: dict[str, Any]) -> dict[str, Any]:
+    """The per-edge provenance payload every impact answer must carry (§8).
+
+    ``sources`` + ``provenance`` + ``derived_at`` come straight off the projected
+    ``DEPENDS_ON`` edge (the compact, refs-only summary — full provenance stays
+    in Postgres, §3.2). ``derived_at`` is coerced so no driver temporal leaks.
+    """
+    return {
+        "sources": list(rel_props.get("sources") or []),
+        "provenance": list(rel_props.get("provenance") or []),
+        "derived_at": _coerce(rel_props.get("derived_at")),
+    }
+
+
 async def _read_graph(
     tx: AsyncManagedTransaction,
     *,
@@ -181,23 +236,24 @@ async def _read_graph(
     # Relationship types are validated module constants — safe to interpolate
     # into the type pattern (the driver cannot parameterize a rel-type literal).
     rel_pattern = "|".join(rel_types)
-    # DNS-family edges (IN_ZONE, RESOLVES_TO) connect DnsZone/DnsRecord/IPAddress
-    # nodes which carry no .site property; Neo4j evaluates a missing property as
-    # null, so `null = $site` is always false and would silently drop every DNS
-    # edge whenever site is non-null.  The guard `OR type(r) IN $dns_rel_types`
-    # short-circuits the site predicate for those relationship types, mirroring
-    # the existing VRF guard for ROUTES_TO.
-    dns_rel_types = list(_DNS_REL_TYPES)
+    # DNS-family (IN_ZONE, RESOLVES_TO) and application-dependency (DEPENDS_ON)
+    # edges connect nodes that carry no .site property (DnsZone/DnsRecord/
+    # IPAddress; Application/IPAddress); Neo4j evaluates a missing property as
+    # null, so `null = $site` is always false and a site scope would silently
+    # drop every one of those edges.  The guard `OR type(r) IN $siteless_rel_types`
+    # short-circuits the site predicate for those families, mirroring the
+    # existing VRF guard for ROUTES_TO.
+    siteless_rel_types = list(_SITELESS_REL_TYPES)
     cypher = (
         f"MATCH (a)-[r:{rel_pattern}]->(b) "
         "WHERE ($site IS NULL OR a.site = $site OR b.site = $site "
-        "       OR type(r) IN $dns_rel_types) "
+        "       OR type(r) IN $siteless_rel_types) "
         "  AND ($vrf IS NULL OR r.vrf = $vrf OR NOT type(r) = 'ROUTES_TO') "
         "RETURN labels(a) AS a_labels, properties(a) AS a_props, "
         "       labels(b) AS b_labels, properties(b) AS b_props, "
         "       type(r) AS rel_type, properties(r) AS rel_props"
     )
-    result = await tx.run(cypher, site=site, vrf=vrf, dns_rel_types=dns_rel_types)
+    result = await tx.run(cypher, site=site, vrf=vrf, siteless_rel_types=siteless_rel_types)
 
     nodes: dict[tuple[str, Any], dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
@@ -332,16 +388,16 @@ async def _count_graph_nodes(
     graph never leaves Neo4j: only the count crosses the wire.
     """
     rel_pattern = "|".join(rel_types)
-    dns_rel_types = list(_DNS_REL_TYPES)
+    siteless_rel_types = list(_SITELESS_REL_TYPES)
     cypher = (
         f"MATCH (a)-[r:{rel_pattern}]->(b) "
         "WHERE ($site IS NULL OR a.site = $site OR b.site = $site "
-        "       OR type(r) IN $dns_rel_types) "
+        "       OR type(r) IN $siteless_rel_types) "
         "  AND ($vrf IS NULL OR r.vrf = $vrf OR NOT type(r) = 'ROUTES_TO') "
         "UNWIND [a, b] AS n "
         "RETURN count(DISTINCT n) AS node_count"
     )
-    result = await tx.run(cypher, site=site, vrf=vrf, dns_rel_types=dns_rel_types)
+    result = await tx.run(cypher, site=site, vrf=vrf, siteless_rel_types=siteless_rel_types)
     async for record in result:
         return int(record["node_count"])
     return 0
@@ -405,3 +461,166 @@ async def fetch_neighborhood(
         return None
     graph["projected_at"] = _projected_at(graph["nodes"])
     return graph
+
+
+async def _read_impact(
+    tx: AsyncManagedTransaction,
+    *,
+    target_label: str,
+    target_key: str,
+    depth: int,
+) -> dict[str, Any]:
+    """Collect the impact answer for one target in one transaction (ADR-0052 §8).
+
+    Two bounded reads, each a scoped ``MATCH`` from the target key (never a
+    full-graph scan):
+
+    - **dependents** (every target kind): expand the target's *physical*
+      neighborhood ``0..depth`` hops (``0`` = the target itself → direct
+      dependents; ``1..depth`` = indirect impact through the L2/L3 chain).
+      ``IPAddress`` nodes carry no *physical* edge of their own (only
+      ``DEPENDS_ON``/``RESOLVES_TO`` touch them), so every physically-reached
+      ``Interface`` node ``n`` is also matched against its co-keyed
+      ``IPAddress`` (``ip.pg_id = n.pg_id`` — both are projected from the SAME
+      ``normalized_interfaces`` row for the "winning", lowest-``pg_id``
+      interface of a given address; see :mod:`app.engines.topology.nodes`
+      L286-304) and that ``IPAddress`` substituted in when present. This makes
+      a ``Device``/``Subnet``/``Interface`` target's transitive reach include
+      IP-bound dependents (e.g. an F5 VIP) whenever the address's winning
+      interface itself falls within the ``depth`` bound — not only when the
+      ``IPAddress`` is the direct target. **Residual boundary** (documented,
+      not a bug): if the winning interface for a shared address lies outside
+      the queried target's ``depth``-bounded neighborhood, that ``IPAddress``
+      is not reached either — mirrors the existing "unreconcilable" absence
+      semantics elsewhere in this layer. Every ``Application`` with a
+      ``DEPENDS_ON`` edge into the resulting candidate set is a dependent.
+    - **dependencies** (``Application`` target only): the direct ``DEPENDS_ON``
+      edges out of the application — "what does application A depend on".
+
+    Every returned edge carries its ``sources``/``provenance``/``derived_at``
+    (the §8 explainability contract). ``stamps`` accumulates every element's
+    ``last_projected_at`` so the caller can stamp the ``projected_at`` watermark.
+    """
+    key_prop = NODE_KEY_PROPERTY[target_label]
+    # Relationship types and the depth bound are validated module-level values
+    # (the driver cannot parameterize either literal); the key stays a bound
+    # parameter so an untrusted target key cannot inject Cypher.
+    phys_pattern = "|".join(_PHYSICAL_REL_TYPES)
+    dependents: list[dict[str, Any]] = []
+    dependencies: list[dict[str, Any]] = []
+    stamps: list[str] = []
+
+    dependents_cypher = (
+        f"MATCH (x:{target_label}) WHERE x.{key_prop} = $key "
+        f"MATCH (x)-[:{phys_pattern}*0..{depth}]-(n) "
+        "WITH DISTINCT n "
+        # Co-key join (rider 2026-07-07-1540): every physically-reached
+        # Interface is also matched against its co-keyed IPAddress (same
+        # pg_id, projected from the same normalized_interfaces row for the
+        # address's winning interface) so IP-bound dependents surface
+        # transitively — no new relationship type, no projector change.
+        f"OPTIONAL MATCH (ip:{LABEL_IPADDRESS}) WHERE n:{LABEL_INTERFACE} AND ip.pg_id = n.pg_id "
+        "WITH DISTINCT CASE WHEN ip IS NOT NULL THEN ip ELSE n END AS n2 "
+        f"MATCH (app:{LABEL_APPLICATION})-[r:{REL_DEPENDS_ON}]->(n2) "
+        "RETURN labels(app) AS app_labels, properties(app) AS app_props, "
+        "       labels(n2) AS target_labels, properties(n2) AS target_props, "
+        "       properties(r) AS rel_props"
+    )
+    result = await tx.run(dependents_cypher, key=target_key)
+    async for record in result:
+        app_label = _primary_label(record["app_labels"])
+        endpoint_label = _primary_label(record["target_labels"])
+        if app_label is None or endpoint_label is None:
+            continue
+        app = _node_payload(app_label, record["app_props"])
+        endpoint = _node_payload(endpoint_label, record["target_props"])
+        _collect_stamp(stamps, record["app_props"])
+        _collect_stamp(stamps, record["rel_props"])
+        dependents.append(
+            {
+                "application": app,
+                "target": {"label": endpoint["label"], "key": endpoint["key"]},
+                **_impact_edge_provenance(record["rel_props"]),
+            }
+        )
+
+    if target_label == LABEL_APPLICATION:
+        dependencies_cypher = (
+            f"MATCH (a:{LABEL_APPLICATION}) WHERE a.{key_prop} = $key "
+            f"MATCH (a)-[r:{REL_DEPENDS_ON}]->(t) "
+            "RETURN labels(t) AS target_labels, properties(t) AS target_props, "
+            "       properties(r) AS rel_props"
+        )
+        result = await tx.run(dependencies_cypher, key=target_key)
+        async for record in result:
+            endpoint_label = _primary_label(record["target_labels"])
+            if endpoint_label is None:
+                continue
+            endpoint = _node_payload(endpoint_label, record["target_props"])
+            _collect_stamp(stamps, record["target_props"])
+            _collect_stamp(stamps, record["rel_props"])
+            dependencies.append(
+                {
+                    "target": endpoint,
+                    **_impact_edge_provenance(record["rel_props"]),
+                }
+            )
+
+    return {
+        "target": {"label": target_label, "key": target_key},
+        "dependents": dependents,
+        "dependencies": dependencies,
+        "stamps": stamps,
+    }
+
+
+async def fetch_impact(
+    client: Neo4jClient,
+    *,
+    target_label: str,
+    target_key: str,
+    depth: int,
+) -> GraphData:
+    """Answer "what depends on X" / "what does application A depend on" (§8).
+
+    The bounded, provenance-citing impact read: applications reachable against
+    the ``DEPENDS_ON`` direction for a ``Device`` / ``IPAddress`` / ``Interface``
+    / ``Subnet`` / ``Application`` target (direct and indirect through the
+    physical chain), plus — for an ``Application`` target — the reverse direction
+    (what that application depends on). Absence is an answer, not an error: an
+    unprojected target yields empty ``dependents``/``dependencies`` with a
+    ``null`` watermark, never a raise. See :func:`_read_impact` for the
+    co-key join that surfaces IP-bound dependents transitively and its
+    residual reachability boundary.
+
+    Args:
+        client:       The Neo4j access wrapper (:class:`Neo4jClient`).
+        target_label: One of ``Device``/``IPAddress``/``Interface``/``Subnet``/
+                      ``Application`` — the node the impact is computed around.
+        target_key:   The target node's key-property value (``pg_id`` / ``cidr``).
+        depth:        Physical-neighborhood hop bound, ``1..MAX_NEIGHBORHOOD_DEPTH``.
+
+    Returns:
+        ``{"target": {...}, "dependents": [...], "dependencies": [...],
+        "projected_at": <iso8601|None>, "depth_used": <int>}`` — JSON-safe
+        throughout, every edge carrying ``sources``/``provenance``/``derived_at``.
+
+    Raises:
+        ValueError: For an unsupported *target_label* or a *depth* outside
+            ``1..MAX_NEIGHBORHOOD_DEPTH`` — the depth is interpolated into the
+            Cypher pattern, so it is re-checked here rather than trusted.
+    """
+    if target_label not in _IMPACT_TARGET_LABELS:
+        raise ValueError(
+            f"impact target must be one of {sorted(_IMPACT_TARGET_LABELS)}, got {target_label!r}"
+        )
+    depth = int(depth)
+    if not 1 <= depth <= MAX_NEIGHBORHOOD_DEPTH:
+        raise ValueError(f"depth must be between 1 and {MAX_NEIGHBORHOOD_DEPTH}, got {depth}")
+    result = await client.execute_read(
+        _read_impact, target_label=target_label, target_key=target_key, depth=depth
+    )
+    stamps: list[str] = result.pop("stamps")
+    result["projected_at"] = max(stamps) if stamps else None
+    result["depth_used"] = depth
+    return result

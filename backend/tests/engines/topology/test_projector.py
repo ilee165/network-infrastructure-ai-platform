@@ -17,6 +17,11 @@ from uuid import UUID
 
 import pytest
 
+from app.engines.topology.applications import (
+    ApplicationNode,
+    DependsOnEdge,
+    DerivedApplications,
+)
 from app.engines.topology.dns import (
     DerivedDns,
     DnsRecordNode,
@@ -56,6 +61,11 @@ DEV1 = UUID("00000000-0000-0000-0000-000000000001")
 DEV2 = UUID("00000000-0000-0000-0000-000000000002")
 IF1 = UUID("00000000-0000-0000-0000-000000000a01")
 IF2 = UUID("00000000-0000-0000-0000-000000000a02")
+APP1 = UUID("00000000-0000-0000-0000-000000000f01")
+
+#: The REQUIRED application component with nothing derived — a legitimate
+#: empty derivation (no rows in Postgres), NOT an omitted layer (ADR-0052 §5).
+EMPTY_APPS = DerivedApplications()
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +209,7 @@ def _sweeps(client: FakeClient) -> list[tuple[str, dict[str, Any]]]:
 # ---------------------------------------------------------------------------
 
 
-def test_projected_label_and_rel_constants_cover_the_m2_subset_plus_dns() -> None:
+def test_projected_label_and_rel_constants_cover_the_m2_subset_plus_dns_plus_app() -> None:
     assert set(PROJECTED_NODE_LABELS) == {
         "Device",
         "Interface",
@@ -211,6 +221,8 @@ def test_projected_label_and_rel_constants_cover_the_m2_subset_plus_dns() -> Non
         # M5 task #13 DNS-dependency layer.
         "DnsZone",
         "DnsRecord",
+        # P4 W2 application-dependency layer (ADR-0052 §5).
+        "Application",
     }
     assert set(PROJECTED_REL_TYPES) == {
         "CONNECTED_TO",
@@ -221,6 +233,8 @@ def test_projected_label_and_rel_constants_cover_the_m2_subset_plus_dns() -> Non
         # M5 task #13 DNS-dependency layer.
         "IN_ZONE",
         "RESOLVES_TO",
+        # P4 W2 application-dependency layer (ADR-0052 §5).
+        "DEPENDS_ON",
     }
 
 
@@ -233,14 +247,21 @@ async def test_project_rejects_naive_projected_at() -> None:
     client = FakeClient()
     naive = datetime(2026, 6, 12, 12, 0, 0)  # noqa: DTZ001 — naive on purpose
     with pytest.raises(ValueError, match="timezone-aware"):
-        await project(client, small_nodes(), small_edges(), naive)
+        await project(client, small_nodes(), small_edges(), naive, applications=EMPTY_APPS)
     assert client.executed == []
 
 
 async def test_project_rejects_non_positive_batch_size() -> None:
     client = FakeClient()
     with pytest.raises(ValueError, match="batch_size"):
-        await project(client, small_nodes(), small_edges(), PROJECTED_AT, batch_size=0)
+        await project(
+            client,
+            small_nodes(),
+            small_edges(),
+            PROJECTED_AT,
+            applications=EMPTY_APPS,
+            batch_size=0,
+        )
     assert client.executed == []
 
 
@@ -251,7 +272,7 @@ async def test_project_rejects_non_positive_batch_size() -> None:
 
 async def test_project_merges_every_label_by_its_key_property() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT)
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
 
     statements = " \n".join(c for c, _ in _upserts(client))
     assert "MERGE (n:Device {pg_id: row.key})" in statements
@@ -265,7 +286,7 @@ async def test_project_merges_every_label_by_its_key_property() -> None:
 
 async def test_project_node_rows_carry_key_and_full_prop_map() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT)
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
 
     device_upserts = [(c, p) for c, p in _upserts(client) if "(n:Device" in c]
     assert len(device_upserts) == 1
@@ -283,7 +304,7 @@ async def test_project_node_rows_carry_key_and_full_prop_map() -> None:
 
 async def test_project_vlan_key_is_the_integer_vlan_id() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT)
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
     vlan_upserts = [(c, p) for c, p in _upserts(client) if "(n:Vlan" in c]
     assert len(vlan_upserts) == 1
     assert vlan_upserts[0][1]["rows"][0]["key"] == 10
@@ -292,7 +313,7 @@ async def test_project_vlan_key_is_the_integer_vlan_id() -> None:
 async def test_project_skips_upsert_statements_for_empty_node_sets() -> None:
     client = FakeClient()
     nodes = DerivedNodes(devices=small_nodes().devices)  # everything else empty
-    await project(client, nodes, DerivedEdges(), PROJECTED_AT)
+    await project(client, nodes, DerivedEdges(), PROJECTED_AT, applications=EMPTY_APPS)
     upsert_statements = [c for c, _ in _upserts(client)]
     assert len(upsert_statements) == 1
     assert "(n:Device" in upsert_statements[0]
@@ -305,7 +326,7 @@ async def test_project_skips_upsert_statements_for_empty_node_sets() -> None:
 
 async def test_project_edges_match_endpoints_and_merge_relationship() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT)
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
     statements = [c for c, _ in _upserts(client)]
 
     has_interface = [c for c in statements if ":HAS_INTERFACE" in c]
@@ -330,7 +351,7 @@ async def test_project_edges_match_endpoints_and_merge_relationship() -> None:
 async def test_project_groups_connected_to_by_endpoint_label_pair() -> None:
     """Mixed Device/Interface endpoints need one statement per label pair."""
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT)
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
     connected = [(c, p) for c, p in _upserts(client) if ":CONNECTED_TO" in c]
     assert len(connected) == 2
 
@@ -356,7 +377,7 @@ async def test_project_groups_connected_to_by_endpoint_label_pair() -> None:
 
 async def test_project_edge_props_carry_last_projected_at() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT)
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
     for cypher, params in _upserts(client):
         if "MERGE (a)-[r:" not in cypher:
             continue
@@ -366,7 +387,7 @@ async def test_project_edge_props_carry_last_projected_at() -> None:
 
 async def test_project_routes_to_rows_keep_route_properties() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT)
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
     routes = [(c, p) for c, p in _upserts(client) if ":ROUTES_TO" in c]
     props = routes[0][1]["rows"][0]["props"]
     assert props["protocol"] == "static"
@@ -382,7 +403,7 @@ async def test_project_routes_to_rows_keep_route_properties() -> None:
 async def test_project_sweeps_every_projected_label_and_rel_type_even_when_empty() -> None:
     """An empty derivation still sweeps every projected label + rel type clean."""
     client = FakeClient()
-    await project(client, DerivedNodes(), DerivedEdges(), PROJECTED_AT)
+    await project(client, DerivedNodes(), DerivedEdges(), PROJECTED_AT, applications=EMPTY_APPS)
 
     assert _upserts(client) == []
     sweeps = _sweeps(client)
@@ -396,7 +417,7 @@ async def test_project_sweeps_every_projected_label_and_rel_type_even_when_empty
 
 async def test_project_sweeps_only_elements_not_stamped_in_this_pass() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT)
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
     for cypher, params in _sweeps(client):
         assert (
             "WHERE r.last_projected_at IS NULL OR r.last_projected_at <> $projected_at" in (cypher)
@@ -407,7 +428,7 @@ async def test_project_sweeps_only_elements_not_stamped_in_this_pass() -> None:
 
 async def test_project_runs_all_upserts_before_any_sweep() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT)
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
     statements = client.statements
     last_upsert = max(i for i, c in enumerate(statements) if "UNWIND" in c)
     first_sweep = min(i for i, c in enumerate(statements) if "DELETE" in c)
@@ -421,13 +442,15 @@ async def test_project_runs_all_upserts_before_any_sweep() -> None:
 
 async def test_project_batches_rows_into_unwind_chunks_not_per_row_calls() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT, batch_size=1)
+    await project(
+        client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS, batch_size=1
+    )
     device_upserts = [(c, p) for c, p in _upserts(client) if "(n:Device" in c]
     assert len(device_upserts) == 2  # 2 devices, batch_size=1 -> 2 chunks
     assert all(len(p["rows"]) == 1 for _, p in device_upserts)
 
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT)
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
     device_upserts = [(c, p) for c, p in _upserts(client) if "(n:Device" in c]
     assert len(device_upserts) == 1  # default batch size: one round trip
     assert len(device_upserts[0][1]["rows"]) == 2
@@ -483,7 +506,9 @@ def small_dns() -> DerivedDns:
 
 async def test_project_merges_dns_zone_and_record_by_their_key_properties() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT, dns=small_dns())
+    await project(
+        client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS, dns=small_dns()
+    )
     statements = " \n".join(c for c, _ in _upserts(client))
     assert "MERGE (n:DnsZone {fqdn: row.key})" in statements
     assert "MERGE (n:DnsRecord {record_key: row.key})" in statements
@@ -501,7 +526,9 @@ async def test_project_merges_dns_zone_and_record_by_their_key_properties() -> N
 
 async def test_project_in_zone_edges_link_dnszone_to_dnsrecord() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT, dns=small_dns())
+    await project(
+        client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS, dns=small_dns()
+    )
     in_zone = [c for c, _ in _upserts(client) if ":IN_ZONE" in c]
     assert len(in_zone) == 1
     cypher = in_zone[0]
@@ -512,7 +539,9 @@ async def test_project_in_zone_edges_link_dnszone_to_dnsrecord() -> None:
 
 async def test_project_resolves_to_targets_reconciled_node_and_carries_value() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT, dns=small_dns())
+    await project(
+        client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS, dns=small_dns()
+    )
     resolves = [(c, p) for c, p in _upserts(client) if ":RESOLVES_TO" in c]
     # Only the reconciled (IPAddress) record yields an edge; the unreconciled one
     # carries no RESOLVES_TO edge (no phantom-node endpoint).
@@ -533,7 +562,9 @@ async def test_project_resolves_to_targets_reconciled_node_and_carries_value() -
 
 async def test_project_without_dns_sweeps_dns_layer_and_emits_no_dns_upserts() -> None:
     client = FakeClient()
-    await project(client, small_nodes(), small_edges(), PROJECTED_AT)  # dns=None
+    await project(
+        client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS
+    )  # dns=None
     upserts = [c for c, _ in _upserts(client)]
     assert not any("DnsZone" in c or "DnsRecord" in c for c in upserts)
     assert not any(":IN_ZONE" in c or ":RESOLVES_TO" in c for c in upserts)
@@ -546,13 +577,142 @@ async def test_project_without_dns_sweeps_dns_layer_and_emits_no_dns_upserts() -
 
 
 # ---------------------------------------------------------------------------
+# project() — application-dependency layer (P4 W2, ADR-0052 §3.2/§5)
+# ---------------------------------------------------------------------------
+
+
+def small_applications() -> DerivedApplications:
+    """One application with a union DEPENDS_ON edge to a Device and one to an IP."""
+    return DerivedApplications(
+        applications=(
+            ApplicationNode(
+                pg_id=APP1,
+                name="payroll",
+                description="payroll service",
+                origin="derived",
+                owner="platform-team",
+                fqdns=("payroll.corp.example.com",),
+            ),
+        ),
+        depends_on=(
+            DependsOnEdge(
+                application_pg_id=str(APP1),
+                target_label="Device",
+                target_key=str(DEV1),
+                sources=("f5", "manual"),
+                derived_at=PROJECTED_AT,
+                provenance=("f5:virtual_server:vs-1", "manual:user:u-1"),
+            ),
+            DependsOnEdge(
+                application_pg_id=str(APP1),
+                target_label="IPAddress",
+                target_key=str(IF1),
+                sources=("dns",),
+                derived_at=PROJECTED_AT,
+                provenance=("dns:record:www.corp.example.com|a|10.0.0.1",),
+            ),
+        ),
+    )
+
+
+async def test_project_merges_application_by_pg_id_with_full_prop_map() -> None:
+    client = FakeClient()
+    await project(
+        client,
+        small_nodes(),
+        small_edges(),
+        PROJECTED_AT,
+        applications=small_applications(),
+    )
+    app_upserts = [(c, p) for c, p in _upserts(client) if "(n:Application" in c]
+    assert len(app_upserts) == 1
+    cypher, params = app_upserts[0]
+    assert "MERGE (n:Application {pg_id: row.key})" in cypher
+    assert "SET n = row.props" in cypher
+    rows = params["rows"]
+    assert [row["key"] for row in rows] == [str(APP1)]
+    props = rows[0]["props"]
+    assert props["name"] == "payroll"
+    assert props["origin"] == "derived"
+    assert props["owner"] == "platform-team"
+    # fqdns projects as a Neo4j array of primitives (list, not tuple).
+    assert props["fqdns"] == ["payroll.corp.example.com"]
+    assert props["last_projected_at"] == PROJECTED_AT
+
+
+async def test_project_depends_on_groups_per_target_label_and_matches_endpoints() -> None:
+    """One UNWIND per (Application, target-label) pair; endpoints MATCH-ed only."""
+    client = FakeClient()
+    await project(
+        client,
+        small_nodes(),
+        small_edges(),
+        PROJECTED_AT,
+        applications=small_applications(),
+    )
+    depends = [(c, p) for c, p in _upserts(client) if ":DEPENDS_ON" in c]
+    assert len(depends) == 2  # one group per target label (Device, IPAddress)
+    by_target = {c.split("MATCH (b:")[1].split(" ")[0]: (c, p) for c, p in depends}
+    assert set(by_target) == {"Device", "IPAddress"}
+
+    device_cypher, device_params = by_target["Device"]
+    assert "MATCH (a:Application {pg_id: row.a_key})" in device_cypher
+    assert "MATCH (b:Device {pg_id: row.b_key})" in device_cypher
+    assert "MERGE (a)-[r:DEPENDS_ON]->(b)" in device_cypher
+    assert "SET r = row.props" in device_cypher
+    # No CREATE of endpoints anywhere: an unprojected target emits no edge.
+    assert "CREATE" not in device_cypher
+
+    # Union-edge properties per ADR-0052 §3.2.
+    rows = device_params["rows"]
+    assert rows == [
+        {
+            "a_key": str(APP1),
+            "b_key": str(DEV1),
+            "props": {
+                "sources": ["f5", "manual"],
+                "derived_at": PROJECTED_AT,
+                "provenance": ["f5:virtual_server:vs-1", "manual:user:u-1"],
+                "last_projected_at": PROJECTED_AT,
+            },
+        }
+    ]
+
+
+async def test_project_with_empty_applications_sweeps_app_layer_clean() -> None:
+    """An empty (but REQUIRED) application derivation sweeps the layer like any
+    other empty derivation — unstamped Application/DEPENDS_ON elements are
+    deleted (stale-sweep convergence, ADR-0052 §5/§6)."""
+    client = FakeClient()
+    await project(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
+    upserts = [c for c, _ in _upserts(client)]
+    assert not any("(n:Application" in c for c in upserts)
+    assert not any(":DEPENDS_ON" in c for c in upserts)
+    sweeps = [c for c, _ in _sweeps(client)]
+    assert any("(n:Application)" in c and "DETACH DELETE" in c for c in sweeps)
+    assert any("[r:DEPENDS_ON]" in c for c in sweeps)
+
+
+def test_project_and_full_rebuild_require_the_application_component() -> None:
+    """Optional-kwarg relapse guard (ADR-0052 §5): ``applications`` has NO
+    default on either entry point — a caller that omits it cannot run a pass
+    (the ``dns=`` deletion hazard must not recur)."""
+    import inspect
+
+    for fn in (project, full_rebuild):
+        param = inspect.signature(fn).parameters["applications"]
+        assert param.default is inspect.Parameter.empty, fn.__name__
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY, fn.__name__
+
+
+# ---------------------------------------------------------------------------
 # full_rebuild()
 # ---------------------------------------------------------------------------
 
 
 async def test_full_rebuild_wipes_then_constrains_then_projects() -> None:
     client = FakeClient()
-    await full_rebuild(client, small_nodes(), small_edges(), PROJECTED_AT)
+    await full_rebuild(client, small_nodes(), small_edges(), PROJECTED_AT, applications=EMPTY_APPS)
     statements = client.statements
 
     wipes = [i for i, c in enumerate(statements) if "DETACH DELETE" in c and "WHERE" not in c]
@@ -567,7 +727,9 @@ async def test_full_rebuild_wipes_then_constrains_then_projects() -> None:
 
 async def test_full_rebuild_wipe_is_scoped_to_projected_labels_only() -> None:
     client = FakeClient()
-    await full_rebuild(client, DerivedNodes(), DerivedEdges(), PROJECTED_AT)
+    await full_rebuild(
+        client, DerivedNodes(), DerivedEdges(), PROJECTED_AT, applications=EMPTY_APPS
+    )
     wipes = [c for c in client.statements if "DETACH DELETE" in c and "WHERE" not in c]
     assert sorted(wipes) == sorted(
         f"MATCH (n:{label}) DETACH DELETE n" for label in PROJECTED_NODE_LABELS
@@ -608,7 +770,7 @@ async def test_live_project_then_mutate_then_incremental_sync() -> None:
             await session.run("MERGE (s:NetopsM2ProjectorSentinel {name: 'keep-me'})")
 
         t1 = datetime.now(tz=UTC)
-        await full_rebuild(client, small_nodes(), small_edges(), t1)
+        await full_rebuild(client, small_nodes(), small_edges(), t1, applications=EMPTY_APPS)
 
         assert await single_value("MATCH (n:Device) RETURN count(n)") == 2
         assert await single_value("MATCH (n:Interface) RETURN count(n)") == 2
@@ -648,7 +810,7 @@ async def test_live_project_then_mutate_then_incremental_sync() -> None:
             in_subnet=small_edges().in_subnet,
         )
         t2 = t1 + timedelta(seconds=5)
-        await project(client, nodes_b, edges_b, t2)
+        await project(client, nodes_b, edges_b, t2, applications=EMPTY_APPS)
 
         # Stale elements are gone; survivors and newcomers are stamped with t2.
         assert await single_value("MATCH (n:Device) RETURN count(n)") == 2

@@ -37,9 +37,25 @@ from app.core.errors import GraphTooLargeError, NotFoundError
 from app.engines.topology.diff import diff_snapshots
 from app.engines.topology.snapshots import SnapshotData
 from app.knowledge import Neo4jClient, count_graph_nodes, fetch_graph, fetch_neighborhood
-from app.knowledge.topology_read import LAYER_ALL, LAYERS, MAX_NEIGHBORHOOD_DEPTH
+from app.knowledge.schema import (
+    LABEL_APPLICATION,
+    LABEL_DEVICE,
+    LABEL_INTERFACE,
+    LABEL_IPADDRESS,
+    LABEL_SUBNET,
+)
+from app.knowledge.topology_read import LAYER_ALL, LAYERS, MAX_NEIGHBORHOOD_DEPTH, fetch_impact
 from app.models import TopologySnapshot, User
-from app.schemas.topology import GraphResponse, TopologyDiffResponse
+from app.schemas.topology import GraphResponse, ImpactResponse, TopologyDiffResponse
+
+#: Impact target-kind query value (lower-snake, ADR-0052 §1) -> projected label.
+_IMPACT_KIND_TO_LABEL: dict[str, str] = {
+    "device": LABEL_DEVICE,
+    "ip_address": LABEL_IPADDRESS,
+    "interface": LABEL_INTERFACE,
+    "subnet": LABEL_SUBNET,
+    "application": LABEL_APPLICATION,
+}
 
 router = APIRouter(prefix="/topology", tags=["topology"])
 
@@ -71,7 +87,7 @@ async def get_graph(
     _user: Viewer,
     site: Annotated[str | None, Query(max_length=255)] = None,
     vrf: Annotated[str | None, Query(max_length=255)] = None,
-    layer: Annotated[str, Query(pattern="^(l2|l3|dns|all)$")] = LAYER_ALL,
+    layer: Annotated[str, Query(pattern="^(l2|l3|dns|app|all)$")] = LAYER_ALL,
 ) -> GraphResponse:
     """Return the projected subgraph as of the latest projection pass.
 
@@ -129,7 +145,7 @@ async def get_neighborhood(
         int,
         Query(ge=1, le=MAX_NEIGHBORHOOD_DEPTH, description="Hop radius around the device."),
     ] = 2,
-    layer: Annotated[str, Query(pattern="^(l2|l3|dns|all)$")] = LAYER_ALL,
+    layer: Annotated[str, Query(pattern="^(l2|l3|dns|app|all)$")] = LAYER_ALL,
 ) -> GraphResponse:
     """Return the subgraph within ``depth`` hops of one projected device.
 
@@ -147,6 +163,50 @@ async def get_neighborhood(
     if graph is None:
         raise NotFoundError(f"no projected device with key {device!r}")
     return GraphResponse.model_validate(graph)
+
+
+@router.get(
+    "/impact",
+    response_model=ImpactResponse,
+    summary="What depends on a node (and, for an application, what it depends on)",
+)
+async def get_impact(
+    client: KnowledgeClient,
+    _user: Viewer,
+    target_kind: Annotated[
+        str,
+        Query(
+            pattern="^(device|ip_address|interface|subnet|application)$",
+            description="Kind of the impact target node.",
+        ),
+    ],
+    target_ref: Annotated[
+        str,
+        Query(min_length=1, max_length=255, description="The target node's key (pg_id / cidr)."),
+    ],
+    depth: Annotated[
+        int,
+        Query(ge=1, le=MAX_NEIGHBORHOOD_DEPTH, description="Physical-neighborhood hop bound."),
+    ] = 2,
+) -> ImpactResponse:
+    """Answer "what depends on X" — and, for an ``Application`` target, "what
+    does X depend on" — with per-edge provenance (ADR-0052 §8).
+
+    The read is bounded by construction (a scoped ``MATCH`` from the target key,
+    ``depth`` clamped to ``MAX_NEIGHBORHOOD_DEPTH``); every dependency claim
+    cites the asserting source(s), a compact provenance summary, and the
+    ``projected_at`` watermark it is "as of". A target absent from the
+    projection is a 200 with empty ``dependents``/``dependencies`` (absence is an
+    answer, not an error); an unknown ``target_kind`` or out-of-range ``depth``
+    is rejected as 422 by FastAPI.
+    """
+    result = await fetch_impact(
+        client,
+        target_label=_IMPACT_KIND_TO_LABEL[target_kind],
+        target_key=target_ref,
+        depth=depth,
+    )
+    return ImpactResponse.model_validate(result)
 
 
 @router.get("/diff", response_model=TopologyDiffResponse, summary="Diff two topology snapshots")

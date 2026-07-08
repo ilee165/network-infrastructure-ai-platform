@@ -105,9 +105,10 @@ export interface TopologyGraphParams {
    * ``l2`` — LLDP/CDP neighbor links only.
    * ``l3`` — subnet adjacency and routing links only.
    * ``dns`` — DNS zone/record dependency layer (T13 DnsZone/DnsRecord/RESOLVES_TO).
+   * ``app`` — application-dependency layer (P4 W2 Application/DEPENDS_ON).
    * ``all`` — all relationship types (default server-side).
    */
-  layer?: "l2" | "l3" | "dns" | "all";
+  layer?: "l2" | "l3" | "dns" | "app" | "all";
 }
 
 /** Params for ``GET /topology/graph/neighborhood`` (audit Wave 5, scoped read). */

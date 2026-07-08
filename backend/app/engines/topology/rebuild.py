@@ -36,6 +36,7 @@ from app.engines.topology.projector import full_rebuild
 from app.engines.topology.snapshots import upsert_snapshot
 from app.engines.topology.sync import derive_topology, snapshot_lists
 from app.knowledge.neo4j_client import create_client
+from app.models.applications import Application, ApplicationDependency
 from app.models.inventory import (
     Device,
     NormalizedInterfaceRow,
@@ -63,11 +64,28 @@ async def rebuild(run_id: UUID | None = None) -> dict[str, Any]:
     projected_at = utcnow()
     try:
         async with db.create_sessionmaker(engine)() as session:
-            devices, interfaces, routes, neighbors = await _load_inventory(session)
-            derived = derive_topology(devices, interfaces, routes, neighbors)
-            node_list, edge_list = snapshot_lists(derived.nodes, derived.edges)
+            (
+                devices,
+                interfaces,
+                routes,
+                neighbors,
+                applications,
+                dependencies,
+            ) = await _load_inventory(session)
+            derived = derive_topology(
+                devices, interfaces, routes, neighbors, applications, dependencies
+            )
+            node_list, edge_list = snapshot_lists(
+                derived.nodes, derived.edges, derived.applications
+            )
 
-            await full_rebuild(client, derived.nodes, derived.edges, projected_at)
+            await full_rebuild(
+                client,
+                derived.nodes,
+                derived.edges,
+                projected_at,
+                applications=derived.applications,
+            )
 
             if run_id is not None:
                 await upsert_snapshot(session, run_id=run_id, nodes=node_list, edges=edge_list)
@@ -99,13 +117,23 @@ async def _load_inventory(
     list[NormalizedInterfaceRow],
     list[NormalizedRouteRow],
     list[NormalizedNeighborRow],
+    list[Application],
+    list[ApplicationDependency],
 ]:
-    """Load every device + normalized row (whole-inventory projection)."""
+    """Load every device + normalized row + application row (whole inventory).
+
+    The application layer is part of EVERY projection pass (ADR-0052 §5), and
+    this single loader reads ``applications`` AND ``application_dependencies``
+    together — both or neither — so a rebuild can never sweep one side's valid
+    graph elements because only the other was loaded.
+    """
     devices = list((await session.execute(select(Device))).scalars())
     interfaces = list((await session.execute(select(NormalizedInterfaceRow))).scalars())
     routes = list((await session.execute(select(NormalizedRouteRow))).scalars())
     neighbors = list((await session.execute(select(NormalizedNeighborRow))).scalars())
-    return devices, interfaces, routes, neighbors
+    applications = list((await session.execute(select(Application))).scalars())
+    dependencies = list((await session.execute(select(ApplicationDependency))).scalars())
+    return devices, interfaces, routes, neighbors, applications, dependencies
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

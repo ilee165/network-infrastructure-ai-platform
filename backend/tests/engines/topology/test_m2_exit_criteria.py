@@ -39,6 +39,7 @@ from uuid import UUID
 
 import pytest
 
+from app.engines.topology.applications import DerivedApplications
 from app.engines.topology.diff import diff_snapshots
 from app.engines.topology.edges import build_l2_edges, build_l3_edges
 from app.engines.topology.nodes import derive_nodes
@@ -160,7 +161,7 @@ def _snapshot_from_inventory(
     l3 = build_l3_edges(devices, interfaces, routes)
 
     node_elements: list[list[str]] = []
-    for label, node_set in _node_sets(nodes):
+    for label, node_set in _node_sets(nodes, DerivedApplications()):
         key_property = NODE_KEY_PROPERTY[label]
         for node in node_set:
             node_elements.append([label, str(node.neo4j_properties(PROJECTED_AT)[key_property])])
@@ -309,7 +310,7 @@ class TestProjectionWriterNodeWellFormedness:
         nodes = derive_nodes(_devices(), _interfaces(), _routes())
 
         total_rows = 0
-        for label, node_set in _node_sets(nodes):
+        for label, node_set in _node_sets(nodes, DerivedApplications()):
             key_property = NODE_KEY_PROPERTY[label]
             rows = _node_rows(label, node_set, PROJECTED_AT)
             for row in rows:
@@ -334,7 +335,7 @@ class TestProjectionWriterNodeWellFormedness:
         # The stale-sweep relies on last_projected_at on every node; the MERGE
         # relies on the key property. Assert no label slips through without both.
         nodes = derive_nodes(_devices(), _interfaces(), _routes())
-        for label, node_set in _node_sets(nodes):
+        for label, node_set in _node_sets(nodes, DerivedApplications()):
             key_property = NODE_KEY_PROPERTY[label]
             for row in _node_rows(label, node_set, PROJECTED_AT):
                 assert key_property in row["props"]
@@ -344,7 +345,7 @@ class TestProjectionWriterNodeWellFormedness:
         # neo4j_properties (called by _node_rows) rejects a naive datetime, so a
         # node can never be projected without a tz-aware last_projected_at.
         nodes = derive_nodes(_devices(), _interfaces(), _routes())
-        label, node_set = _node_sets(nodes)[0]
+        label, node_set = _node_sets(nodes, DerivedApplications())[0]
         naive = datetime(2026, 6, 13, 1, 0)  # noqa: DTZ001 — intentionally naive
         with pytest.raises(ValueError, match="timezone-aware"):
             _node_rows(label, node_set, naive)

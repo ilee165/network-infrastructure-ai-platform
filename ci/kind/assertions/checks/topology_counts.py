@@ -8,11 +8,13 @@ REAL-store primitives it drives via ``kubectl exec`` on the backend-image probe
 pod inside the reduced-scale HA kind cluster:
 
   * ``seed``        — insert a small, FIXED reduced-scale inventory (2 devices,
-                      addressed interfaces, one L2 link, a route, a VRF) into
-                      Postgres via the ORM, keyed by fixed drill UUIDs so the
-                      cleanup targets exactly these rows and never an operator's
-                      real inventory. This is the topology the drill projects,
-                      destroys, and rebuilds.
+                      addressed interfaces, one L2 link, a route, a VRF, plus —
+                      P4 W2, ADR-0052 §6.2 — one application with two dependency
+                      rows so the ``Application``/``DEPENDS_ON`` kinds join the
+                      count comparison) into Postgres via the ORM, keyed by
+                      fixed drill UUIDs so the cleanup targets exactly these
+                      rows and never an operator's real inventory. This is the
+                      topology the drill projects, destroys, and rebuilds.
   * ``pg-source``   — compute the node/edge counts the projection MUST have,
                       derived from POSTGRES ALONE via the real
                       ``app.engines.topology`` derivation (``derive_topology`` ->
@@ -65,6 +67,7 @@ _DEV2 = UUID("00000000-0000-0000-0000-0000000d4d02")
 _IF1 = UUID("00000000-0000-0000-0000-0000000d4da1")
 _IF2 = UUID("00000000-0000-0000-0000-0000000d4da2")
 _RAW = UUID("00000000-0000-0000-0000-0000000d4dff")
+_APP1 = UUID("00000000-0000-0000-0000-0000000d4d21")
 _DEVICE_IDS = (_DEV1, _DEV2)
 
 _TAG = "DRILL neo4j_rebuild"
@@ -189,11 +192,57 @@ def _discovery_run() -> Any:
     )
 
 
+def _applications() -> list[Any]:
+    """One derived drill application (P4 W2, ADR-0052 §6.2): the Application/
+    DEPENDS_ON kinds must join the drill's count comparison."""
+    from app.models.applications import Application, ApplicationOrigin  # noqa: PLC0415
+
+    return [
+        Application(
+            id=_APP1,
+            name="drill-payroll",
+            origin=ApplicationOrigin.DERIVED,
+            origin_ref="f5:drill:payroll",
+            fqdns=["payroll.drill.example"],
+        )
+    ]
+
+
+def _application_dependencies() -> list[Any]:
+    """Two per-source rows targeting the seeded rebuild-safe kinds (§2.3):
+    app -> device (source f5) and app -> ip_address (source dns)."""
+    from app.models.applications import (  # noqa: PLC0415
+        ApplicationDependency,
+        DependencySource,
+        DependencyTargetKind,
+    )
+
+    return [
+        ApplicationDependency(
+            application_id=_APP1,
+            target_kind=DependencyTargetKind.DEVICE,
+            target_ref=str(_DEV1),
+            source=DependencySource.F5,
+            provenance=[{"kind": "virtual_server", "ref": "drill-vs"}],
+            derived_at=_COLLECTED_AT,
+        ),
+        ApplicationDependency(
+            application_id=_APP1,
+            target_kind=DependencyTargetKind.IP_ADDRESS,
+            target_ref=str(_IF1),
+            source=DependencySource.DNS,
+            provenance=[{"kind": "record", "ref": "payroll.drill.example|a|10.77.0.1"}],
+            derived_at=_COLLECTED_AT,
+        ),
+    ]
+
+
 async def _purge(sessionmaker: Any) -> None:
     """Remove ONLY the rows this drill owns (keyed by fixed drill ids)."""
     from sqlalchemy import delete  # noqa: PLC0415
 
     from app.models import DiscoveryRun  # noqa: PLC0415
+    from app.models.applications import Application, ApplicationDependency  # noqa: PLC0415
     from app.models.inventory import (  # noqa: PLC0415
         Device,
         NormalizedInterfaceRow,
@@ -206,6 +255,10 @@ async def _purge(sessionmaker: Any) -> None:
         await session.execute(delete(TopologySnapshot).where(TopologySnapshot.run_id == _RUN_ID))
         for model in (NormalizedInterfaceRow, NormalizedRouteRow, NormalizedNeighborRow):
             await session.execute(delete(model).where(model.device_id.in_(_DEVICE_IDS)))
+        await session.execute(
+            delete(ApplicationDependency).where(ApplicationDependency.application_id == _APP1)
+        )
+        await session.execute(delete(Application).where(Application.id == _APP1))
         await session.execute(delete(Device).where(Device.id.in_(_DEVICE_IDS)))
         await session.execute(delete(DiscoveryRun).where(DiscoveryRun.id == _RUN_ID))
         await session.commit()
@@ -237,8 +290,10 @@ async def _cmd_seed() -> int:
             session.add(_discovery_run())
             for device in _devices():
                 session.add(device)
+            for application in _applications():
+                session.add(application)
             await session.flush()
-            for row in (*_interfaces(), *_routes(), *_neighbors()):
+            for row in (*_interfaces(), *_routes(), *_neighbors(), *_application_dependencies()):
                 session.add(row)
             await session.commit()
     finally:
@@ -275,6 +330,7 @@ async def _pg_source_counts() -> tuple[int, int]:
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.engines.topology.sync import derive_topology, snapshot_lists  # noqa: PLC0415
+    from app.models.applications import Application, ApplicationDependency  # noqa: PLC0415
     from app.models.inventory import (  # noqa: PLC0415
         Device,
         NormalizedInterfaceRow,
@@ -319,10 +375,26 @@ async def _pg_source_counts() -> tuple[int, int]:
                     )
                 ).scalars()
             )
+            # The application layer joins the count comparison (ADR-0052 §6.2)
+            # — loaded BOTH tables together, scoped to the drill's fixed id.
+            applications = list(
+                (
+                    await session.execute(select(Application).where(Application.id == _APP1))
+                ).scalars()
+            )
+            dependencies = list(
+                (
+                    await session.execute(
+                        select(ApplicationDependency).where(
+                            ApplicationDependency.application_id == _APP1
+                        )
+                    )
+                ).scalars()
+            )
     finally:
         await engine.dispose()
-    derived = derive_topology(devices, interfaces, routes, neighbors)
-    node_list, edge_list = snapshot_lists(derived.nodes, derived.edges)
+    derived = derive_topology(devices, interfaces, routes, neighbors, applications, dependencies)
+    node_list, edge_list = snapshot_lists(derived.nodes, derived.edges, derived.applications)
     return len(node_list), len(edge_list)
 
 

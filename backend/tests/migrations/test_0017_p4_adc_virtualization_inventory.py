@@ -6,9 +6,9 @@ dialect (no DB/Docker/network) and assert the emitted DDL creates all six
 read-only inventory tables (``adc_virtual_servers``, ``adc_pools``,
 ``virt_machines``, ``virt_hosts``, ``virt_clusters``, ``virt_port_groups``)
 with their key columns. This is an **expand-only** migration (six new tables,
-no edits to existing ones). ``alembic heads`` is asserted to be the SINGLE
-head ``0017`` chaining after ``0016`` — 0017 is now the LATEST migration and
-owns the single-head invariant.
+no edits to existing ones). The single-head invariant is owned by the LATEST
+migration test (``test_0018_p4_application_dependency_topology.py``); here
+0017 is asserted to chain after ``0016`` on the single unbranched line.
 """
 
 from __future__ import annotations
@@ -57,11 +57,18 @@ def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_single_head_is_0017() -> None:
-    """`alembic heads` resolves to exactly one head, revision 0017 (no branch)."""
+def test_0017_is_an_ancestor_of_the_single_head() -> None:
+    """0017 stays on the single linear chain below the current head (no branch).
+
+    The single-head invariant now belongs to the LATEST migration
+    (``tests/migrations/test_0018_p4_application_dependency_topology.py``); 0017
+    no longer owns the head but must remain on the single, unbranched chain.
+    """
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert heads == ["0017"], f"expected single head 0017, got {heads}"
+    assert len(heads) == 1, f"expected a single unbranched head, got {heads}"
+    ancestry = {rev.revision for rev in script.walk_revisions("base", heads[0])}
+    assert "0017" in ancestry
 
 
 def test_0017_revises_0016() -> None:

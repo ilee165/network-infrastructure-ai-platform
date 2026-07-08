@@ -20,12 +20,15 @@ from typing import Any
 import pytest
 
 from app.knowledge.schema import (
+    LABEL_APPLICATION,
+    LABEL_IPADDRESS,
     NODE_KEY_PROPERTY,
     REL_CONNECTED_TO,
+    REL_DEPENDS_ON,
     REL_ROUTES_TO,
 )
 from app.knowledge.topology_read import (
-    _DNS_REL_TYPES,
+    _SITELESS_REL_TYPES,
     MAX_NEIGHBORHOOD_DEPTH,
     count_graph_nodes,
     fetch_neighborhood,
@@ -83,7 +86,8 @@ class _FakeTx:
     def _distinct_node_count(self, cypher: str, params: dict[str, Any]) -> int:
         # Mirror the production count predicate exactly (the lockstep the
         # _count_graph_nodes docstring demands): the site predicate is bypassed
-        # for the DNS relationship family, and vrf only constrains ROUTES_TO.
+        # for the site-less relationship families (DNS + app-dependency), and
+        # vrf only constrains ROUTES_TO.
         rel_segment = cypher.split("[r:", 1)[1].split("]", 1)[0]
         selected = set(rel_segment.split("|"))
         site = params.get("site")
@@ -94,7 +98,7 @@ class _FakeTx:
                 continue
             if (
                 site is not None
-                and rec["rel_type"] not in _DNS_REL_TYPES
+                and rec["rel_type"] not in _SITELESS_REL_TYPES
                 and not (rec["a_props"].get("site") == site or rec["b_props"].get("site") == site)
             ):
                 continue
@@ -334,6 +338,21 @@ class TestCountGraphNodes:
         # lon touches b-c (dev-c side) and c-d: b, c, d.
         assert await count_graph_nodes(client, layer="all", site="lon") == 3
         assert await count_graph_nodes(client, layer="all", site="no-such-site") == 0
+
+    async def test_site_filter_exempts_app_dependency_edges(self) -> None:
+        # Regression (PR #119 review): DEPENDS_ON endpoints (Application,
+        # IPAddress) carry no .site, so a site predicate that only exempts the
+        # DNS family would silently drop every app->IPAddress edge under a site
+        # scope — the exact DNS-guard hazard, un-extended to the app layer. The
+        # app-dependency family must be site-less like DNS.
+        app = {"pg_id": "app-1", "name": "billing", "last_projected_at": PROJECTED_AT}
+        vip = {"pg_id": "ip-9", "last_projected_at": PROJECTED_AT}
+        siteless = FakeKnowledgeClient(
+            [_edge(REL_DEPENDS_ON, LABEL_APPLICATION, app, LABEL_IPADDRESS, vip)]
+        )
+        # Both endpoints lack .site; without the app-layer exemption this is 0.
+        assert await count_graph_nodes(siteless, layer="app", site="nyc") == 2
+        assert await count_graph_nodes(siteless, layer="all", site="dc1") == 2
 
     async def test_vrf_filter_constrains_routes_to_only(self, client: FakeKnowledgeClient) -> None:
         # vrf never drops CONNECTED_TO edges; it only constrains ROUTES_TO.

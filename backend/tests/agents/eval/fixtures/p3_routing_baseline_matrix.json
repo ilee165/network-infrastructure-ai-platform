@@ -2,7 +2,7 @@
   "_meta": {
     "task": "P3 W5-T2 — cross-vendor + agent routing re-run (no regression vs P2 matrix)",
     "description": "Recorded 9-way routing matrix for the P3 release HEAD. P3 ships NO new vendor and NO new agent (platform-only: HA/scale-out + WebSocket fan-out + worker changes), so the routable specialist roster and every per-agent tool allow-list are UNCHANGED from the P2 W5-T2 matrix. This file is the recorded artifact the deterministic no-regression gate (test_p3_routing_no_regression.py) pins the live P3-HEAD registry against, and the artifact the W5-T3 phase-exit gate doc (PRODUCTION.md 2.6 / G-MNT) cites. It is generated from build_default_registry() and cross-checked in-test against the P2 module's own published constants, so it is proven to BE the P2 matrix — not a tautological re-derivation of whatever the live registry happens to be.",
-    "provenance": "Introspected from app.agents.build_default_registry() on branch feat/p3-w5-evals; cross-verified against backend/tests/agents/eval/test_p2_cross_vendor_routing.py constants.",
+    "provenance": "Introspected from app.agents.build_default_registry() on branch feat/p3-w5-evals; cross-verified against backend/tests/agents/eval/test_p2_cross_vendor_routing.py constants. RECONCILED at P4 W2-T4 (feat/p4-w2-app-dependency-topology): the Troubleshooting Agent gains ONE new READ_ONLY tool, get_application_impact (ADR-0052 §8 application-dependency impact read) — a conscious, reviewed capability addition, not a silent rebaseline. The roster (9 agents, no new agent/vendor), the Security-Agent allow-list, and the state-changing-reachable set ({ddi, security}) are BYTE-IDENTICAL to the P2 matrix; only the troubleshooting read-only surface grew by one.",
     "supervisor": "master_architect",
     "roster_count": 9,
     "adrs": ["ADR-0003 (supervisor routing)", "ADR-0033 (injection boundary)", "ADR-0037 (Security Agent)"],
@@ -67,6 +67,7 @@
       "propose_firewall_remediation": "state_changing"
     },
     "troubleshooting": {
+      "get_application_impact": "read_only",
       "get_device_routes": "read_only",
       "read_live_acls": "read_only",
       "read_live_bgp_peers": "read_only",
@@ -96,7 +97,7 @@
   },
   "result": {
     "roster_unchanged_vs_p2": true,
-    "allow_lists_unchanged_vs_p2": true,
+    "allow_lists_unchanged_vs_p2": "except one P4 W2-T4 addition: troubleshooting.get_application_impact (read_only, ADR-0052 §8); all other agents byte-identical to P2",
     "injection_boundary_intact": true,
     "no_new_agent": true,
     "no_new_vendor": true
