@@ -130,17 +130,42 @@ export function createApplication(body: ApplicationCreate): Promise<ApplicationR
   });
 }
 
-/** ``PATCH /api/v1/applications/{id}`` — update attributes (engineer+). */
-export function updateApplication(id: string, body: ApplicationUpdate): Promise<ApplicationRead> {
+/**
+ * ``PATCH /api/v1/applications/{id}`` — update attributes (engineer+).
+ *
+ * Optimistic concurrency (N1): the PATCH is mandatory-conditional. Pass the
+ * ``updated_at`` of the {@link ApplicationRead} the caller last read as
+ * ``expectedVersion``; it travels as the ``If-Match`` ETag so a stale edit
+ * cannot silently clobber a concurrent writer (the backend replies 409
+ * ``stale-precondition`` when it no longer matches, 428 when omitted).
+ */
+export function updateApplication(
+  id: string,
+  body: ApplicationUpdate,
+  expectedVersion: string,
+): Promise<ApplicationRead> {
   return apiFetch<ApplicationRead>(`/applications/${id}`, {
     method: "PATCH",
     body: JSON.stringify(body),
+    headers: { "If-Match": `"${expectedVersion}"` },
   });
 }
 
-/** ``DELETE /api/v1/applications/{id}`` — delete one ``manual`` application (engineer+). */
-export function deleteApplication(id: string): Promise<void> {
-  return apiFetch<void>(`/applications/${id}`, { method: "DELETE" });
+/**
+ * ``DELETE /api/v1/applications/{id}`` — delete one ``manual`` application (engineer+).
+ *
+ * ``expectedVersion`` is OPTIONAL (unlike the PATCH): when given, the row's
+ * ``updated_at`` travels as ``If-Match`` so a delete issued from a stale view is
+ * refused 409 rather than destroying a row that changed underneath the user;
+ * when omitted, no precondition is sent and the delete is unconditional.
+ */
+export function deleteApplication(id: string, expectedVersion?: string): Promise<void> {
+  return apiFetch<void>(`/applications/${id}`, {
+    method: "DELETE",
+    ...(expectedVersion !== undefined
+      ? { headers: { "If-Match": `"${expectedVersion}"` } }
+      : {}),
+  });
 }
 
 /**

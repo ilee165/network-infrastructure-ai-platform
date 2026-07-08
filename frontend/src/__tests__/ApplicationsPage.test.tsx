@@ -222,6 +222,7 @@ interface RecordedCall {
   method: string;
   url: string;
   body: unknown;
+  headers: Record<string, string>;
 }
 
 /**
@@ -241,6 +242,7 @@ function fetchWriting(
       method,
       url: path,
       body: init?.body !== undefined && init?.body !== null ? JSON.parse(String(init.body)) : undefined,
+      headers: (init?.headers as Record<string, string> | undefined) ?? {},
     });
     if (method === "DELETE") {
       return Promise.resolve(new Response(null, { status: 204 }));
@@ -399,5 +401,99 @@ describe("viewer_sees_read_only_tagging_surface_without_write_controls", () => {
     await screen.findByTestId(`dependency-source-${MANUAL_DEP.id}`);
     expect(screen.queryByTestId(`dependency-add-${MANUAL_APP.id}`)).not.toBeInTheDocument();
     expect(screen.queryByTestId(`dependency-remove-${MANUAL_DEP.id}`)).not.toBeInTheDocument();
+  });
+});
+
+// ── application_edit_uses_optimistic_concurrency_if_match (N1) ──────────────────
+
+const STALE_PROBLEM = {
+  type: "urn:netops:error:stale-precondition",
+  title: "Conflict",
+  status: 409,
+  detail: "application was modified by another writer since you last read it; reload and retry",
+  instance: `/api/v1/applications/${MANUAL_APP.id}`,
+};
+
+const NAME_CONFLICT_PROBLEM = {
+  type: "urn:netops:error:conflict",
+  title: "Conflict",
+  status: 409,
+  detail: "an application named 'taken' already exists (names are case-insensitive)",
+  instance: `/api/v1/applications/${MANUAL_APP.id}`,
+};
+
+/** Answer reads with the list and the edit PATCH with a fixed status/problem. */
+function fetchEditReturns(list: unknown, status: number, problem?: unknown) {
+  return vi.fn((_url: string, init?: RequestInit): Promise<Response> => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "PATCH") {
+      return Promise.resolve(
+        new Response(problem !== undefined ? JSON.stringify(problem) : null, {
+          status,
+          headers: { "Content-Type": "application/problem+json" },
+        }),
+      );
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify(list), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  });
+}
+
+async function openEditAndSubmit(): Promise<void> {
+  fireEvent.click(await screen.findByTestId(`application-edit-${MANUAL_APP.id}`));
+  fireEvent.change(screen.getByTestId("application-form-owner"), {
+    target: { value: "new-owner" },
+  });
+  fireEvent.click(screen.getByTestId("application-form-submit"));
+}
+
+describe("application_edit_uses_optimistic_concurrency_if_match", () => {
+  it("(a) sends the row's updated_at as the If-Match precondition on edit", async () => {
+    const { mock, calls } = fetchWriting(LIST, {});
+    vi.stubGlobal("fetch", mock);
+    renderPage("engineer");
+    await openEditAndSubmit();
+
+    await waitFor(() => {
+      const patch = writeCalls(calls).find((c) => c.method === "PATCH");
+      expect(patch).toBeDefined();
+      expect(patch!.headers["If-Match"]).toBe(`"${MANUAL_APP.updated_at}"`);
+    });
+  });
+
+  it("(b) a stale-precondition 409 shows the reload message and does not close the modal", async () => {
+    vi.stubGlobal("fetch", fetchEditReturns(LIST, 409, STALE_PROBLEM));
+    renderPage("engineer");
+    await openEditAndSubmit();
+
+    expect(await screen.findByText(/changed by someone else/i)).toBeInTheDocument();
+    expect(screen.getByTestId("application-reload-button")).toBeInTheDocument();
+    // The modal stays open — the success path (toast + close) never ran.
+    expect(screen.getByLabelText("Edit application")).toBeInTheDocument();
+  });
+
+  it("(c) a name-collision 409 shows the plain detail, not the reload UX", async () => {
+    vi.stubGlobal("fetch", fetchEditReturns(LIST, 409, NAME_CONFLICT_PROBLEM));
+    renderPage("engineer");
+    await openEditAndSubmit();
+
+    expect(await screen.findByText(/already exists/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("application-reload-button")).not.toBeInTheDocument();
+    expect(screen.queryByText(/changed by someone else/i)).not.toBeInTheDocument();
+  });
+
+  it("(d) a successful edit closes the modal (invalidating the list as before)", async () => {
+    const { mock } = fetchWriting(LIST, {});
+    vi.stubGlobal("fetch", mock);
+    renderPage("engineer");
+    await openEditAndSubmit();
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Edit application")).not.toBeInTheDocument();
+    });
   });
 });

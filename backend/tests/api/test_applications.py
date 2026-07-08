@@ -120,6 +120,32 @@ async def _audit_rows(session: AsyncSession, action: str | None = None) -> list[
     return list((await session.execute(query)).scalars().all())
 
 
+def _etag(read_body: dict[str, Any]) -> str:
+    """The opaque concurrency token a client echoes back: the row's ``updated_at``."""
+    return read_body["updated_at"]
+
+
+def _if_match(headers: dict[str, str], token: str) -> dict[str, str]:
+    """Copy *headers* adding a double-quoted ``If-Match`` precondition token."""
+    return {**headers, "If-Match": f'"{token}"'}
+
+
+def _instant(token: str) -> datetime:
+    """Parse an ETag / If-Match token (a quoted ISO-8601 string) to a tz-aware instant.
+
+    Mirrors the endpoint's ``_parse_if_match`` so a test compares tokens by
+    INSTANT, never by string: the JSON body renders UTC as ``…Z`` while the
+    ``ETag`` header renders it via ``datetime.isoformat`` as ``…+00:00`` — the
+    same instant in two spellings.
+    """
+    raw = token.strip()
+    if raw.startswith("W/"):
+        raw = raw[2:].strip()
+    raw = raw.strip('"')
+    parsed = datetime.fromisoformat(raw)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 # ---------------------------------------------------------------------------
 # Application create (POST /applications)
 # ---------------------------------------------------------------------------
@@ -290,7 +316,7 @@ class TestApplicationUpdate:
         response = await client.patch(
             f"{BASE}/{created['id']}",
             json={"name": "payroll-v2", "owner": None},
-            headers=auth_headers("engineer"),
+            headers=_if_match(auth_headers("engineer"), _etag(created)),
         )
         assert response.status_code == 200, response.text
         body = response.json()
@@ -312,16 +338,23 @@ class TestApplicationUpdate:
         await _create_application(client, headers)
         other = await _create_application(client, headers, name="crm-frontend", fqdns=[])
         response = await client.patch(
-            f"{BASE}/{other['id']}", json={"name": "PAYROLL"}, headers=headers
+            f"{BASE}/{other['id']}",
+            json={"name": "PAYROLL"},
+            headers=_if_match(headers, _etag(other)),
         )
         assert response.status_code == 409
+        # A valid precondition passes; this is the NAME-collision conflict, not a
+        # stale one — the two 409s are distinguishable by problem ``type``.
+        assert response.json()["type"] == "urn:netops:error:conflict"
 
     async def test_case_only_rename_of_same_row_is_allowed(
         self, client: httpx.AsyncClient, auth_headers: Headers
     ) -> None:
         created = await _create_application(client, auth_headers("engineer"))
         response = await client.patch(
-            f"{BASE}/{created['id']}", json={"name": "Payroll"}, headers=auth_headers("engineer")
+            f"{BASE}/{created['id']}",
+            json={"name": "Payroll"},
+            headers=_if_match(auth_headers("engineer"), _etag(created)),
         )
         assert response.status_code == 200
         assert response.json()["name"] == "Payroll"
@@ -333,7 +366,7 @@ class TestApplicationUpdate:
         response = await client.patch(
             f"{BASE}/{created['id']}",
             json={"name": None, "description": None},
-            headers=auth_headers("engineer"),
+            headers=_if_match(auth_headers("engineer"), _etag(created)),
         )
         assert response.status_code == 200
         body = response.json()
@@ -349,7 +382,9 @@ class TestApplicationUpdate:
         assert derived_attributes_clean(derived)
 
         response = await client.patch(
-            f"{BASE}/{derived.id}", json={"name": "crm"}, headers=auth_headers("engineer")
+            f"{BASE}/{derived.id}",
+            json={"name": "crm"},
+            headers=_if_match(auth_headers("engineer"), derived.updated_at.isoformat()),
         )
         assert response.status_code == 200
 
@@ -376,10 +411,111 @@ class TestApplicationUpdate:
     async def test_unknown_id_is_404(
         self, client: httpx.AsyncClient, auth_headers: Headers
     ) -> None:
+        # Ordering: the endpoint loads-or-404s BEFORE it parses the precondition,
+        # so a missing row is a 404 even with NO If-Match header (the 428 guard
+        # never runs on a resource that does not exist).
         response = await client.patch(
             f"{BASE}/{uuid.uuid4()}", json={"name": "x"}, headers=auth_headers("engineer")
         )
         assert response.status_code == 404
+
+    async def test_missing_if_match_is_428(
+        self, client: httpx.AsyncClient, auth_headers: Headers, session: AsyncSession
+    ) -> None:
+        """A PATCH without an If-Match precondition is refused 428 (RFC 6585); the
+        lost-update guard fires before any mutation, so NO update audit row is
+        written and the row is untouched."""
+        created = await _create_application(client, auth_headers("engineer"))
+        response = await client.patch(
+            f"{BASE}/{created['id']}",
+            json={"name": "payroll-v2"},
+            headers=auth_headers("engineer"),
+        )
+        assert response.status_code == 428, response.text
+        assert response.json()["type"] == "urn:netops:error:precondition-required"
+        assert await _audit_rows(session, audit.APPLICATION_UPDATE) == []
+        row = await session.get(Application, uuid.UUID(created["id"]))
+        assert row is not None and row.name == "payroll"
+
+    async def test_stale_if_match_is_409(
+        self, client: httpx.AsyncClient, auth_headers: Headers, session: AsyncSession
+    ) -> None:
+        """Two writers race: the first PATCH advances updated_at (v1→v2); a second
+        PATCH still holding v1 is rejected 409 stale-precondition. Exactly ONE
+        successful UPDATE is audited and the row holds the first writer's state."""
+        created = await _create_application(client, auth_headers("engineer"))
+        v1 = _etag(created)
+        first = await client.patch(
+            f"{BASE}/{created['id']}",
+            json={"name": "payroll-v2"},
+            headers=_if_match(auth_headers("engineer"), v1),
+        )
+        assert first.status_code == 200, first.text
+        v2 = _etag(first.json())
+        assert v2 != v1
+
+        stale = await client.patch(
+            f"{BASE}/{created['id']}",
+            json={"name": "payroll-v3"},
+            headers=_if_match(auth_headers("engineer"), v1),
+        )
+        assert stale.status_code == 409, stale.text
+        assert stale.json()["type"] == "urn:netops:error:stale-precondition"
+
+        [entry] = await _audit_rows(session, audit.APPLICATION_UPDATE)
+        assert entry.detail is not None and entry.detail["after"]["name"] == "payroll-v2"
+        row = await session.get(Application, uuid.UUID(created["id"]))
+        assert row is not None and row.name == "payroll-v2"
+
+    async def test_matching_if_match_succeeds_and_returns_fresh_etag(
+        self, client: httpx.AsyncClient, auth_headers: Headers
+    ) -> None:
+        """A PATCH with the current token succeeds and the 200 carries a FRESH
+        ETag (the advanced updated_at), distinct from the token the client sent."""
+        created = await _create_application(client, auth_headers("engineer"))
+        token = _etag(created)
+        response = await client.patch(
+            f"{BASE}/{created['id']}",
+            json={"name": "payroll-v2"},
+            headers=_if_match(auth_headers("engineer"), token),
+        )
+        assert response.status_code == 200, response.text
+        etag = response.headers.get("ETag")
+        assert etag is not None
+        # Compare by INSTANT: the body renders UTC as 'Z', the ETag as '+00:00'.
+        new_updated_at = response.json()["updated_at"]
+        assert _instant(etag) == _instant(new_updated_at)
+        assert _instant(etag) != _instant(token)
+
+    async def test_malformed_if_match_is_400(
+        self, client: httpx.AsyncClient, auth_headers: Headers, session: AsyncSession
+    ) -> None:
+        """An unparseable If-Match token is a 400 (the client fixes the header),
+        writes no audit row, and leaves the row unchanged."""
+        created = await _create_application(client, auth_headers("engineer"))
+        response = await client.patch(
+            f"{BASE}/{created['id']}",
+            json={"name": "payroll-v2"},
+            headers={**auth_headers("engineer"), "If-Match": "not-a-timestamp"},
+        )
+        assert response.status_code == 400, response.text
+        assert await _audit_rows(session, audit.APPLICATION_UPDATE) == []
+        row = await session.get(Application, uuid.UUID(created["id"]))
+        assert row is not None and row.name == "payroll"
+
+    async def test_get_and_create_emit_etag_header(
+        self, client: httpx.AsyncClient, auth_headers: Headers
+    ) -> None:
+        """Both POST 201 and GET /{id} carry an ETag equal (by instant) to the
+        row's updated_at, so a client can read the token to precondition a write."""
+        create_resp = await client.post(BASE, json=_payload(), headers=auth_headers("engineer"))
+        assert create_resp.status_code == 201, create_resp.text
+        created = create_resp.json()
+        assert _instant(create_resp.headers["ETag"]) == _instant(created["updated_at"])
+
+        get_resp = await client.get(f"{BASE}/{created['id']}", headers=auth_headers("viewer"))
+        assert get_resp.status_code == 200
+        assert _instant(get_resp.headers["ETag"]) == _instant(get_resp.json()["updated_at"])
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +560,38 @@ class TestApplicationDelete:
         response = await client.delete(f"{BASE}/{derived.id}", headers=auth_headers("engineer"))
         assert response.status_code == 409
         assert await session.get(Application, derived.id) is not None
+        assert await _audit_rows(session, audit.APPLICATION_DELETE) == []
+
+    async def test_delete_without_if_match_still_succeeds(
+        self, client: httpx.AsyncClient, auth_headers: Headers, session: AsyncSession
+    ) -> None:
+        """DELETE's precondition is OPTIONAL: a token-less delete still 204s."""
+        created = await _create_application(client, auth_headers("engineer"))
+        response = await client.delete(f"{BASE}/{created['id']}", headers=auth_headers("engineer"))
+        assert response.status_code == 204
+        assert await session.get(Application, uuid.UUID(created["id"])) is None
+
+    async def test_delete_with_stale_if_match_is_409(
+        self, client: httpx.AsyncClient, auth_headers: Headers, session: AsyncSession
+    ) -> None:
+        """A DELETE carrying a token that no longer matches (the row was edited
+        after the client read it) is refused 409 stale-precondition — the row
+        survives and no delete audit row is written."""
+        created = await _create_application(client, auth_headers("engineer"))
+        stale = _etag(created)
+        patched = await client.patch(
+            f"{BASE}/{created['id']}",
+            json={"owner": "team-fin"},
+            headers=_if_match(auth_headers("engineer"), stale),
+        )
+        assert patched.status_code == 200
+        response = await client.delete(
+            f"{BASE}/{created['id']}",
+            headers=_if_match(auth_headers("engineer"), stale),
+        )
+        assert response.status_code == 409
+        assert response.json()["type"] == "urn:netops:error:stale-precondition"
+        assert await session.get(Application, uuid.UUID(created["id"])) is not None
         assert await _audit_rows(session, audit.APPLICATION_DELETE) == []
 
     @pytest.mark.parametrize("role", ["viewer", "operator"])
@@ -739,8 +907,12 @@ class TestAuditChainMembership:
             headers=headers,
         )
         assert dep.status_code == 201
+        # Tagging a dependency does not touch the application row, so the create
+        # ETag is still current for this PATCH.
         patched = await client.patch(
-            f"{BASE}/{created['id']}", json={"owner": "team-fin"}, headers=headers
+            f"{BASE}/{created['id']}",
+            json={"owner": "team-fin"},
+            headers=_if_match(headers, _etag(created)),
         )
         assert patched.status_code == 200
         removed = await client.delete(
