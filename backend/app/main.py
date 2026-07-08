@@ -166,9 +166,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Enumerated, not wildcarded (audit PRODUCTION_READINESS #9): the
         # frontend (frontend/src/api/client.ts) only ever issues these methods
         # and sends only these request headers (Accept/Content-Type for the
-        # request body, Authorization for the bearer token).
+        # request body, Authorization for the bearer token, If-Match for the
+        # optimistic-concurrency precondition on application PATCH/DELETE —
+        # frontend/src/api/applications.ts).
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
-        allow_headers=["Authorization", "Content-Type", "Accept"],
+        allow_headers=["Authorization", "Content-Type", "Accept", "If-Match"],
     )
 
     @app.middleware("http")
