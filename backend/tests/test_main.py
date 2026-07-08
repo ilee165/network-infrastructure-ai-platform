@@ -78,7 +78,7 @@ async def test_cors_preflight_exposes_only_enumerated_methods_and_headers(
         headers={
             "Origin": "http://testserver",
             "Access-Control-Request-Method": "POST",
-            "Access-Control-Request-Headers": "authorization,content-type",
+            "Access-Control-Request-Headers": "authorization,content-type,if-match",
         },
     )
     assert response.status_code == 200
@@ -89,15 +89,16 @@ async def test_cors_preflight_exposes_only_enumerated_methods_and_headers(
     }
     # Starlette's CORSMiddleware always unions the configured allow_headers with
     # the CORS-safelisted simple headers (accept/accept-language/content-language
-    # /content-type) regardless of what is passed — so those four plus our one
-    # explicit addition (authorization) is the full expected set; there must be
-    # no wildcard and nothing beyond this fixed list.
+    # /content-type) regardless of what is passed — so those four plus our two
+    # explicit additions (authorization, if-match) is the full expected set;
+    # there must be no wildcard and nothing beyond this fixed list.
     assert allow_headers == {
         "authorization",
         "content-type",
         "accept",
         "accept-language",
         "content-language",
+        "if-match",
     }
 
 
