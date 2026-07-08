@@ -55,6 +55,10 @@ _ACTOR = "agent:troubleshooting"
 
 #: Hop bound for the impact read's physical-neighborhood expansion (matches the
 #: ``GET /topology/impact`` default; ADR-0052 §8 bounded traversal).
+#: Deliberately tighter than ``MAX_NEIGHBORHOOD_DEPTH`` (5, in
+#: ``app.knowledge.topology_read``) -- the agent tool caps its own blast
+#: radius at 2 hops on purpose; the two are not meant to track each other,
+#: and raising this to match would widen impact semantics for the agent path.
 _IMPACT_DEPTH = 2
 
 # ---------------------------------------------------------------------------
