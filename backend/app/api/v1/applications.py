@@ -39,15 +39,22 @@ containment).
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated, Any, Final
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Header, Query, Response
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require_role
-from app.core.errors import ConflictError, NotFoundError
+from app.core.errors import (
+    BadRequestError,
+    ConflictError,
+    NotFoundError,
+    PreconditionRequiredError,
+    StalePreconditionError,
+)
 from app.models import (
     Application,
     ApplicationDependency,
@@ -86,6 +93,47 @@ def _actor(user: User) -> str:
     return f"user:{user.username}"
 
 
+def _etag(application: Application) -> str:
+    """The strong ETag for *application*: its ``updated_at`` as a quoted ISO-8601 token.
+
+    ``updated_at`` advances at flush on every UPDATE (house ``onupdate``,
+    :class:`~app.models.mixins.TimestampMixin`), so it is a natural
+    optimistic-concurrency validator — the token a client reads on a GET/POST and
+    echoes back in ``If-Match`` to precondition its next write (N1). Rendered via
+    ``datetime.isoformat`` (``…+00:00``); the JSON body renders the same instant
+    as ``…Z`` — a client compares by instant, never by string.
+    """
+    return f'"{application.updated_at.isoformat()}"'
+
+
+def _parse_if_match(raw: str | None) -> datetime:
+    """Parse an ``If-Match`` precondition header into the instant it asserts.
+
+    ``None`` (header absent) → 428: the PATCH mandates the precondition so a
+    stale full-snapshot edit cannot silently clobber a concurrent writer (N1).
+    A present-but-unparseable token → 400 (the client fixes its header). A weak
+    validator (``W/"…"``) is accepted and unwrapped — its value is still the
+    ``updated_at`` instant. A tz-naive token is read as UTC; callers compare by
+    INSTANT, never by string.
+    """
+    if raw is None:
+        raise PreconditionRequiredError(
+            "this endpoint requires an If-Match precondition header carrying the "
+            "application's current updated_at ETag"
+        )
+    token = raw.strip()
+    if token.startswith("W/"):
+        token = token[2:].strip()
+    token = token.strip('"')
+    try:
+        parsed = datetime.fromisoformat(token)
+    except ValueError as exc:
+        raise BadRequestError(
+            "malformed If-Match token; expected a double-quoted ISO-8601 updated_at"
+        ) from exc
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def _application_state(application: Application) -> dict[str, Any]:
     """JSON-safe before/after snapshot for ``application.*`` audit entries.
 
@@ -114,8 +162,13 @@ def _dependency_state(dependency: ApplicationDependency) -> dict[str, Any]:
     }
 
 
-async def _get_application_or_404(session: AsyncSession, application_id: uuid.UUID) -> Application:
-    application = await session.get(Application, application_id)
+async def _get_application_or_404(
+    session: AsyncSession, application_id: uuid.UUID, *, for_update: bool = False
+) -> Application:
+    """Load one application or 404. With ``for_update`` the row is ``SELECT … FOR
+    UPDATE`` on PostgreSQL (a no-op on SQLite) so a read-then-write precondition
+    check cannot race a concurrent writer between the read and the flush (N1)."""
+    application = await session.get(Application, application_id, with_for_update=for_update)
     if application is None:
         raise NotFoundError(f"application {application_id} does not exist")
     return application
@@ -197,10 +250,16 @@ async def list_applications(
 
 @router.get("/{application_id}", response_model=ApplicationRead)
 async def get_application(
-    application_id: uuid.UUID, session: DbSession, _user: Viewer
+    application_id: uuid.UUID, session: DbSession, _user: Viewer, http_response: Response
 ) -> ApplicationRead:
-    """One application by id (404 problem details when unknown)."""
-    return ApplicationRead.model_validate(await _get_application_or_404(session, application_id))
+    """One application by id (404 problem details when unknown).
+
+    Emits the row's ``ETag`` so a client can read the token here and echo it in
+    the ``If-Match`` of a later conditional PATCH/DELETE (N1).
+    """
+    application = await _get_application_or_404(session, application_id)
+    http_response.headers["ETag"] = _etag(application)
+    return ApplicationRead.model_validate(application)
 
 
 @router.get("/{application_id}/dependencies", response_model=list[ApplicationDependencyRead])
@@ -234,9 +293,13 @@ async def list_application_dependencies(
 
 @router.post("", response_model=ApplicationRead, status_code=201)
 async def create_application(
-    body: ApplicationCreate, session: DbSession, user: Engineer
+    body: ApplicationCreate, session: DbSession, user: Engineer, http_response: Response
 ) -> ApplicationRead:
-    """Create one ``manual``-origin application; audits ``application.create``."""
+    """Create one ``manual``-origin application; audits ``application.create``.
+
+    The 201 carries the new row's ``ETag`` so a client can precondition a
+    follow-up edit without a round-trip GET (N1).
+    """
     await _ensure_name_free(session, body.name)
     application = Application(
         name=body.name,
@@ -261,22 +324,44 @@ async def create_application(
         detail={"after": _application_state(application)},
     )
     response = ApplicationRead.model_validate(application)
+    http_response.headers["ETag"] = _etag(application)
     await session.commit()
     return response
 
 
 @router.patch("/{application_id}", response_model=ApplicationRead)
 async def update_application(
-    application_id: uuid.UUID, body: ApplicationUpdate, session: DbSession, user: Engineer
+    application_id: uuid.UUID,
+    body: ApplicationUpdate,
+    session: DbSession,
+    user: Engineer,
+    http_response: Response,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> ApplicationRead:
     """Update attributes; audits ``application.update`` with before/after state.
+
+    Optimistic concurrency (N1): the PATCH is mandatory-conditional. The caller
+    MUST send ``If-Match`` carrying the ``updated_at`` ETag it last read; a
+    missing header is 428, a malformed one 400, and a token that no longer
+    matches the current row is 409 ``stale-precondition`` — so two engineers
+    editing the same application from stale modal state cannot silently clobber
+    each other (a lost update). The row is locked ``FOR UPDATE`` for the read so
+    the compare-then-write cannot race on PostgreSQL. A rejected precondition
+    raises BEFORE any state snapshot, mutation, flush, or audit, so the failed
+    attempt leaves no ``application.update`` entry and mutates nothing.
 
     Allowed on both origins: editing a ``derived`` row's attributes is the
     §3.3.3 manual-wins handoff — ``updated_at`` moves (house ``onupdate``)
     while ``derived_watermark`` stays, so no derivation pass may overwrite the
     user's curation again. ``origin``/``origin_ref`` are not editable.
     """
-    application = await _get_application_or_404(session, application_id)
+    application = await _get_application_or_404(session, application_id, for_update=True)
+    expected = _parse_if_match(if_match)
+    if application.updated_at != expected:
+        raise StalePreconditionError(
+            f"application {application_id} was modified by another writer since you "
+            "last read it; reload and retry"
+        )
     before = _application_state(application)
     updates = {
         field: value
@@ -306,13 +391,20 @@ async def update_application(
         },
     )
     response = ApplicationRead.model_validate(application)
+    # Capture the post-flush ETag BEFORE commit — commit may expire attributes
+    # (expire_on_commit), and re-reading updated_at then would trigger an async
+    # lazy-load. The header advertises the new token for the client's next edit.
+    http_response.headers["ETag"] = _etag(application)
     await session.commit()
     return response
 
 
 @router.delete("/{application_id}", status_code=204)
 async def delete_application(
-    application_id: uuid.UUID, session: DbSession, user: Engineer
+    application_id: uuid.UUID,
+    session: DbSession,
+    user: Engineer,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> Response:
     """Delete one ``manual`` application; audits ``application.delete``.
 
@@ -320,12 +412,23 @@ async def delete_application(
     silently resurrect on the next pass (ADR-0052 §3.3.5). The cascade-deleted
     dependency rows (``ON DELETE CASCADE``) are recorded in the audit entry so
     every retracted edge stays answerable from the trail.
+
+    ``If-Match`` is OPTIONAL here (unlike the PATCH): a token-less delete still
+    succeeds, but when the caller DOES send one it is enforced — a stale token
+    is 409 ``stale-precondition`` (a malformed one 400), so a delete issued from
+    a view the user edited elsewhere cannot destroy a row that changed under
+    them. The row is locked ``FOR UPDATE`` for the read.
     """
-    application = await _get_application_or_404(session, application_id)
+    application = await _get_application_or_404(session, application_id, for_update=True)
     if ApplicationOrigin(application.origin) is ApplicationOrigin.DERIVED:
         raise ConflictError(
             f"application {application_id} is derived and lifecycle-owned by derivation; "
             "it disappears when its source object disappears, not by user delete"
+        )
+    if if_match is not None and application.updated_at != _parse_if_match(if_match):
+        raise StalePreconditionError(
+            f"application {application_id} was modified by another writer since you "
+            "last read it; reload and retry"
         )
     dependencies = (
         (

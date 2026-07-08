@@ -208,13 +208,36 @@ describe("applications_client_create_sends_manual_origin_payload", () => {
     expect(calledUrl(mock)).toContain(`/api/v1/applications/${APP_ID}/dependencies`);
   });
 
-  it("updateApplication PATCHes only the supplied fields", async () => {
+  it("updateApplication PATCHes only the supplied fields and sends the If-Match precondition", async () => {
     const mock = okFetch(MANUAL_APP);
     vi.stubGlobal("fetch", mock);
-    await updateApplication(APP_ID, { owner: "new-team" });
+    await updateApplication(APP_ID, { owner: "new-team" }, "2026-07-01T10:00:00Z");
     const init = calledInit(mock);
     expect(init.method).toBe("PATCH");
     expect(JSON.parse(String(init.body))).toEqual({ owner: "new-team" });
+    // Optimistic concurrency (N1): the version travels as a quoted If-Match ETag.
+    expect((init.headers as Record<string, string>)["If-Match"]).toBe('"2026-07-01T10:00:00Z"');
+  });
+});
+
+// ── applications_client_delete_conditions_on_version_when_given ────────────────
+
+describe("applications_client_delete_conditions_on_version_when_given", () => {
+  it("deleteApplication sends If-Match when a version is given", async () => {
+    const mock = okFetch(undefined, 204);
+    vi.stubGlobal("fetch", mock);
+    await deleteApplication(APP_ID, "2026-07-01T10:00:00Z");
+    expect((calledInit(mock).headers as Record<string, string>)["If-Match"]).toBe(
+      '"2026-07-01T10:00:00Z"',
+    );
+  });
+
+  it("deleteApplication omits If-Match when no version is given", async () => {
+    const mock = okFetch(undefined, 204);
+    vi.stubGlobal("fetch", mock);
+    await deleteApplication(APP_ID);
+    const headers = (calledInit(mock).headers ?? {}) as Record<string, string>;
+    expect(headers["If-Match"]).toBeUndefined();
   });
 });
 

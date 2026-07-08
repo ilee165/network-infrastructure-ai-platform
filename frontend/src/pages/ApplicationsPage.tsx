@@ -48,8 +48,25 @@ const TARGET_KINDS: DependencyTargetKind[] = ["device", "ip_address"];
 
 const GENERIC_ERROR = "Something went wrong. Please try again.";
 
+/** Problem ``type`` the backend uses for an optimistic-concurrency (N1) conflict. */
+const STALE_PRECONDITION_TYPE = "urn:netops:error:stale-precondition";
+
+/** Message shown when a write lost the optimistic-concurrency race (N1). */
+const STALE_MESSAGE =
+  "This application was changed by someone else since you opened it. Reload to load " +
+  "the latest values, then re-apply your change.";
+
 function errorMessage(err: unknown): string {
   return err instanceof ApiError ? err.problem.detail : GENERIC_ERROR;
+}
+
+/**
+ * True only for the lost-update 409 (``stale-precondition``) — NOT the sibling
+ * name-collision 409 (``conflict``), which shares the status but differs by
+ * problem ``type`` and is fixed by just changing the name.
+ */
+function isStalePrecondition(err: unknown): boolean {
+  return err instanceof ApiError && err.problem.type === STALE_PRECONDITION_TYPE;
 }
 
 /** Tailwind tone per application origin — derived vs user-owned are visually distinct. */
@@ -160,6 +177,7 @@ function ApplicationFormModal({
   const [owner, setOwner] = useState(application?.owner ?? "");
   const [fqdns, setFqdns] = useState((application?.fqdns ?? []).join(", "));
   const [formError, setFormError] = useState<string | null>(null);
+  const [stale, setStale] = useState(false);
 
   const mutation = useMutation({
     mutationFn: () => {
@@ -172,20 +190,42 @@ function ApplicationFormModal({
           .map((entry) => entry.trim())
           .filter(Boolean),
       };
-      return editing ? updateApplication(application.id, payload) : createApplication(payload);
+      // Optimistic concurrency (N1): send the version the modal opened with as
+      // the If-Match precondition so a concurrent edit is not silently clobbered.
+      return editing
+        ? updateApplication(application.id, payload, application.updated_at)
+        : createApplication(payload);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["applications"] });
       pushToast("success", editing ? "Application updated." : "Application created.");
       onClose();
     },
-    onError: (err) => setFormError(errorMessage(err)),
+    onError: (err) => {
+      if (isStalePrecondition(err)) {
+        // Someone else changed the row: surface the reload affordance, refresh the
+        // list in the background, and do NOT toast success.
+        setStale(true);
+        setFormError(STALE_MESSAGE);
+        void queryClient.invalidateQueries({ queryKey: ["applications"] });
+      } else {
+        // Any other error (including a name-collision 409) is fixable in place.
+        setStale(false);
+        setFormError(errorMessage(err));
+      }
+    },
   });
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     setFormError(null);
+    setStale(false);
     mutation.mutate();
+  }
+
+  function reloadAndClose(): void {
+    void queryClient.invalidateQueries({ queryKey: ["applications"] });
+    onClose();
   }
 
   return (
@@ -246,9 +286,19 @@ function ApplicationFormModal({
             />
           </label>
           {formError !== null ? (
-            <p role="alert" className="text-xs text-status-error">
-              {formError}
-            </p>
+            <div role="alert" className="flex flex-col gap-1 text-xs text-status-error">
+              <span>{formError}</span>
+              {stale ? (
+                <button
+                  type="button"
+                  data-testid="application-reload-button"
+                  onClick={reloadAndClose}
+                  className="self-start underline hover:no-underline"
+                >
+                  Reload
+                </button>
+              ) : null}
+            </div>
           ) : null}
           <div className="mt-2 flex justify-end gap-3">
             <button
@@ -521,13 +571,23 @@ function ApplicationsTable({
   const colSpan = canWrite ? 5 : 4;
 
   const deleteMutation = useMutation({
-    mutationFn: (application: ApplicationRead) => deleteApplication(application.id),
+    // Optimistic concurrency (N1): pass the row version as the If-Match precondition
+    // so a delete from a stale view cannot destroy a row that changed underneath us.
+    mutationFn: (application: ApplicationRead) =>
+      deleteApplication(application.id, application.updated_at),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["applications"] });
       pushToast("success", "Application deleted.");
       setPendingDelete(null);
     },
-    onError: (err) => setConfirmError(errorMessage(err)),
+    onError: (err) => {
+      if (isStalePrecondition(err)) {
+        setConfirmError(STALE_MESSAGE);
+        void queryClient.invalidateQueries({ queryKey: ["applications"] });
+      } else {
+        setConfirmError(errorMessage(err));
+      }
+    },
   });
 
   const toggle = (id: string) => setExpanded((prev) => (prev === id ? null : id));
