@@ -87,3 +87,16 @@ npm run lint && npm run typecheck && npm test && npm run build
 ## Contributing
 
 Every feature requires tests, documentation, and API documentation before merge (see [CLAUDE.md](CLAUDE.md), the platform constitution). Architecture changes require an ADR in [docs/adr/](docs/adr/README.md). CI (GitHub Actions) gates on lint, types, tests, builds, and image vulnerability scans.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution guide and licensing terms for submitted work.
+
+## License
+
+Copyright 2026 ilee165
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this project except in compliance with the License. You may obtain a copy of the
+License at [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0).
+
+See [LICENSE](LICENSE) for the full license text and [NOTICE](NOTICE) for
+copyright and attribution information.
