@@ -100,6 +100,17 @@ describe("Layout", () => {
     });
   });
 
+  it("keeps the LLM badge fallback when profile fetch fails", async () => {
+    getLlmProfileMock.mockRejectedValue(new Error("network error"));
+    renderLayout();
+    await waitFor(() => {
+      expect(getLlmProfileMock).toHaveBeenCalled();
+    });
+    // Error leaves data undefined — same fallback as loading, never a stale profile.
+    expect(screen.getByTestId("llm-profile-badge")).toHaveTextContent("llm: …");
+    expect(screen.getByTestId("llm-profile-badge")).not.toHaveTextContent("llm: local");
+  });
+
   it("includes Profile and Settings nav links", () => {
     renderLayout();
     expect(screen.getByRole("link", { name: "Profile" })).toBeInTheDocument();

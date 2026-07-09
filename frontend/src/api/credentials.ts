@@ -76,7 +76,9 @@ export function rotateCredential(
   id: string,
   payload: CredentialRotatePayload,
 ): Promise<CredentialRead> {
-  return apiFetch<CredentialRead>(`/credentials/${id}/rotate`, {
+  // Encode the path segment so a malicious or corrupted id cannot reshape the
+  // URL (e.g. ``../..``) and send the secret body to an unintended route.
+  return apiFetch<CredentialRead>(`/credentials/${encodeURIComponent(id)}/rotate`, {
     method: "POST",
     body: JSON.stringify(payload),
   });

@@ -28,6 +28,7 @@ import {
 import { ApiError } from "../api/client";
 import { FormField } from "../components/FormField";
 import { PageHeader } from "../components/PageHeader";
+import { Pagination } from "../components/Pagination";
 import { Spinner } from "../components/Skeleton";
 import { useAuthStore } from "../stores/auth";
 import { hasMinimumRole, type Role } from "../stores/roles";
@@ -38,6 +39,9 @@ import type { Theme } from "../stores/theme";
 
 const KNOWN_PROFILES = ["local", "anthropic", "openai", "azure"] as const;
 type LlmProfile = (typeof KNOWN_PROFILES)[number];
+
+/** Page size for the credential vault table (server-side offset/limit). */
+const CREDENTIALS_PAGE_SIZE = 50;
 
 const CREDENTIAL_KINDS: { value: CredentialKind; label: string }[] = [
   { value: "ssh", label: "SSH" },
@@ -393,9 +397,10 @@ export function SettingsCredentialsSection() {
   const queryClient = useQueryClient();
   const canWrite = hasMinimumRole(useAuthStore((s) => s.user?.role), "engineer");
 
+  const [offset, setOffset] = useState(0);
   const { data, isPending, error: loadError } = useQuery({
-    queryKey: ["credentials"],
-    queryFn: () => listCredentials({ limit: 100, offset: 0 }),
+    queryKey: ["credentials", offset],
+    queryFn: () => listCredentials({ limit: CREDENTIALS_PAGE_SIZE, offset }),
   });
 
   const [name, setName] = useState("");
@@ -427,6 +432,7 @@ export function SettingsCredentialsSection() {
       setUsername("");
       setSecret("");
       setScopeSite("");
+      setOffset(0);
       void queryClient.invalidateQueries({ queryKey: ["credentials"] });
     },
     onError: (err) => {
@@ -569,6 +575,13 @@ export function SettingsCredentialsSection() {
           <p className="border-t border-carbon-800 px-3 py-2 text-[11px] text-zinc-600">
             {data.total} total
           </p>
+          <Pagination
+            offset={offset}
+            limit={CREDENTIALS_PAGE_SIZE}
+            total={data.total}
+            onChange={setOffset}
+            label="credentials"
+          />
         </div>
       )}
 
