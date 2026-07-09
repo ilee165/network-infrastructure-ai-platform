@@ -154,9 +154,7 @@ async def test_llm_readiness_admin_ok_no_secret_fields(
 async def test_llm_test_forbidden_for_non_admin(
     client, users, auth_headers: Callable[[str], dict[str, str]], role: str
 ) -> None:
-    resp = await client.post(
-        LLM_TEST_URL, headers=auth_headers(role), json={"profile": "local"}
-    )
+    resp = await client.post(LLM_TEST_URL, headers=auth_headers(role), json={"profile": "local"})
     assert resp.status_code == 403
 
 
@@ -182,9 +180,7 @@ async def test_llm_test_local_probes_and_audits(
         return {"models": [{"name": "llama3.1:8b"}]}
 
     monkeypatch.setattr(readiness, "_http_get_json", fake_get)
-    resp = await client.post(
-        LLM_TEST_URL, headers=_admin(auth_headers), json={"profile": "local"}
-    )
+    resp = await client.post(LLM_TEST_URL, headers=_admin(auth_headers), json={"profile": "local"})
     assert resp.status_code == 200
     body = resp.json()
     _assert_no_secret_keys(body)

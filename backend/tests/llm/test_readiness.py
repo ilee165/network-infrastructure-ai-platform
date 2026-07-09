@@ -100,9 +100,7 @@ async def test_probe_external_not_configured_without_keys(settings: Settings) ->
 
 
 @pytest.mark.asyncio
-async def test_probe_anthropic_ready(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_probe_anthropic_ready(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
     async def fake_get(url: str, *, headers: dict[str, str] | None = None) -> Any:
