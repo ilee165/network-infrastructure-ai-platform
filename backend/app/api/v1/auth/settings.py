@@ -6,6 +6,9 @@ row at runtime (env is the fallback). Provider API keys and the Ollama endpoint
 stay in env/``Settings`` and are NEVER accepted in a request body nor returned in
 a response — these schemas have no field for them, and unknown body fields are
 ignored by pydantic.
+
+``GET /llm-profile`` is the non-secret readiness signal for the shell badge
+(any authenticated user): active profile name only, never keys or endpoints.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_app_settings, get_db, require_role
+from app.api.deps import get_app_settings, get_current_user, get_db, require_role
 from app.api.v1.auth._shared import router
 from app.core.config import Settings
 from app.core.errors import BadRequestError
@@ -71,6 +74,35 @@ async def _load_settings_row(session: AsyncSession) -> SystemSetting | None:
     return result.scalar_one_or_none()
 
 
+def _effective_llm_profile(row: SystemSetting | None, settings: Settings) -> str:
+    """DB row wins; env :attr:`Settings.llm_profile` is the deploy-time fallback."""
+    if row is not None:
+        return row.llm_profile
+    return settings.llm_profile
+
+
+class LlmProfileStatus(BaseModel):
+    """Non-secret active LLM profile for shell badges (any authenticated user)."""
+
+    llm_profile: str
+
+
+@router.get("/llm-profile", response_model=LlmProfileStatus)
+async def get_llm_profile_status(
+    _user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> LlmProfileStatus:
+    """Return the effective LLM profile name (any authenticated user).
+
+    Used by the SPA shell badge so operators see the *runtime* selection rather
+    than a build-time ``VITE_*`` default. Never returns API keys, endpoints, or
+    role-map details (those stay on the admin ``/settings`` routes).
+    """
+    row = await _load_settings_row(session)
+    return LlmProfileStatus(llm_profile=_effective_llm_profile(row, settings))
+
+
 @router.get("/settings", response_model=SystemSettingsResponse)
 async def get_app_system_settings(
     admin: Annotated[User, Depends(require_role("admin"))],
@@ -86,7 +118,7 @@ async def get_app_system_settings(
     row = await _load_settings_row(session)
     if row is None:
         return SystemSettingsResponse(
-            llm_profile=settings.llm_profile,
+            llm_profile=_effective_llm_profile(None, settings),
             llm_role_reasoning=settings.llm_role_reasoning,
             llm_role_fast=settings.llm_role_fast,
         )

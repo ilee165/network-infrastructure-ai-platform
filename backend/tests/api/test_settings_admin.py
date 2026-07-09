@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import AuditLog, SystemSetting
 
 SETTINGS_URL = "/api/v1/auth/settings"
+LLM_PROFILE_URL = "/api/v1/auth/llm-profile"
 
 # Fields that must never appear in any settings request or response body.
 _SECRET_FIELD_HINTS = (
@@ -78,6 +79,41 @@ async def test_patch_settings_forbidden_for_non_admin(
 async def test_get_settings_unauthenticated_is_401(client, users) -> None:
     resp = await client.get(SETTINGS_URL)
     assert resp.status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# GET /llm-profile — any authenticated user (shell badge)                     #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("role", ["viewer", "operator", "engineer", "admin"])
+async def test_get_llm_profile_allowed_for_any_authenticated(
+    client, users, auth_headers: Callable[[str], dict[str, str]], role: str
+) -> None:
+    resp = await client.get(LLM_PROFILE_URL, headers=auth_headers(role))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["llm_profile"] == "local"
+    _assert_no_secret_keys(body)
+
+
+async def test_get_llm_profile_unauthenticated_is_401(client, users) -> None:
+    resp = await client.get(LLM_PROFILE_URL)
+    assert resp.status_code == 401
+
+
+async def test_get_llm_profile_follows_db_row(
+    client, users, session: AsyncSession, auth_headers: Callable[[str], dict[str, str]]
+) -> None:
+    session.add(
+        SystemSetting(
+            llm_profile="openai",
+            llm_role_reasoning=None,
+            llm_role_fast=None,
+        )
+    )
+    await session.commit()
+    resp = await client.get(LLM_PROFILE_URL, headers=auth_headers("viewer"))
+    assert resp.status_code == 200
+    assert resp.json()["llm_profile"] == "openai"
 
 
 # --------------------------------------------------------------------------- #

@@ -1,15 +1,9 @@
 /**
- * Settings route gate tests (Auth & Account UI, F2 review fix).
+ * Settings route gate tests.
  *
- * Spec F2 item 3 requires "/users AND the LLM section of /settings under
- * RoleRoute(\"admin\")". The Appearance section of /settings is reachable by any
- * authenticated user; the LLM profile + role map section is admin-only and must
- * sit behind a nested RoleRoute("admin") — defense-in-depth over the backend
- * require_role, which remains the source of truth.
- *
- * These mount the same /settings route subtree the App wires up (SettingsPage as
- * the layout, the admin LLM section behind RoleRoute("admin")), mirroring the
- * isolated-subtree style of ProtectedRoute / RoleRoute tests.
+ * Appearance / agents / account: any authenticated user.
+ * Credentials: RoleRoute("engineer").
+ * LLM + access: RoleRoute("admin").
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -17,12 +11,18 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RoleRoute } from "../components/RoleRoute";
-import { SettingsLlmSection } from "../pages/SettingsPage";
-import { SettingsPage } from "../pages/SettingsPage";
+import {
+  SettingsAccessSection,
+  SettingsAccountSection,
+  SettingsAgentsSection,
+  SettingsAppearanceSection,
+  SettingsCredentialsSection,
+  SettingsLlmSection,
+  SettingsPage,
+} from "../pages/SettingsPage";
 import type { UserMe } from "../stores/auth";
 import { useAuthStore } from "../stores/auth";
 
-// SettingsLlmSection now fetches GET /auth/settings; mock so no real network calls.
 vi.mock("../api/auth", () => ({
   getSettings: vi.fn().mockResolvedValue({
     llm_profile: "local",
@@ -30,6 +30,18 @@ vi.mock("../api/auth", () => ({
     llm_role_fast: null,
   }),
   updateSettings: vi.fn(),
+  getLlmProfile: vi.fn().mockResolvedValue({ llm_profile: "local" }),
+}));
+
+vi.mock("../api/credentials", () => ({
+  listCredentials: vi.fn().mockResolvedValue({
+    items: [],
+    total: 0,
+    limit: 100,
+    offset: 0,
+  }),
+  createCredential: vi.fn(),
+  rotateCredential: vi.fn(),
 }));
 
 function userWithRole(role: string): UserMe {
@@ -66,8 +78,15 @@ function renderSettings(path: string, role: string) {
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/settings" element={<SettingsPage />}>
+            <Route index element={<SettingsAppearanceSection />} />
+            <Route path="agents" element={<SettingsAgentsSection />} />
+            <Route path="account" element={<SettingsAccountSection />} />
+            <Route element={<RoleRoute minimum="engineer" />}>
+              <Route path="credentials" element={<SettingsCredentialsSection />} />
+            </Route>
             <Route element={<RoleRoute minimum="admin" />}>
               <Route path="llm" element={<SettingsLlmSection />} />
+              <Route path="access" element={<SettingsAccessSection />} />
             </Route>
           </Route>
         </Routes>
@@ -98,6 +117,26 @@ describe("/settings LLM section — admin gate", () => {
   it("keeps the appearance settings reachable by a non-admin", () => {
     renderSettings("/settings", "viewer");
     expect(screen.getByTestId("settings-page")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-appearance")).toBeInTheDocument();
     expect(screen.queryByTestId("forbidden")).not.toBeInTheDocument();
+  });
+});
+
+describe("/settings credentials — engineer gate", () => {
+  it("renders credentials for an engineer", async () => {
+    renderSettings("/settings/credentials", "engineer");
+    expect(await screen.findByTestId("settings-credentials")).toBeInTheDocument();
+    expect(screen.queryByTestId("forbidden")).not.toBeInTheDocument();
+  });
+
+  it("blocks a viewer from credentials", () => {
+    renderSettings("/settings/credentials", "viewer");
+    expect(screen.queryByTestId("settings-credentials")).not.toBeInTheDocument();
+    expect(screen.getByTestId("forbidden")).toBeInTheDocument();
+  });
+
+  it("allows admin (above engineer) on credentials", async () => {
+    renderSettings("/settings/credentials", "admin");
+    expect(await screen.findByTestId("settings-credentials")).toBeInTheDocument();
   });
 });

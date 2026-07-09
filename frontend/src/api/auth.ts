@@ -200,6 +200,19 @@ export function updateSettings(patch: UpdateSettingsPayload): Promise<SystemSett
   });
 }
 
+/**
+ * Non-secret active profile for the shell badge (any authenticated user).
+ * ``GET /auth/llm-profile`` — never returns keys or endpoints.
+ */
+export interface LlmProfileStatus {
+  llm_profile: string;
+}
+
+/** ``GET /auth/llm-profile`` — runtime profile name for UI badges. */
+export function getLlmProfile(): Promise<LlmProfileStatus> {
+  return apiFetch<LlmProfileStatus>("/auth/llm-profile");
+}
+
 // ── Boot helper ───────────────────────────────────────────────────────────────
 
 /**

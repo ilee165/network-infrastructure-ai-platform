@@ -13,9 +13,10 @@
  *    the source of truth. ``/incidents`` uses ``RoleRoute("viewer")`` (matching
  *    the backend viewer+ RBAC on GET /docs). ``/packet`` and ``/changes`` use
  *    ``RoleRoute("engineer")``. Admin-only surfaces — ``/users`` and the LLM
- *    section of ``/settings`` (``/settings/llm``) — use ``RoleRoute("admin")``.
- *    The Appearance section of ``/settings`` stays reachable by any authenticated
- *    user.
+ *    section of ``/settings`` (``/settings/llm``, ``/settings/access``) —
+ *    use ``RoleRoute("admin")``. Credentials (``/settings/credentials``) use
+ *    ``RoleRoute("engineer")``. Appearance, agents help, and account links stay
+ *    reachable by any authenticated user.
  *
  * The existing M0 pages keep their paths; unknown paths redirect to the
  * dashboard.
@@ -40,7 +41,15 @@ import { IncidentReportsPage } from "./pages/IncidentReportsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { PacketPage } from "./pages/PacketPage";
 import { ProfilePage } from "./pages/ProfilePage";
-import { SettingsLlmSection, SettingsPage } from "./pages/SettingsPage";
+import {
+  SettingsAccessSection,
+  SettingsAccountSection,
+  SettingsAgentsSection,
+  SettingsAppearanceSection,
+  SettingsCredentialsSection,
+  SettingsLlmSection,
+  SettingsPage,
+} from "./pages/SettingsPage";
 import { TopologyPage } from "./pages/TopologyPage";
 import { UsersPage } from "./pages/UsersPage";
 import { VirtualizationPage } from "./pages/VirtualizationPage";
@@ -96,11 +105,18 @@ export function App() {
             <Route path="audit" element={<AuditPage />} />
             <Route path="profile" element={<ProfilePage />} />
 
-            {/* /settings: Appearance is open to any authed user; the LLM section
-                is admin-only (defense-in-depth over the backend RBAC). */}
+            {/* /settings hub: Appearance / agents / account for any authed user;
+                credentials engineer+; LLM + access admin-only. */}
             <Route path="settings" element={<SettingsPage />}>
+              <Route index element={<SettingsAppearanceSection />} />
+              <Route path="agents" element={<SettingsAgentsSection />} />
+              <Route path="account" element={<SettingsAccountSection />} />
+              <Route element={<RoleRoute minimum="engineer" />}>
+                <Route path="credentials" element={<SettingsCredentialsSection />} />
+              </Route>
               <Route element={<RoleRoute minimum="admin" />}>
                 <Route path="llm" element={<SettingsLlmSection />} />
+                <Route path="access" element={<SettingsAccessSection />} />
               </Route>
             </Route>
 

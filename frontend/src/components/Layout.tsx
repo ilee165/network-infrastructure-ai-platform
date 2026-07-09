@@ -3,11 +3,12 @@
  * environment / LLM-profile badges. Pages render through the router outlet.
  */
 
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Toaster } from "./Toaster";
-import { logout } from "../api/auth";
+import { getLlmProfile, logout } from "../api/auth";
 import { useAuthStore } from "../stores/auth";
 import { hasMinimumRole } from "../stores/roles";
 import { useUiStore } from "../stores/ui";
@@ -76,12 +77,20 @@ export function Layout() {
   const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
   const theme = useUiStore((state) => state.theme);
-  const llmProfile = import.meta.env.VITE_LLM_PROFILE ?? "local";
 
   const user = useAuthStore((state) => state.user);
   const setAnon = useAuthStore((state) => state.setAnon);
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Runtime profile from GET /auth/llm-profile (not a build-time VITE_* default).
+  const { data: llmStatus } = useQuery({
+    queryKey: ["llm-profile"],
+    queryFn: getLlmProfile,
+    staleTime: 60_000,
+    enabled: Boolean(user),
+  });
+  const llmProfile = llmStatus?.llm_profile ?? "…";
 
   const isAdmin = hasMinimumRole(user?.role, "admin");
   const isEngineer = hasMinimumRole(user?.role, "engineer");

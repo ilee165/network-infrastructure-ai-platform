@@ -5,6 +5,7 @@
  * user + role, a working logout, and an admin-only Users link.
  */
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,8 +13,14 @@ import { Layout } from "../components/Layout";
 import type { UserMe } from "../stores/auth";
 import { useAuthStore } from "../stores/auth";
 
-const { logoutMock } = vi.hoisted(() => ({ logoutMock: vi.fn() }));
-vi.mock("../api/auth", () => ({ logout: logoutMock }));
+const { logoutMock, getLlmProfileMock } = vi.hoisted(() => ({
+  logoutMock: vi.fn(),
+  getLlmProfileMock: vi.fn(),
+}));
+vi.mock("../api/auth", () => ({
+  logout: logoutMock,
+  getLlmProfile: getLlmProfileMock,
+}));
 
 /** Must stay in sync with NAV_ITEMS in components/Layout.tsx and App.tsx. */
 const NAV_LABELS = ["Dashboard", "Devices", "Topology", "Chat", "Changes", "Audit"] as const;
@@ -38,6 +45,8 @@ beforeEach(() => {
   resetStore();
   logoutMock.mockReset();
   logoutMock.mockResolvedValue({ revoked: true });
+  getLlmProfileMock.mockReset();
+  getLlmProfileMock.mockResolvedValue({ llm_profile: "local" });
 });
 afterEach(resetStore);
 
@@ -47,19 +56,24 @@ function renderLayout(role = "viewer", display_name: string | null = null) {
     accessToken: "tok",
     user: userWithRole(role, display_name),
   });
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
   return render(
-    <MemoryRouter initialEntries={["/"]}>
-      <Routes>
-        <Route element={<Layout />}>
-          <Route index element={<div data-testid="outlet-page" />} />
-          {/* Catch-all so clicking a nav link (e.g. "Devices") keeps Layout
-              mounted, mirroring the real route table, instead of falling
-              through to "no routes matched". */}
-          <Route path="*" element={<div data-testid="outlet-page" />} />
-        </Route>
-        <Route path="/login" element={<div data-testid="login-page" />} />
-      </Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/"]}>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route index element={<div data-testid="outlet-page" />} />
+            {/* Catch-all so clicking a nav link (e.g. "Devices") keeps Layout
+                mounted, mirroring the real route table, instead of falling
+                through to "no routes matched". */}
+            <Route path="*" element={<div data-testid="outlet-page" />} />
+          </Route>
+          <Route path="/login" element={<div data-testid="login-page" />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -78,10 +92,12 @@ describe("Layout", () => {
     expect(screen.getByTestId("outlet-page")).toBeInTheDocument();
   });
 
-  it("shows environment and LLM-profile badges in the header", () => {
+  it("shows environment and LLM-profile badges in the header", async () => {
     renderLayout();
     expect(screen.getByTestId("env-badge")).toBeInTheDocument();
-    expect(screen.getByTestId("llm-profile-badge")).toHaveTextContent("llm: local");
+    await waitFor(() => {
+      expect(screen.getByTestId("llm-profile-badge")).toHaveTextContent("llm: local");
+    });
   });
 
   it("includes Profile and Settings nav links", () => {
@@ -102,17 +118,22 @@ describe("Layout — per-route error boundary", () => {
       accessToken: "tok",
       user: userWithRole("engineer"),
     });
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
     // Silence React's expected error logging for the intentional throw.
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       render(
-        <MemoryRouter initialEntries={["/"]}>
-          <Routes>
-            <Route element={<Layout />}>
-              <Route index element={<Boom />} />
-            </Route>
-          </Routes>
-        </MemoryRouter>,
+        <QueryClientProvider client={qc}>
+          <MemoryRouter initialEntries={["/"]}>
+            <Routes>
+              <Route element={<Layout />}>
+                <Route index element={<Boom />} />
+              </Route>
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>,
       );
     } finally {
       errorSpy.mockRestore();
