@@ -213,6 +213,44 @@ export function getLlmProfile(): Promise<LlmProfileStatus> {
   return apiFetch<LlmProfileStatus>("/auth/llm-profile");
 }
 
+// ── Admin: LLM readiness + connection test ───────────────────────────────────
+
+/** Per-profile readiness row (``GET /auth/settings/llm-readiness``). */
+export type LlmProfileProbeStatus = "ready" | "not_configured" | "unreachable" | "error";
+
+export interface LlmProfileReadiness {
+  profile: string;
+  configured: boolean;
+  status: LlmProfileProbeStatus;
+  model: string;
+  egress: boolean;
+  models: string[];
+  detail: string | null;
+  latency_ms: number | null;
+}
+
+export interface LlmReadinessReport {
+  active_profile: string;
+  local_model: string;
+  profiles: LlmProfileReadiness[];
+}
+
+/** Result of ``POST /auth/settings/llm-test``. */
+export type LlmProbeResult = LlmProfileReadiness;
+
+/** ``GET /auth/settings/llm-readiness`` — static configured? status (admin). */
+export function getLlmReadiness(): Promise<LlmReadinessReport> {
+  return apiFetch<LlmReadinessReport>("/auth/settings/llm-readiness");
+}
+
+/** ``POST /auth/settings/llm-test`` — live connection probe (admin). */
+export function testLlmConnection(profile: string): Promise<LlmProbeResult> {
+  return apiFetch<LlmProbeResult>("/auth/settings/llm-test", {
+    method: "POST",
+    body: JSON.stringify({ profile }),
+  });
+}
+
 // ── Boot helper ───────────────────────────────────────────────────────────────
 
 /**

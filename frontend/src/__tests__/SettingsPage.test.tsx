@@ -30,6 +30,53 @@ vi.mock("../api/auth", () => ({
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
   getLlmProfile: vi.fn().mockResolvedValue({ llm_profile: "local" }),
+  getLlmReadiness: vi.fn().mockResolvedValue({
+    active_profile: "local",
+    local_model: "llama3.1:8b",
+    profiles: [
+      {
+        profile: "local",
+        configured: true,
+        status: "ready",
+        model: "llama3.1:8b",
+        egress: false,
+        models: [],
+        detail: null,
+        latency_ms: null,
+      },
+      {
+        profile: "anthropic",
+        configured: false,
+        status: "not_configured",
+        model: "claude-sonnet-4-5",
+        egress: true,
+        models: [],
+        detail: "credentials not set in server environment",
+        latency_ms: null,
+      },
+      {
+        profile: "openai",
+        configured: false,
+        status: "not_configured",
+        model: "gpt-4o",
+        egress: true,
+        models: [],
+        detail: null,
+        latency_ms: null,
+      },
+      {
+        profile: "azure",
+        configured: false,
+        status: "not_configured",
+        model: "gpt-4o",
+        egress: true,
+        models: [],
+        detail: null,
+        latency_ms: null,
+      },
+    ],
+  }),
+  testLlmConnection: vi.fn(),
 }));
 
 vi.mock("../api/credentials", () => ({
@@ -43,7 +90,7 @@ vi.mock("../api/credentials", () => ({
   rotateCredential: vi.fn(),
 }));
 
-import { getSettings, updateSettings } from "../api/auth";
+import { getSettings, testLlmConnection, updateSettings } from "../api/auth";
 import { createCredential, listCredentials, rotateCredential } from "../api/credentials";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -281,6 +328,29 @@ describe("SettingsPage — LLM section content (admin)", () => {
       ),
     );
     expect(secretLabel).toBeUndefined();
+  });
+
+  it("shows provider readiness and runs a connection test", async () => {
+    vi.mocked(getSettings).mockResolvedValue(CURRENT_SETTINGS);
+    vi.mocked(testLlmConnection).mockResolvedValue({
+      profile: "local",
+      configured: true,
+      status: "ready",
+      model: "llama3.1:8b",
+      egress: false,
+      models: ["llama3.1:8b"],
+      detail: null,
+      latency_ms: 12.5,
+    });
+    renderSettings("/settings/llm", ADMIN_USER);
+    expect(await screen.findByTestId("llm-readiness-panel")).toBeInTheDocument();
+    expect(await screen.findByTestId("llm-readiness-list")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("llm-test-local"));
+    await waitFor(() => {
+      expect(testLlmConnection).toHaveBeenCalledWith("local");
+    });
+    expect(await screen.findByTestId("llm-probe-result")).toHaveTextContent(/ready/i);
+    expect(screen.getByTestId("llm-probe-result")).toHaveTextContent("llama3.1:8b");
   });
 });
 

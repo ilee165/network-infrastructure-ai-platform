@@ -31,6 +31,12 @@ vi.mock("../api/auth", () => ({
   }),
   updateSettings: vi.fn(),
   getLlmProfile: vi.fn().mockResolvedValue({ llm_profile: "local" }),
+  getLlmReadiness: vi.fn().mockResolvedValue({
+    active_profile: "local",
+    local_model: "llama3.1:8b",
+    profiles: [],
+  }),
+  testLlmConnection: vi.fn(),
 }));
 
 vi.mock("../api/credentials", () => ({

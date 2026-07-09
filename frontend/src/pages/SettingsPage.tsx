@@ -17,7 +17,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
-import { getSettings, updateSettings } from "../api/auth";
+import {
+  getLlmReadiness,
+  getSettings,
+  testLlmConnection,
+  updateSettings,
+  type LlmProbeResult,
+} from "../api/auth";
 import {
   createCredential,
   listCredentials,
@@ -726,6 +732,16 @@ export function SettingsCredentialsSection() {
 
 // ── LLM settings section (admin only, mounted at /settings/llm) ───────────────
 
+function readinessTone(status: string, configured: boolean): string {
+  if (status === "ready" && configured) {
+    return "text-status-ok";
+  }
+  if (status === "not_configured") {
+    return "text-zinc-500";
+  }
+  return "text-status-error";
+}
+
 /**
  * Admin-only LLM profile + role map section.
  *
@@ -733,6 +749,9 @@ export function SettingsCredentialsSection() {
  * profile and optional reasoning/fast role overrides, then PATCHes on save.
  * Provider API keys are never shown, entered, or stored here — the backend has
  * no body field for them and this component has no such input.
+ *
+ * Readiness + connection test: GET /auth/settings/llm-readiness (static) and
+ * POST /auth/settings/llm-test (live probe).
  */
 export function SettingsLlmSection() {
   const queryClient = useQueryClient();
@@ -742,11 +761,23 @@ export function SettingsLlmSection() {
     queryFn: getSettings,
   });
 
+  const {
+    data: readiness,
+    isPending: readinessPending,
+    error: readinessError,
+  } = useQuery({
+    queryKey: ["llm-readiness"],
+    queryFn: getLlmReadiness,
+  });
+
   const [profile, setProfile] = useState<LlmProfile | "">("");
   const [reasoning, setReasoning] = useState<string>("");
   const [fast, setFast] = useState<string>("");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [probeTarget, setProbeTarget] = useState<LlmProfile | null>(null);
+  const [probeResult, setProbeResult] = useState<LlmProbeResult | null>(null);
+  const [probeError, setProbeError] = useState<string | null>(null);
 
   const effectiveProfile = (profile || settings?.llm_profile) as LlmProfile | undefined;
   const effectiveReasoning =
@@ -765,10 +796,26 @@ export function SettingsLlmSection() {
       setSaveError(null);
       void queryClient.invalidateQueries({ queryKey: ["auth-settings"] });
       void queryClient.invalidateQueries({ queryKey: ["llm-profile"] });
+      void queryClient.invalidateQueries({ queryKey: ["llm-readiness"] });
     },
     onError: (err) => {
       setSaveError(errorMessage(err));
       setSaveSuccess(false);
+    },
+  });
+
+  const testMutation = useMutation({
+    mutationFn: (target: LlmProfile) => testLlmConnection(target),
+    onSuccess: (result) => {
+      setProbeResult(result);
+      setProbeError(null);
+      setProbeTarget(null);
+      void queryClient.invalidateQueries({ queryKey: ["llm-readiness"] });
+    },
+    onError: (err) => {
+      setProbeError(errorMessage(err));
+      setProbeResult(null);
+      setProbeTarget(null);
     },
   });
 
@@ -777,6 +824,13 @@ export function SettingsLlmSection() {
     setSaveError(null);
     setSaveSuccess(false);
     saveMutation.mutate();
+  }
+
+  function handleTest(target: LlmProfile) {
+    setProbeTarget(target);
+    setProbeError(null);
+    setProbeResult(null);
+    testMutation.mutate(target);
   }
 
   return (
@@ -804,6 +858,106 @@ export function SettingsLlmSection() {
             External profile selected: prompts and tool context may leave this
             deployment. Selection is audit-logged.
           </p>
+        )}
+      </div>
+
+      <div
+        className="panel p-4 flex flex-col gap-3"
+        data-testid="llm-readiness-panel"
+      >
+        <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">
+          Provider readiness
+        </h3>
+        <p className="text-xs text-zinc-400">
+          Configured = server env has the required credentials. Test runs a
+          bounded live probe (Ollama tags or provider models list) without
+          showing secrets.
+        </p>
+        {readinessPending && (
+          <p role="status" className="text-xs text-zinc-500">
+            Loading readiness…
+          </p>
+        )}
+        {readinessError && (
+          <p role="alert" className="text-xs text-status-error">
+            {errorMessage(readinessError)}
+          </p>
+        )}
+        {readiness && (
+          <>
+            <p className="text-xs text-zinc-400">
+              Active:{" "}
+              <code className="font-mono text-zinc-200">{readiness.active_profile}</code>
+              {" · "}
+              Local model:{" "}
+              <code className="font-mono text-zinc-200">{readiness.local_model}</code>
+            </p>
+            <ul className="flex flex-col gap-2" data-testid="llm-readiness-list">
+              {readiness.profiles.map((row) => (
+                <li
+                  key={row.profile}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded border border-carbon-800 px-3 py-2"
+                >
+                  <div className="flex flex-col gap-0.5">
+                    <span className="font-mono text-xs text-zinc-100">
+                      {row.profile}
+                      {row.egress ? (
+                        <span className="ml-2 text-[10px] uppercase text-status-warn">
+                          egress
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className={`text-[11px] ${readinessTone(row.status, row.configured)}`}>
+                      {row.configured ? "configured" : "not configured"} · {row.status}
+                      {row.model ? ` · ${row.model}` : ""}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="rounded border border-carbon-700 px-2 py-1 text-[11px] text-zinc-300 hover:border-carbon-600 hover:text-zinc-100 disabled:opacity-50"
+                    disabled={testMutation.isPending}
+                    onClick={() => handleTest(row.profile as LlmProfile)}
+                    data-testid={`llm-test-${row.profile}`}
+                  >
+                    {probeTarget === row.profile && testMutation.isPending
+                      ? "Testing…"
+                      : "Test connection"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        {probeError && (
+          <p role="alert" className="text-xs text-status-error">
+            {probeError}
+          </p>
+        )}
+        {probeResult && (
+          <div
+            role="status"
+            data-testid="llm-probe-result"
+            className="rounded border border-carbon-700 bg-carbon-950/50 px-3 py-2 text-xs text-zinc-300"
+          >
+            <p>
+              Probe <code className="font-mono text-zinc-100">{probeResult.profile}</code>
+              :{" "}
+              <span className={readinessTone(probeResult.status, probeResult.configured)}>
+                {probeResult.status}
+              </span>
+              {probeResult.latency_ms != null
+                ? ` · ${probeResult.latency_ms.toFixed(0)} ms`
+                : ""}
+            </p>
+            {probeResult.detail ? (
+              <p className="mt-1 text-zinc-500">{probeResult.detail}</p>
+            ) : null}
+            {probeResult.models.length > 0 ? (
+              <p className="mt-1 font-mono text-[11px] text-zinc-500">
+                models: {probeResult.models.join(", ")}
+              </p>
+            ) : null}
+          </div>
         )}
       </div>
 

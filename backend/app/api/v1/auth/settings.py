@@ -9,6 +9,10 @@ ignored by pydantic.
 
 ``GET /llm-profile`` is the non-secret readiness signal for the shell badge
 (any authenticated user): active profile name only, never keys or endpoints.
+
+Admin connection-test surface (Settings hub):
+- ``GET  /settings/llm-readiness`` — static configured? status per profile (no network)
+- ``POST /settings/llm-test``     — live probe for one profile (bounded HTTP)
 """
 
 from __future__ import annotations
@@ -25,6 +29,13 @@ from app.api.v1.auth._shared import router
 from app.core.config import Settings
 from app.core.errors import BadRequestError
 from app.llm.providers import KNOWN_PROFILES
+from app.llm.readiness import (
+    LlmProbeRequest,
+    LlmProbeResult,
+    LlmReadinessReport,
+    probe_profile,
+    static_readiness,
+)
 from app.models import SystemSetting, User
 from app.services.audit import service as audit_service
 
@@ -101,6 +112,59 @@ async def get_llm_profile_status(
     """
     row = await _load_settings_row(session)
     return LlmProfileStatus(llm_profile=_effective_llm_profile(row, settings))
+
+
+@router.get("/settings/llm-readiness", response_model=LlmReadinessReport)
+async def get_llm_readiness(
+    admin: Annotated[User, Depends(require_role("admin"))],
+    session: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> LlmReadinessReport:
+    """Return static per-profile configured status (admin only; no network).
+
+    Used by Settings → AI / LLM to show which subscription providers have
+    server-side credentials before the operator runs a live probe. Never
+    returns keys, endpoints, or env values.
+    """
+    _ = admin  # role gate only
+    row = await _load_settings_row(session)
+    active = _effective_llm_profile(row, settings)
+    return static_readiness(settings, active_profile=active)
+
+
+@router.post("/settings/llm-test", response_model=LlmProbeResult)
+async def post_llm_connection_test(
+    body: LlmProbeRequest,
+    admin: Annotated[User, Depends(require_role("admin"))],
+    session: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> LlmProbeResult:
+    """Run a bounded live connection probe for one LLM profile (admin only).
+
+    Local: ``GET`` Ollama ``/api/tags``. External: provider models list with
+    env credentials. Audits ``llm.connection_tested`` with profile + status
+    only — never secrets. Unknown profiles are 400.
+    """
+    try:
+        result = await probe_profile(body.profile, settings)
+    except ValueError as exc:
+        raise BadRequestError(str(exc)) from exc
+
+    await audit_service.record(
+        session,
+        actor=f"user:{admin.username}",
+        action=audit_service.LLM_CONNECTION_TESTED,
+        target_type="llm_profile",
+        target_id=result.profile,
+        detail={
+            "profile": result.profile,
+            "status": result.status,
+            "configured": result.configured,
+            "egress": result.egress,
+        },
+    )
+    await session.commit()
+    return result
 
 
 @router.get("/settings", response_model=SystemSettingsResponse)

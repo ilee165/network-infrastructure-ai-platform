@@ -118,6 +118,9 @@ USER_UPDATED: Final = "user.updated"
 USER_ROLE_CHANGED: Final = "user.role_changed"
 USER_PASSWORD_RESET: Final = "user.password_reset"
 SETTINGS_UPDATED: Final = "settings.updated"
+# Admin LLM connection probe (Settings hub). ``detail`` carries profile +
+# status only — never keys, endpoints, or raw provider error bodies.
+LLM_CONNECTION_TESTED: Final = "llm.connection_tested"
 # M4 config-management audit vocabulary (ADR-0017 §4): approving a snapshot as a
 # device's drift baseline is an explicit, audited action. ``detail`` references
 # the snapshot by id/hash only — never the (secret-bearing) config content.
