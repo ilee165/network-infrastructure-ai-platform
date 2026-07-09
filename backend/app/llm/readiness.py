@@ -258,10 +258,14 @@ async def _probe_external(profile: str, settings: Settings) -> LlmProbeResult:
         )
     except Exception as exc:
         latency = (time.perf_counter() - t0) * 1000.0
+        if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
+            status: ProfileStatus = "unreachable"
+        else:
+            status = "error"
         return LlmProbeResult(
             profile=profile,
             configured=True,
-            status="unreachable" if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)) else "error",
+            status=status,
             model=model,
             egress=True,
             detail=_safe_detail(exc),
