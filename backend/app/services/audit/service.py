@@ -51,6 +51,9 @@ _CHAIN_LOCK_KEY: Final = 0x0A0D38  # mnemonic for "audit chain", matches checkpo
 CREDENTIAL_CREATED: Final = "credential.created"
 CREDENTIAL_ROTATED: Final = "credential.rotated"
 CREDENTIAL_DECRYPTED: Final = "credential.decrypted"
+# Settings T1.3: soft-disable / retire a vault entry. ``detail`` carries name,
+# kind, and the freed operator-facing name only — never secret material.
+CREDENTIAL_DISABLED: Final = "credential.disabled"
 # P2 W4-T2 device-secret rotation + scoping (ADR-0040). ``detail`` carries
 # ids/versions/outcome ONLY — never the secret, the scope values, or device
 # attributes (ADR-0040 §1/§2 no-leak). A session-open refused because the

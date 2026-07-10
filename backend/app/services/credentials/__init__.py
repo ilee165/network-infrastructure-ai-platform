@@ -17,6 +17,7 @@ from app.services.credentials.service import (
     autonomous_sessionmaker,
     create_credential,
     decrypt,
+    disable_credential,
     rotate_kek,
     rotate_secret,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "autonomous_sessionmaker",
     "create_credential",
     "decrypt",
+    "disable_credential",
     "get_rotation_status",
     "re_wrap_keys",
     "rotate_device_secret",

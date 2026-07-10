@@ -238,6 +238,172 @@ class TestCredentialList:
         assert response.status_code == 401
 
 
+class TestCredentialDisable:
+    """Settings T1.3: soft-disable retires a vault entry without secret leakage."""
+
+    async def test_engineer_disables_credential(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+        session: AsyncSession,
+    ) -> None:
+        created = await _create_credential(client, auth_headers("engineer"))
+        response = await client.post(
+            f"/api/v1/credentials/{created['id']}/disable",
+            headers=auth_headers("engineer"),
+        )
+        assert response.status_code == 200, response.text
+        assert SECRET_SENTINEL not in response.text
+        body = response.json()
+        assert body["id"] == created["id"]
+        assert body["disabled_at"] is not None
+        # Operator-facing name is freed (renamed); original name not still unique.
+        assert body["name"] != created["name"]
+        assert created["name"] in body["name"] or body["name"].startswith("disabled__")
+        forbidden = {"secret", "ciphertext", "nonce", "wrapped_dek", "dek_nonce"}
+        assert forbidden.isdisjoint(body.keys())
+
+        row = await session.get(DeviceCredential, uuid.UUID(created["id"]))
+        assert row is not None
+        assert row.disabled_at is not None
+        assert row.is_active is False
+
+        actions = [r.action for r in (await session.execute(select(AuditLog))).scalars().all()]
+        assert "credential.disabled" in actions
+        audit_row = (
+            (
+                await session.execute(
+                    select(AuditLog).where(AuditLog.action == "credential.disabled")
+                )
+            )
+            .scalars()
+            .one()
+        )
+        assert audit_row.target_id == created["id"]
+        assert SECRET_SENTINEL not in str(audit_row.detail)
+        assert audit_row.detail is not None
+        assert audit_row.detail.get("name") == created["name"]
+
+    async def test_disabled_excluded_from_list(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+    ) -> None:
+        engineer = auth_headers("engineer")
+        created = await _create_credential(client, engineer)
+        await _create_credential(client, engineer, name="keep-me")
+        disable = await client.post(
+            f"/api/v1/credentials/{created['id']}/disable", headers=engineer
+        )
+        assert disable.status_code == 200
+        response = await client.get("/api/v1/credentials", headers=auth_headers("viewer"))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 1
+        assert [item["name"] for item in body["items"]] == ["keep-me"]
+
+    async def test_disable_frees_name_for_reuse(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+    ) -> None:
+        engineer = auth_headers("engineer")
+        created = await _create_credential(client, engineer, name="recycle-me")
+        assert (
+            await client.post(f"/api/v1/credentials/{created['id']}/disable", headers=engineer)
+        ).status_code == 200
+        recreated = await _create_credential(client, engineer, name="recycle-me")
+        assert recreated["name"] == "recycle-me"
+        assert recreated["id"] != created["id"]
+
+    async def test_disable_unknown_is_404(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+    ) -> None:
+        response = await client.post(
+            f"/api/v1/credentials/{uuid.uuid4()}/disable",
+            headers=auth_headers("engineer"),
+        )
+        assert response.status_code == 404
+
+    async def test_disable_already_disabled_is_409(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+    ) -> None:
+        engineer = auth_headers("engineer")
+        created = await _create_credential(client, engineer)
+        first = await client.post(f"/api/v1/credentials/{created['id']}/disable", headers=engineer)
+        assert first.status_code == 200
+        second = await client.post(f"/api/v1/credentials/{created['id']}/disable", headers=engineer)
+        assert second.status_code == 409
+        assert SECRET_SENTINEL not in second.text
+
+    async def test_rotate_disabled_is_409(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+    ) -> None:
+        engineer = auth_headers("engineer")
+        created = await _create_credential(client, engineer)
+        assert (
+            await client.post(f"/api/v1/credentials/{created['id']}/disable", headers=engineer)
+        ).status_code == 200
+        response = await client.post(
+            f"/api/v1/credentials/{created['id']}/rotate",
+            json={"secret": ROTATED_SENTINEL},
+            headers=engineer,
+        )
+        assert response.status_code == 409
+        assert ROTATED_SENTINEL not in response.text
+
+    async def test_decrypt_disabled_raises_conflict(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+        session: AsyncSession,
+    ) -> None:
+        from app.core.errors import ConflictError
+
+        created = await _create_credential(client, auth_headers("engineer"))
+        assert (
+            await client.post(
+                f"/api/v1/credentials/{created['id']}/disable",
+                headers=auth_headers("engineer"),
+            )
+        ).status_code == 200
+        await session.commit()
+        row = await session.get(DeviceCredential, uuid.UUID(created["id"]))
+        assert row is not None
+        with pytest.raises(ConflictError, match="disabled"):
+            await credentials_service.decrypt(
+                session, key_provider, row, actor="test", reason="disable assertion"
+            )
+
+    @pytest.mark.parametrize("role", ["viewer", "operator"])
+    async def test_disable_below_engineer_is_403(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+        key_provider: _StaticProvider,
+        role: str,
+    ) -> None:
+        created = await _create_credential(client, auth_headers("engineer"))
+        response = await client.post(
+            f"/api/v1/credentials/{created['id']}/disable",
+            headers=auth_headers(role),
+        )
+        assert response.status_code == 403
+
+
 class TestCredentialRotate:
     async def test_engineer_rotates_secret(
         self,

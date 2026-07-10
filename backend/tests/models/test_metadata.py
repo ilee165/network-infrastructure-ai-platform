@@ -143,5 +143,7 @@ def test_device_credential_has_no_plaintext_secret_column() -> None:
         "scope_site",
         "scope_role",
         "scope_device_group",
+        # Settings T1.3 soft-disable timestamp (non-secret metadata).
+        "disabled_at",
     }
     assert set(_table("device_credentials").columns.keys()) == expected

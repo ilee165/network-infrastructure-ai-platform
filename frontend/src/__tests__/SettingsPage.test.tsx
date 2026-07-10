@@ -130,6 +130,7 @@ vi.mock("../api/credentials", () => ({
   }),
   createCredential: vi.fn(),
   rotateCredential: vi.fn(),
+  disableCredential: vi.fn(),
   getRotationStatus: vi.fn().mockResolvedValue({
     from_version: null,
     to_version: "test-v1",
@@ -147,6 +148,7 @@ import {
 } from "../api/auth";
 import {
   createCredential,
+  disableCredential,
   getRotationStatus,
   listCredentials,
   rotateCredential,
@@ -238,6 +240,7 @@ beforeEach(() => {
   vi.mocked(listCredentials).mockReset();
   vi.mocked(createCredential).mockReset();
   vi.mocked(rotateCredential).mockReset();
+  vi.mocked(disableCredential).mockReset();
   vi.mocked(listCredentials).mockResolvedValue({
     items: [],
     total: 0,
@@ -552,6 +555,47 @@ describe("SettingsPage — credentials vault (engineer)", () => {
       /3 pending/i,
     );
     expect(screen.getByText("netops-kek:v1")).toBeInTheDocument();
+  });
+
+  it("disables a credential after confirm", async () => {
+    vi.mocked(listCredentials).mockResolvedValue({
+      items: [SAMPLE_CREDENTIAL],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    vi.mocked(disableCredential).mockResolvedValue({
+      ...SAMPLE_CREDENTIAL,
+      name: "prod-ssh__disabled__abcd1234",
+      disabled_at: "2026-07-10T12:00:00Z",
+    });
+    renderSettings("/settings/credentials", ENGINEER_USER);
+    expect(await screen.findByText("prod-ssh")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^disable$/i }));
+    expect(await screen.findByTestId("credential-disable-dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("confirm-disable-credential"));
+    await waitFor(() => {
+      expect(disableCredential).toHaveBeenCalledWith(SAMPLE_CREDENTIAL.id);
+    });
+    expect(await screen.findByText(/disabled “prod-ssh”/i)).toBeInTheDocument();
+  });
+
+  it("cancels disable without calling the API", async () => {
+    vi.mocked(listCredentials).mockResolvedValue({
+      items: [SAMPLE_CREDENTIAL],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    renderSettings("/settings/credentials", ENGINEER_USER);
+    expect(await screen.findByText("prod-ssh")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^disable$/i }));
+    await screen.findByTestId("credential-disable-dialog");
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    await waitFor(() => {
+      expect(screen.queryByTestId("credential-disable-dialog")).not.toBeInTheDocument();
+    });
+    expect(disableCredential).not.toHaveBeenCalled();
   });
 });
 

@@ -7,8 +7,9 @@ tables (``applications``, ``application_dependencies``) with their key
 columns, CHECK constraints, the case-insensitive unique name index, the
 partial-unique ``origin_ref`` index, the natural-key unique constraint, and
 the reverse ``(target_kind, target_ref)`` index. This is an **expand-only**
-migration (two new tables, no edits to existing ones). ``alembic heads`` is
-asserted to be the SINGLE head ``0018`` chaining after ``0017``.
+migration (two new tables, no edits to existing ones). Single-head ownership moved to
+``test_0019_credential_disabled_at`` when 0019 extended the chain; 0018 stays
+on the linear ancestry after ``0017``.
 """
 
 from __future__ import annotations
@@ -57,11 +58,18 @@ def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_single_head_is_0018() -> None:
-    """`alembic heads` resolves to exactly one head, revision 0018 (no branch)."""
+def test_single_head_no_branch() -> None:
+    """`alembic heads` resolves to exactly one head (no branch).
+
+    0018 was the head when W2-T1 landed; Settings T1.3's 0019 now extends the
+    same linear chain. Current-head assertion lives in
+    ``test_0019_credential_disabled_at.test_single_head_is_0019``.
+    """
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert heads == ["0018"], f"expected single head 0018, got {heads}"
+    assert len(heads) == 1, f"expected a single head (no branch), got {heads}"
+    ancestry = {rev.revision for rev in script.iterate_revisions(heads[0], "base")}
+    assert "0018" in ancestry, f"0018 must be on the line to the head, got {ancestry}"
 
 
 def test_0018_revises_0017() -> None:

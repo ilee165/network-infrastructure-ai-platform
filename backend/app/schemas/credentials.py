@@ -83,6 +83,7 @@ class CredentialRead(BaseModel):
     scope_role: str | None
     scope_device_group: str | None
     kek_version: str
+    disabled_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
