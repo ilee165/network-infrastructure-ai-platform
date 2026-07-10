@@ -110,6 +110,19 @@ afterEach(() => {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("AuditPage — agent tool-audit view", () => {
+  it("labels itself as agent tool audit, not the platform audit_log browser", () => {
+    renderPage();
+    expect(
+      screen.getByRole("heading", { name: /agent tool audit/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/not the platform-wide audit_log browser/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/every actor, action, and AI decision/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("lists one audit row per agent tool_call step", async () => {
     vi.stubGlobal("fetch", mockSessionFetch(SESSION_WITH_TOOL_EVENTS));
     renderPage();

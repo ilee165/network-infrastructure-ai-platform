@@ -83,3 +83,18 @@ export function rotateCredential(
     body: JSON.stringify(payload),
   });
 }
+
+/** KEK rotation progress from ``GET /api/v1/credentials/rotation-status``. */
+export interface RotationStatus {
+  from_version: string | null;
+  to_version: string;
+  rows_pending: number;
+}
+
+/**
+ * ``GET /api/v1/credentials/rotation-status`` — versions/counts only (engineer+).
+ * Never returns wrapped DEKs or per-row ciphertext fields.
+ */
+export function getRotationStatus(): Promise<RotationStatus> {
+  return apiFetch<RotationStatus>("/credentials/rotation-status");
+}

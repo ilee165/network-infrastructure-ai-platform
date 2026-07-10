@@ -10,7 +10,8 @@ ignored by pydantic.
 ``GET /llm-profile`` is the non-secret readiness signal for the shell badge
 (any authenticated user): active profile name only, never keys or endpoints.
 
-Admin connection-test surface (Settings hub):
+Admin Settings hub surface:
+- ``GET  /settings/oidc-status``   — non-secret OIDC enablement flags
 - ``GET  /settings/llm-readiness`` — static configured? status per profile (no network)
 - ``POST /settings/llm-test``     — live probe for one profile (bounded HTTP)
 """
@@ -38,6 +39,24 @@ from app.llm.readiness import (
 )
 from app.models import SystemSetting, User
 from app.services.audit import service as audit_service
+
+
+class OidcStatusResponse(BaseModel):
+    """Non-secret OIDC / SSO deployment status for the Settings access panel.
+
+    Presence flags only — never issuer URL contents beyond redirect_uri (public
+    callback), never client secret values or vault ref strings.
+    """
+
+    enabled: bool
+    issuer_configured: bool
+    client_id_configured: bool
+    #: True when ``oidc_client_secret_ref`` is set (ref name is never returned).
+    client_ref_configured: bool
+    redirect_uri: str
+    #: When OIDC is enabled, local password login is fenced to admin only.
+    break_glass_local_admin_only: bool
+    allow_admin_via_oidc: bool
 
 
 def _validate_profile(value: str | None) -> str | None:
@@ -112,6 +131,30 @@ async def get_llm_profile_status(
     """
     row = await _load_settings_row(session)
     return LlmProfileStatus(llm_profile=_effective_llm_profile(row, settings))
+
+
+@router.get("/settings/oidc-status", response_model=OidcStatusResponse)
+async def get_oidc_status(
+    admin: Annotated[User, Depends(require_role("admin"))],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> OidcStatusResponse:
+    """Return non-secret OIDC enablement flags (admin only).
+
+    Operators use this on Settings → Users & access to see whether SSO is
+    active and whether break-glass local admin login applies. Never returns
+    client secrets, vault ref strings, or group-map contents.
+    """
+    _ = admin  # role gate only
+    enabled = settings.oidc_enabled
+    return OidcStatusResponse(
+        enabled=enabled,
+        issuer_configured=bool(settings.oidc_issuer),
+        client_id_configured=bool(settings.oidc_client_id),
+        client_ref_configured=bool(settings.oidc_client_secret_ref),
+        redirect_uri=settings.oidc_redirect_uri,
+        break_glass_local_admin_only=enabled,
+        allow_admin_via_oidc=settings.oidc_allow_admin,
+    )
 
 
 @router.get("/settings/llm-readiness", response_model=LlmReadinessReport)

@@ -77,6 +77,15 @@ vi.mock("../api/auth", () => ({
     ],
   }),
   testLlmConnection: vi.fn(),
+  getOidcStatus: vi.fn().mockResolvedValue({
+    enabled: false,
+    issuer_configured: false,
+    client_id_configured: false,
+    client_ref_configured: false,
+    redirect_uri: "https://localhost/api/v1/auth/oidc/callback",
+    break_glass_local_admin_only: false,
+    allow_admin_via_oidc: false,
+  }),
 }));
 
 vi.mock("../api/credentials", () => ({
@@ -88,10 +97,20 @@ vi.mock("../api/credentials", () => ({
   }),
   createCredential: vi.fn(),
   rotateCredential: vi.fn(),
+  getRotationStatus: vi.fn().mockResolvedValue({
+    from_version: null,
+    to_version: "test-v1",
+    rows_pending: 0,
+  }),
 }));
 
-import { getSettings, testLlmConnection, updateSettings } from "../api/auth";
-import { createCredential, listCredentials, rotateCredential } from "../api/credentials";
+import { getOidcStatus, getSettings, testLlmConnection, updateSettings } from "../api/auth";
+import {
+  createCredential,
+  getRotationStatus,
+  listCredentials,
+  rotateCredential,
+} from "../api/credentials";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -460,5 +479,77 @@ describe("SettingsPage — credentials vault (engineer)", () => {
       });
     });
     expect(await screen.findByText(/rotated “prod-ssh”/i)).toBeInTheDocument();
+  });
+
+  it("shows KEK rotation status (fully wrapped when nothing pending)", async () => {
+    vi.mocked(getRotationStatus).mockResolvedValue({
+      from_version: null,
+      to_version: "test-v1",
+      rows_pending: 0,
+    });
+    renderSettings("/settings/credentials", ENGINEER_USER);
+    expect(await screen.findByTestId("credentials-kek-rotation")).toBeInTheDocument();
+    expect(await screen.findByTestId("kek-rows-pending-pill")).toHaveTextContent(
+      /fully wrapped/i,
+    );
+    expect(screen.getByText("test-v1")).toBeInTheDocument();
+    expect(getRotationStatus).toHaveBeenCalled();
+  });
+
+  it("warns when KEK rewrap rows are pending", async () => {
+    vi.mocked(getRotationStatus).mockResolvedValue({
+      from_version: "netops-kek:v1",
+      to_version: "netops-kek:v2",
+      rows_pending: 3,
+    });
+    renderSettings("/settings/credentials", ENGINEER_USER);
+    expect(await screen.findByTestId("kek-rows-pending-pill")).toHaveTextContent(
+      /3 pending/i,
+    );
+    expect(screen.getByText("netops-kek:v1")).toBeInTheDocument();
+  });
+});
+
+// ── Access / OIDC status (admin) ──────────────────────────────────────────────
+
+describe("SettingsPage — access OIDC status (admin)", () => {
+  it("shows SSO disabled pill when OIDC is off", async () => {
+    vi.mocked(getOidcStatus).mockResolvedValue({
+      enabled: false,
+      issuer_configured: false,
+      client_id_configured: false,
+      client_ref_configured: false,
+      redirect_uri: "https://localhost/api/v1/auth/oidc/callback",
+      break_glass_local_admin_only: false,
+      allow_admin_via_oidc: false,
+    });
+    renderSettings("/settings/access", ADMIN_USER);
+    expect(await screen.findByTestId("settings-oidc-status")).toBeInTheDocument();
+    expect(await screen.findByTestId("oidc-enabled-pill")).toHaveTextContent(
+      /sso disabled/i,
+    );
+    expect(screen.queryByTestId("oidc-break-glass-pill")).not.toBeInTheDocument();
+  });
+
+  it("shows SSO enabled and break-glass when OIDC is on", async () => {
+    vi.mocked(getOidcStatus).mockResolvedValue({
+      enabled: true,
+      issuer_configured: true,
+      client_id_configured: true,
+      client_ref_configured: true,
+      redirect_uri: "https://app.example/api/v1/auth/oidc/callback",
+      break_glass_local_admin_only: true,
+      allow_admin_via_oidc: false,
+    });
+    renderSettings("/settings/access", ADMIN_USER);
+    expect(await screen.findByTestId("oidc-enabled-pill")).toHaveTextContent(
+      /sso enabled/i,
+    );
+    expect(await screen.findByTestId("oidc-break-glass-pill")).toHaveTextContent(
+      /break-glass admin only/i,
+    );
+    expect(screen.getByText(/admin via sso capped/i)).toBeInTheDocument();
+    // Never render vault ref strings or secret field labels in this panel.
+    expect(screen.queryByText(/vault\//i)).not.toBeInTheDocument();
   });
 });

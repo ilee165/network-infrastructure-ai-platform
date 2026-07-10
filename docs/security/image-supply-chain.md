@@ -141,6 +141,14 @@ justification **and** an expiry/re-review date (mirrors the `.pip-audit` /
 `.trivyignore` conventions). The file is currently **empty of accepted findings**
 — the raise is clean on the current images.
 
+**Frontend Alpine patches + GHA layer cache:** `deploy/docker/frontend.Dockerfile`
+runs `apk upgrade --no-cache` before dropping to the non-root user. CI reuses
+that layer via `cache-from/to type=gha`. When Trivy reports a **fixable** OS
+CVE (e.g. c-ares CVE-2026-33630, 2026-07-10), **bump the cache-bust date
+comment** on that `RUN` so upgrade re-fetches packages — do **not** add the CVE
+to `.trivyignore-image` while an upstream patch exists. Standing rule:
+`docs/roadmap/LESSONS.md` **L-IMG-1**.
+
 > Image-CVE suppression (`deploy/docker/.trivyignore-image`) is kept **separate**
 > from IaC-misconfig suppression (`deploy/kubernetes/.trivyignore`) so a misconfig
 > exception can never silence a real CVE, and vice-versa.

@@ -187,6 +187,16 @@ discipline derived from prior milestones:
   credential vault, any pipeline touching secret material).
 - **Confirm a CI fix makes the gate RUN and BITE** — a gate failing at setup
   masks the findings it would have produced.
+- **When a component gains a new API import, update every `vi.mock` of that
+  module** — sibling test files (route gates, page tests, layout) that partially
+  mock `../api/*` will fail at runtime with “No X export is defined on the mock”
+  if they omit the new export (Settings hub Path A: `getRotationStatus` /
+  `getOidcStatus`; see `docs/roadmap/LESSONS.md` **L-FE-1**).
+- **Frontend image Trivy RED on a fixable Alpine package → bump the
+  `apk upgrade` cache-bust date** in `deploy/docker/frontend.Dockerfile` so GHA
+  layer cache does not re-ship the pre-patch packages (e.g. c-ares CVE-2026-33630
+  on 2026-07-10; see `docs/roadmap/LESSONS.md` **L-IMG-1**). Do **not** silence
+  the finding in `.trivyignore-image` when an upstream patch exists.
 
 ### Build & runtime verification
 
@@ -216,6 +226,9 @@ re-validating the platform should know:
   layers fail TLS unless the egress CA is trusted inside the build (see
   `docs/security/supply-chain-scanning.md`); the Dockerfiles themselves are sound
   and build under normal CI egress.
+- **Frontend Dockerfile `apk upgrade` is cache-busted by date comment.** CI
+  reuses the GHA build layer; a new *fixable* OS CVE in the Trivy image gate
+  means re-run upgrade by bumping that date (not by ignoring the CVE).
 
 ## Consultant Agent
 
