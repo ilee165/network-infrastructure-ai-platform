@@ -6,6 +6,13 @@ row at runtime (env is the fallback). Provider API keys and the Ollama endpoint
 stay in env/``Settings`` and are NEVER accepted in a request body nor returned in
 a response — these schemas have no field for them, and unknown body fields are
 ignored by pydantic.
+
+``GET /llm-profile`` is the non-secret readiness signal for the shell badge
+(any authenticated user): active profile name only, never keys or endpoints.
+
+Admin connection-test surface (Settings hub):
+- ``GET  /settings/llm-readiness`` — static configured? status per profile (no network)
+- ``POST /settings/llm-test``     — live probe for one profile (bounded HTTP)
 """
 
 from __future__ import annotations
@@ -17,11 +24,18 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_app_settings, get_db, require_role
+from app.api.deps import get_app_settings, get_current_user, get_db, require_role
 from app.api.v1.auth._shared import router
 from app.core.config import Settings
 from app.core.errors import BadRequestError
 from app.llm.providers import KNOWN_PROFILES
+from app.llm.readiness import (
+    LlmProbeRequest,
+    LlmProbeResult,
+    LlmReadinessReport,
+    probe_profile,
+    static_readiness,
+)
 from app.models import SystemSetting, User
 from app.services.audit import service as audit_service
 
@@ -71,6 +85,88 @@ async def _load_settings_row(session: AsyncSession) -> SystemSetting | None:
     return result.scalar_one_or_none()
 
 
+def _effective_llm_profile(row: SystemSetting | None, settings: Settings) -> str:
+    """DB row wins; env :attr:`Settings.llm_profile` is the deploy-time fallback."""
+    if row is not None:
+        return row.llm_profile
+    return settings.llm_profile
+
+
+class LlmProfileStatus(BaseModel):
+    """Non-secret active LLM profile for shell badges (any authenticated user)."""
+
+    llm_profile: str
+
+
+@router.get("/llm-profile", response_model=LlmProfileStatus)
+async def get_llm_profile_status(
+    _user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> LlmProfileStatus:
+    """Return the effective LLM profile name (any authenticated user).
+
+    Used by the SPA shell badge so operators see the *runtime* selection rather
+    than a build-time ``VITE_*`` default. Never returns API keys, endpoints, or
+    role-map details (those stay on the admin ``/settings`` routes).
+    """
+    row = await _load_settings_row(session)
+    return LlmProfileStatus(llm_profile=_effective_llm_profile(row, settings))
+
+
+@router.get("/settings/llm-readiness", response_model=LlmReadinessReport)
+async def get_llm_readiness(
+    admin: Annotated[User, Depends(require_role("admin"))],
+    session: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> LlmReadinessReport:
+    """Return static per-profile configured status (admin only; no network).
+
+    Used by Settings → AI / LLM to show which subscription providers have
+    server-side credentials before the operator runs a live probe. Never
+    returns keys, endpoints, or env values.
+    """
+    _ = admin  # role gate only
+    row = await _load_settings_row(session)
+    active = _effective_llm_profile(row, settings)
+    return static_readiness(settings, active_profile=active)
+
+
+@router.post("/settings/llm-test", response_model=LlmProbeResult)
+async def post_llm_connection_test(
+    body: LlmProbeRequest,
+    admin: Annotated[User, Depends(require_role("admin"))],
+    session: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> LlmProbeResult:
+    """Run a bounded live connection probe for one LLM profile (admin only).
+
+    Local: ``GET`` Ollama ``/api/tags``. External: provider models list with
+    env credentials. Audits ``llm.connection_tested`` with profile + status
+    only — never secrets. Unknown profiles are 400.
+    """
+    try:
+        result = await probe_profile(body.profile, settings)
+    except ValueError as exc:
+        raise BadRequestError(str(exc)) from exc
+
+    await audit_service.record(
+        session,
+        actor=f"user:{admin.username}",
+        action=audit_service.LLM_CONNECTION_TESTED,
+        target_type="llm_profile",
+        target_id=result.profile,
+        detail={
+            "profile": result.profile,
+            "status": result.status,
+            "configured": result.configured,
+            "egress": result.egress,
+        },
+    )
+    await session.commit()
+    return result
+
+
 @router.get("/settings", response_model=SystemSettingsResponse)
 async def get_app_system_settings(
     admin: Annotated[User, Depends(require_role("admin"))],
@@ -86,7 +182,7 @@ async def get_app_system_settings(
     row = await _load_settings_row(session)
     if row is None:
         return SystemSettingsResponse(
-            llm_profile=settings.llm_profile,
+            llm_profile=_effective_llm_profile(None, settings),
             llm_role_reasoning=settings.llm_role_reasoning,
             llm_role_fast=settings.llm_role_fast,
         )

@@ -24,6 +24,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import AuditLog, SystemSetting
 
 SETTINGS_URL = "/api/v1/auth/settings"
+LLM_PROFILE_URL = "/api/v1/auth/llm-profile"
+LLM_READINESS_URL = "/api/v1/auth/settings/llm-readiness"
+LLM_TEST_URL = "/api/v1/auth/settings/llm-test"
 
 # Fields that must never appear in any settings request or response body.
 _SECRET_FIELD_HINTS = (
@@ -48,10 +51,16 @@ async def _audit_rows(session: AsyncSession, action: str) -> list[AuditLog]:
     )
 
 
-def _assert_no_secret_keys(payload: dict[str, object]) -> None:
-    for field in payload:
-        lowered = field.lower()
-        assert not any(hint in lowered for hint in _SECRET_FIELD_HINTS), field
+def _assert_no_secret_keys(payload: object) -> None:
+    """Reject secret-hint field names at any nesting depth."""
+    if isinstance(payload, dict):
+        for field, value in payload.items():
+            lowered = str(field).lower()
+            assert not any(hint in lowered for hint in _SECRET_FIELD_HINTS), field
+            _assert_no_secret_keys(value)
+    elif isinstance(payload, list):
+        for item in payload:
+            _assert_no_secret_keys(item)
 
 
 # --------------------------------------------------------------------------- #
@@ -78,6 +87,113 @@ async def test_patch_settings_forbidden_for_non_admin(
 async def test_get_settings_unauthenticated_is_401(client, users) -> None:
     resp = await client.get(SETTINGS_URL)
     assert resp.status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# GET /llm-profile — any authenticated user (shell badge)                     #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("role", ["viewer", "operator", "engineer", "admin"])
+async def test_get_llm_profile_allowed_for_any_authenticated(
+    client, users, auth_headers: Callable[[str], dict[str, str]], role: str
+) -> None:
+    resp = await client.get(LLM_PROFILE_URL, headers=auth_headers(role))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["llm_profile"] == "local"
+    _assert_no_secret_keys(body)
+
+
+async def test_get_llm_profile_unauthenticated_is_401(client, users) -> None:
+    resp = await client.get(LLM_PROFILE_URL)
+    assert resp.status_code == 401
+
+
+async def test_get_llm_profile_follows_db_row(
+    client, users, session: AsyncSession, auth_headers: Callable[[str], dict[str, str]]
+) -> None:
+    session.add(
+        SystemSetting(
+            llm_profile="openai",
+            llm_role_reasoning=None,
+            llm_role_fast=None,
+        )
+    )
+    await session.commit()
+    resp = await client.get(LLM_PROFILE_URL, headers=auth_headers("viewer"))
+    assert resp.status_code == 200
+    assert resp.json()["llm_profile"] == "openai"
+
+
+# --------------------------------------------------------------------------- #
+# GET /settings/llm-readiness + POST /settings/llm-test (admin)               #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("role", ["viewer", "operator", "engineer"])
+async def test_llm_readiness_forbidden_for_non_admin(
+    client, users, auth_headers: Callable[[str], dict[str, str]], role: str
+) -> None:
+    resp = await client.get(LLM_READINESS_URL, headers=auth_headers(role))
+    assert resp.status_code == 403
+
+
+async def test_llm_readiness_admin_ok_no_secret_fields(
+    client, users, auth_headers: Callable[[str], dict[str, str]]
+) -> None:
+    resp = await client.get(LLM_READINESS_URL, headers=_admin(auth_headers))
+    assert resp.status_code == 200
+    body = resp.json()
+    _assert_no_secret_keys(body)
+    assert body["active_profile"] == "local"
+    assert "local_model" in body
+    profiles = {row["profile"]: row for row in body["profiles"]}
+    assert profiles["local"]["configured"] is True
+    assert profiles["anthropic"]["configured"] is False
+    assert profiles["anthropic"]["egress"] is True
+
+
+@pytest.mark.parametrize("role", ["viewer", "operator", "engineer"])
+async def test_llm_test_forbidden_for_non_admin(
+    client, users, auth_headers: Callable[[str], dict[str, str]], role: str
+) -> None:
+    resp = await client.post(LLM_TEST_URL, headers=auth_headers(role), json={"profile": "local"})
+    assert resp.status_code == 403
+
+
+async def test_llm_test_unknown_profile_is_400(
+    client, users, auth_headers: Callable[[str], dict[str, str]]
+) -> None:
+    resp = await client.post(
+        LLM_TEST_URL, headers=_admin(auth_headers), json={"profile": "bedrock"}
+    )
+    assert resp.status_code == 400
+
+
+async def test_llm_test_local_probes_and_audits(
+    client,
+    users,
+    session: AsyncSession,
+    auth_headers: Callable[[str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.llm import readiness
+
+    async def fake_get(url: str, *, headers: dict[str, str] | None = None) -> object:
+        return {"models": [{"name": "llama3.1:8b"}]}
+
+    monkeypatch.setattr(readiness, "_http_get_json", fake_get)
+    resp = await client.post(LLM_TEST_URL, headers=_admin(auth_headers), json={"profile": "local"})
+    assert resp.status_code == 200
+    body = resp.json()
+    _assert_no_secret_keys(body)
+    assert body["profile"] == "local"
+    assert body["status"] == "ready"
+    assert "llama3.1:8b" in body["models"]
+
+    rows = await _audit_rows(session, "llm.connection_tested")
+    assert len(rows) == 1
+    assert rows[0].detail["profile"] == "local"
+    assert rows[0].detail["status"] == "ready"
+    # Audit detail must not carry secret-ish keys either.
+    _assert_no_secret_keys(rows[0].detail)
 
 
 # --------------------------------------------------------------------------- #
