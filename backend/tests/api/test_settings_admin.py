@@ -392,6 +392,7 @@ async def test_patch_ignores_api_keys_and_endpoints_in_body(
     assert "sk-should-be-ignored" not in serialized
     assert "evil" not in serialized
 
+
 # --------------------------------------------------------------------------- #
 # GET /settings/platform-health + platform-config (admin, Path B)             #
 # --------------------------------------------------------------------------- #
