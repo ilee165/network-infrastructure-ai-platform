@@ -1080,9 +1080,9 @@ langgraph-sdk==0.4.2 \
     --hash=sha256:75fa5096c1177ce39c847096a8fe3745ffd480ddb412995f836e9f5f884c43dd \
     --hash=sha256:b88f0f5f6328ac0680d6790614a905b2bcfa257f2276dba4e38f0e86db0aa738
     # via langgraph
-langsmith==0.9.3 \
-    --hash=sha256:868a007b3ecda002914b21212a953c77fcb1d71a8a09a94562c3b57941d3df3a \
-    --hash=sha256:aac85686868a7e61d77858b880230e510583c61ea48ac0a197e6ceff64ffb22b
+langsmith==0.10.2 \
+    --hash=sha256:9aa685383fbdec07a0df51dafc333ab0d4b6b995771172a232c3364714eb17a6 \
+    --hash=sha256:c2a3929055758ac1831582f0939fafc0973cc08432365bbad335c336338ec37c
     # via
     #   netops-backend (pyproject.toml)
     #   langchain-core
