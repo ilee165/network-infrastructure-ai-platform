@@ -270,6 +270,43 @@ export function getOidcStatus(): Promise<OidcStatus> {
   return apiFetch<OidcStatus>("/auth/settings/oidc-status");
 }
 
+// ── Admin: platform health + effective config (Path B) ────────────────────────
+
+/** One dependency row from readiness / platform-health. */
+export interface PlatformDependencyStatus {
+  status: "ok" | "error";
+  latency_ms: number;
+  error: string | null;
+}
+
+/** Aggregate readiness reused by Settings → Platform (admin). */
+export interface PlatformHealthReport {
+  status: "ok" | "degraded";
+  dependencies: Record<string, PlatformDependencyStatus>;
+}
+
+/** Read-only retention + SIEM export flags (never hosts/tokens). */
+export interface PlatformConfig {
+  pcap_retention_days: number;
+  pcap_retention_hour: number;
+  pcap_retention_minute: number;
+  raw_artifact_retention_days: number;
+  raw_artifact_retention_hour: number;
+  raw_artifact_retention_minute: number;
+  audit_export_format: "syslog" | "cef" | "https-json" | null;
+  audit_export_configured: boolean;
+}
+
+/** ``GET /auth/settings/platform-health`` — dependency probes (admin). */
+export function getPlatformHealth(): Promise<PlatformHealthReport> {
+  return apiFetch<PlatformHealthReport>("/auth/settings/platform-health");
+}
+
+/** ``GET /auth/settings/platform-config`` — retention / export effective config. */
+export function getPlatformConfig(): Promise<PlatformConfig> {
+  return apiFetch<PlatformConfig>("/auth/settings/platform-config");
+}
+
 // ── Boot helper ───────────────────────────────────────────────────────────────
 
 /**

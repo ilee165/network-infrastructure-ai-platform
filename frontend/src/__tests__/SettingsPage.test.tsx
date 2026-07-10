@@ -16,8 +16,10 @@ import {
   SettingsAgentsSection,
   SettingsAppearanceSection,
   SettingsCredentialsSection,
+  SettingsIntegrationsSection,
   SettingsLlmSection,
   SettingsPage,
+  SettingsPlatformSection,
 } from "../pages/SettingsPage";
 import type { SystemSettings } from "../api/auth";
 import type { UserMe } from "../stores/auth";
@@ -86,6 +88,37 @@ vi.mock("../api/auth", () => ({
     break_glass_local_admin_only: false,
     allow_admin_via_oidc: false,
   }),
+  getPlatformHealth: vi.fn().mockResolvedValue({
+    status: "ok",
+    dependencies: {
+      postgres: { status: "ok", latency_ms: 1.2, error: null },
+      neo4j: { status: "ok", latency_ms: 2.0, error: null },
+      redis: { status: "ok", latency_ms: 0.8, error: null },
+    },
+  }),
+  getPlatformConfig: vi.fn().mockResolvedValue({
+    pcap_retention_days: 30,
+    pcap_retention_hour: 3,
+    pcap_retention_minute: 0,
+    raw_artifact_retention_days: 90,
+    raw_artifact_retention_hour: 4,
+    raw_artifact_retention_minute: 0,
+    audit_export_format: null,
+    audit_export_configured: false,
+  }),
+}));
+
+vi.mock("../api/integrations", () => ({
+  listIntegrations: vi.fn().mockResolvedValue({
+    vendors: [
+      {
+        vendor_id: "cisco_ios",
+        display_name: "Cisco IOS",
+        capabilities: ["discovery_ssh", "interfaces"],
+        category: "network",
+      },
+    ],
+  }),
 }));
 
 vi.mock("../api/credentials", () => ({
@@ -104,13 +137,21 @@ vi.mock("../api/credentials", () => ({
   }),
 }));
 
-import { getOidcStatus, getSettings, testLlmConnection, updateSettings } from "../api/auth";
+import {
+  getOidcStatus,
+  getPlatformConfig,
+  getPlatformHealth,
+  getSettings,
+  testLlmConnection,
+  updateSettings,
+} from "../api/auth";
 import {
   createCredential,
   getRotationStatus,
   listCredentials,
   rotateCredential,
 } from "../api/credentials";
+import { listIntegrations } from "../api/integrations";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -176,6 +217,8 @@ function renderSettings(path: string, user: UserMe) {
             <Route element={<RoleRoute minimum="admin" />}>
               <Route path="llm" element={<SettingsLlmSection />} />
               <Route path="access" element={<SettingsAccessSection />} />
+              <Route path="integrations" element={<SettingsIntegrationsSection />} />
+              <Route path="platform" element={<SettingsPlatformSection />} />
             </Route>
           </Route>
         </Routes>
@@ -255,10 +298,12 @@ describe("SettingsPage — section nav", () => {
     expect(screen.queryByRole("link", { name: /ai \/ llm/i })).not.toBeInTheDocument();
   });
 
-  it("shows AI / LLM and Users & access for admin", () => {
+  it("shows AI / LLM, access, integrations, and platform for admin", () => {
     renderSettings("/settings", ADMIN_USER);
     expect(screen.getByRole("link", { name: /ai \/ llm/i })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /users & access/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /integrations/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /platform/i })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /credentials/i })).toBeInTheDocument();
   });
 
@@ -551,5 +596,87 @@ describe("SettingsPage — access OIDC status (admin)", () => {
     expect(screen.getByText(/admin via sso capped/i)).toBeInTheDocument();
     // Never render vault ref strings or secret field labels in this panel.
     expect(screen.queryByText(/vault\//i)).not.toBeInTheDocument();
+  });
+});
+
+// ── Integrations matrix (admin, Path B) ───────────────────────────────────────
+
+describe("SettingsPage — integrations (admin)", () => {
+  it("lists registered vendors and capabilities", async () => {
+    renderSettings("/settings/integrations", ADMIN_USER);
+    expect(await screen.findByTestId("settings-integrations")).toBeInTheDocument();
+    expect(await screen.findByTestId("integration-row-cisco_ios")).toBeInTheDocument();
+    expect(screen.getByText("Cisco IOS")).toBeInTheDocument();
+    expect(screen.getByText("discovery_ssh")).toBeInTheDocument();
+    expect(listIntegrations).toHaveBeenCalled();
+  });
+
+  it("shows empty state when no vendors are registered", async () => {
+    vi.mocked(listIntegrations).mockResolvedValueOnce({ vendors: [] });
+    renderSettings("/settings/integrations", ADMIN_USER);
+    expect(await screen.findByTestId("integrations-empty")).toBeInTheDocument();
+  });
+
+  it("hides Integrations nav for non-admin", () => {
+    renderSettings("/settings", VIEWER_USER);
+    expect(screen.queryByRole("link", { name: "Integrations" })).not.toBeInTheDocument();
+  });
+});
+
+// ── Platform health + retention (admin, Path B) ───────────────────────────────
+
+describe("SettingsPage — platform (admin)", () => {
+  it("shows dependency cards and retention defaults", async () => {
+    renderSettings("/settings/platform", ADMIN_USER);
+    expect(await screen.findByTestId("settings-platform")).toBeInTheDocument();
+    expect(await screen.findByTestId("platform-health-overall")).toHaveTextContent(
+      /all dependencies ok/i,
+    );
+    expect(screen.getByTestId("platform-dep-postgres")).toBeInTheDocument();
+    expect(screen.getByTestId("pcap-retention-days")).toHaveTextContent(/30 day/i);
+    expect(screen.getByTestId("raw-artifact-retention-days")).toHaveTextContent(/90 days/i);
+    expect(screen.getByTestId("audit-export-pill")).toHaveTextContent(/export disabled/i);
+    expect(getPlatformHealth).toHaveBeenCalled();
+    expect(getPlatformConfig).toHaveBeenCalled();
+  });
+
+  it("shows degraded overall when a dependency fails", async () => {
+    vi.mocked(getPlatformHealth).mockResolvedValueOnce({
+      status: "degraded",
+      dependencies: {
+        postgres: { status: "ok", latency_ms: 1, error: null },
+        redis: {
+          status: "error",
+          latency_ms: 12,
+          error: "ConnectionError: dependency unreachable",
+        },
+      },
+    });
+    renderSettings("/settings/platform", ADMIN_USER);
+    expect(await screen.findByTestId("platform-health-overall")).toHaveTextContent(
+      /degraded/i,
+    );
+    expect(screen.getByTestId("platform-dep-redis")).toHaveTextContent(/error/i);
+  });
+
+  it("never surfaces SIEM host or bearer token in retention panel", async () => {
+    vi.mocked(getPlatformConfig).mockResolvedValueOnce({
+      pcap_retention_days: 14,
+      pcap_retention_hour: 3,
+      pcap_retention_minute: 0,
+      raw_artifact_retention_days: 90,
+      raw_artifact_retention_hour: 4,
+      raw_artifact_retention_minute: 0,
+      audit_export_format: "syslog",
+      audit_export_configured: true,
+    });
+    renderSettings("/settings/platform", ADMIN_USER);
+    expect(await screen.findByTestId("audit-export-pill")).toHaveTextContent(
+      /export: syslog/i,
+    );
+    // Host / token material must never appear — only the format name.
+    expect(screen.queryByText(/siem\.internal/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Authorization/i)).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Bearer\s+[A-Za-z0-9._-]+/);
   });
 });

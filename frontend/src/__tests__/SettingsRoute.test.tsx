@@ -17,8 +17,10 @@ import {
   SettingsAgentsSection,
   SettingsAppearanceSection,
   SettingsCredentialsSection,
+  SettingsIntegrationsSection,
   SettingsLlmSection,
   SettingsPage,
+  SettingsPlatformSection,
 } from "../pages/SettingsPage";
 import type { UserMe } from "../stores/auth";
 import { useAuthStore } from "../stores/auth";
@@ -46,6 +48,22 @@ vi.mock("../api/auth", () => ({
     break_glass_local_admin_only: false,
     allow_admin_via_oidc: false,
   }),
+  getPlatformHealth: vi.fn().mockResolvedValue({
+    status: "ok",
+    dependencies: {
+      postgres: { status: "ok", latency_ms: 1, error: null },
+    },
+  }),
+  getPlatformConfig: vi.fn().mockResolvedValue({
+    pcap_retention_days: 30,
+    pcap_retention_hour: 3,
+    pcap_retention_minute: 0,
+    raw_artifact_retention_days: 90,
+    raw_artifact_retention_hour: 4,
+    raw_artifact_retention_minute: 0,
+    audit_export_format: null,
+    audit_export_configured: false,
+  }),
 }));
 
 vi.mock("../api/credentials", () => ({
@@ -62,6 +80,10 @@ vi.mock("../api/credentials", () => ({
     to_version: "test-v1",
     rows_pending: 0,
   }),
+}));
+
+vi.mock("../api/integrations", () => ({
+  listIntegrations: vi.fn().mockResolvedValue({ vendors: [] }),
 }));
 
 function userWithRole(role: string): UserMe {
@@ -107,6 +129,8 @@ function renderSettings(path: string, role: string) {
             <Route element={<RoleRoute minimum="admin" />}>
               <Route path="llm" element={<SettingsLlmSection />} />
               <Route path="access" element={<SettingsAccessSection />} />
+              <Route path="integrations" element={<SettingsIntegrationsSection />} />
+              <Route path="platform" element={<SettingsPlatformSection />} />
             </Route>
           </Route>
         </Routes>
@@ -158,5 +182,30 @@ describe("/settings credentials — engineer gate", () => {
   it("allows admin (above engineer) on credentials", async () => {
     renderSettings("/settings/credentials", "admin");
     expect(await screen.findByTestId("settings-credentials")).toBeInTheDocument();
+  });
+});
+
+describe("/settings integrations + platform — admin gate", () => {
+  it("renders integrations for an admin", async () => {
+    renderSettings("/settings/integrations", "admin");
+    expect(await screen.findByTestId("settings-integrations")).toBeInTheDocument();
+    expect(screen.queryByTestId("forbidden")).not.toBeInTheDocument();
+  });
+
+  it("blocks a viewer from integrations", () => {
+    renderSettings("/settings/integrations", "viewer");
+    expect(screen.queryByTestId("settings-integrations")).not.toBeInTheDocument();
+    expect(screen.getByTestId("forbidden")).toBeInTheDocument();
+  });
+
+  it("renders platform for an admin", async () => {
+    renderSettings("/settings/platform", "admin");
+    expect(await screen.findByTestId("settings-platform")).toBeInTheDocument();
+  });
+
+  it("blocks an engineer from platform", () => {
+    renderSettings("/settings/platform", "engineer");
+    expect(screen.queryByTestId("settings-platform")).not.toBeInTheDocument();
+    expect(screen.getByTestId("forbidden")).toBeInTheDocument();
   });
 });

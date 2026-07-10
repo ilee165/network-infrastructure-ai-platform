@@ -138,9 +138,13 @@ async def live() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/ready", response_model=ReadinessReport)
-async def ready(request: Request) -> ReadinessReport:
-    """Readiness: probe postgres/neo4j/redis (+ the KEK provider) concurrently."""
+async def build_readiness_report(request: Request) -> ReadinessReport:
+    """Probe postgres/neo4j/redis (+ KEK) and return the readiness report.
+
+    Shared by the public ``GET /health/ready`` probe and the admin Settings
+    platform-health panel so both surfaces stay in lockstep. Never raises when
+    a dependency is down — failures become per-dependency ``error`` statuses.
+    """
     settings: Settings = request.app.state.settings
     probes = dict(_PROBES)
     # ADR-0032 §4: an unreachable KMS pulls this replica from rotation. The probe
@@ -160,3 +164,9 @@ async def ready(request: Request) -> ReadinessReport:
         "ok" if all(dep.status == "ok" for dep in dependencies.values()) else "degraded"
     )
     return ReadinessReport(status=overall, dependencies=dependencies)
+
+
+@router.get("/ready", response_model=ReadinessReport)
+async def ready(request: Request) -> ReadinessReport:
+    """Readiness: probe postgres/neo4j/redis (+ the KEK provider) concurrently."""
+    return await build_readiness_report(request)
