@@ -13,8 +13,9 @@
  *    the source of truth. ``/incidents`` uses ``RoleRoute("viewer")`` (matching
  *    the backend viewer+ RBAC on GET /docs). ``/packet`` and ``/changes`` use
  *    ``RoleRoute("engineer")``. Admin-only surfaces — ``/users`` and the LLM
- *    section of ``/settings`` (``/settings/llm``, ``/settings/access``) —
- *    use ``RoleRoute("admin")``. Credentials (``/settings/credentials``) use
+ *    section of ``/settings`` (``/settings/llm``, ``/settings/access``,
+ *    ``/settings/integrations``, ``/settings/platform``) — use
+ *    ``RoleRoute("admin")``. Credentials (``/settings/credentials``) use
  *    ``RoleRoute("engineer")``. Appearance, agents help, and account links stay
  *    reachable by any authenticated user.
  *
@@ -47,8 +48,10 @@ import {
   SettingsAgentsSection,
   SettingsAppearanceSection,
   SettingsCredentialsSection,
+  SettingsIntegrationsSection,
   SettingsLlmSection,
   SettingsPage,
+  SettingsPlatformSection,
 } from "./pages/SettingsPage";
 import { TopologyPage } from "./pages/TopologyPage";
 import { UsersPage } from "./pages/UsersPage";
@@ -106,7 +109,8 @@ export function App() {
             <Route path="profile" element={<ProfilePage />} />
 
             {/* /settings hub: Appearance / agents / account for any authed user;
-                credentials engineer+; LLM + access admin-only. */}
+                credentials engineer+; LLM + access + integrations + platform
+                admin-only. */}
             <Route path="settings" element={<SettingsPage />}>
               <Route index element={<SettingsAppearanceSection />} />
               <Route path="agents" element={<SettingsAgentsSection />} />
@@ -117,6 +121,8 @@ export function App() {
               <Route element={<RoleRoute minimum="admin" />}>
                 <Route path="llm" element={<SettingsLlmSection />} />
                 <Route path="access" element={<SettingsAccessSection />} />
+                <Route path="integrations" element={<SettingsIntegrationsSection />} />
+                <Route path="platform" element={<SettingsPlatformSection />} />
               </Route>
             </Route>
 

@@ -11,22 +11,25 @@ ignored by pydantic.
 (any authenticated user): active profile name only, never keys or endpoints.
 
 Admin Settings hub surface:
-- ``GET  /settings/oidc-status``   — non-secret OIDC enablement flags
-- ``GET  /settings/llm-readiness`` — static configured? status per profile (no network)
-- ``POST /settings/llm-test``     — live probe for one profile (bounded HTTP)
+- ``GET  /settings/oidc-status``      — non-secret OIDC enablement flags
+- ``GET  /settings/llm-readiness``    — static configured? status per profile (no network)
+- ``POST /settings/llm-test``        — live probe for one profile (bounded HTTP)
+- ``GET  /settings/platform-health`` — admin-gated dependency readiness (reuse /health/ready probes)
+- ``GET  /settings/platform-config`` — read-only retention / SIEM export effective config
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_app_settings, get_current_user, get_db, require_role
 from app.api.v1.auth._shared import router
+from app.api.v1.health import ReadinessReport, build_readiness_report
 from app.core.config import Settings
 from app.core.errors import BadRequestError
 from app.llm.providers import KNOWN_PROFILES
@@ -173,6 +176,66 @@ async def get_llm_readiness(
     row = await _load_settings_row(session)
     active = _effective_llm_profile(row, settings)
     return static_readiness(settings, active_profile=active)
+
+
+class PlatformConfigResponse(BaseModel):
+    """Effective non-secret deploy config for retention and SIEM export status.
+
+    Values only — never hosts, URLs, bearer tokens, CA paths, or vault refs.
+    Operators change these via Helm/env, not this form.
+    """
+
+    pcap_retention_days: int
+    pcap_retention_hour: int
+    pcap_retention_minute: int
+    raw_artifact_retention_days: int
+    raw_artifact_retention_hour: int
+    raw_artifact_retention_minute: int
+    #: Active SIEM transport name, or ``null`` when export is disabled.
+    audit_export_format: Literal["syslog", "cef", "https-json"] | None
+    #: True when ``audit_export_format`` is set (host/endpoint details never returned).
+    audit_export_configured: bool
+
+
+@router.get("/settings/platform-health", response_model=ReadinessReport)
+async def get_platform_health(
+    request: Request,
+    admin: Annotated[User, Depends(require_role("admin"))],
+) -> ReadinessReport:
+    """Return dependency readiness for Settings → Platform (admin only).
+
+    Reuses the same probe helpers as public ``GET /health/ready`` so K8s and
+    the admin UI cannot diverge. Does not add version dumps, connection
+    strings, or KEK material beyond existing readiness fields
+    (``status``, ``latency_ms``, short error class).
+    """
+    _ = admin  # role gate only
+    return await build_readiness_report(request)
+
+
+@router.get("/settings/platform-config", response_model=PlatformConfigResponse)
+async def get_platform_config(
+    admin: Annotated[User, Depends(require_role("admin"))],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> PlatformConfigResponse:
+    """Return effective retention / SIEM-export flags (admin only; read-only).
+
+    Surfaces deploy-time policy so operators can confirm what the beat jobs
+    will enforce. Never returns ``audit_export_host``, endpoint URLs, bearer
+    tokens, or TLS material.
+    """
+    _ = admin  # role gate only
+    fmt = settings.audit_export_format
+    return PlatformConfigResponse(
+        pcap_retention_days=settings.pcap_retention_days,
+        pcap_retention_hour=settings.pcap_retention_hour,
+        pcap_retention_minute=settings.pcap_retention_minute,
+        raw_artifact_retention_days=settings.raw_artifact_retention_days,
+        raw_artifact_retention_hour=settings.raw_artifact_retention_hour,
+        raw_artifact_retention_minute=settings.raw_artifact_retention_minute,
+        audit_export_format=fmt,
+        audit_export_configured=fmt is not None,
+    )
 
 
 @router.post("/settings/llm-test", response_model=LlmProbeResult)

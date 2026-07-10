@@ -391,3 +391,118 @@ async def test_patch_ignores_api_keys_and_endpoints_in_body(
     serialized = str(row.__dict__).lower()
     assert "sk-should-be-ignored" not in serialized
     assert "evil" not in serialized
+
+# --------------------------------------------------------------------------- #
+# GET /settings/platform-health + platform-config (admin, Path B)             #
+# --------------------------------------------------------------------------- #
+PLATFORM_HEALTH_URL = "/api/v1/auth/settings/platform-health"
+PLATFORM_CONFIG_URL = "/api/v1/auth/settings/platform-config"
+
+
+@pytest.mark.parametrize("role", ["viewer", "operator", "engineer"])
+async def test_platform_health_forbidden_for_non_admin(
+    client, users, auth_headers: Callable[[str], dict[str, str]], role: str
+) -> None:
+    resp = await client.get(PLATFORM_HEALTH_URL, headers=auth_headers(role))
+    assert resp.status_code == 403
+
+
+async def test_platform_health_unauthenticated_is_401(client, users) -> None:
+    resp = await client.get(PLATFORM_HEALTH_URL)
+    assert resp.status_code == 401
+
+
+async def test_platform_health_admin_ok_reuses_ready_shape(
+    client, users, auth_headers: Callable[[str], dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.api.v1 import health
+
+    async def _ok(settings: object) -> None:
+        return None
+
+    for name in list(health._PROBES):
+        monkeypatch.setitem(health._PROBES, name, _ok)
+
+    resp = await client.get(PLATFORM_HEALTH_URL, headers=_admin(auth_headers))
+    assert resp.status_code == 200
+    body = resp.json()
+    _assert_no_secret_keys(body)
+    assert body["status"] == "ok"
+    assert "postgres" in body["dependencies"]
+    assert "neo4j" in body["dependencies"]
+    assert "redis" in body["dependencies"]
+    for dep in body["dependencies"].values():
+        assert dep["status"] == "ok"
+        assert dep["error"] is None
+        assert "latency_ms" in dep
+
+
+async def test_platform_health_degrades_without_500(
+    client, users, auth_headers: Callable[[str], dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.api.v1 import health
+
+    async def _fail(settings: object) -> None:
+        raise ConnectionError("dependency unreachable")
+
+    for name in list(health._PROBES):
+        monkeypatch.setitem(health._PROBES, name, _fail)
+
+    resp = await client.get(PLATFORM_HEALTH_URL, headers=_admin(auth_headers))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "degraded"
+    for dep in body["dependencies"].values():
+        assert dep["status"] == "error"
+        assert "ConnectionError" in (dep["error"] or "")
+
+
+@pytest.mark.parametrize("role", ["viewer", "operator", "engineer"])
+async def test_platform_config_forbidden_for_non_admin(
+    client, users, auth_headers: Callable[[str], dict[str, str]], role: str
+) -> None:
+    resp = await client.get(PLATFORM_CONFIG_URL, headers=auth_headers(role))
+    assert resp.status_code == 403
+
+
+async def test_platform_config_admin_returns_retention_defaults(
+    client, users, auth_headers: Callable[[str], dict[str, str]]
+) -> None:
+    resp = await client.get(PLATFORM_CONFIG_URL, headers=_admin(auth_headers))
+    assert resp.status_code == 200
+    body = resp.json()
+    _assert_no_secret_keys(body)
+    assert body["pcap_retention_days"] == 30
+    assert body["pcap_retention_hour"] == 3
+    assert body["pcap_retention_minute"] == 0
+    assert body["raw_artifact_retention_days"] == 90
+    assert body["raw_artifact_retention_hour"] == 4
+    assert body["raw_artifact_retention_minute"] == 0
+    assert body["audit_export_format"] is None
+    assert body["audit_export_configured"] is False
+    # Host/endpoint/token must never appear.
+    assert "audit_export_host" not in body
+    assert "bearer" not in resp.text.lower()
+
+
+async def test_platform_config_reports_export_format_without_secrets(
+    client,
+    app,
+    users,
+    auth_headers: Callable[[str], dict[str, str]],
+) -> None:
+    app.state.settings = app.state.settings.model_copy(
+        update={
+            "audit_export_format": "syslog",
+            "audit_export_host": "siem.internal.example",
+            "pcap_retention_days": 14,
+        }
+    )
+    resp = await client.get(PLATFORM_CONFIG_URL, headers=_admin(auth_headers))
+    assert resp.status_code == 200
+    body = resp.json()
+    _assert_no_secret_keys(body)
+    assert body["audit_export_format"] == "syslog"
+    assert body["audit_export_configured"] is True
+    assert body["pcap_retention_days"] == 14
+    assert "siem.internal.example" not in resp.text

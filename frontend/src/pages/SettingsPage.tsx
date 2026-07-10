@@ -1,6 +1,7 @@
 /**
  * Settings hub: appearance, account links, agents onboarding, credentials
- * vault (engineer+), LLM profile (admin), and users/access links (admin).
+ * vault (engineer+), LLM profile (admin), users/access, integrations matrix,
+ * and platform health/retention (admin).
  *
  * Nested routes (App.tsx):
  *  - index              Appearance
@@ -9,6 +10,8 @@
  *  - /credentials       Device credential vault (RoleRoute engineer+)
  *  - /llm               LLM profile + role map (RoleRoute admin)
  *  - /access            Users & access help (RoleRoute admin)
+ *  - /integrations      Vendor plugin matrix (RoleRoute admin)
+ *  - /platform          Health + retention effective config (RoleRoute admin)
  *
  * Provider API keys are NEVER shown, entered, or stored here (ADR-0009).
  */
@@ -20,6 +23,8 @@ import { Link, NavLink, Outlet } from "react-router-dom";
 import {
   getLlmReadiness,
   getOidcStatus,
+  getPlatformConfig,
+  getPlatformHealth,
   getSettings,
   testLlmConnection,
   updateSettings,
@@ -33,6 +38,7 @@ import {
   type CredentialKind,
   type CredentialRead,
 } from "../api/credentials";
+import { listIntegrations } from "../api/integrations";
 import { ApiError } from "../api/client";
 import { FormField } from "../components/FormField";
 import { PageHeader } from "../components/PageHeader";
@@ -87,6 +93,8 @@ const SECTION_LINKS: SectionLink[] = [
   { to: "/settings/credentials", label: "Credentials", minRole: "engineer" },
   { to: "/settings/llm", label: "AI / LLM", minRole: "admin" },
   { to: "/settings/access", label: "Users & access", minRole: "admin" },
+  { to: "/settings/integrations", label: "Integrations", minRole: "admin" },
+  { to: "/settings/platform", label: "Platform", minRole: "admin" },
 ];
 
 function SettingsSectionNav() {
@@ -1201,6 +1209,290 @@ export function SettingsLlmSection() {
   );
 }
 
+// ── Integrations matrix (admin, Path B / T2.1) ────────────────────────────────
+
+export function SettingsIntegrationsSection() {
+  const {
+    data,
+    isPending,
+    error: loadError,
+  } = useQuery({
+    queryKey: ["integrations"],
+    queryFn: listIntegrations,
+  });
+
+  return (
+    <section
+      aria-label="Integrations"
+      data-testid="settings-integrations"
+      className="flex flex-col gap-4"
+    >
+      <div className="panel p-4 flex flex-col gap-3">
+        <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">
+          Vendor integrations
+        </h3>
+        <p className="text-sm text-zinc-300">
+          Registered vendor plugins and the capabilities they declare. This is
+          inventory only — live device reachability is discovery, not Settings.
+        </p>
+      </div>
+
+      {isPending && (
+        <p role="status" className="text-xs text-zinc-500">
+          Loading integrations…
+        </p>
+      )}
+      {loadError && (
+        <p role="alert" className="text-xs text-status-error">
+          {errorMessage(loadError)}
+        </p>
+      )}
+
+      {data && data.vendors.length === 0 && (
+        <div className="panel p-4 text-sm text-zinc-400" data-testid="integrations-empty">
+          No vendor plugins are registered in this process.
+        </div>
+      )}
+
+      {data && data.vendors.length > 0 && (
+        <div className="panel overflow-x-auto" data-testid="integrations-table">
+          <table className="w-full min-w-[36rem] text-left text-xs">
+            <thead className="border-b border-carbon-800 text-[11px] uppercase tracking-wider text-zinc-500">
+              <tr>
+                <th className="px-3 py-2 font-medium">Vendor</th>
+                <th className="px-3 py-2 font-medium">Category</th>
+                <th className="px-3 py-2 font-medium">Capabilities</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.vendors.map((v) => (
+                <tr
+                  key={v.vendor_id}
+                  className="border-b border-carbon-900/80 last:border-0"
+                  data-testid={`integration-row-${v.vendor_id}`}
+                >
+                  <td className="px-3 py-2 align-top">
+                    <div className="font-medium text-zinc-100">{v.display_name}</div>
+                    <code className="font-mono text-[11px] text-zinc-500">
+                      {v.vendor_id}
+                    </code>
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    <StatusPill variant="neutral">{v.category}</StatusPill>
+                  </td>
+                  <td className="px-3 py-2 align-top text-zinc-300">
+                    {v.capabilities.length === 0 ? (
+                      <span className="text-zinc-500">—</span>
+                    ) : (
+                      <ul className="flex flex-wrap gap-1">
+                        {v.capabilities.map((cap) => (
+                          <li key={cap}>
+                            <code className="rounded border border-carbon-800 bg-carbon-950/40 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400">
+                              {cap}
+                            </code>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="border-t border-carbon-800 px-3 py-2 text-[11px] text-zinc-600">
+            {data.vendors.length} vendor{data.vendors.length === 1 ? "" : "s"} registered
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ── Platform health + retention (admin, Path B / T2.2–T2.3) ───────────────────
+
+function pad2(n: number): string {
+  return n.toString().padStart(2, "0");
+}
+
+function utcSchedule(hour: number, minute: number): string {
+  return `${pad2(hour)}:${pad2(minute)} UTC`;
+}
+
+export function SettingsPlatformSection() {
+  const {
+    data: health,
+    isPending: healthPending,
+    error: healthError,
+    dataUpdatedAt: healthUpdatedAt,
+    refetch: refetchHealth,
+    isFetching: healthFetching,
+  } = useQuery({
+    queryKey: ["platform-health"],
+    queryFn: getPlatformHealth,
+  });
+
+  const {
+    data: config,
+    isPending: configPending,
+    error: configError,
+  } = useQuery({
+    queryKey: ["platform-config"],
+    queryFn: getPlatformConfig,
+  });
+
+  const lastFetched =
+    healthUpdatedAt > 0
+      ? new Date(healthUpdatedAt).toLocaleTimeString()
+      : null;
+
+  return (
+    <section
+      aria-label="Platform health and retention"
+      data-testid="settings-platform"
+      className="flex flex-col gap-4"
+    >
+      <div className="panel p-4 flex flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">
+            Platform health
+          </h3>
+          <div className="flex flex-wrap items-center gap-2">
+            {lastFetched && (
+              <span className="text-[11px] text-zinc-500" data-testid="platform-health-fetched">
+                Last fetched {lastFetched}
+              </span>
+            )}
+            <button
+              type="button"
+              className="rounded border border-carbon-700 px-3 py-1.5 text-xs text-zinc-300 hover:border-carbon-600"
+              onClick={() => void refetchHealth()}
+              disabled={healthFetching}
+              data-testid="platform-health-refresh"
+            >
+              {healthFetching ? "Refreshing…" : "Refresh"}
+            </button>
+          </div>
+        </div>
+        <p className="text-sm text-zinc-300">
+          Dependency probes reuse the same checks as orchestrator readiness.
+          Public <code className="font-mono text-[11px]">/health/ready</code> stays
+          unauthenticated for K8s; this panel is admin-gated.
+        </p>
+
+        {healthPending && (
+          <p role="status" className="text-xs text-zinc-500">
+            Probing dependencies…
+          </p>
+        )}
+        {healthError && (
+          <p role="alert" className="text-xs text-status-error">
+            {errorMessage(healthError)}
+          </p>
+        )}
+        {health && (
+          <div className="flex flex-col gap-3">
+            <StatusPill
+              variant={health.status === "ok" ? "ok" : "error"}
+              data-testid="platform-health-overall"
+            >
+              {health.status === "ok" ? "all dependencies ok" : "degraded"}
+            </StatusPill>
+            <div
+              className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3"
+              data-testid="platform-health-deps"
+            >
+              {Object.entries(health.dependencies).map(([name, dep]) => (
+                <div
+                  key={name}
+                  className="rounded border border-carbon-800 px-3 py-2"
+                  data-testid={`platform-dep-${name}`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-xs text-zinc-200">{name}</span>
+                    <StatusPill variant={dep.status === "ok" ? "ok" : "error"}>
+                      {dep.status}
+                    </StatusPill>
+                  </div>
+                  <p className="mt-1 text-[11px] text-zinc-500">
+                    {dep.latency_ms.toFixed(0)} ms
+                    {dep.error ? ` · ${dep.error}` : ""}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="panel p-4 flex flex-col gap-3" data-testid="platform-retention">
+        <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">
+          Retention & export (effective config)
+        </h3>
+        <p className="text-sm text-zinc-300">
+          Read-only deploy configuration. Change via Helm/env, not this form.
+        </p>
+        {configPending && (
+          <p role="status" className="text-xs text-zinc-500">
+            Loading effective config…
+          </p>
+        )}
+        {configError && (
+          <p role="alert" className="text-xs text-status-error">
+            {errorMessage(configError)}
+          </p>
+        )}
+        {config && (
+          <dl className="grid gap-2 text-sm sm:grid-cols-2">
+            <div className="rounded border border-carbon-800 px-3 py-2">
+              <dt className="font-mono text-[11px] uppercase tracking-wider text-zinc-500">
+                Pcap retention
+              </dt>
+              <dd className="mt-0.5 text-zinc-200" data-testid="pcap-retention-days">
+                {config.pcap_retention_days} day
+                {config.pcap_retention_days === 1 ? "" : "s"} · purge schedule{" "}
+                {utcSchedule(config.pcap_retention_hour, config.pcap_retention_minute)}
+              </dd>
+            </div>
+            <div className="rounded border border-carbon-800 px-3 py-2">
+              <dt className="font-mono text-[11px] uppercase tracking-wider text-zinc-500">
+                Raw artifact retention
+              </dt>
+              <dd className="mt-0.5 text-zinc-200" data-testid="raw-artifact-retention-days">
+                {config.raw_artifact_retention_days === 0
+                  ? "disabled (keep forever)"
+                  : `${config.raw_artifact_retention_days} days`}{" "}
+                · schedule{" "}
+                {utcSchedule(
+                  config.raw_artifact_retention_hour,
+                  config.raw_artifact_retention_minute,
+                )}
+              </dd>
+            </div>
+            <div className="rounded border border-carbon-800 px-3 py-2 sm:col-span-2">
+              <dt className="font-mono text-[11px] uppercase tracking-wider text-zinc-500">
+                Audit → SIEM export
+              </dt>
+              <dd className="mt-0.5 flex flex-wrap items-center gap-2 text-zinc-200">
+                <StatusPill
+                  variant={config.audit_export_configured ? "ok" : "neutral"}
+                  data-testid="audit-export-pill"
+                >
+                  {config.audit_export_configured
+                    ? `export: ${config.audit_export_format}`
+                    : "export disabled"}
+                </StatusPill>
+                <span className="text-xs text-zinc-500">
+                  Host, URL, and bearer token are never shown here.
+                </span>
+              </dd>
+            </div>
+          </dl>
+        )}
+      </div>
+    </section>
+  );
+}
+
 // ── Page shell ────────────────────────────────────────────────────────────────
 
 export function SettingsPage() {
@@ -1208,7 +1500,7 @@ export function SettingsPage() {
     <div className="flex flex-col gap-6" data-testid="settings-page">
       <PageHeader
         title="Settings"
-        description="Appearance, account links, agents setup, credentials vault, and (for admins) AI profile and user access."
+        description="Appearance, account links, agents setup, credentials vault, and (for admins) AI profile, integrations, platform health, and user access."
       />
       <SettingsSectionNav />
       <Outlet />
