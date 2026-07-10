@@ -27,6 +27,14 @@
 | [PRODUCTION.md](roadmap/PRODUCTION.md) | Post-MVP path to enterprise production: four phases (P1–P4), vendor waves for all 13 families, HA/scale-out, OIDC, security hardening, SLOs, DR, K8s hardening, readiness gates. |
 | [LESSONS.md](roadmap/LESSONS.md) | Cross-wave lessons learned (what bit CI → rule for next time). Wave retros also live as `P*-W*-LESSONS.md`. |
 
+## features/
+
+Feature-scoped plans (done vs remaining) for operator-facing product slices that span multiple milestone waves.
+
+| Document | Description |
+|---|---|
+| [settings-hub/](features/settings-hub/) | Settings hub: role-gated operator configuration (PRs #124–#127 done; SIEM lag + full audit browser remaining). |
+
 ## consultant/
 
 | Document | Description |
@@ -35,4 +43,4 @@
 | [QUESTIONS.md](consultant/QUESTIONS.md) | Open questions Q1–Q19 for the platform owner, each with options considered and the recommended default the build proceeds on. |
 | [ASSUMPTIONS.md](consultant/ASSUMPTIONS.md) | Working-assumption register A1–A19 (in-force defaults for Q1–Q19) with risk-if-wrong and "where baked in" lists. |
 
-**Reading order for newcomers:** `CLAUDE.md` → `architecture/DECISIONS-BRIEF.md` → `architecture/DIAGRAMS.md` → `roadmap/MVP.md` → `architecture/REPO-STRUCTURE.md`; consult `consultant/` for every open item and its in-force default, and `adr/` for the rationale behind any individual decision.
+**Reading order for newcomers:** `CLAUDE.md` → `architecture/DECISIONS-BRIEF.md` → `architecture/DIAGRAMS.md` → `roadmap/MVP.md` → `architecture/REPO-STRUCTURE.md`; consult `consultant/` for every open item and its in-force default, and `adr/` for the rationale behind any individual decision. Feature slices (e.g. Settings) live under `features/`.
