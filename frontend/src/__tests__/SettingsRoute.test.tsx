@@ -37,6 +37,15 @@ vi.mock("../api/auth", () => ({
     profiles: [],
   }),
   testLlmConnection: vi.fn(),
+  getOidcStatus: vi.fn().mockResolvedValue({
+    enabled: false,
+    issuer_configured: false,
+    client_id_configured: false,
+    client_ref_configured: false,
+    redirect_uri: "https://localhost/api/v1/auth/oidc/callback",
+    break_glass_local_admin_only: false,
+    allow_admin_via_oidc: false,
+  }),
 }));
 
 vi.mock("../api/credentials", () => ({
@@ -48,6 +57,11 @@ vi.mock("../api/credentials", () => ({
   }),
   createCredential: vi.fn(),
   rotateCredential: vi.fn(),
+  getRotationStatus: vi.fn().mockResolvedValue({
+    from_version: null,
+    to_version: "test-v1",
+    rows_pending: 0,
+  }),
 }));
 
 function userWithRole(role: string): UserMe {
