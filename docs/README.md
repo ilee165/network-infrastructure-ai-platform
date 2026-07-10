@@ -25,6 +25,7 @@
 |---|---|
 | [MVP.md](roadmap/MVP.md) | Milestones M0–M5 (scaffold → discovery → topology → agents → config mgmt → ChangeRequest/DDI/packet), with binding scope lists, exit criteria, and a full CLAUDE.md traceability table. |
 | [PRODUCTION.md](roadmap/PRODUCTION.md) | Post-MVP path to enterprise production: four phases (P1–P4), vendor waves for all 13 families, HA/scale-out, OIDC, security hardening, SLOs, DR, K8s hardening, readiness gates. |
+| [LESSONS.md](roadmap/LESSONS.md) | Cross-wave lessons learned (what bit CI → rule for next time). Wave retros also live as `P*-W*-LESSONS.md`. |
 
 ## consultant/
 
