@@ -28,21 +28,27 @@ Prerequisites: Docker Engine with Compose v2. Run everything from the
 cp .env.example .env
 # Edit .env first — see "First-run notes" below (secret key, neo4j password).
 
-docker compose -f deploy/docker/docker-compose.yml up -d
+docker compose -f deploy/docker/docker-compose.yml up -d --build
 ```
 
 With a local LLM (Ollama):
 
 ```bash
-docker compose -f deploy/docker/docker-compose.yml --profile local-llm up -d
+docker compose -f deploy/docker/docker-compose.yml --profile local-llm up -d --build
 ```
 
 Recommended invocation — add `--env-file .env` so the `NETOPS_NEO4J_*` values
-from your root `.env` reach the `neo4j` container (see note 2):
+from your root `.env` reach the `neo4j` container (see note 2). Use `--build`
+on first run and after frontend/backend changes (or after `docker image prune`
+/ Docker Desktop reset): `netops-backend:dev`, `netops-backend-packet:dev`, and
+`netops-frontend:dev` are **local-only** image tags. Compose will **build** them
+(`pull_policy: build`); they are not published to Docker Hub. Without a local
+image, a registry pull fails with `pull access denied for netops-frontend`
+(same for `netops-backend`).
 
 ```bash
-docker compose --env-file .env -f deploy/docker/docker-compose.yml up -d
-docker compose --env-file .env -f deploy/docker/docker-compose.yml --profile local-llm up -d
+docker compose --env-file .env -f deploy/docker/docker-compose.yml up -d --build
+docker compose --env-file .env -f deploy/docker/docker-compose.yml --profile local-llm up -d --build
 ```
 
 The core stack (`api`, `worker`, `frontend`, `postgres`, `redis`, `neo4j`) comes

@@ -28,9 +28,12 @@ Agents are orchestrated with LangGraph (Master Architect supervisor + 9 speciali
 cp .env.example .env          # then set NETOPS_SECRET_KEY, NETOPS_NEO4J_PASSWORD, NETOPS_ADMIN_PASSWORD
 # --env-file .env is REQUIRED: with `-f deploy/docker/...` compose interpolates the
 # neo4j credential from the compose dir/shell, not the root .env (deploy/docker/README.md §2).
-docker compose --env-file .env -f deploy/docker/docker-compose.yml up -d
+# --build is required on first run (and after a prune / major FE+BE change): the
+# app images are local-only tags (netops-backend:dev, netops-frontend:dev), not
+# Docker Hub repos — without a local build Compose can report "pull access denied".
+docker compose --env-file .env -f deploy/docker/docker-compose.yml up -d --build
 # with a local LLM:
-docker compose --env-file .env -f deploy/docker/docker-compose.yml --profile local-llm up -d
+docker compose --env-file .env -f deploy/docker/docker-compose.yml --profile local-llm up -d --build
 ```
 
 - Frontend: http://localhost:8080 · API docs: http://localhost:8000/docs · Health: `GET /api/v1/health/ready`
