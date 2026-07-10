@@ -37,7 +37,9 @@ docker compose --env-file .env -f deploy/docker/docker-compose.yml --profile loc
 ```
 
 - Frontend: http://localhost:8080 · API docs: http://localhost:8000/docs · Health: `GET /api/v1/health/ready`
-- First-run schema: `docker compose --env-file .env -f deploy/docker/docker-compose.yml exec api alembic upgrade head` (applies migrations `0001`→`0010`; the `0001` baseline seeds the bootstrap `admin` user from `NETOPS_ADMIN_PASSWORD`, defaulting to `admin`/`admin` with a loud warning when unset — set it and rotate after first login).
+- **First-run schema (required before login):**  
+  `docker compose --env-file .env -f deploy/docker/docker-compose.yml run --rm migrate`  
+  (or `exec api alembic upgrade head`). Applies migrations through head; the `0001` baseline seeds the bootstrap `admin` user from `NETOPS_ADMIN_PASSWORD` (insecure `admin`/`admin` + warning when unset — set it and rotate after first login). Skipping this leaves Postgres empty: login returns **503 schema-not-ready** and `/health/ready` reports `schema` degraded.
 
 Details: [deploy/docker/README.md](deploy/docker/README.md). Kubernetes/Helm arrives per the [production roadmap](docs/roadmap/PRODUCTION.md).
 

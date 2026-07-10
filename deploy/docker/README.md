@@ -117,8 +117,16 @@ ship today — identity/inventory/evidence/audit, topology, agent sessions, auth
 config+docs, change-requests, OIDC):
 
 ```bash
+# Preferred (one-shot migrate service — same image as api):
+docker compose --env-file .env -f deploy/docker/docker-compose.yml run --rm migrate
+
+# Equivalent if api is already up:
 docker compose --env-file .env -f deploy/docker/docker-compose.yml exec api alembic upgrade head
 ```
+
+Skipping this step leaves an empty database: `POST /auth/login` returns
+**503** (`urn:netops:error:schema-not-ready`) with an `alembic upgrade head`
+hint, and `GET /health/ready` reports the `schema` dependency as error.
 
 The `0001` baseline also **seeds the bootstrap `admin` user** from
 `NETOPS_ADMIN_PASSWORD`. If that variable is unset the migration seeds the

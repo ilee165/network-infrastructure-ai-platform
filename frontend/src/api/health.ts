@@ -17,7 +17,7 @@ export interface DependencyStatus {
 /** Aggregate readiness: degraded if any dependency probe fails. */
 export interface ReadinessReport {
   status: "ok" | "degraded";
-  /** Keyed by dependency name; M0 probes are postgres, neo4j, and redis. */
+  /** Keyed by dependency name; probes include postgres, schema, neo4j, redis. */
   dependencies: Record<string, DependencyStatus>;
 }
 
@@ -31,7 +31,7 @@ export function getLiveness(): Promise<LivenessReport> {
   return apiFetch<LivenessReport>("/health/live");
 }
 
-/** `GET /api/v1/health/ready` — per-dependency postgres/neo4j/redis status. */
+/** `GET /api/v1/health/ready` — per-dependency postgres/schema/neo4j/redis status. */
 export function getReadiness(): Promise<ReadinessReport> {
   return apiFetch<ReadinessReport>("/health/ready");
 }

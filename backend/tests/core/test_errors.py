@@ -16,7 +16,10 @@ from app.core.errors import (
     NotFoundError,
     PluginError,
     RateLimitedError,
+    SchemaNotReadyError,
+    _bounded_traceback,
     _problem_response,
+    translate_db_schema_error,
     translate_llm_error,
     unhandled_error_handler,
 )
@@ -171,3 +174,66 @@ async def test_unhandled_handler_returns_opaque_500() -> None:
     assert response.status_code == 500
     assert b"hunter2" not in response.body
     assert b"An internal error occurred." in response.body
+
+
+class TestSchemaNotReadyTranslation:
+    """Missing-table DB errors map to a fast operator-facing 503."""
+
+    def test_schema_not_ready_problem_shape(self) -> None:
+        problem = SchemaNotReadyError("run alembic").to_problem(instance="/api/v1/auth/login")
+        assert problem["status"] == 503
+        assert problem["type"] == "urn:netops:error:schema-not-ready"
+        assert problem["detail"] == "run alembic"
+        assert issubclass(SchemaNotReadyError, NetOpsError)
+
+    def test_translates_undefined_table_by_name(self) -> None:
+        exc = type("UndefinedTableError", (Exception,), {"__module__": "asyncpg.exceptions"})(
+            'relation "users" does not exist'
+        )
+        mapped = translate_db_schema_error(exc)
+        assert isinstance(mapped, SchemaNotReadyError)
+        assert "alembic upgrade head" in mapped.detail
+
+    def test_translates_sqlalchemy_programming_error_wrapper(self) -> None:
+        orig = type("UndefinedTableError", (Exception,), {"__module__": "asyncpg.exceptions"})(
+            'relation "users" does not exist'
+        )
+        # Mimic SQLAlchemy's wrapper: outer ProgrammingError with .orig set.
+        outer = type("ProgrammingError", (Exception,), {"__module__": "sqlalchemy.exc"})(
+            "(sqlalchemy) <class 'asyncpg.exceptions.UndefinedTableError'>: "
+            'relation "users" does not exist'
+        )
+        outer.orig = orig  # type: ignore[attr-defined]
+        outer.__cause__ = orig
+        mapped = translate_db_schema_error(outer)
+        assert isinstance(mapped, SchemaNotReadyError)
+
+    def test_passes_through_unrelated_errors(self) -> None:
+        assert translate_db_schema_error(RuntimeError("boom")) is None
+        assert translate_db_schema_error(NotFoundError("x")) is None
+
+
+async def test_unhandled_handler_maps_missing_schema_to_503() -> None:
+    """Missing ``users`` must be a fast 503 with the alembic hint, not opaque 500."""
+    request = _bare_request("/api/v1/auth/login")
+    exc = type("UndefinedTableError", (Exception,), {"__module__": "asyncpg.exceptions"})(
+        'relation "users" does not exist'
+    )
+    response = await unhandled_error_handler(request, exc)
+    assert response.status_code == 503
+    body = response.body
+    assert b"schema-not-ready" in body
+    assert b"alembic upgrade head" in body
+    assert b"users" not in body  # no raw relation name leak required; detail is fixed
+
+
+def test_bounded_traceback_truncates_and_omits_locals() -> None:
+    """Bounded formatter must stay small and never expand frame locals."""
+    try:
+        raise RuntimeError("tiny")
+    except RuntimeError as exc:
+        tb = _bounded_traceback(exc)
+    assert "RuntimeError" in tb
+    assert "tiny" in tb
+    # Cap sanity: even a deep stack is clipped (this one is short).
+    assert len(tb) < 4000

@@ -18,7 +18,8 @@ at :class:`NetOpsError`. M1+: plugin sub-hierarchy (``PluginConnectionError``,
 
 from __future__ import annotations
 
-from typing import Any
+import traceback
+from typing import Any, Final
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -28,6 +29,16 @@ from app.core.logging import get_logger
 PROBLEM_CONTENT_TYPE = "application/problem+json"
 
 _logger = get_logger(__name__)
+
+#: Operator-facing detail when Postgres is up but Alembic has not been applied.
+#: No secrets, no DSN material — just the fix command.
+_SCHEMA_NOT_READY_DETAIL: Final = "Database schema is not applied. Run: alembic upgrade head"
+
+#: Cap for the traceback string logged on unhandled exceptions. Large enough to
+#: debug, small enough that ConsoleRenderer never pegs a core formatting SQLAlchemy
+#: local-variable dumps (which previously stalled the event loop for minutes).
+_TRACEBACK_MAX_CHARS: Final = 4000
+_TRACEBACK_FRAME_LIMIT: Final = 20
 
 
 class NetOpsError(Exception):
@@ -216,6 +227,20 @@ class LLMUpstreamError(NetOpsError):
     slug = "llm-upstream"
 
 
+class SchemaNotReadyError(NetOpsError):
+    """Postgres is reachable but required tables/migrations are missing.
+
+    Typical first-run footgun: compose is up and ``/health/live`` is green, but
+    ``alembic upgrade head`` was never run so ``users`` (and peers) do not exist.
+    Surfaces as **503** with an operator-actionable detail — never a multi-second
+    opaque 500 that burns CPU rendering a rich SQLAlchemy stack.
+    """
+
+    status_code = 503
+    title = "Service Unavailable"
+    slug = "schema-not-ready"
+
+
 #: Top-level modules of the LLM provider/transport SDKs whose exceptions mean an
 #: upstream failure (not a platform bug). Matched on the exception's root module
 #: so the error layer never has to import the provider SDKs.
@@ -255,6 +280,61 @@ def translate_llm_error(exc: Exception) -> NetOpsError | None:
     return None
 
 
+def _is_missing_relation_error(exc: BaseException) -> bool:
+    """True when *exc* (or its cause chain) is a missing-table / undefined relation.
+
+    Matches asyncpg ``UndefinedTableError`` and SQLAlchemy ``ProgrammingError``
+    wrappers without importing asyncpg/sqlalchemy at module load (keeps this
+    module light and import-cycle free).
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        name = type(current).__name__
+        msg = str(current).lower()
+        if name == "UndefinedTableError" or "undefinedtable" in name.lower():
+            return True
+        # SQLAlchemy / asyncpg wrapper text: relation "users" does not exist
+        if "does not exist" in msg and ("relation" in msg or "table" in msg):
+            return True
+        current = current.__cause__ or getattr(current, "orig", None) or current.__context__
+    return False
+
+
+def translate_db_schema_error(exc: Exception) -> SchemaNotReadyError | None:
+    """Map a missing-schema DB exception to :class:`SchemaNotReadyError`, else ``None``.
+
+    Already-typed :class:`NetOpsError` instances are left alone. Genuine code bugs
+    (AttributeError, etc.) stay unmapped so they still surface as opaque 500s.
+    The client detail is fixed and operator-facing — never the raw SQL / DSN.
+    """
+    if isinstance(exc, NetOpsError):
+        return None
+    if _is_missing_relation_error(exc):
+        return SchemaNotReadyError(_SCHEMA_NOT_READY_DETAIL)
+    return None
+
+
+def _bounded_traceback(exc: BaseException) -> str:
+    """Format a plain traceback string with frame + character caps (no locals).
+
+    Deliberately avoids ``logger.exception`` / rich ConsoleRenderer local dumps,
+    which on deep SQLAlchemy stacks burned ~100% CPU and stalled the event loop.
+    """
+    tb = "".join(
+        traceback.format_exception(
+            type(exc),
+            exc,
+            exc.__traceback__,
+            limit=_TRACEBACK_FRAME_LIMIT,
+        )
+    )
+    if len(tb) > _TRACEBACK_MAX_CHARS:
+        return tb[:_TRACEBACK_MAX_CHARS] + "\n... (truncated)"
+    return tb
+
+
 def _problem_response(error: NetOpsError, request: Request) -> JSONResponse:
     headers: dict[str, str] | None = None
     if error.status_code == 401:
@@ -286,10 +366,31 @@ async def netops_error_handler(request: Request, exc: Exception) -> JSONResponse
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """Last-resort handler: log the exception, return an opaque 500 problem.
 
-    The response detail is deliberately generic — internals never leak to
-    clients (secure by default).
+    Missing-schema DB errors are translated to a fast 503
+    (:class:`SchemaNotReadyError`) with an operator-actionable detail. All other
+    unhandled exceptions stay an opaque 500. Logging uses a **bounded plain
+    traceback** (no ``logger.exception`` / rich local dumps) so a deep SQLAlchemy
+    stack cannot pin the event loop at ~100% CPU.
     """
-    _logger.exception("unhandled_exception", path=request.url.path, error=str(exc))
+    mapped = translate_db_schema_error(exc)
+    if mapped is not None:
+        _logger.error(
+            "schema_not_ready",
+            path=request.url.path,
+            error_type=type(exc).__name__,
+        )
+        return _problem_response(mapped, request)
+
+    # Do NOT pass exc_info=True / use .exception(): structlog's ConsoleRenderer
+    # in dev expands locals on every frame and can stall uvicorn for minutes on
+    # SQLAlchemy ProgrammingError trees.
+    _logger.error(
+        "unhandled_exception",
+        path=request.url.path,
+        error_type=type(exc).__name__,
+        error=str(exc)[:500],
+        traceback=_bounded_traceback(exc),
+    )
     return _problem_response(NetOpsError("An internal error occurred."), request)
 
 

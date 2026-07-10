@@ -23,6 +23,24 @@
 name: netops
 
 services:
+  # One-shot Alembic migration (ADR-0004). Run explicitly after first `up`:
+  #   docker compose --env-file .env -f deploy/docker/docker-compose.yml run --rm migrate
+  # Seeds bootstrap admin from NETOPS_ADMIN_PASSWORD (migration 0001). Not wired
+  # as a hard depends_on of api — keeps Alembic ownership explicit and avoids
+  # multi-replica races if someone later scales api.
+  migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/backend.Dockerfile
+    image: netops-backend:dev
+    pull_policy: build
+    command: alembic upgrade head
+    env_file: ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   # FastAPI REST + WebSocket API (uvicorn; default CMD of the backend image).
   api:
     build:
