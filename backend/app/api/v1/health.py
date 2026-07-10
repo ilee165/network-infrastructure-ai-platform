@@ -1,11 +1,12 @@
 """Liveness and readiness endpoints (canonical M0 contract; ADR-0015).
 
 - ``GET /api/v1/health/live``  — process is up; touches no dependencies.
-- ``GET /api/v1/health/ready`` — probes Postgres, Neo4j, and Redis with a
-  ~2 s timeout each and reports per-dependency ``{status, latency_ms, error}``.
-  Overall status is ``"ok"`` or ``"degraded"``; the endpoint **never raises**
-  when a dependency is down (HTTP 200 either way — orchestrators inspect the
-  body, and compose/K8s probes are configured against it in deploy/).
+- ``GET /api/v1/health/ready`` — probes Postgres, schema (Alembic), Neo4j, and
+  Redis with a ~2 s timeout each and reports per-dependency
+  ``{status, latency_ms, error}``. Overall status is ``"ok"`` or ``"degraded"``;
+  the endpoint **never raises** when a dependency is down (HTTP 200 either way
+  — orchestrators inspect the body, and compose/K8s probes are configured
+  against it in deploy/).
 
 Health endpoints are unauthenticated and expose no version/config detail
 beyond per-dependency up/down (ADR-0015 hardening choice).
@@ -55,6 +56,27 @@ async def _probe_postgres(settings: Settings) -> None:
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
+    finally:
+        await engine.dispose()
+
+
+async def _probe_schema(settings: Settings) -> None:
+    """Confirm Alembic has been applied (``alembic_version`` row readable).
+
+    Distinct from :func:`_probe_postgres`: the DB can answer ``SELECT 1`` while
+    migrations were never run (login then 503s on missing ``users``). Fails with
+    a clear message so readiness is ``degraded`` until ``alembic upgrade head``.
+    """
+    engine = db.create_engine(settings)
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1 FROM alembic_version LIMIT 1"))
+    except Exception as exc:
+        # Normalize to a short, operator-facing message (no DSN / SQL dump).
+        msg = str(exc).lower()
+        if "does not exist" in msg or "undefinedtable" in type(exc).__name__.lower():
+            raise ConnectionError("schema not applied — run alembic upgrade head") from exc
+        raise
     finally:
         await engine.dispose()
 
@@ -112,6 +134,7 @@ def _make_kek_probe(provider: object) -> Probe:
 #: is added per-request only when a provider is cached on app.state (see :func:`ready`).
 _PROBES: dict[str, Probe] = {
     "postgres": _probe_postgres,
+    "schema": _probe_schema,
     "neo4j": _probe_neo4j,
     "redis": _probe_redis,
 }
@@ -139,7 +162,7 @@ async def live() -> dict[str, str]:
 
 
 async def build_readiness_report(request: Request) -> ReadinessReport:
-    """Probe postgres/neo4j/redis (+ KEK) and return the readiness report.
+    """Probe postgres/schema/neo4j/redis (+ KEK) and return the readiness report.
 
     Shared by the public ``GET /health/ready`` probe and the admin Settings
     platform-health panel so both surfaces stay in lockstep. Never raises when
@@ -168,5 +191,5 @@ async def build_readiness_report(request: Request) -> ReadinessReport:
 
 @router.get("/ready", response_model=ReadinessReport)
 async def ready(request: Request) -> ReadinessReport:
-    """Readiness: probe postgres/neo4j/redis (+ the KEK provider) concurrently."""
+    """Readiness: probe postgres/schema/neo4j/redis (+ the KEK provider) concurrently."""
     return await build_readiness_report(request)

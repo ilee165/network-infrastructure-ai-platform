@@ -13,7 +13,7 @@ import pytest
 from app.api.v1 import health
 from app.core.config import Settings
 
-EXPECTED_DEPENDENCIES = {"postgres", "neo4j", "redis"}
+EXPECTED_DEPENDENCIES = {"postgres", "schema", "neo4j", "redis"}
 
 
 async def _failing_probe(settings: Settings) -> None:
@@ -86,7 +86,26 @@ async def test_ready_degrades_when_one_dependency_down(
     assert body["status"] == "degraded"
     assert body["dependencies"]["redis"]["status"] == "error"
     assert body["dependencies"]["postgres"]["status"] == "ok"
+    assert body["dependencies"]["schema"]["status"] == "ok"
     assert body["dependencies"]["neo4j"]["status"] == "ok"
+
+
+async def test_ready_degrades_when_schema_missing(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Postgres up + Alembic not applied → schema dependency error, overall degraded."""
+
+    async def schema_missing(settings: Settings) -> None:
+        raise ConnectionError("schema not applied — run alembic upgrade head")
+
+    _patch_all_probes(monkeypatch, _ok_probe)
+    monkeypatch.setitem(health._PROBES, "schema", schema_missing)
+    response = await client.get("/api/v1/health/ready")
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["dependencies"]["schema"]["status"] == "error"
+    assert "alembic" in body["dependencies"]["schema"]["error"]
+    assert body["dependencies"]["postgres"]["status"] == "ok"
 
 
 async def test_ready_times_out_hung_probe(
