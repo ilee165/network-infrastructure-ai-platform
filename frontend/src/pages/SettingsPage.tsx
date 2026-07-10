@@ -32,6 +32,7 @@ import {
 } from "../api/auth";
 import {
   createCredential,
+  disableCredential,
   getRotationStatus,
   listCredentials,
   rotateCredential,
@@ -511,6 +512,10 @@ export function SettingsCredentialsSection() {
   const [rotateError, setRotateError] = useState<string | null>(null);
   const [rotateSuccess, setRotateSuccess] = useState<string | null>(null);
 
+  const [disableTarget, setDisableTarget] = useState<CredentialRead | null>(null);
+  const [disableError, setDisableError] = useState<string | null>(null);
+  const [disableSuccess, setDisableSuccess] = useState<string | null>(null);
+
   const createMutation = useMutation({
     mutationFn: () =>
       createCredential({
@@ -553,6 +558,28 @@ export function SettingsCredentialsSection() {
     onError: (err) => {
       setRotateError(errorMessage(err));
       setRotateSuccess(null);
+    },
+  });
+
+  const disableMutation = useMutation({
+    mutationFn: () => {
+      if (!disableTarget) {
+        throw new Error("missing credential id");
+      }
+      return disableCredential(disableTarget.id);
+    },
+    onSuccess: (_updated, _vars, _ctx) => {
+      const label = disableTarget?.name ?? "credential";
+      setDisableSuccess(
+        `Disabled “${label}”. The name is free for a new vault entry; the secret cannot be used again.`,
+      );
+      setDisableError(null);
+      setDisableTarget(null);
+      void queryClient.invalidateQueries({ queryKey: ["credentials"] });
+    },
+    onError: (err) => {
+      setDisableError(errorMessage(err));
+      setDisableSuccess(null);
     },
   });
 
@@ -697,18 +724,32 @@ export function SettingsCredentialsSection() {
                     </td>
                     {canWrite && (
                       <td className="px-3 py-2">
-                        <button
-                          type="button"
-                          className="text-accent hover:underline"
-                          onClick={() => {
-                            setRotateId(row.id);
-                            setRotateSecret("");
-                            setRotateError(null);
-                            setRotateSuccess(null);
-                          }}
-                        >
-                          Rotate
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            className="text-accent hover:underline"
+                            onClick={() => {
+                              setRotateId(row.id);
+                              setRotateSecret("");
+                              setRotateError(null);
+                              setRotateSuccess(null);
+                            }}
+                          >
+                            Rotate
+                          </button>
+                          <button
+                            type="button"
+                            className="text-status-error hover:underline"
+                            data-testid={`credential-disable-${row.id}`}
+                            onClick={() => {
+                              setDisableTarget(row);
+                              setDisableError(null);
+                              setDisableSuccess(null);
+                            }}
+                          >
+                            Disable
+                          </button>
+                        </div>
                       </td>
                     )}
                   </tr>
@@ -774,6 +815,54 @@ export function SettingsCredentialsSection() {
       {rotateSuccess && (
         <p className="text-xs text-status-ok" role="status">
           {rotateSuccess}
+        </p>
+      )}
+
+      {canWrite && disableTarget && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm disable credential"
+          data-testid="credential-disable-dialog"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+        >
+          <div className="w-full max-w-sm rounded border border-carbon-700 bg-carbon-900 p-6 shadow-xl">
+            <p className="text-sm text-zinc-200">
+              Disable credential “{disableTarget.name}”? It will disappear from
+              this list, the name can be reused, and discovery/tools can no longer
+              decrypt it. This does not hard-delete the vault row.
+            </p>
+            {disableError ? (
+              <p role="alert" className="mt-3 text-xs text-status-error">
+                {disableError}
+              </p>
+            ) : null}
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setDisableTarget(null)}
+                disabled={disableMutation.isPending}
+                className="rounded border border-carbon-700 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:border-carbon-600 hover:text-zinc-100 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="confirm-disable-credential"
+                onClick={() => disableMutation.mutate()}
+                disabled={disableMutation.isPending}
+                className="rounded bg-status-error px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
+              >
+                {disableMutation.isPending ? "Disabling…" : "Confirm disable"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {disableSuccess && (
+        <p className="text-xs text-status-ok" role="status">
+          {disableSuccess}
         </p>
       )}
 

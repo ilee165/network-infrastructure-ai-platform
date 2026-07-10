@@ -2,8 +2,9 @@
  * Typed client for the device credential vault (``/api/v1/credentials``).
  *
  * Secrets are write-only: create/rotate accept a secret; list/read return
- * metadata only. Never store returned secrets in the SPA — create does not
- * echo the secret, and rotate does not either.
+ * metadata only. Disable soft-retires a row (no secret in any response).
+ * Never store returned secrets in the SPA — create does not echo the secret,
+ * and rotate does not either.
  */
 
 import { apiFetch } from "./client";
@@ -21,6 +22,8 @@ export interface CredentialRead {
   scope_role: string | null;
   scope_device_group: string | null;
   kek_version: string;
+  /** ISO timestamp when soft-disabled; null/omitted means active. */
+  disabled_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -81,6 +84,16 @@ export function rotateCredential(
   return apiFetch<CredentialRead>(`/credentials/${encodeURIComponent(id)}/rotate`, {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * ``POST /api/v1/credentials/{id}/disable`` — soft-retire; response has no secret.
+ * Frees the operator-facing name so a replacement can reuse it.
+ */
+export function disableCredential(id: string): Promise<CredentialRead> {
+  return apiFetch<CredentialRead>(`/credentials/${encodeURIComponent(id)}/disable`, {
+    method: "POST",
   });
 }
 

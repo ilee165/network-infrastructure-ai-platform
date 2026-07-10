@@ -1,11 +1,12 @@
-"""Credential vault routes (M1-15): create, rotate, list — secrets write-only.
+"""Credential vault routes (M1-15 / Settings T1.3): create, rotate, disable, list.
 
 The secret enters as a :class:`~pydantic.SecretStr`, goes straight into the
 envelope-encryption service (ADR-0011), and never appears in any response,
 log line, or audit detail. Reads expose metadata only via
 :class:`~app.schemas.credentials.CredentialRead`. Mutations require the
 ``engineer`` rank; the service writes the ``credential.created`` /
-``credential.rotated`` audit rows, committed atomically here.
+``credential.rotated`` / ``credential.disabled`` audit rows, committed
+atomically here. Disable is a soft-retire (not hard DELETE of ciphertext).
 """
 
 from __future__ import annotations
@@ -108,6 +109,27 @@ async def rotate_credential(
     return response
 
 
+@router.post("/{credential_id}/disable", response_model=CredentialRead)
+async def disable_credential(
+    credential_id: uuid.UUID,
+    session: DbSession,
+    user: Engineer,
+) -> CredentialRead:
+    """Soft-disable (retire) a credential; frees the operator-facing name.
+
+    Audits ``credential.disabled``. Response is metadata only (includes
+    ``disabled_at``); secrets are never returned. Idempotent refuse → 409.
+    """
+    credential = await credentials_service.disable_credential(
+        session,
+        credential_id=credential_id,
+        actor=_actor(user),
+    )
+    response = CredentialRead.model_validate(credential)
+    await session.commit()
+    return response
+
+
 @router.get("", response_model=CredentialListResponse)
 async def list_credentials(
     session: DbSession,
@@ -115,12 +137,23 @@ async def list_credentials(
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> CredentialListResponse:
-    """List credential metadata (never secrets), paginated, ordered by name."""
-    total = (await session.execute(select(func.count()).select_from(DeviceCredential))).scalar_one()
+    """List *active* credential metadata (never secrets), paginated by name.
+
+    Soft-disabled (retired) rows are excluded so Settings vault UI does not
+    surface dead names. Disabled rows remain in the table for audit/FK safety.
+    """
+    active = DeviceCredential.disabled_at.is_(None)
+    total = (
+        await session.execute(select(func.count()).select_from(DeviceCredential).where(active))
+    ).scalar_one()
     rows = (
         (
             await session.execute(
-                select(DeviceCredential).order_by(DeviceCredential.name).limit(limit).offset(offset)
+                select(DeviceCredential)
+                .where(active)
+                .order_by(DeviceCredential.name)
+                .limit(limit)
+                .offset(offset)
             )
         )
         .scalars()

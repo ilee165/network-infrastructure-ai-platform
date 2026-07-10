@@ -42,9 +42,10 @@ from app.core.crypto import (
     is_production_grade,
     rewrap,
 )
-from app.core.errors import CredentialScopeError, NotFoundError
+from app.core.errors import ConflictError, CredentialScopeError, NotFoundError
 from app.core.logging import get_logger
 from app.models.inventory import CredentialKind, Device, DeviceCredential
+from app.models.mixins import utcnow
 from app.services import audit
 
 _logger = get_logger(__name__)
@@ -402,6 +403,8 @@ async def rotate_secret(
     credential = await session.get(DeviceCredential, credential_id)
     if credential is None:
         raise NotFoundError(f"credential {credential_id} does not exist")
+    if credential.disabled_at is not None:
+        raise ConflictError(f"credential {credential_id} is disabled and cannot be rotated")
     try:
         envelope = envelope_encrypt(new_secret.encode("utf-8"), _aad(credential.id), provider)
     except KeyProviderUnavailable as exc:
@@ -425,6 +428,64 @@ async def rotate_secret(
         target_type=_TARGET_TYPE,
         target_id=str(credential.id),
         detail={"kek_version": envelope.kek_version},
+    )
+    return credential
+
+
+async def disable_credential(
+    session: AsyncSession,
+    *,
+    credential_id: uuid.UUID,
+    actor: str,
+) -> DeviceCredential:
+    """Soft-disable (retire) a vault entry so it no longer appears or decrypts.
+
+    Settings T1.3: operators need to remove dead credential *names* from the UI
+    without a hard DELETE that would break FKs or erase forensic metadata.
+    Behaviour:
+
+    - Sets ``disabled_at`` (UTC now).
+    - Renames the row to free the operator-facing unique name so a replacement
+      credential can reuse it (``{name}__disabled__{id8}``).
+    - Audits ``credential.disabled`` with original name + kind only — never
+      secret material.
+    - Idempotent refuse: already-disabled rows raise :class:`ConflictError`.
+
+    Ciphertext is left in place (row stays envelope-encrypted); decrypt and
+    rotate refuse disabled rows so the secret cannot be used again. Hard purge
+    of ciphertext is out of scope for T1.3.
+
+    Raises:
+        NotFoundError: If *credential_id* does not exist.
+        ConflictError: If the credential is already disabled.
+    """
+    credential = await session.get(DeviceCredential, credential_id)
+    if credential is None:
+        raise NotFoundError(f"credential {credential_id} does not exist")
+    if credential.disabled_at is not None:
+        raise ConflictError(f"credential {credential_id} is already disabled")
+
+    original_name = credential.name
+    # Free the unique operator-facing name while keeping the row for audit/FK.
+    # id.hex[:8] is stable and short enough for the 255-char name column.
+    disabled_name = f"{original_name}__disabled__{credential.id.hex[:8]}"
+    # Guard against pathological long names (unique constraint still applies).
+    if len(disabled_name) > 255:
+        disabled_name = f"disabled__{credential.id.hex}"
+    credential.name = disabled_name
+    credential.disabled_at = utcnow()
+
+    await audit.record(
+        session,
+        actor=actor,
+        action=audit.CREDENTIAL_DISABLED,
+        target_type=_TARGET_TYPE,
+        target_id=str(credential.id),
+        detail={
+            "name": original_name,
+            "kind": credential.kind.value,
+            "disabled_name": disabled_name,
+        },
     )
     return credential
 
@@ -473,6 +534,8 @@ async def decrypt(
     # autonomous *sessionmaker* (CR C6) so it COMMITS durably before the caller's
     # transaction rolls back on the raised error — a denied access always leaves a
     # trail.
+    if credential.disabled_at is not None:
+        raise ConflictError(f"credential {credential.id} is disabled and cannot be decrypted")
     await _enforce_scope(
         session, credential, target, actor=actor, reason=reason, sessionmaker=sessionmaker
     )

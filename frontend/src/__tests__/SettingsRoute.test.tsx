@@ -75,6 +75,7 @@ vi.mock("../api/credentials", () => ({
   }),
   createCredential: vi.fn(),
   rotateCredential: vi.fn(),
+  disableCredential: vi.fn(),
   getRotationStatus: vi.fn().mockResolvedValue({
     from_version: null,
     to_version: "test-v1",

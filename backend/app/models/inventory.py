@@ -134,6 +134,14 @@ class DeviceCredential(UuidPkMixin, TimestampMixin, Base):
     scope_site: Mapped[str | None] = mapped_column(String(128))
     scope_role: Mapped[str | None] = mapped_column(String(128))
     scope_device_group: Mapped[str | None] = mapped_column(String(128))
+    # Soft-disable / retire (Settings T1.3 / migration 0019). NULL = active;
+    # non-NULL timestamp = retired (list excludes by default; decrypt/rotate refuse).
+    disabled_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+
+    @property
+    def is_active(self) -> bool:
+        """True when the credential has not been soft-disabled (retired)."""
+        return self.disabled_at is None
 
     @property
     def is_scoped(self) -> bool:
