@@ -19,6 +19,7 @@ import type { FormEvent } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 import {
   getLlmReadiness,
+  getOidcStatus,
   getSettings,
   testLlmConnection,
   updateSettings,
@@ -26,6 +27,7 @@ import {
 } from "../api/auth";
 import {
   createCredential,
+  getRotationStatus,
   listCredentials,
   rotateCredential,
   type CredentialKind,
@@ -36,6 +38,7 @@ import { FormField } from "../components/FormField";
 import { PageHeader } from "../components/PageHeader";
 import { Pagination } from "../components/Pagination";
 import { Spinner } from "../components/Skeleton";
+import { StatusPill } from "../components/StatusPill";
 import { useAuthStore } from "../stores/auth";
 import { hasMinimumRole, type Role } from "../stores/roles";
 import { useThemeStore } from "../stores/theme";
@@ -338,6 +341,15 @@ export function SettingsAccountSection() {
 // ── Users & access (admin) ────────────────────────────────────────────────────
 
 export function SettingsAccessSection() {
+  const {
+    data: oidc,
+    isPending: oidcPending,
+    error: oidcError,
+  } = useQuery({
+    queryKey: ["oidc-status"],
+    queryFn: getOidcStatus,
+  });
+
   return (
     <section
       aria-label="Users and access"
@@ -381,10 +393,68 @@ export function SettingsAccessSection() {
         </dl>
       </div>
 
-      <div className="panel p-4 flex flex-col gap-2">
+      <div
+        className="panel p-4 flex flex-col gap-2"
+        data-testid="settings-oidc-status"
+      >
         <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">
           SSO / break-glass
         </h3>
+        {oidcPending && (
+          <p role="status" className="text-xs text-zinc-500">
+            Loading SSO status…
+          </p>
+        )}
+        {oidcError && (
+          <p role="alert" className="text-xs text-status-error">
+            {errorMessage(oidcError)}
+          </p>
+        )}
+        {oidc && (
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusPill
+                variant={oidc.enabled ? "ok" : "neutral"}
+                data-testid="oidc-enabled-pill"
+              >
+                {oidc.enabled ? "SSO enabled" : "SSO disabled"}
+              </StatusPill>
+              {oidc.enabled && oidc.break_glass_local_admin_only && (
+                <StatusPill variant="warn" data-testid="oidc-break-glass-pill">
+                  break-glass admin only
+                </StatusPill>
+              )}
+              {oidc.enabled && (
+                <StatusPill
+                  variant={oidc.allow_admin_via_oidc ? "info" : "neutral"}
+                  data-testid="oidc-admin-via-sso-pill"
+                >
+                  {oidc.allow_admin_via_oidc
+                    ? "admin via SSO allowed"
+                    : "admin via SSO capped"}
+                </StatusPill>
+              )}
+            </div>
+            <ul className="list-disc space-y-1 pl-5 text-xs text-zinc-400">
+              <li>
+                Issuer: {oidc.issuer_configured ? "configured" : "not set"}
+              </li>
+              <li>
+                Client id: {oidc.client_id_configured ? "configured" : "not set"}
+              </li>
+              <li>
+                Client secret ref:{" "}
+                {oidc.client_ref_configured ? "configured" : "not set"}
+              </li>
+              <li>
+                Redirect URI:{" "}
+                <code className="font-mono text-[11px] text-zinc-300">
+                  {oidc.redirect_uri}
+                </code>
+              </li>
+            </ul>
+          </div>
+        )}
         <p className="text-sm text-zinc-300">
           OIDC/SSO is configured at deploy time (issuer, client id, secret ref,
           group→role map) — not via this form. When OIDC is enabled, local
@@ -407,6 +477,17 @@ export function SettingsCredentialsSection() {
   const { data, isPending, error: loadError } = useQuery({
     queryKey: ["credentials", offset],
     queryFn: () => listCredentials({ limit: CREDENTIALS_PAGE_SIZE, offset }),
+  });
+
+  const {
+    data: rotation,
+    isPending: rotationPending,
+    error: rotationError,
+  } = useQuery({
+    queryKey: ["credentials-rotation-status"],
+    queryFn: getRotationStatus,
+    // engineer+ only: viewers never mount this section (RoleRoute).
+    enabled: canWrite,
   });
 
   const [name, setName] = useState("");
@@ -506,6 +587,55 @@ export function SettingsCredentialsSection() {
           Devices.
         </p>
       </div>
+
+      {canWrite && (
+        <div
+          className="panel p-4 flex flex-col gap-2"
+          data-testid="credentials-kek-rotation"
+        >
+          <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">
+            KEK rotation status
+          </h3>
+          <p className="text-xs text-zinc-400">
+            Envelope-key rewrap progress (versions and pending row count only —
+            no key material).
+          </p>
+          {rotationPending && (
+            <p role="status" className="text-xs text-zinc-500">
+              Loading rotation status…
+            </p>
+          )}
+          {rotationError && (
+            <p role="alert" className="text-xs text-status-error">
+              {errorMessage(rotationError)}
+            </p>
+          )}
+          {rotation && (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-300">
+              <StatusPill
+                variant={rotation.rows_pending > 0 ? "warn" : "ok"}
+                data-testid="kek-rows-pending-pill"
+              >
+                {rotation.rows_pending > 0
+                  ? `${rotation.rows_pending} pending`
+                  : "fully wrapped"}
+              </StatusPill>
+              <span>
+                Active KEK:{" "}
+                <code className="font-mono text-zinc-200">{rotation.to_version}</code>
+              </span>
+              {rotation.from_version != null && (
+                <span>
+                  Migrating from:{" "}
+                  <code className="font-mono text-zinc-200">
+                    {rotation.from_version}
+                  </code>
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {isPending && (
         <p role="status" className="flex items-center gap-2 text-xs text-zinc-500">

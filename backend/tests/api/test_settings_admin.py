@@ -27,6 +27,7 @@ SETTINGS_URL = "/api/v1/auth/settings"
 LLM_PROFILE_URL = "/api/v1/auth/llm-profile"
 LLM_READINESS_URL = "/api/v1/auth/settings/llm-readiness"
 LLM_TEST_URL = "/api/v1/auth/settings/llm-test"
+OIDC_STATUS_URL = "/api/v1/auth/settings/oidc-status"
 
 # Fields that must never appear in any settings request or response body.
 _SECRET_FIELD_HINTS = (
@@ -122,6 +123,65 @@ async def test_get_llm_profile_follows_db_row(
     resp = await client.get(LLM_PROFILE_URL, headers=auth_headers("viewer"))
     assert resp.status_code == 200
     assert resp.json()["llm_profile"] == "openai"
+
+
+# --------------------------------------------------------------------------- #
+# GET /settings/oidc-status (admin)                                           #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("role", ["viewer", "operator", "engineer"])
+async def test_oidc_status_forbidden_for_non_admin(
+    client, users, auth_headers: Callable[[str], dict[str, str]], role: str
+) -> None:
+    resp = await client.get(OIDC_STATUS_URL, headers=auth_headers(role))
+    assert resp.status_code == 403
+
+
+async def test_oidc_status_disabled_by_default(
+    client, users, auth_headers: Callable[[str], dict[str, str]]
+) -> None:
+    resp = await client.get(OIDC_STATUS_URL, headers=_admin(auth_headers))
+    assert resp.status_code == 200
+    body = resp.json()
+    _assert_no_secret_keys(body)
+    assert body["enabled"] is False
+    assert body["issuer_configured"] is False
+    assert body["client_id_configured"] is False
+    assert body["client_ref_configured"] is False
+    assert body["break_glass_local_admin_only"] is False
+    assert "redirect_uri" in body
+    # Never surface vault ref field names or values — presence is client_ref_configured.
+    assert "oidc_client_secret_ref" not in body
+
+
+async def test_oidc_status_enabled_when_fully_configured(
+    client,
+    app,
+    users,
+    auth_headers: Callable[[str], dict[str, str]],
+) -> None:
+    app.state.settings = app.state.settings.model_copy(
+        update={
+            "oidc_issuer": "https://idp.example/realms/netops",
+            "oidc_client_id": "netops-spa",
+            "oidc_client_secret_ref": "vault/oidc-client",
+            "oidc_redirect_uri": "https://app.example/api/v1/auth/oidc/callback",
+            "oidc_allow_admin": True,
+        }
+    )
+    resp = await client.get(OIDC_STATUS_URL, headers=_admin(auth_headers))
+    assert resp.status_code == 200
+    body = resp.json()
+    _assert_no_secret_keys(body)
+    assert body["enabled"] is True
+    assert body["issuer_configured"] is True
+    assert body["client_id_configured"] is True
+    assert body["client_ref_configured"] is True
+    assert body["break_glass_local_admin_only"] is True
+    assert body["allow_admin_via_oidc"] is True
+    assert body["redirect_uri"] == "https://app.example/api/v1/auth/oidc/callback"
+    # Vault ref string itself must never appear.
+    assert "vault/oidc-client" not in resp.text
+    assert "https://idp.example" not in resp.text  # issuer URL not returned
 
 
 # --------------------------------------------------------------------------- #

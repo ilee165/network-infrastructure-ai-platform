@@ -131,8 +131,8 @@ export function AuditPage() {
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
-        title="Audit"
-        description="Append-only audit log: every actor, action, and AI decision, linked to reasoning traces."
+        title="Agent tool audit"
+        description="Tool actions from one agent session (reasoning-trace tool_call steps). This is not the platform-wide audit_log browser — load a session ID from Chat to inspect that run's tools."
       />
 
       <form onSubmit={handleSubmit} className="panel flex flex-wrap items-end gap-3 p-4">

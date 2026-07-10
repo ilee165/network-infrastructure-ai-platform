@@ -251,6 +251,25 @@ export function testLlmConnection(profile: string): Promise<LlmProbeResult> {
   });
 }
 
+// ── Admin: OIDC status (non-secret) ───────────────────────────────────────────
+
+/** Non-secret OIDC flags from ``GET /auth/settings/oidc-status``. */
+export interface OidcStatus {
+  enabled: boolean;
+  issuer_configured: boolean;
+  client_id_configured: boolean;
+  /** True when a vault secret-ref is configured; the ref string is never returned. */
+  client_ref_configured: boolean;
+  redirect_uri: string;
+  break_glass_local_admin_only: boolean;
+  allow_admin_via_oidc: boolean;
+}
+
+/** ``GET /auth/settings/oidc-status`` — SSO enablement for Settings access (admin). */
+export function getOidcStatus(): Promise<OidcStatus> {
+  return apiFetch<OidcStatus>("/auth/settings/oidc-status");
+}
+
 // ── Boot helper ───────────────────────────────────────────────────────────────
 
 /**
