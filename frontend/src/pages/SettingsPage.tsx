@@ -568,7 +568,7 @@ export function SettingsCredentialsSection() {
       }
       return disableCredential(disableTarget.id);
     },
-    onSuccess: (_updated, _vars, _ctx) => {
+    onSuccess: () => {
       const label = disableTarget?.name ?? "credential";
       setDisableSuccess(
         `Disabled “${label}”. The name is free for a new vault entry; the secret cannot be used again.`,
