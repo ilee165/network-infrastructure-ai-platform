@@ -895,9 +895,9 @@ idna==3.18 \
     #   anyio
     #   httpx
     #   requests
-import-linter==2.12 \
-    --hash=sha256:217f0f0f0890b8625389765039d52c215f4c6d4a047f42ea78b6d00ceba1900e \
-    --hash=sha256:b346eeb30cabd5b0630773d42cca4eac8dd459ac5d507ac2ecadc3f99462f231
+import-linter==2.13 \
+    --hash=sha256:13af4a1d6b06044c58ea784e8732fd7fe48eec821a75feb4d6a1a2de36dd5c27 \
+    --hash=sha256:c0372e7ee5e15657bc06a8e841445e13237afd738a672d26863dc927af9f0bf5
     # via netops-backend (pyproject.toml)
 iniconfig==2.3.0 \
     --hash=sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730 \
