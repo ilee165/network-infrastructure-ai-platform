@@ -1758,12 +1758,19 @@ config:
       # redisSentinel.sentinel.masterName — keep them in sync; the chart reads the
       # redisSentinel value when the tier is on, this is the documented coordinate).
       masterName: netops-redis
-  # External LLM provider selection (ADR-0009). "ollama" routes to the in-cluster
-  # ollama Service when services.ollama.enabled; otherwise an external provider.
+  # LLM provider profile (ADR-0009) — rendered as NETOPS_LLM_PROFILE, one of the
+  # app's KNOWN_PROFILES: local (Ollama) | anthropic | openai | azure. `local`
+  # keeps the local-first default; enable services.ollama (opt-in) or point
+  # ollamaBaseUrl at an external Ollama to serve it.
   llm:
-    provider: ollama
-    ollamaHost: netops-ollama
-    ollamaPort: 11434
+    profile: local
+    # NETOPS_OLLAMA_BASE_URL. Empty = the chart's in-cluster ollama Service
+    # (http://<fullname>-ollama:<services.ollama.port>); set to dial an
+    # external Ollama endpoint instead.
+    ollamaBaseUrl: ""
+    # Optional NETOPS_LLM_LOCAL_MODEL override (Ollama model tag for the local
+    # profile); empty = the app default.
+    localModel: ""
   # OIDC/SSO non-secret coordinates (ADR-0028). The client SECRET is by-reference
   # only (secrets.keys.oidcClientSecret); issuer/clientId are non-secret.
   oidc:

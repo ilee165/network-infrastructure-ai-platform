@@ -47,11 +47,15 @@ data:
   # broker overrides). Under the Sentinel tier the URL above supersedes these.
   NETOPS_REDIS_HOST: {{ .Values.config.redis.host | quote }}
   NETOPS_REDIS_PORT: {{ .Values.config.redis.port | quote }}
-  # LLM provider (ADR-0009). When provider=ollama and services.ollama.enabled,
-  # the in-cluster ollama Service is dialed; otherwise an external provider.
-  NETOPS_LLM_PROVIDER: {{ .Values.config.llm.provider | quote }}
-  NETOPS_OLLAMA_HOST: {{ .Values.config.llm.ollamaHost | quote }}
-  NETOPS_OLLAMA_PORT: {{ .Values.config.llm.ollamaPort | quote }}
+  # LLM provider profile (ADR-0009) — REAL Settings keys (llm_profile /
+  # ollama_base_url; Settings has extra="ignore", so a wrong key here fails
+  # SILENTLY). profile=local dials Ollama at NETOPS_OLLAMA_BASE_URL, which
+  # defaults to the chart's in-cluster ollama Service (services.ollama, opt-in).
+  NETOPS_LLM_PROFILE: {{ .Values.config.llm.profile | quote }}
+  NETOPS_OLLAMA_BASE_URL: {{ include "netops.ollamaBaseUrl" . | quote }}
+  {{- with .Values.config.llm.localModel }}
+  NETOPS_LLM_LOCAL_MODEL: {{ . | quote }}
+  {{- end }}
   # OIDC/SSO non-secret coordinates (ADR-0028). The client SECRET is by-reference
   # only (secrets.keys.oidcClientSecret) — issuer/clientId are non-secret.
   NETOPS_OIDC_ENABLED: {{ .Values.config.oidc.enabled | quote }}
