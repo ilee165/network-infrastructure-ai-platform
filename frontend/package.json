@@ -20,7 +20,7 @@
     "cytoscape": "3.34.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
-    "react-router-dom": "6.30.4",
+    "react-router-dom": "7.18.1",
     "zustand": "5.0.14"
   },
   "devDependencies": {
