@@ -594,6 +594,39 @@ class TestFailurePath:
         assert audit_service.AUTOMATION_ROLLBACK_FAILED in actions
         assert audit_service.CHANGE_REQUEST_FAILED_TO_ROLLED_BACK not in actions
 
+    async def test_unexpected_executor_exception_marks_failed(
+        self,
+        service: ChangeRequestService,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """An executor raise after mark_executing must not strand the CR.
+
+        Before the fix, any unexpected exception escaping _apply_and_finalize
+        left the CR in 'executing' forever (execute() refuses non-'approved'
+        CRs and no reaper exists). The CR must land 'failed' with an
+        operator-alert audit row, and the original exception must propagate.
+        """
+
+        class _ExplodingExecutor:
+            async def apply(self, cr: ChangeRequest, plan: ChangePlan) -> ChangeResult:
+                raise RuntimeError("transport blew up mid-apply")
+
+        cr = await _approved_config_cr(service, sessionmaker)
+        agent = _config_agent(service, config_executor=_ExplodingExecutor())
+
+        with pytest.raises(RuntimeError, match="transport blew up mid-apply"):
+            await agent.execute(cr.id)
+
+        final = await service.get(cr.id)
+        assert final.state is ChangeRequestState.FAILED
+
+        rows = await _audit_rows(sessionmaker, cr.id)
+        actions = [row.action for row in rows]
+        assert audit_service.CHANGE_REQUEST_EXECUTING_TO_FAILED in actions
+        assert audit_service.AUTOMATION_ROLLBACK_FAILED in actions
+        alert = next(row for row in rows if row.action == audit_service.AUTOMATION_ROLLBACK_FAILED)
+        assert "unexpected RuntimeError" in alert.detail["reason"]
+
     async def test_ddi_failure_rolls_back(
         self,
         service: ChangeRequestService,

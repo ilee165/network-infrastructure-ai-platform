@@ -50,6 +50,8 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
+import structlog
+
 from app.agents.automation.executors import (
     ConfigChangeExecutor,
     DdiChangeExecutor,
@@ -83,6 +85,8 @@ from app.services.change_requests import (
     AutomationPrincipal,
     ChangeRequestService,
 )
+
+logger = structlog.get_logger(__name__)
 
 #: String id of this agent — equals its package name (REPO-STRUCTURE §4.1).
 AUTOMATION_NAME = "automation"
@@ -286,7 +290,15 @@ class AutomationAgent(BaseSpecialistAgent):
             ),
         )
 
-        final_state = await self._apply_and_finalize(cr, trace)
+        # From here the CR is 'executing'; an escaping exception would strand it
+        # there forever (execute() refuses non-'approved' CRs, and no reaper
+        # exists), so any unexpected raise is converted into an audited
+        # executing -> failed transition before propagating.
+        try:
+            final_state = await self._apply_and_finalize(cr, trace)
+        except Exception as exc:
+            await self._fail_unexpected(cr, trace, exc)
+            raise
         completed = await self._trace_recorder.complete(trace.trace_id)
         return ChangeExecutionResult(state=final_state, trace=completed)
 
@@ -508,6 +520,57 @@ class AutomationAgent(BaseSpecialistAgent):
             ),
         )
         return ChangeRequestState.FAILED
+
+    async def _fail_unexpected(
+        self, cr: ChangeRequest, trace: ReasoningTrace, exc: Exception
+    ) -> None:
+        """Best-effort executing -> failed salvage when the executor raised unexpectedly.
+
+        Mirrors :meth:`_fail_no_executor`'s fail-closed shape (mark failed +
+        operator-alert audit + trace conclusion), but every salvage step is
+        individually guarded: the original exception must propagate even when
+        the DB itself is what failed, so a salvage error is logged and swallowed
+        rather than allowed to mask the cause.
+        """
+        reason = f"unexpected {type(exc).__name__} during execution: {exc}"
+        try:
+            await self._svc.mark_failed(cr.id, principal=self._principal)
+        except Exception:
+            logger.exception(
+                "failed to mark change request failed after unexpected executor error",
+                change_request_id=str(cr.id),
+            )
+        try:
+            async with self._svc.sessionmaker() as session:
+                await audit.record(
+                    session,
+                    actor=self._principal.actor,
+                    action=audit.AUTOMATION_ROLLBACK_FAILED,
+                    target_type="change_request",
+                    target_id=str(cr.id),
+                    detail={"reason": reason, "target_refs": cr.target_refs},
+                    reasoning_trace_id=cr.reasoning_trace_id,
+                )
+                await session.commit()
+        except Exception:
+            logger.exception(
+                "failed to audit unexpected executor error",
+                change_request_id=str(cr.id),
+            )
+        try:
+            await self._trace_recorder.record_step(
+                trace.trace_id,
+                TraceStep(
+                    kind=TraceStepKind.CONCLUSION,
+                    summary=f"change request {cr.id} marked 'failed': {reason}",
+                ),
+            )
+            await self._trace_recorder.complete(trace.trace_id)
+        except Exception:
+            logger.exception(
+                "failed to record trace for unexpected executor error",
+                change_request_id=str(cr.id),
+            )
 
     async def _fail_no_executor(
         self, cr: ChangeRequest, trace: ReasoningTrace, *, reason: str
