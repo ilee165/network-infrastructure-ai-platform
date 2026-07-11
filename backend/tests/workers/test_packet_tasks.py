@@ -153,12 +153,20 @@ def test_capture_segment_redelivery_is_idempotent(
     first = tasks.capture_segment(requester, "eth0", None, None, None, capture_id)
     assert first["ok"] is True
     assert spawn_count["n"] == 1
+    completed_after_first = [
+        a for a in _fetch_all(db_url, AuditLog) if a.action == "packet.capture_completed"
+    ]
+    assert len(completed_after_first) == 1
 
     second = tasks.capture_segment(requester, "eth0", None, None, None, capture_id)
     assert second["ok"] is True
     assert second.get("idempotent") is True
     assert spawn_count["n"] == 1  # no second physical capture
     assert len(_fetch_all(db_url, PcapMetadata)) == 1
+    completed_after_second = [
+        a for a in _fetch_all(db_url, AuditLog) if a.action == "packet.capture_completed"
+    ]
+    assert len(completed_after_second) == 1  # no second completed audit
 
 
 def test_capture_segment_rejects_malicious_interface_and_audits(

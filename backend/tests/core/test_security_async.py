@@ -1,12 +1,12 @@
 """Wave-2: bcrypt helpers run off the event loop (perf #6 / H2)."""
+
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core.security import hash_password_async, verify_password_async, hash_password
+from app.core.security import hash_password, hash_password_async, verify_password_async
 
 
 @pytest.mark.asyncio

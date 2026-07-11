@@ -268,7 +268,7 @@ async def ingest_capture(
     device_id: UUID | None = None,
     capture_filter: str | None = None,
     retention_days: int = DEFAULT_RETENTION_DAYS,
-) -> PcapMetadata:
+) -> tuple[PcapMetadata, bool]:
     """Persist one finished capture's metadata row (ADR-0023 §3).
 
     Records the integrity ``sha256``, byte/packet counts, the on-volume
@@ -278,8 +278,12 @@ async def ingest_capture(
     entry the worker writes alongside it. ``device_id`` is ``None`` for a
     worker-side ``tcpdump`` capture (segment, not a device).
 
-    Idempotent under redelivery: ``ON CONFLICT (capture_id) DO NOTHING`` returns
-    the existing row when a prior delivery already claimed the id (H10).
+    Idempotent under redelivery: ``ON CONFLICT (capture_id) DO NOTHING``.
+
+    Returns:
+        ``(metadata, created)`` where *created* is ``True`` only when this call
+        inserted the row. Concurrent redelivery losers get ``created=False`` so
+        callers can skip a second ``packet.capture_completed`` audit.
     """
     now = utcnow()
     values = {
@@ -326,7 +330,7 @@ async def ingest_capture(
             capture_id=str(capture_id),
             existing_id=str(existing.id),
         )
-        return existing
+        return existing, False
     metadata = await session.get(PcapMetadata, inserted_id)
     assert metadata is not None  # noqa: S101 — just inserted
     await session.flush()
@@ -338,7 +342,7 @@ async def ingest_capture(
         packet_count=packet_count,
         sha256=sha256,
     )
-    return metadata
+    return metadata, True
 
 
 async def expired_capture_ids(session: AsyncSession, *, now: datetime | None = None) -> list[UUID]:

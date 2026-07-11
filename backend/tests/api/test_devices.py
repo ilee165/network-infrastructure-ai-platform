@@ -380,6 +380,45 @@ class TestDeviceUpdate:
             await update_device(device.id, body, session, user)
         session.rollback.assert_awaited()
 
+    async def test_patch_non_ip_integrity_error_uses_prior_mgmt_ip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After rollback, error message uses snapshotted mgmt_ip (no lazy load)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+
+        from sqlalchemy.exc import IntegrityError
+
+        from app.api.v1.devices import update_device
+        from app.core.errors import ConflictError
+        from app.models import Device, DeviceStatus
+        from app.schemas.devices import DeviceUpdate
+
+        device = Device(
+            id=uuid4(),
+            hostname="edge-1",
+            mgmt_ip="192.0.2.1",
+            status=DeviceStatus.NEW,
+        )
+        # No mgmt_ip in updates — exercises prior_mgmt_ip snapshot after rollback.
+        body = DeviceUpdate(hostname="edge-1-renamed")
+        user = MagicMock()
+        user.id = uuid4()
+        user.username = "engineer"
+        session = AsyncMock()
+        session.flush = AsyncMock(
+            side_effect=IntegrityError("UPDATE", {}, Exception("uq_devices_mgmt_ip"))
+        )
+        session.rollback = AsyncMock()
+
+        async def _get(_session: object, _device_id: object) -> Device:
+            return device
+
+        monkeypatch.setattr("app.api.v1.devices._get_device_or_404", _get)
+        with pytest.raises(ConflictError, match="192.0.2.1"):
+            await update_device(device.id, body, session, user)
+        session.rollback.assert_awaited()
+
 
 class TestDeviceDelete:
     async def test_engineer_deletes_device(

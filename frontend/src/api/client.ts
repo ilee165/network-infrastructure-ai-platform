@@ -36,8 +36,8 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * Combine a caller-supplied signal with a default timeout so either abort
- * cancels the in-flight fetch. Falls back to the timeout alone when
- * `AbortSignal.any` is unavailable (older runtimes).
+ * cancels the in-flight fetch. When `AbortSignal.any` is unavailable (e.g.
+ * Safari 16), manually fan-in both signals so the 30s default is never dropped.
  */
 function resolveSignal(caller?: AbortSignal | null): AbortSignal {
   const timeout = AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS);
@@ -50,7 +50,20 @@ function resolveSignal(caller?: AbortSignal | null): AbortSignal {
   if (typeof anyFactory === "function") {
     return anyFactory([caller, timeout]);
   }
-  return caller;
+  // Manual combine: abort if either the caller or the timeout fires.
+  const controller = new AbortController();
+  const onAbort = () => {
+    if (!controller.signal.aborted) {
+      controller.abort();
+    }
+  };
+  if (caller.aborted || timeout.aborted) {
+    controller.abort();
+    return controller.signal;
+  }
+  caller.addEventListener("abort", onAbort, { once: true });
+  timeout.addEventListener("abort", onAbort, { once: true });
+  return controller.signal;
 }
 
 /** Shape of the backend `{ access_token, token_type }` token responses. */

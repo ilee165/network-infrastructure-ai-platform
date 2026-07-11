@@ -35,4 +35,5 @@ def test_two_sequential_capability_calls_share_live_loop() -> None:
     # Same private loop reused across calls (not a new dead loop).
     assert cap._loop is first_loop
     assert cap._loop is not None and not cap._loop.is_closed()
-    cap._loop.run_until_complete(client.aclose())
+    cap.close()
+    assert cap._loop is None

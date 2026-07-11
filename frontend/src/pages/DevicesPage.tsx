@@ -46,8 +46,8 @@ const RUNS_COLS = 6;
 
 type RunStatusValue = RunStatus["status"];
 
-/** Page-level mapping from a discovery run's status to a StatusPill tone. */
-const RUN_VARIANT: Record<RunStatusValue, StatusPillVariant> = {
+/** Mapping from a discovery run's status to a StatusPill tone (exported for tests). */
+export const RUN_VARIANT: Record<RunStatusValue, StatusPillVariant> = {
   pending: "warn",
   running: "info",
   succeeded: "ok",

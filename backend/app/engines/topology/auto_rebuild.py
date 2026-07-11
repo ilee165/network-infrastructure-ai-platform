@@ -64,19 +64,22 @@ async def graph_freshness(client: Neo4jClient) -> tuple[int, int, datetime | Non
     """
 
     async def _read(tx: Any) -> tuple[int, int, datetime | None]:
-        result = await tx.run(
-            "MATCH (n) "
-            "OPTIONAL MATCH ()-[r]->() "
-            "RETURN count(DISTINCT n) AS nodes, count(r) AS edges, "
-            "max(n.last_projected_at) AS newest"
+        # Two independent aggregates — never ``MATCH (n) OPTIONAL MATCH ()-[r]->()``
+        # in one clause: that forms a Cartesian product and ``count(r)`` becomes
+        # N×E instead of E (CodeRabbit / Wave-2 review).
+        node_result = await tx.run(
+            "MATCH (n) RETURN count(n) AS nodes, max(n.last_projected_at) AS newest"
         )
-        record = await result.single()
-        if record is None:
+        node_record = await node_result.single()
+        if node_record is None:
             return 0, 0, None
-        newest = record["newest"]
+        edge_result = await tx.run("MATCH ()-[r]->() RETURN count(r) AS edges")
+        edge_record = await edge_result.single()
+        edges = int(edge_record["edges"]) if edge_record is not None else 0
+        newest = node_record["newest"]
         # neo4j returns a DateTime; normalize to a stdlib datetime when present.
         newest_dt = newest.to_native() if hasattr(newest, "to_native") else newest
-        return int(record["nodes"]), int(record["edges"]), newest_dt
+        return int(node_record["nodes"]), edges, newest_dt
 
     return await client.execute_read(_read)
 

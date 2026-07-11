@@ -598,7 +598,7 @@ class TestCriterion5PcapRetentionTombstonesAndAudits:
                 started_at=started,
                 ended_at=started + timedelta(minutes=5),
                 retention_days=30,
-            )
+            )  # return value unused — worklist uses capture_id only
             await session.commit()
 
         # The retention worklist surfaces exactly this capture as expired.

@@ -259,7 +259,7 @@ async def _persist_capture(
         existing = await claim_or_get_capture(session, capture_id)
         if existing is not None:
             return existing
-        metadata = await ingest_capture(
+        metadata, created = await ingest_capture(
             session,
             capture_id=capture_id,
             requester_id=requester_id,
@@ -274,21 +274,24 @@ async def _persist_capture(
             capture_filter=capture_filter,
             retention_days=retention_days,
         )
-        await audit.record(
-            session,
-            actor=_ACTOR,
-            action=_CAPTURE_COMPLETED,
-            target_type="pcap_metadata",
-            target_id=str(metadata.id),
-            detail={
-                "capture_id": str(capture_id),
-                "device_id": str(device_id) if device_id is not None else None,
-                "interface": interface,
-                "byte_count": byte_count,
-                "sha256": sha256,
-            },
-        )
-        await session.commit()
+        # Concurrent redelivery losers hit ON CONFLICT with created=False —
+        # skip the completed audit so one capture never gets two completion rows.
+        if created:
+            await audit.record(
+                session,
+                actor=_ACTOR,
+                action=_CAPTURE_COMPLETED,
+                target_type="pcap_metadata",
+                target_id=str(metadata.id),
+                detail={
+                    "capture_id": str(capture_id),
+                    "device_id": str(device_id) if device_id is not None else None,
+                    "interface": interface,
+                    "byte_count": byte_count,
+                    "sha256": sha256,
+                },
+            )
+            await session.commit()
         return metadata
 
 

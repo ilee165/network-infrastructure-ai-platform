@@ -140,10 +140,11 @@ describe("apiFetch — single-flight refresh (concurrent 401s)", () => {
 });
 
 describe("apiFetch — AbortSignal / timeout (M34)", () => {
-  it("forwards a caller AbortSignal so cancelled requests reject", async () => {
+  it("forwards a combined signal so caller abort cancels the request", async () => {
     const controller = new AbortController();
+    let fetchSignal: AbortSignal | undefined;
     const mock = vi.fn((_url: string, init?: RequestInit) => {
-      // Abort immediately after fetch is called with the signal.
+      fetchSignal = init?.signal ?? undefined;
       return new Promise<Response>((_resolve, reject) => {
         const signal = init?.signal;
         if (signal?.aborted) {
@@ -158,10 +159,11 @@ describe("apiFetch — AbortSignal / timeout (M34)", () => {
     vi.stubGlobal("fetch", mock);
     useAuthStore.setState({ accessToken: "tok", user: null, status: "authed" });
     const pending = apiFetch("/devices", { signal: controller.signal });
+    // Combined signal is not the caller's alone (timeout is fan-in'd).
+    expect(fetchSignal).toBeDefined();
+    expect(fetchSignal).not.toBe(controller.signal);
     controller.abort();
     await expect(pending).rejects.toThrow();
     expect(mock).toHaveBeenCalled();
-    const init = mock.mock.calls[0]?.[1] as RequestInit | undefined;
-    expect(init?.signal).toBeDefined();
   });
 });

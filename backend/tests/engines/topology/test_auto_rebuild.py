@@ -38,6 +38,23 @@ class _FakeClient:
         self.closed = True
 
 
+# --- graph_freshness Cypher shape (no Cartesian product) -------------------
+
+
+def test_graph_freshness_query_separates_node_and_edge_aggregates() -> None:
+    """Regression: a single MATCH/OPTIONAL MATCH pair yields N×E for count(r)."""
+    import inspect
+
+    source = inspect.getsource(auto_rebuild.graph_freshness)
+    # Live Cypher strings must aggregate independently (not Cartesian product).
+    assert '"MATCH (n) RETURN count(n)' in source or "'MATCH (n) RETURN count(n)" in source
+    assert "MATCH ()-[r]->() RETURN count(r)" in source
+    # The buggy combined form must not appear as an executed query string.
+    assert 'OPTIONAL MATCH ()-[r]->()' not in source.replace(
+        "never ``MATCH (n) OPTIONAL MATCH ()-[r]->()``", ""
+    )
+
+
 # --- staleness gate -------------------------------------------------------
 
 

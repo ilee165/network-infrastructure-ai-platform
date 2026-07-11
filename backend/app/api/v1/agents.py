@@ -367,17 +367,17 @@ async def _load_traces(
     return [await recorder.get(row_id.hex) for row_id in rows]
 
 
-async def _load_steps_after(
+async def _load_session_steps(
     sessionmaker: async_sessionmaker[AsyncSession],
     session_id: uuid.UUID,
-    after_count: int,
 ) -> list[TraceStep]:
-    """Load durable steps for *session_id* with global offset *after_count*.
+    """Load every durable step for *session_id* in a single query.
 
-    Single query (no N+1 full-trace reload): steps ordered by parent-trace
-    start then ordinal, skipping the *after_count* already emitted. Used by the
-    WS fallback poll so Redis pub/sub carries liveness while the DB only
-    supplies the durability tail (perf #4).
+    Avoids the prior N+1 full-trace reload (one ``recorder.get`` per trace).
+    Offset-based cursors are **not** used: concurrent specialist traces can
+    insert steps that reorder under ``(started_at, id, ordinal)``, and a
+    global offset would skip mid-list inserts. Dedup is the caller's
+    ``emitted_keys`` set (same as live Redis frames).
     """
     from app.agents.framework.traces import EvidenceRef
     from app.agents.framework.traces import TraceStepKind as FrameworkStepKind
@@ -397,7 +397,6 @@ async def _load_steps_after(
                         ReasoningTraceRow.id,
                         ReasoningTraceStep.ordinal,
                     )
-                    .offset(after_count)
                 )
             )
             .scalars()
@@ -680,20 +679,18 @@ async def stream_session(
     pending_live: asyncio.Task[AgentStreamFrame] | None = None
     async with fanout.subscribe(str(session_id)) as live_frames:
         await websocket.accept()
-        emitted = 0
         try:
             for _ in range(_STREAM_MAX_POLLS):
                 row = await _load_session_or_404(sessionmaker, session_id)
                 status = row.status
-                # Durable tail only: steps newer than the cursor (single query).
-                new_steps = await _load_steps_after(sessionmaker, session_id, emitted)
-                for step in new_steps:
+                # Durable replay: one query for all steps (no N+1); skip via keys.
+                steps = await _load_session_steps(sessionmaker, session_id)
+                for step in steps:
                     data = _step_read(step).model_dump(mode="json")
                     key = _step_frame_key(data)
                     if key not in emitted_keys:
                         emitted_keys.add(key)
                         await websocket.send_json(data)
-                    emitted += 1
                 # Liveness: relay any live frames already fanned out for this session
                 # (ADR-0044 §2). Done on EVERY iteration — including the terminal one —
                 # so a frame that arrived on the wire just before the run finished is

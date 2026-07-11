@@ -198,13 +198,16 @@ async def update_device(
         await _ensure_mgmt_ip_free(session, updates["mgmt_ip"], exclude_id=device.id)
     if updates.get("credential_id") is not None:
         await _ensure_credential_exists(session, updates["credential_id"])
+    # Snapshot before flush: after rollback the ORM instance is expired and
+    # lazy-loading ``device.mgmt_ip`` can raise MissingGreenlet on async sessions.
+    prior_mgmt_ip = device.mgmt_ip
     for field, value in updates.items():
         setattr(device, field, value)
     try:
         await session.flush()
     except IntegrityError as exc:  # concurrent rename slipping past the pre-check
         await session.rollback()
-        mgmt_ip = updates.get("mgmt_ip", device.mgmt_ip)
+        mgmt_ip = updates.get("mgmt_ip", prior_mgmt_ip)
         raise ConflictError(f"a device with mgmt_ip {mgmt_ip} already exists") from exc
     await audit.record(
         session,

@@ -414,9 +414,8 @@ describe("ChatPage — unmount during stream open (M24)", () => {
 
     await waitFor(() => {
       const late = MockWebSocket.instances.find((s) => s.url.includes("late-ticket"));
-      if (late) {
-        expect(late.closed).toBe(true);
-      }
+      expect(late).toBeDefined();
+      expect(late!.closed).toBe(true);
     });
   });
 });

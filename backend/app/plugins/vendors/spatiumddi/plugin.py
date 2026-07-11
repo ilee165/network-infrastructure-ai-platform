@@ -35,6 +35,7 @@ the caller may already own, so there is no nested-loop hazard.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -205,6 +206,18 @@ class _SpatiumCapability(PluginCapability):
         if self._loop is None or self._loop.is_closed():
             self._loop = asyncio.new_event_loop()
         return self._loop.run_until_complete(coro)
+
+    def close(self) -> None:
+        """Close the session loop and the underlying httpx client (best-effort).
+
+        Discovery runners should call this when the device session ends so the
+        private loop and connection pool are not leaked for the process lifetime.
+        """
+        if self._loop is not None and not self._loop.is_closed():
+            with contextlib.suppress(Exception):
+                self._loop.run_until_complete(self._client.aclose())
+            self._loop.close()
+        self._loop = None
 
     def _record_json(self, command: str, payload: Any) -> None:
         """Record a REST payload verbatim (canonical JSON) before parsing."""
