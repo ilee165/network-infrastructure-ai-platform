@@ -125,7 +125,8 @@ QUEUE_REDELIVERY_RATIONALE: dict[str, str] = {
         "Operational tasks only. ``system.healthcheck`` is read-only; "
         "``credentials.re_wrap_keys`` is a confirm-then-swap KEK re-wrap that is "
         "idempotent by construction (already-active-version rows are skipped, the "
-        "decrypted payload is byte-identical), so a redelivery re-wraps nothing new."
+        "decrypted payload is byte-identical), so a redelivery re-wraps nothing new. "
+        "``system.ensure_partitions`` is idempotent DDL (CREATE TABLE IF NOT EXISTS)."
     ),
 }
 
@@ -144,6 +145,7 @@ def create_celery_app() -> Celery:
             "app.workers.tasks.config",
             "app.workers.tasks.packet",
             "app.workers.tasks.credentials",
+            "app.workers.tasks.maintenance",
         ],
         # M5+: ".docs"
     )
@@ -225,6 +227,15 @@ def create_celery_app() -> Celery:
                     hour=str(settings.raw_artifact_retention_hour),
                     minute=str(settings.raw_artifact_retention_minute),
                 ),
+            },
+            # monthly-partition pre-creation (H4, 2026-07-10 review): guarantee the
+            # current+next monthly partitions exist for the four range-partitioned
+            # tables (ADR-0011) so rows never leak into the DEFAULT partition.
+            # Daily + idempotent (CREATE TABLE IF NOT EXISTS); PG-only, no-op
+            # elsewhere. Fixed 00:20 UTC — before the retention sweeps.
+            "partition-precreate": {
+                "task": "system.ensure_partitions",
+                "schedule": crontab(hour="0", minute="20"),
             },
             # queue-depth sampling (W3-T0, ADR-0015 §2 / ADR-0046 §1/§5): refresh the
             # ``netops_celery_queue_depth`` saturation gauge from each work queue's
