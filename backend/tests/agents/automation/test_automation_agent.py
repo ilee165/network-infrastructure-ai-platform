@@ -50,7 +50,7 @@ from app.agents.automation.executors import (
 )
 from app.agents.framework.registry import AgentRegistry
 from app.agents.framework.tools import ToolClassification
-from app.agents.framework.traces import InMemoryTraceRecorder, TraceStepKind
+from app.agents.framework.traces import InMemoryTraceRecorder, TraceStep, TraceStepKind
 from app.core.security import Role
 from app.models import (
     AuditLog,
@@ -168,6 +168,15 @@ class _ScriptedDdiExecutor:
     async def apply(self, cr: ChangeRequest, draft: ChangeRequestDraft) -> DdiChangeResult:
         self.calls.append((cr, draft))
         return self._result_factory(cr, draft)
+
+
+def _raiser(exc: Exception) -> Any:
+    """An async callable that raises *exc* — for salvage failure injection."""
+
+    async def _fail(*args: Any, **kwargs: Any) -> Any:
+        raise exc
+
+    return _fail
 
 
 def _applied_result(cr: ChangeRequest, plan: ChangePlan) -> ChangeResult:
@@ -604,17 +613,21 @@ class TestFailurePath:
         Before the fix, any unexpected exception escaping _apply_and_finalize
         left the CR in 'executing' forever (execute() refuses non-'approved'
         CRs and no reaper exists). The CR must land 'failed' with an
-        operator-alert audit row, and the original exception must propagate.
+        operator-alert audit row, the trace must be completed, and the original
+        exception must propagate. The persisted reason carries only the
+        exception TYPE — never str(exc), which can embed credential-bearing
+        transport text (CodeRabbit PR #140).
         """
 
         class _ExplodingExecutor:
             async def apply(self, cr: ChangeRequest, plan: ChangePlan) -> ChangeResult:
-                raise RuntimeError("transport blew up mid-apply")
+                raise RuntimeError("https://admin:s3cret-leak@device mid-apply")
 
+        recorder = InMemoryTraceRecorder()
         cr = await _approved_config_cr(service, sessionmaker)
-        agent = _config_agent(service, config_executor=_ExplodingExecutor())
+        agent = _config_agent(service, config_executor=_ExplodingExecutor(), recorder=recorder)
 
-        with pytest.raises(RuntimeError, match="transport blew up mid-apply"):
+        with pytest.raises(RuntimeError, match="mid-apply"):
             await agent.execute(cr.id)
 
         final = await service.get(cr.id)
@@ -625,7 +638,130 @@ class TestFailurePath:
         assert audit_service.CHANGE_REQUEST_EXECUTING_TO_FAILED in actions
         assert audit_service.AUTOMATION_ROLLBACK_FAILED in actions
         alert = next(row for row in rows if row.action == audit_service.AUTOMATION_ROLLBACK_FAILED)
-        assert "unexpected RuntimeError" in alert.detail["reason"]
+        assert alert.detail["reason"] == "unexpected RuntimeError during execution"
+        assert "s3cret-leak" not in str(alert.detail)
+
+        # The trace was concluded + completed despite the failure, with no
+        # exception text persisted in any step.
+        (trace,) = recorder._traces.values()
+        assert trace.completed_at is not None
+        assert any(step.kind is TraceStepKind.CONCLUSION for step in trace.steps)
+        assert all("s3cret-leak" not in step.summary for step in trace.steps)
+
+    @pytest.mark.parametrize("broken", ["mark_failed", "audit", "trace"])
+    async def test_salvage_step_failures_never_mask_the_executor_error(
+        self,
+        service: ChangeRequestService,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        broken: str,
+    ) -> None:
+        """Each best-effort salvage step may itself fail; the ORIGINAL executor
+        exception must still propagate (never the salvage error), and the
+        salvage steps that did not break must still take effect."""
+
+        class _ExplodingExecutor:
+            async def apply(self, cr: ChangeRequest, plan: ChangePlan) -> ChangeResult:
+                raise RuntimeError("transport blew up mid-apply")
+
+        class _FailedStepRaisingRecorder(InMemoryTraceRecorder):
+            """Raises only on the salvage conclusion step, so the pre-executor
+            PLAN steps still record and the executor genuinely runs."""
+
+            async def record_step(self, trace_id: str, step: TraceStep) -> Any:
+                if "marked 'failed'" in step.summary:
+                    raise OSError("trace store down")
+                return await super().record_step(trace_id, step)
+
+        recorder: InMemoryTraceRecorder = (
+            _FailedStepRaisingRecorder() if broken == "trace" else InMemoryTraceRecorder()
+        )
+        cr = await _approved_config_cr(service, sessionmaker)
+        agent = _config_agent(service, config_executor=_ExplodingExecutor(), recorder=recorder)
+
+        if broken == "mark_failed":
+            monkeypatch.setattr(
+                service,
+                "mark_failed",
+                _raiser(OSError("db down during mark_failed")),
+            )
+        elif broken == "audit":
+            from app.agents.automation import agent as agent_module
+
+            real_record = agent_module.audit.record
+
+            async def _record_but_fail_alert(*args: Any, **kwargs: Any) -> Any:
+                # Break ONLY the salvage operator-alert write; the service's own
+                # lifecycle audits (mark_executing/mark_failed) stay intact.
+                if kwargs.get("action") == audit_service.AUTOMATION_ROLLBACK_FAILED:
+                    raise OSError("db down during audit")
+                return await real_record(*args, **kwargs)
+
+            monkeypatch.setattr(agent_module.audit, "record", _record_but_fail_alert)
+
+        with pytest.raises(RuntimeError, match="transport blew up mid-apply"):
+            await agent.execute(cr.id)
+
+        final = await service.get(cr.id)
+        rows = await _audit_rows(sessionmaker, cr.id)
+        actions = [row.action for row in rows]
+        if broken == "mark_failed":
+            # The failure transition itself broke — the CR stays 'executing'
+            # (nothing can be done), but the operator alert still lands.
+            assert final.state is ChangeRequestState.EXECUTING
+            assert audit_service.AUTOMATION_ROLLBACK_FAILED in actions
+        elif broken == "audit":
+            assert final.state is ChangeRequestState.FAILED
+            assert audit_service.AUTOMATION_ROLLBACK_FAILED not in actions
+        else:
+            assert final.state is ChangeRequestState.FAILED
+            assert audit_service.AUTOMATION_ROLLBACK_FAILED in actions
+
+    async def test_terminal_state_preserved_when_trace_fails_after_completion(
+        self,
+        service: ChangeRequestService,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A trace write failing AFTER mark_completed must not report failure.
+
+        The CR really completed; salvage must preserve the terminal outcome —
+        no executing->failed attempt, no AUTOMATION_ROLLBACK_FAILED operator
+        alert, no raised error — and execute() returns state=COMPLETED
+        (CodeRabbit PR #140).
+        """
+
+        class _FlakyOnceRecorder(InMemoryTraceRecorder):
+            """Raises on the FIRST post-completion conclusion step only."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.tripped = False
+
+            async def record_step(self, trace_id: str, step: TraceStep) -> Any:
+                if not self.tripped and "-> completed" in step.summary:
+                    self.tripped = True
+                    raise OSError("trace store hiccup after mark_completed")
+                return await super().record_step(trace_id, step)
+
+        recorder = _FlakyOnceRecorder()
+        cr = await _approved_config_cr(service, sessionmaker)
+        config_exec = _ScriptedConfigExecutor(_applied_result)
+        agent = _config_agent(service, config_executor=config_exec, recorder=recorder)
+
+        result = await agent.execute(cr.id)
+
+        assert recorder.tripped  # the injected fault actually fired
+        assert result.state is ChangeRequestState.COMPLETED
+        assert result.trace.completed_at is not None
+
+        final = await service.get(cr.id)
+        assert final.state is ChangeRequestState.COMPLETED
+
+        actions = [row.action for row in await _audit_rows(sessionmaker, cr.id)]
+        assert audit_service.CHANGE_REQUEST_EXECUTING_TO_COMPLETED in actions
+        # Never the false operator alert, never a failure transition.
+        assert audit_service.AUTOMATION_ROLLBACK_FAILED not in actions
+        assert audit_service.CHANGE_REQUEST_EXECUTING_TO_FAILED not in actions
 
     async def test_ddi_failure_rolls_back(
         self,
