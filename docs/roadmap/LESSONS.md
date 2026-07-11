@@ -84,6 +84,83 @@ layer cache).
 
 ---
 
+## Backend / async / review hygiene
+
+### L-ASYNC-1 — After `session.rollback()`, never touch expired ORM attributes
+
+**Bit us:** Wave 2 devices IntegrityError handler did
+`updates.get("mgmt_ip", device.mgmt_ip)` **after** `await session.rollback()`.
+On async SQLAlchemy that lazy-loads expired attrs and can raise
+`MissingGreenlet` (or silently mis-report). CodeRabbit flagged on PR #141.
+
+**Rule:** Snapshot any fields needed for the error message **before**
+`flush`/`rollback`. Prefer request-body values (`body.mgmt_ip`) over
+re-reading the expired instance.
+
+**Hits next:** Any create/update path that maps `IntegrityError` → 409.
+
+### L-CYPHER-1 — Never `MATCH (n) OPTIONAL MATCH ()-[r]->()` for dual counts
+
+**Bit us:** Wave 2 `graph_freshness` used one Cypher with both clauses;
+`count(r)` becomes **N×E** (Cartesian), so the topology edge gauge was wrong
+on every healthy no-op tick — worse than hard-coding 0.
+
+**Rule:** Aggregate nodes and edges in **separate** queries (or a pattern that
+binds `r` to `n`). Add a source-shape regression if the query is easy to
+re-break.
+
+**Hits next:** Any Neo4j metric / freshness / inventory count path.
+
+### L-CURSOR-1 — Offset cursors skip interleaved ordered inserts
+
+**Bit us:** WS durable replay used `OFFSET emitted` on steps ordered by
+`(trace.started_at, id, ordinal)`. Concurrent specialist traces can insert a
+step that sorts **before** already-emitted later rows; offset then **skips** it
+forever (dedupe keys cannot recover a never-loaded row).
+
+**Rule:** For multi-writer ordered streams, either load all rows and dedupe by
+stable key, or use a **seek cursor** on a monotonic unique key — not a pure
+offset into a reorderable list.
+
+**Hits next:** Any poll/replay over multi-trace or multi-shard ordered data.
+
+### L-IDEM-1 — Idempotent insert must return created vs existing for audit
+
+**Bit us:** Packet `ON CONFLICT DO NOTHING` returned the existing row, but
+the worker still wrote `packet.capture_completed` — concurrent redelivery
+could double-audit even when the row was unique.
+
+**Rule:** Claim/upsert helpers return `(row, created: bool)`; emit
+started/completed audits **only** when `created`. Assert audit row counts in
+redelivery tests, not only side-effect counters.
+
+**Hits next:** Celery `acks_late` / claim-before-work tasks (config backup
+pattern is the precedent).
+
+### L-CI-1 — Always `ruff check` on **new** test files before push
+
+**Bit us:** PR #141 backend job failed only on `tests/core/test_security_async.py`
+(I001 import order + F401 unused `asyncio`) written via shell heredoc without
+ruff.
+
+**Rule:** After adding any new module/test: `ruff check <path> --fix` and
+`ruff format`. New files are the highest-risk for unrun lint.
+
+**Hits next:** Every wave that scaffolds tests with write tools / shell.
+
+### L-TEST-1 — Do not duplicate production mappings in FE tests
+
+**Bit us:** `discovery-partial-status.test.tsx` re-declared `RUN_VARIANT`
+locally; production could drop `"partial"` and the test stayed green.
+
+**Rule:** Export the production map (or render the real page with fixtures)
+and import it in the test. Vacuous `if (found)` guards around expects are
+also forbidden — assert presence first.
+
+**Hits next:** StatusPill / enum drift tests.
+
+---
+
 ## Related
 
 | Doc | Scope |
@@ -92,3 +169,4 @@ layer cache).
 | `P1-W4-LESSONS.md` | Helm/K8s GA chart wave (L1–L8) |
 | `docs/security/image-supply-chain.md` | Trivy / SBOM / cosign / admission controls |
 | `deploy/docker/frontend.Dockerfile` | `apk upgrade` cache-bust comment mechanism |
+| `docs/reviews/WAVE2-PLAN.md` / PR #141 | Source of L-ASYNC-1 … L-TEST-1 |
