@@ -1828,8 +1828,8 @@ pytz==2026.2 \
     --hash=sha256:04156e608bee23d3792fd45c94ae47fae1036688e75032eea2e3bf0323d1f126 \
     --hash=sha256:0e60b47b29f21574376f218fe21abc009894a2321ea16c6754f3cad6eb7cdd6a
     # via neo4j
-pyvmomi==8.0.3.0.1 \
-    --hash=sha256:db795c960159cfa3c81e6af4cf1f46618e61cf0349db1666de75df98a4f29c69
+pyvmomi==9.1.0.0 \
+    --hash=sha256:f4b024baa7e5179d14f350dd006b788365e4aaadf15850e36024945a114db92b
     # via netops-backend (pyproject.toml)
 pyyaml==6.0.3 \
     --hash=sha256:00c4bdeba853cc34e7dd471f16b4114f4162dc03e6b7afcc2128711f0eca823c \

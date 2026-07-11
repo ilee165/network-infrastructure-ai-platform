@@ -73,7 +73,7 @@ dependencies = [
     # estates); the exact version is resolved in requirements.lock.txt (same
     # commit) so the drift gate + supply-chain scanning cover it from day one.
     # pyVmomi ships pure-Python wheels (air-gap-mirrorable, no build toolchain).
-    "pyvmomi>=8.0,<9",
+    "pyvmomi>=8.0,<10",
     # Declarative compliance policies (M4, ADR-0018): YAML rule documents
     "pyyaml",
     # Packet-analysis self-confining executor (ADR-0049): libseccomp Python
