@@ -68,6 +68,7 @@ from app.engines.packet import (
     build_eos_capture_commands,
     build_eos_finalize_commands,
     build_tcpdump_argv,
+    claim_or_get_capture,
     expired_capture_ids,
     ingest_capture,
     pcap_path_for,
@@ -228,6 +229,12 @@ class _CaptureRecord:
     byte_count: int
 
 
+async def _existing_capture(capture_id: UUID) -> PcapMetadata | None:
+    """Return a pre-existing metadata row for *capture_id* (redelivery guard)."""
+    async with _session() as session:
+        return await claim_or_get_capture(session, capture_id)
+
+
 async def _persist_capture(
     *,
     capture_id: UUID,
@@ -242,10 +249,17 @@ async def _persist_capture(
     device_id: UUID | None,
     capture_filter: str | None,
     retention_days: int,
-) -> None:
-    """Persist the metadata row and audit the completed capture (atomic)."""
+) -> PcapMetadata:
+    """Persist the metadata row and audit the completed capture (atomic).
+
+    Idempotent under redelivery: if a prior delivery already claimed
+    *capture_id*, returns the existing row without a second completed audit.
+    """
     async with _session() as session:
-        metadata = await ingest_capture(
+        existing = await claim_or_get_capture(session, capture_id)
+        if existing is not None:
+            return existing
+        metadata, created = await ingest_capture(
             session,
             capture_id=capture_id,
             requester_id=requester_id,
@@ -260,21 +274,25 @@ async def _persist_capture(
             capture_filter=capture_filter,
             retention_days=retention_days,
         )
-        await audit.record(
-            session,
-            actor=_ACTOR,
-            action=_CAPTURE_COMPLETED,
-            target_type="pcap_metadata",
-            target_id=str(metadata.id),
-            detail={
-                "capture_id": str(capture_id),
-                "device_id": str(device_id) if device_id is not None else None,
-                "interface": interface,
-                "byte_count": byte_count,
-                "sha256": sha256,
-            },
-        )
-        await session.commit()
+        # Concurrent redelivery losers hit ON CONFLICT with created=False —
+        # skip the completed audit so one capture never gets two completion rows.
+        if created:
+            await audit.record(
+                session,
+                actor=_ACTOR,
+                action=_CAPTURE_COMPLETED,
+                target_type="pcap_metadata",
+                target_id=str(metadata.id),
+                detail={
+                    "capture_id": str(capture_id),
+                    "device_id": str(device_id) if device_id is not None else None,
+                    "interface": interface,
+                    "byte_count": byte_count,
+                    "sha256": sha256,
+                },
+            )
+            await session.commit()
+        return metadata
 
 
 async def _audit_failure(
@@ -358,6 +376,19 @@ def capture_segment(
     """
     settings = _settings()
     cid: uuid.UUID = uuid.UUID(capture_id) if capture_id else uuid.uuid4()
+    # Redelivery guard: if a prior delivery already persisted this capture_id,
+    # return success without re-running the physical capture (H10 / task_acks_late).
+    existing = asyncio.run(_existing_capture(cid))
+    if existing is not None:
+        logger.info("packet.segment_capture_idempotent", capture_id=str(cid))
+        return {
+            "ok": True,
+            "capture_id": str(cid),
+            "storage_path": existing.storage_path,
+            "sha256": existing.sha256,
+            "byte_count": existing.byte_count,
+            "idempotent": True,
+        }
     storage_path = pcap_path_for(cid, pcap_dir=settings.pcap_dir)
     started_at = utcnow()
     try:
@@ -435,6 +466,17 @@ def capture_device(
     settings = _settings()
     cid: uuid.UUID = uuid.UUID(capture_id) if capture_id else uuid.uuid4()
     device_uuid = uuid.UUID(device_id)
+    existing = asyncio.run(_existing_capture(cid))
+    if existing is not None:
+        logger.info("packet.device_capture_idempotent", capture_id=str(cid))
+        return {
+            "ok": True,
+            "capture_id": str(cid),
+            "storage_path": existing.storage_path,
+            "sha256": existing.sha256,
+            "byte_count": existing.byte_count,
+            "idempotent": True,
+        }
     storage_path = pcap_path_for(cid, pcap_dir=settings.pcap_dir)
     started_at = utcnow()
     try:

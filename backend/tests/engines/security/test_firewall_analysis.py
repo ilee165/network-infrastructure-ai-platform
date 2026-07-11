@@ -335,6 +335,40 @@ class TestPosture:
         assert len(mgmt) == 1
         assert mgmt[0].severity is FindingSeverity.HIGH
 
+    def test_management_plane_any_service_from_any_source_is_high(self) -> None:
+        """Wildcard service dimension must not miss the management-plane HIGH."""
+        rules = [
+            _rule(
+                "permit-any-svc",
+                action=FirewallAction.ALLOW,
+                destination_addresses=("core-1",),
+                services=("any",),
+                logging=True,
+            )
+        ]
+        findings = analyze_security_posture(rules)
+        mgmt = [f for f in findings if "management-plane" in f.rationale]
+        assert len(mgmt) == 1
+        assert mgmt[0].severity is FindingSeverity.HIGH
+
+    def test_any_any_any_rule_is_not_a_management_plane_posture_finding(self) -> None:
+        """A fully wildcard allow (any src -> any dst -> any svc) must NOT emit
+        the inferred mgmt-plane posture HIGH: that rule shape is already the
+        canonical HIGH overly-permissive finding, and double-reporting it is a
+        posture false positive per the P2-W5-T1 precision corpus."""
+        rules = [
+            _rule(
+                "permit-any-any",
+                action=FirewallAction.ALLOW,
+                source_addresses=("any",),
+                destination_addresses=("any",),
+                services=("any",),
+                logging=True,
+            )
+        ]
+        findings = analyze_security_posture(rules)
+        assert [f for f in findings if "management-plane" in f.rationale] == []
+
     def test_management_plane_from_specific_source_is_not_flagged(self) -> None:
         rules = [
             _rule(

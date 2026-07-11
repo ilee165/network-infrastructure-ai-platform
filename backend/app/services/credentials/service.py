@@ -237,7 +237,9 @@ async def _audit_provider_unavailable(
     caller — never replaced by the audit DB error (CR8); the lost audit row is
     logged (coarse reason class only) but does not mask the fail-closed 503.
     """
-    try:
+    from app.services.audit.fail_closed import audit_fail_closed
+
+    async def _write() -> None:
         if sessionmaker is not None:
             async with sessionmaker() as audit_session:
                 await audit.record(
@@ -258,17 +260,9 @@ async def _audit_provider_unavailable(
             target_id=target_id,
             detail={"reason_class": exc.reason_class},
         )
-    except Exception as audit_exc:  # noqa: BLE001 - never mask the original 503
-        # CR8: if the audit record/commit itself fails (e.g. the audit DB is also
-        # down), preserve the ORIGINAL KeyProviderUnavailable the caller must see
-        # -- a fail-closed 503 -- rather than letting the audit DB error replace
-        # it. The lost audit row is logged (coarse class only, no key material) but
-        # does not change the failure surfaced to the caller.
-        _logger.error(
-            "kek.provider.unavailable.audit_failed",
-            reason_class=exc.reason_class,
-            audit_error_class=type(audit_exc).__name__,
-        )
+
+    # CR8 / H11: audit-path failure must never replace KeyProviderUnavailable.
+    await audit_fail_closed(_write, reason_class=exc.reason_class)
 
 
 async def audit_provider_select(

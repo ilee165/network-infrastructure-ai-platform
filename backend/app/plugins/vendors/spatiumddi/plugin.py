@@ -34,7 +34,6 @@ the caller may already own, so there is no nested-loop hazard.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -188,16 +187,22 @@ class _SpatiumCapability(PluginCapability):
         self._device_id = device_id
         self._ctx = context or SpatiumContext()
 
-    @staticmethod
-    def _run(coro: Coroutine[Any, Any, _T]) -> _T:
-        """Run *coro* to completion on a private event loop (sync bridge).
+    def _run(self, coro: Coroutine[Any, Any, _T]) -> _T:
+        """Run *coro* on the shared :class:`SpatiumClient` private event loop.
 
-        A fresh loop is used so we never assume — or clobber — a loop the caller
-        already owns. The capability methods are invoked from synchronous
-        contexts (discovery runner, conformance suite); the production
-        async-executor path calls the client directly, not through these.
+        Loop ownership lives on the client (one pool → one loop) so multiple
+        capability classes over the same client never bind httpx to two loops
+        (H9). The production async-executor path calls the client directly.
         """
-        return asyncio.run(coro)
+        return self._client.run_sync(coro)
+
+    def close(self) -> None:
+        """Close the shared client loop + httpx pool (idempotent).
+
+        Safe to call from any capability over the same client; subsequent
+        siblings see a closed client and should not issue further work.
+        """
+        self._client.close_sync()
 
     def _record_json(self, command: str, payload: Any) -> None:
         """Record a REST payload verbatim (canonical JSON) before parsing."""

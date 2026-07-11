@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
 import structlog
-from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction, AsyncSession
+from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncSession
 from neo4j.exceptions import DriverError, Neo4jError, ServiceUnavailable, SessionExpired
 
 from app.core.config import Settings, get_settings
@@ -150,16 +150,18 @@ class Neo4jClient:
 
         Single attempt (no retry/backoff) so readiness probes stay within their
         timeout budget. Never raises for connectivity-class failures.
+
+        Uses an unmanaged auto-commit ``session.run`` on purpose: the managed
+        ``execute_read`` API retries ``ServiceUnavailable`` INSIDE the driver
+        (``max_transaction_retry_time``, jittered sleeps of 30s+), which turns
+        an unreachable graph into a 30-90s block — well past any probe budget
+        and past the suite's 60s pytest-timeout for self-skipping live tests.
         """
-
-        async def _ping(tx: AsyncManagedTransaction) -> bool:
-            result = await tx.run("RETURN 1 AS ok")
-            record = await result.single()
-            return record is not None and record["ok"] == 1
-
         try:
             async with self.session() as session:
-                return bool(await session.execute_read(_ping))
+                result = await session.run("RETURN 1 AS ok")
+                record = await result.single()
+                return record is not None and record["ok"] == 1
         except (Neo4jError, DriverError, OSError) as exc:
             logger.warning("neo4j_health_check_failed", error=type(exc).__name__)
             return False

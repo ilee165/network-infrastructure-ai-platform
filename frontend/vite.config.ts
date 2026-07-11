@@ -28,5 +28,23 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     css: false,
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "lcov"],
+      // Ratchet floor (F2): raise over time; never lower to silence gaps.
+      thresholds: {
+        lines: 40,
+        functions: 40,
+        branches: 30,
+        statements: 40,
+      },
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        "src/**/*.test.{ts,tsx}",
+        "src/test/**",
+        "src/main.tsx",
+        "src/vite-env.d.ts",
+      ],
+    },
   },
 });

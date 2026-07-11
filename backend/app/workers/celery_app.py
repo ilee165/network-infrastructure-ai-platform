@@ -100,8 +100,10 @@ QUEUE_REDELIVERY_RATIONALE: dict[str, str] = {
         "tests/pg/test_worker_idempotency_pg.py)."
     ),
     QUEUE_PACKET_CAPTURE: (
-        "``packet.capture_*`` writes are keyed to a pre-created capture row whose "
-        "state machine (engines.packet.capture) guards re-entry, and "
+        "``packet.capture_*`` is idempotent under redelivery (task_acks_late): "
+        "before any physical capture the worker claims by unique ``capture_id`` "
+        "(``claim_or_get_capture`` / ``ingest_capture`` ON CONFLICT DO NOTHING) so "
+        "a redelivered task is a no-op success; "
         "``packet.purge_expired`` is a cutoff-driven retention sweep that tombstones "
         "by id — a re-run deletes/tombstones nothing already tombstoned (a no-op)."
     ),

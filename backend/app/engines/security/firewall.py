@@ -298,9 +298,24 @@ def _posture_firewall(
     for rule in rules:
         if not rule.enabled or rule.action != FirewallAction.ALLOW:
             continue
-        # Management-plane service reachable from any source.
-        named_services = {s.casefold() for s in (*rule.services, *rule.applications)}
-        exposed = sorted(named_services & MANAGEMENT_SERVICES)
+        # Management-plane service reachable from any source. A wildcard service/
+        # application dimension (``any``/``all``/empty) matches every service, so
+        # treat it as exposing the full management-plane set — exact-name
+        # intersection alone misses the common ``services=("any",)`` rule shape.
+        # Only when the destination is scoped, though: an any->any->any rule is
+        # the canonical over-broad shape already reported HIGH by the
+        # overly-permissive detector, and a second inferred mgmt-plane HIGH for
+        # the same rule is double-reporting (the P2-W5-T1 precision corpus
+        # labels it a posture false positive).
+        if (
+            _dim_is_any(rule.services)
+            and _dim_is_any(rule.applications)
+            and not _dim_is_any(rule.destination_addresses)
+        ):
+            exposed = sorted(MANAGEMENT_SERVICES)
+        else:
+            named_services = {s.casefold() for s in (*rule.services, *rule.applications)}
+            exposed = sorted(named_services & MANAGEMENT_SERVICES)
         if exposed and _is_any(rule.source_addresses):
             findings.append(
                 SecurityFinding(

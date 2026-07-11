@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,6 +37,8 @@ from uuid import UUID
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engines.packet.filters import FilterValidationError, validate_capture_filter
@@ -48,6 +51,7 @@ __all__ = [
     "MAX_SIZE_BYTES",
     "CaptureSpec",
     "build_eos_capture_commands",
+    "claim_or_get_capture",
     "build_eos_finalize_commands",
     "build_tcpdump_argv",
     "expired_capture_ids",
@@ -237,6 +241,18 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+async def claim_or_get_capture(session: AsyncSession, capture_id: UUID) -> PcapMetadata | None:
+    """Return an existing metadata row for *capture_id*, or ``None`` if free.
+
+    Used by capture workers as a redelivery guard: when a prior delivery already
+    persisted the row, the redelivered task is a no-op success (no second
+    physical capture). Mirrors the claim-before-work pattern of config backup.
+    """
+    return (
+        await session.execute(select(PcapMetadata).where(PcapMetadata.capture_id == capture_id))
+    ).scalar_one_or_none()
+
+
 async def ingest_capture(
     session: AsyncSession,
     *,
@@ -252,7 +268,7 @@ async def ingest_capture(
     device_id: UUID | None = None,
     capture_filter: str | None = None,
     retention_days: int = DEFAULT_RETENTION_DAYS,
-) -> PcapMetadata:
+) -> tuple[PcapMetadata, bool]:
     """Persist one finished capture's metadata row (ADR-0023 §3).
 
     Records the integrity ``sha256``, byte/packet counts, the on-volume
@@ -261,22 +277,69 @@ async def ingest_capture(
     (this only flushes), so the metadata row commits atomically with the audit
     entry the worker writes alongside it. ``device_id`` is ``None`` for a
     worker-side ``tcpdump`` capture (segment, not a device).
+
+    Idempotent under redelivery: ``ON CONFLICT (capture_id) DO NOTHING``.
+
+    Returns:
+        ``(metadata, created)`` where *created* is ``True`` only when this call
+        inserted the row. Concurrent redelivery losers get ``created=False`` so
+        callers can skip a second ``packet.capture_completed`` audit.
     """
-    metadata = PcapMetadata(
-        capture_id=capture_id,
-        device_id=device_id,
-        interface=interface,
-        capture_filter=capture_filter,
-        requester_id=requester_id,
-        started_at=started_at,
-        ended_at=ended_at,
-        byte_count=byte_count,
-        packet_count=packet_count,
-        sha256=sha256,
-        storage_path=storage_path,
-        retention_expires_at=started_at + timedelta(days=retention_days),
-    )
-    session.add(metadata)
+    now = utcnow()
+    values = {
+        "id": uuid_mod.uuid4(),
+        "capture_id": capture_id,
+        "device_id": device_id,
+        "interface": interface,
+        "capture_filter": capture_filter,
+        "requester_id": requester_id,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "byte_count": byte_count,
+        "packet_count": packet_count,
+        "sha256": sha256,
+        "storage_path": storage_path,
+        "retention_expires_at": started_at + timedelta(days=retention_days),
+        "created_at": now,
+        "updated_at": now,
+    }
+    bind = session.bind
+    dialect = bind.dialect.name if bind is not None else "sqlite"
+    # Intentional dialect split: production is PostgreSQL; the unit suite is
+    # SQLite (≥ 3.35 for RETURNING). Other dialects are not supported here.
+    if dialect == "postgresql":
+        stmt = (
+            pg_insert(PcapMetadata)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["capture_id"])
+            .returning(PcapMetadata.id)
+        )
+    elif dialect == "sqlite":
+        stmt = (
+            sqlite_insert(PcapMetadata)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["capture_id"])
+            .returning(PcapMetadata.id)
+        )
+    else:  # pragma: no cover - only PG + SQLite are used in this repo
+        raise NotImplementedError(
+            f"ingest_capture ON CONFLICT is not implemented for dialect {dialect!r}"
+        )
+    result = await session.execute(stmt)
+    inserted_id = result.scalar_one_or_none()
+    if inserted_id is None:
+        existing = await claim_or_get_capture(session, capture_id)
+        if existing is None:  # pragma: no cover - conflict without row is impossible
+            raise RuntimeError(f"capture {capture_id} conflicted but row is missing")
+        logger.info(
+            "packet.capture_ingest_idempotent",
+            capture_id=str(capture_id),
+            existing_id=str(existing.id),
+        )
+        return existing, False
+    metadata = await session.get(PcapMetadata, inserted_id)
+    if metadata is None:  # pragma: no cover — just inserted
+        raise RuntimeError(f"capture {capture_id} inserted but row is missing")
     await session.flush()
     logger.info(
         "packet.capture_ingested",
@@ -286,7 +349,7 @@ async def ingest_capture(
         packet_count=packet_count,
         sha256=sha256,
     )
-    return metadata
+    return metadata, True
 
 
 async def expired_capture_ids(session: AsyncSession, *, now: datetime | None = None) -> list[UUID]:

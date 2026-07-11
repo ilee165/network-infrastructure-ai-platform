@@ -55,7 +55,7 @@ async def session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 async def test_ingest_capture_sets_retention_clock(session: AsyncSession) -> None:
     started = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
     capture_id = uuid.uuid4()
-    meta = await ingest_capture(
+    meta, created = await ingest_capture(
         session,
         capture_id=capture_id,
         requester_id=uuid.uuid4(),
@@ -71,6 +71,7 @@ async def test_ingest_capture_sets_retention_clock(session: AsyncSession) -> Non
         retention_days=30,
     )
     await session.commit()
+    assert created is True
     assert meta.retention_expires_at == started + timedelta(days=30)
     assert meta.device_id is None  # worker-side tcpdump
     assert meta.tombstoned_at is None
@@ -110,7 +111,7 @@ async def test_expired_worklist_excludes_future_and_tombstoned(session: AsyncSes
         retention_days=30,
     )
     # expired but already tombstoned → not in worklist
-    tomb = await ingest_capture(
+    tomb, _ = await ingest_capture(
         session,
         capture_id=already_tombstoned,
         requester_id=uuid.uuid4(),

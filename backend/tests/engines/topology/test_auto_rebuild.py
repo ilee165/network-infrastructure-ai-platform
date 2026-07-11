@@ -22,8 +22,13 @@ from app.models.mixins import utcnow
 class _FakeClient:
     """Minimal Neo4jClient stand-in: returns a canned freshness, records close()."""
 
-    def __init__(self, freshness: tuple[int, Any]) -> None:
-        self._freshness = freshness
+    def __init__(self, freshness: tuple[int, int, Any] | tuple[int, Any]) -> None:
+        # Accept legacy (nodes, newest) fixtures and expand to (nodes, edges, newest).
+        if len(freshness) == 2:
+            nodes, newest = freshness  # type: ignore[misc]
+            self._freshness = (nodes, 0, newest)
+        else:
+            self._freshness = freshness  # type: ignore[assignment]
         self.closed = False
 
     async def execute_read(self, work: Any, *args: Any, **kwargs: Any) -> Any:
@@ -31,6 +36,60 @@ class _FakeClient:
 
     async def close(self) -> None:
         self.closed = True
+
+
+# --- graph_freshness Cypher shape (no Cartesian product) -------------------
+
+
+def test_graph_freshness_query_separates_node_and_edge_aggregates() -> None:
+    """Regression: node and edge aggregates are independent Cypher constants."""
+    assert "OPTIONAL MATCH" not in auto_rebuild._NODES_QUERY
+    assert "OPTIONAL MATCH" not in auto_rebuild._EDGES_QUERY
+    assert auto_rebuild._NODES_QUERY.startswith("MATCH (n) RETURN count(n)")
+    assert auto_rebuild._EDGES_QUERY == "MATCH ()-[r]->() RETURN count(r) AS edges"
+
+
+class _RecordingResult:
+    def __init__(self, record: dict[str, Any] | None) -> None:
+        self._record = record
+
+    async def single(self) -> dict[str, Any] | None:
+        return self._record
+
+
+class _RecordingTx:
+    """Neo4j-shaped transaction: answers each query constant with a canned record."""
+
+    def __init__(self, records: dict[str, dict[str, Any] | None]) -> None:
+        self._records = records
+        self.queries: list[str] = []
+
+    async def run(self, query: str, **params: Any) -> _RecordingResult:
+        self.queries.append(query)
+        return _RecordingResult(self._records[query])
+
+
+@pytest.mark.asyncio
+async def test_graph_freshness_issues_both_queries_and_uses_edge_count() -> None:
+    """Behavioral guard for the Cartesian-product regression: graph_freshness
+    must issue the two aggregates as SEPARATE queries and report the edge
+    aggregate's count — a combined node×edge read (N×E inflation) cannot
+    produce these two tx.run calls."""
+
+    class _TxClient:
+        async def execute_read(self, work: Any, *args: Any, **kwargs: Any) -> Any:
+            self.tx = _RecordingTx(
+                {
+                    auto_rebuild._NODES_QUERY: {"nodes": 11, "newest": None},
+                    auto_rebuild._EDGES_QUERY: {"edges": 17},
+                }
+            )
+            return await work(self.tx, *args, **kwargs)
+
+    client = _TxClient()
+    nodes, edges, newest = await auto_rebuild.graph_freshness(client)  # type: ignore[arg-type]
+    assert (nodes, edges, newest) == (11, 17, None)
+    assert client.tx.queries == [auto_rebuild._NODES_QUERY, auto_rebuild._EDGES_QUERY]
 
 
 # --- staleness gate -------------------------------------------------------
@@ -146,7 +205,7 @@ async def test_reconcile_noop_when_graph_fresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     newest = utcnow() - timedelta(seconds=5)
-    client = _FakeClient((11, newest))  # fresh graph -> no rebuild.
+    client = _FakeClient((11, 17, newest))  # fresh graph -> no rebuild; live edges=17.
     monkeypatch.setattr(auto_rebuild, "create_client", lambda settings: client)
 
     async def _fail_timed_rebuild() -> dict[str, Any]:  # pragma: no cover
@@ -159,10 +218,12 @@ async def test_reconcile_noop_when_graph_fresh(
 
     assert summary["rebuilt"] is False
     assert summary["nodes"] == 11
+    assert summary["edges"] == 17  # live count, not hard-coded 0
     # Even on a no-op tick the textfile is written (continuous series + freshness).
     assert target.exists()
     text = target.read_text(encoding="utf-8")
     assert "topology_rebuild_seconds 0.000000" in text
+    assert "topology_rebuild_edges 17" in text
     assert "topology_graph_age_seconds" in text
 
 

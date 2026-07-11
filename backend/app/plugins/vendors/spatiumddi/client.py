@@ -30,15 +30,19 @@ exhaustion and their ``items`` concatenated.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+import contextlib
+from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import Any, Final, TypeVar
 
 import httpx
 
 from app.core.errors import PluginError
 
 __all__ = ["SpatiumClient", "SpatiumCredentials"]
+
+_T = TypeVar("_T")
 
 #: SpatiumDDI mounts its v1 router under this global prefix (ADR-0024 §1).
 _API_V1: Final = "/api/v1"
@@ -105,10 +109,32 @@ class SpatiumClient:
         else:
             self._client = client
             self._client.headers.update(auth_header)
+        # One private loop per *client* (not per capability): httpx pins its
+        # connection-pool locks to the first loop that drives the client. All
+        # capabilities sharing this SpatiumClient must reuse this loop (H9).
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def __repr__(self) -> str:
         # Never echo the client (its default headers carry the token).
         return f"{type(self).__name__}(root={self._root!r})"
+
+    def run_sync(self, coro: Coroutine[Any, Any, _T]) -> _T:
+        """Run *coro* on this client's private event loop (sync capability bridge).
+
+        Reuses one loop for the lifetime of the client so every capability
+        instance over the same httpx pool stays bound to a live loop.
+        """
+        if self._loop is None or self._loop.is_closed():
+            self._loop = asyncio.new_event_loop()
+        return self._loop.run_until_complete(coro)
+
+    def close_sync(self) -> None:
+        """Close the httpx client and private loop (idempotent; best-effort)."""
+        if self._loop is not None and not self._loop.is_closed():
+            with contextlib.suppress(Exception):
+                self._loop.run_until_complete(self.aclose())
+            self._loop.close()
+        self._loop = None
 
     # -- low-level verbs ----------------------------------------------------
 

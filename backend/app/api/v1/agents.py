@@ -75,6 +75,7 @@ from app.models import (
     AgentSessionStatus,
     PcapMetadata,
     ReasoningTraceRow,
+    ReasoningTraceStep,
     User,
 )
 from app.schemas.agents_api import (
@@ -145,11 +146,13 @@ _WS_POLICY_VIOLATION = 1008
 
 #: How long the stream socket waits between polls of an in-progress session
 #: before re-checking for newly recorded steps / a terminal status.
-_STREAM_POLL_SECONDS = 0.02
+#: ≥500 ms — the previous 20 ms (50 Hz) N+1 poll path generated ~400 q/s per
+#: open socket; Redis pub/sub carries liveness, DB poll is durability only (H4).
+_STREAM_POLL_SECONDS = 0.5
 
 #: Upper bound on stream poll iterations so a stuck run can never wedge the
-#: socket open forever (defence in depth — runs complete synchronously today).
-_STREAM_MAX_POLLS = 1500
+#: socket open forever (~30 s at 0.5 s/poll; defence in depth).
+_STREAM_MAX_POLLS = 60
 
 #: Lifetime of a single-use stream ticket in seconds.  The client must open
 #: the WebSocket within this window after calling ``stream-ticket``; the ticket
@@ -362,6 +365,55 @@ async def _load_traces(
         )
     recorder = PostgresTraceRecorder(sessionmaker, session_id=session_id)
     return [await recorder.get(row_id.hex) for row_id in rows]
+
+
+async def _load_session_steps(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session_id: uuid.UUID,
+) -> list[TraceStep]:
+    """Load every durable step for *session_id* in a single query.
+
+    Avoids the prior N+1 full-trace reload (one ``recorder.get`` per trace).
+    Offset-based cursors are **not** used: concurrent specialist traces can
+    insert steps that reorder under ``(started_at, id, ordinal)``, and a
+    global offset would skip mid-list inserts. Dedup is the caller's
+    ``emitted_keys`` set (same as live Redis frames).
+    """
+    from app.agents.framework.traces import EvidenceRef
+    from app.agents.framework.traces import TraceStepKind as FrameworkStepKind
+
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ReasoningTraceStep)
+                    .join(
+                        ReasoningTraceRow,
+                        ReasoningTraceStep.trace_id == ReasoningTraceRow.id,
+                    )
+                    .where(ReasoningTraceRow.session_id == session_id)
+                    .order_by(
+                        ReasoningTraceRow.started_at,
+                        ReasoningTraceRow.id,
+                        ReasoningTraceStep.ordinal,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # Build while session is open (no DetachedInstanceError).
+        return [
+            TraceStep(
+                kind=FrameworkStepKind(row.kind.value),
+                summary=row.summary,
+                detail=row.detail,
+                tool_name=row.tool_name,
+                evidence=[EvidenceRef.model_validate(item) for item in (row.evidence or [])],
+                occurred_at=row.occurred_at,
+            )
+            for row in rows
+        ]
 
 
 def _trace_read(trace: ReasoningTrace) -> AgentTraceRead:
@@ -627,21 +679,18 @@ async def stream_session(
     pending_live: asyncio.Task[AgentStreamFrame] | None = None
     async with fanout.subscribe(str(session_id)) as live_frames:
         await websocket.accept()
-        emitted = 0
         try:
             for _ in range(_STREAM_MAX_POLLS):
                 row = await _load_session_or_404(sessionmaker, session_id)
                 status = row.status
-                traces = await _load_traces(sessionmaker, session_id)
-                steps = [step for trace in traces for step in trace.steps]
-                # Durable replay: emit any newly persisted step (completeness, §5).
-                while emitted < len(steps):
-                    data = _step_read(steps[emitted]).model_dump(mode="json")
+                # Durable replay: one query for all steps (no N+1); skip via keys.
+                steps = await _load_session_steps(sessionmaker, session_id)
+                for step in steps:
+                    data = _step_read(step).model_dump(mode="json")
                     key = _step_frame_key(data)
                     if key not in emitted_keys:
                         emitted_keys.add(key)
                         await websocket.send_json(data)
-                    emitted += 1
                 # Liveness: relay any live frames already fanned out for this session
                 # (ADR-0044 §2). Done on EVERY iteration — including the terminal one —
                 # so a frame that arrived on the wire just before the run finished is
@@ -652,6 +701,7 @@ async def stream_session(
                     websocket, live_frames, emitted_keys, pending_live
                 )
                 if status is not AgentSessionStatus.RUNNING:
+                    traces = await _load_traces(sessionmaker, session_id)
                     answer = _final_answer_from_traces(traces)
                     break
                 await asyncio.sleep(_STREAM_POLL_SECONDS)

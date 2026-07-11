@@ -21,7 +21,7 @@ from app.api.deps import get_db, require_role
 from app.api.v1.auth._shared import _EMAIL_TAKEN, router
 from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.core.security import Role as RoleEnum
-from app.core.security import hash_password
+from app.core.security import hash_password_async
 from app.models import Role, User
 from app.services.audit import service as audit_service
 from app.services.auth_sessions import service as session_service
@@ -201,7 +201,7 @@ async def create_user(
     temp_password = body.temp_password or _generate_temp_password()
     user = User(
         username=body.username,
-        password_hash=hash_password(temp_password),
+        password_hash=await hash_password_async(temp_password),
         role=role,
         email=body.email,
         display_name=body.display_name,
@@ -320,7 +320,7 @@ async def reset_user_password(
     """
     user = await _load_user(session, user_id)
     temp_password = body.temp_password or _generate_temp_password()
-    user.password_hash = hash_password(temp_password)
+    user.password_hash = await hash_password_async(temp_password)
     user.must_change_password = True
 
     await session_service.revoke_all_for_user(session, user_id=user.id)

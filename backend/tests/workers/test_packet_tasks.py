@@ -133,6 +133,42 @@ def test_capture_segment_persists_metadata_and_audits(
     assert "packet.capture_completed" in actions
 
 
+def test_capture_segment_redelivery_is_idempotent(
+    eager_celery: None, db_url: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H10: a redelivered task with an existing capture_id does not re-capture."""
+    monkeypatch.setattr(tasks._settings(), "pcap_dir", tmp_path)
+    spawn_count = {"n": 0}
+
+    def _fake_tcpdump(argv: list[str]) -> None:
+        spawn_count["n"] += 1
+        out = argv[argv.index("-w") + 1]
+        with open(out, "wb") as handle:
+            handle.write(b"\xd4\xc3\xb2\xa1pcapbytes")
+
+    monkeypatch.setattr(tasks, "_run_tcpdump", _fake_tcpdump)
+    capture_id = str(uuid.uuid4())
+    requester = str(uuid.uuid4())
+
+    first = tasks.capture_segment(requester, "eth0", None, None, None, capture_id)
+    assert first["ok"] is True
+    assert spawn_count["n"] == 1
+    completed_after_first = [
+        a for a in _fetch_all(db_url, AuditLog) if a.action == "packet.capture_completed"
+    ]
+    assert len(completed_after_first) == 1
+
+    second = tasks.capture_segment(requester, "eth0", None, None, None, capture_id)
+    assert second["ok"] is True
+    assert second.get("idempotent") is True
+    assert spawn_count["n"] == 1  # no second physical capture
+    assert len(_fetch_all(db_url, PcapMetadata)) == 1
+    completed_after_second = [
+        a for a in _fetch_all(db_url, AuditLog) if a.action == "packet.capture_completed"
+    ]
+    assert len(completed_after_second) == 1  # no second completed audit
+
+
 def test_capture_segment_rejects_malicious_interface_and_audits(
     eager_celery: None, db_url: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

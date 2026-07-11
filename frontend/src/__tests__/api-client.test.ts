@@ -13,7 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, apiFetch } from "../api/client";
+import { ApiError, apiFetch, DEFAULT_REQUEST_TIMEOUT_MS } from "../api/client";
 import { useAuthStore } from "../stores/auth";
 
 const REFRESH_URL = "/api/v1/auth/refresh";
@@ -136,5 +136,83 @@ describe("apiFetch — single-flight refresh (concurrent 401s)", () => {
     const later = await apiFetch<{ ok: boolean }>("/devices");
     expect(later).toEqual({ ok: true });
     expect(refreshCalls).toBe(2);
+  });
+});
+
+describe("apiFetch — AbortSignal / timeout (M34)", () => {
+  it("forwards a combined signal so caller abort cancels the request", async () => {
+    const controller = new AbortController();
+    let fetchSignal: AbortSignal | undefined;
+    const mock = vi.fn((_url: string, init?: RequestInit) => {
+      fetchSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) {
+          reject(new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        signal?.addEventListener("abort", () => {
+          reject(new DOMException("Aborted", "AbortError"));
+        });
+      });
+    });
+    vi.stubGlobal("fetch", mock);
+    useAuthStore.setState({ accessToken: "tok", user: null, status: "authed" });
+    const pending = apiFetch("/devices", { signal: controller.signal });
+    // Combined signal is not the caller's alone (timeout is fan-in'd).
+    expect(fetchSignal).toBeDefined();
+    expect(fetchSignal).not.toBe(controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+    expect(mock).toHaveBeenCalled();
+  });
+
+  it("no caller signal still attaches the default 30s timeout signal", async () => {
+    // Spy wraps the real factory so the forwarded signal can be identity-checked:
+    // apiFetch with no caller signal must hand fetch EXACTLY the timeout signal.
+    const minted: AbortSignal[] = [];
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      const signal = realTimeout(ms);
+      minted.push(signal);
+      return signal;
+    });
+    let fetchSignal: AbortSignal | undefined;
+    const mock = vi.fn((_url: string, init?: RequestInit) => {
+      fetchSignal = init?.signal ?? undefined;
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", mock);
+    useAuthStore.setState({ accessToken: "tok", user: null, status: "authed" });
+    try {
+      await apiFetch("/devices");
+      expect(timeoutSpy).toHaveBeenCalledWith(DEFAULT_REQUEST_TIMEOUT_MS);
+      expect(fetchSignal).toBe(minted[0]);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  it("timeoutMs null disables the default timeout (caller signal only)", async () => {
+    const controller = new AbortController();
+    let fetchSignal: AbortSignal | undefined;
+    const mock = vi.fn((_url: string, init?: RequestInit) => {
+      fetchSignal = init?.signal ?? undefined;
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", mock);
+    useAuthStore.setState({ accessToken: "tok", user: null, status: "authed" });
+    await apiFetch("/devices", { signal: controller.signal, timeoutMs: null });
+    expect(fetchSignal).toBe(controller.signal);
   });
 });
