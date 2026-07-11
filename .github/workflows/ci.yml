@@ -1906,6 +1906,14 @@ jobs:
             echo "::error::PG layer skipped or collected nothing — the service was not reachable; this gate must RUN and BITE."
             exit 1
           fi
+          # Silent-drop guard (F1, 2026-07-10 testing review): a tests/pg/ file
+          # missing `pytestmark = pytest.mark.integration` is DESELECTED here and
+          # then runs in NO job at all (the unit job skips all of tests/pg/ via
+          # the PG-unreachable collection hook). Deselection is a red gate.
+          if grep -qE '[1-9][0-9]* deselected' pg-pytest-output.txt; then
+            echo "::error::PG layer deselected tests — a tests/pg/ file is missing 'pytestmark = pytest.mark.integration' and would run in NO CI job."
+            exit 1
+          fi
           {
             echo "## PG-backed W4-control tests (real PostgreSQL)"
             echo ""
