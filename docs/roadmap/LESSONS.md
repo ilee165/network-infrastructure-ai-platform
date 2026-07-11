@@ -161,6 +161,47 @@ also forbidden — assert presence first.
 
 ---
 
+## Dependencies / Dependabot
+
+### L-DEP-1 — Dependabot lock-only majors that full `uv` recompile reverts are unmergeable
+
+**Bit us:** Dependabot opened pip majors that surgically rewrote one pin in
+`backend/requirements.lock.txt`:
+
+- #149 `redis` 6.4.0 → 8.0.1 — blocked by `kombu[redis]` (`redis<6.5`)
+- #146 `paramiko` 4.0.0 → 5.0.0 — blocked by `netmiko` (`paramiko<5`)
+- #151 `websockets` 15.0.1 → 16.0 — blocked by `langgraph-sdk` (`websockets<16`)
+
+The CI **lockfile** job re-runs `uv pip compile` from `pyproject.toml` and
+reverted each pin → `all-gates` RED. Green minors/patches in the same batch
+(#148 uvicorn, #150 wcwidth, npm/GHA) were fine.
+
+**Why:** A single-line lock edit is not a full resolve. Transitive upper bounds
+make the major impossible until the constraining package is upgraded first.
+
+**Rule:**
+
+1. If lockfile RED and recompile reverts the pin → **confirmed constraint
+   conflict only** — close and `@dependabot ignore this major version`, or keep
+   a scoped ignore in `dependabot.yml` that cites the constrainer. Do **not**
+   force-edit the lock to green. Do **not** use close+ignore for planned
+   migrations without a constraint conflict (ignore is forward-suppressing and
+   blocks later security updates for that major). For planned migrations: close
+   *without* ignoring, or a tracked scoped ignore with owner + revisit date.
+2. Human major upgrades: lift the constrainer in `pyproject.toml`, re-lock with
+   `--upgrade-package`, run integration, land as a normal PR.
+3. Schedule is **monthly**; pip majors for `redis` / `paramiko` / `websockets`
+   are scoped-ignored. Never blanket-ignore `*` majors (suppresses security
+   updates — PR #142).
+
+**Hits next:** Any Dependabot pip PR that only touches `requirements.lock.txt`
+with a major bump.
+
+**Evidence:** Closed #146/#149/#151; triage SOP in
+`docs/security/supply-chain-scanning.md` (“Dependabot triage (monthly)”).
+
+---
+
 ## Related
 
 | Doc | Scope |
@@ -168,5 +209,6 @@ also forbidden — assert presence first.
 | `CLAUDE.md` § Orchestrated builds / Build & runtime | Standing agent rules (includes L-FE-1 / L-IMG-1 one-liners) |
 | `P1-W4-LESSONS.md` | Helm/K8s GA chart wave (L1–L8) |
 | `docs/security/image-supply-chain.md` | Trivy / SBOM / cosign / admission controls |
+| `docs/security/supply-chain-scanning.md` | Lockfile gate + Dependabot triage (L-DEP-1) |
 | `deploy/docker/frontend.Dockerfile` | `apk upgrade` cache-bust comment mechanism |
 | `docs/reviews/WAVE2-PLAN.md` / PR #141 | Source of L-ASYNC-1 … L-TEST-1 |
