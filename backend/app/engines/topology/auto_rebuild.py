@@ -53,6 +53,12 @@ logger = structlog.get_logger(__name__)
 
 __all__ = ["main", "reconcile", "graph_freshness"]
 
+#: Independent node aggregate — never combined with a relationship MATCH in one
+#: clause (that forms a Cartesian product and inflates ``count(r)`` to N×E).
+_NODES_QUERY = "MATCH (n) RETURN count(n) AS nodes, max(n.last_projected_at) AS newest"
+#: Standalone edge aggregate (separate query from :data:`_NODES_QUERY`).
+_EDGES_QUERY = "MATCH ()-[r]->() RETURN count(r) AS edges"
+
 
 async def graph_freshness(client: Neo4jClient) -> tuple[int, int, datetime | None]:
     """Return ``(node_count, edge_count, newest_last_projected_at)`` for the graph.
@@ -64,16 +70,11 @@ async def graph_freshness(client: Neo4jClient) -> tuple[int, int, datetime | Non
     """
 
     async def _read(tx: Any) -> tuple[int, int, datetime | None]:
-        # Two independent aggregates — never ``MATCH (n) OPTIONAL MATCH ()-[r]->()``
-        # in one clause: that forms a Cartesian product and ``count(r)`` becomes
-        # N×E instead of E (CodeRabbit / Wave-2 review).
-        node_result = await tx.run(
-            "MATCH (n) RETURN count(n) AS nodes, max(n.last_projected_at) AS newest"
-        )
+        node_result = await tx.run(_NODES_QUERY)
         node_record = await node_result.single()
         if node_record is None:
             return 0, 0, None
-        edge_result = await tx.run("MATCH ()-[r]->() RETURN count(r) AS edges")
+        edge_result = await tx.run(_EDGES_QUERY)
         edge_record = await edge_result.single()
         edges = int(edge_record["edges"]) if edge_record is not None else 0
         newest = node_record["newest"]

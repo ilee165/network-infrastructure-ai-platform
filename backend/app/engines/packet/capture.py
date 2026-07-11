@@ -305,6 +305,8 @@ async def ingest_capture(
     }
     bind = session.bind
     dialect = bind.dialect.name if bind is not None else "sqlite"
+    # Intentional dialect split: production is PostgreSQL; the unit suite is
+    # SQLite (≥ 3.35 for RETURNING). Other dialects are not supported here.
     if dialect == "postgresql":
         stmt = (
             pg_insert(PcapMetadata)
@@ -312,12 +314,16 @@ async def ingest_capture(
             .on_conflict_do_nothing(index_elements=["capture_id"])
             .returning(PcapMetadata.id)
         )
-    else:
+    elif dialect == "sqlite":
         stmt = (
             sqlite_insert(PcapMetadata)
             .values(**values)
             .on_conflict_do_nothing(index_elements=["capture_id"])
             .returning(PcapMetadata.id)
+        )
+    else:  # pragma: no cover - only PG + SQLite are used in this repo
+        raise NotImplementedError(
+            f"ingest_capture ON CONFLICT is not implemented for dialect {dialect!r}"
         )
     result = await session.execute(stmt)
     inserted_id = result.scalar_one_or_none()
@@ -332,7 +338,8 @@ async def ingest_capture(
         )
         return existing, False
     metadata = await session.get(PcapMetadata, inserted_id)
-    assert metadata is not None  # noqa: S101 — just inserted
+    if metadata is None:  # pragma: no cover — just inserted
+        raise RuntimeError(f"capture {capture_id} inserted but row is missing")
     await session.flush()
     logger.info(
         "packet.capture_ingested",

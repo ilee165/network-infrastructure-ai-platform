@@ -419,6 +419,44 @@ class TestDeviceUpdate:
             await update_device(device.id, body, session, user)
         session.rollback.assert_awaited()
 
+    async def test_create_fk_integrity_error_is_not_mapped_to_mgmt_ip_409(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Concurrent credential FK failure must not become a bogus mgmt_ip 409."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+
+        from sqlalchemy.exc import IntegrityError
+
+        from app.api.v1.devices import create_device
+        from app.schemas.devices import DeviceCreate
+
+        body = DeviceCreate(
+            hostname="edge-1",
+            mgmt_ip="192.0.2.50",
+            credential_id=uuid4(),
+        )
+        user = MagicMock()
+        user.id = uuid4()
+        user.username = "engineer"
+        session = AsyncMock()
+        session.add = MagicMock()
+        session.flush = AsyncMock(
+            side_effect=IntegrityError("INSERT", {}, Exception("FOREIGN KEY constraint failed"))
+        )
+        session.rollback = AsyncMock()
+
+        async def _free(*_a: object, **_k: object) -> None:
+            return None
+
+        async def _cred(*_a: object, **_k: object) -> None:
+            return None
+
+        monkeypatch.setattr("app.api.v1.devices._ensure_mgmt_ip_free", _free)
+        monkeypatch.setattr("app.api.v1.devices._ensure_credential_exists", _cred)
+        with pytest.raises(IntegrityError):
+            await create_device(body, session, user)
+
 
 class TestDeviceDelete:
     async def test_engineer_deletes_device(

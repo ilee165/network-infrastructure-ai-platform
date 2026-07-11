@@ -50,6 +50,18 @@ _TARGET_TYPE: Final = "device"
 _NON_NULLABLE_FIELDS: Final = frozenset({"hostname", "mgmt_ip", "status"})
 
 
+def _is_mgmt_ip_unique_violation(exc: IntegrityError) -> bool:
+    """True when *exc* is the devices.mgmt_ip unique constraint (not an FK, etc.).
+
+    Matches PostgreSQL ``uq_devices_mgmt_ip`` / unique index names and SQLite's
+    ``UNIQUE constraint failed: devices.mgmt_ip`` so we never mis-map a concurrent
+    credential FK failure to a bogus "mgmt_ip already exists" 409.
+    """
+    parts = [str(exc.orig) if exc.orig is not None else "", *(str(a) for a in exc.args)]
+    text = " ".join(parts).lower()
+    return "mgmt_ip" in text or "uq_devices_mgmt_ip" in text
+
+
 def _actor(user: User) -> str:
     return f"user:{user.username}"
 
@@ -169,6 +181,8 @@ async def create_device(body: DeviceCreate, session: DbSession, user: Engineer) 
         await session.flush()
     except IntegrityError as exc:  # concurrent duplicate slipping past the pre-check
         await session.rollback()
+        if not _is_mgmt_ip_unique_violation(exc):
+            raise
         raise ConflictError(f"a device with mgmt_ip {body.mgmt_ip} already exists") from exc
     await audit.record(
         session,
@@ -207,6 +221,8 @@ async def update_device(
         await session.flush()
     except IntegrityError as exc:  # concurrent rename slipping past the pre-check
         await session.rollback()
+        if not _is_mgmt_ip_unique_violation(exc):
+            raise
         mgmt_ip = updates.get("mgmt_ip", prior_mgmt_ip)
         raise ConflictError(f"a device with mgmt_ip {mgmt_ip} already exists") from exc
     await audit.record(

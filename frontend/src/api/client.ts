@@ -35,12 +35,32 @@ const LOGIN_PATH = "/login";
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
- * Combine a caller-supplied signal with a default timeout so either abort
- * cancels the in-flight fetch. When `AbortSignal.any` is unavailable (e.g.
- * Safari 16), manually fan-in both signals so the 30s default is never dropped.
+ * Fetch init for {@link apiFetch}: standard `RequestInit` plus an optional
+ * timeout override. `timeoutMs: null` disables the default 30s timeout
+ * (slow downloads / exports); a number overrides the default.
  */
-function resolveSignal(caller?: AbortSignal | null): AbortSignal {
-  const timeout = AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS);
+export interface ApiFetchInit extends RequestInit {
+  timeoutMs?: number | null;
+}
+
+/**
+ * Combine a caller-supplied signal with an optional default timeout so either
+ * abort cancels the in-flight fetch. When `AbortSignal.any` is unavailable
+ * (e.g. Safari 16), manually fan-in both signals so the default is never dropped.
+ *
+ * @param timeoutMs - `undefined` → {@link DEFAULT_REQUEST_TIMEOUT_MS};
+ *   `null` → no default timeout (caller signal only, if any); number → override.
+ */
+function resolveSignal(
+  caller?: AbortSignal | null,
+  timeoutMs: number | null | undefined = DEFAULT_REQUEST_TIMEOUT_MS,
+): AbortSignal | undefined {
+  const effectiveTimeout =
+    timeoutMs === undefined ? DEFAULT_REQUEST_TIMEOUT_MS : timeoutMs;
+  if (effectiveTimeout === null) {
+    return caller ?? undefined;
+  }
+  const timeout = AbortSignal.timeout(effectiveTimeout);
   if (caller == null) {
     return timeout;
   }
@@ -50,19 +70,30 @@ function resolveSignal(caller?: AbortSignal | null): AbortSignal {
   if (typeof anyFactory === "function") {
     return anyFactory([caller, timeout]);
   }
-  // Manual combine: abort if either the caller or the timeout fires.
+  // Manual combine: abort with the firing signal's reason; drop both listeners.
   const controller = new AbortController();
-  const onAbort = () => {
+  const onCallerAbort = () => {
+    timeout.removeEventListener("abort", onTimeoutAbort);
     if (!controller.signal.aborted) {
-      controller.abort();
+      controller.abort(caller.reason);
     }
   };
-  if (caller.aborted || timeout.aborted) {
-    controller.abort();
+  const onTimeoutAbort = () => {
+    caller.removeEventListener("abort", onCallerAbort);
+    if (!controller.signal.aborted) {
+      controller.abort(timeout.reason);
+    }
+  };
+  if (caller.aborted) {
+    controller.abort(caller.reason);
     return controller.signal;
   }
-  caller.addEventListener("abort", onAbort, { once: true });
-  timeout.addEventListener("abort", onAbort, { once: true });
+  if (timeout.aborted) {
+    controller.abort(timeout.reason);
+    return controller.signal;
+  }
+  caller.addEventListener("abort", onCallerAbort, { once: true });
+  timeout.addEventListener("abort", onTimeoutAbort, { once: true });
   return controller.signal;
 }
 
@@ -142,13 +173,14 @@ async function toApiError(response: Response, path: string): Promise<ApiError> {
  */
 async function rawFetch(
   path: string,
-  init: RequestInit,
+  init: ApiFetchInit,
   options: { withAuth: boolean },
 ): Promise<Response> {
+  const { timeoutMs, signal: callerSignal, ...rest } = init;
   const headers: Record<string, string> = {
     Accept: "application/json, application/problem+json",
-    ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}),
-    ...(init.headers as Record<string, string> | undefined),
+    ...(rest.body !== undefined ? { "Content-Type": "application/json" } : {}),
+    ...(rest.headers as Record<string, string> | undefined),
   };
   if (options.withAuth) {
     const token = useAuthStore.getState().accessToken;
@@ -156,8 +188,8 @@ async function rawFetch(
       headers.Authorization = `Bearer ${token}`;
     }
   }
-  const signal = resolveSignal(init.signal ?? null);
-  return fetch(`${API_BASE}${path}`, { ...init, headers, signal });
+  const signal = resolveSignal(callerSignal ?? null, timeoutMs);
+  return fetch(`${API_BASE}${path}`, { ...rest, headers, signal });
 }
 
 /** Parse a successful `Response` into `T` (`undefined` for 204). */
@@ -222,7 +254,7 @@ async function attemptRefresh(): Promise<string | null> {
  * @returns The parsed JSON body, typed as `T` (`undefined` for 204 responses).
  * @throws {ApiError} For any non-2xx response (after the single refresh+retry).
  */
-export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function apiFetch<T>(path: string, init: ApiFetchInit = {}): Promise<T> {
   // The refresh endpoint is exempt from the refresh-on-401 dance: refreshing a
   // refresh would recurse, and its 401 simply means the session is dead.
   const isRefreshCall = path === REFRESH_PATH;

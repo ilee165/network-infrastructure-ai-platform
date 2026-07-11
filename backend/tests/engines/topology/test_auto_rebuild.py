@@ -42,17 +42,11 @@ class _FakeClient:
 
 
 def test_graph_freshness_query_separates_node_and_edge_aggregates() -> None:
-    """Regression: a single MATCH/OPTIONAL MATCH pair yields N×E for count(r)."""
-    import inspect
-
-    source = inspect.getsource(auto_rebuild.graph_freshness)
-    # Live Cypher strings must aggregate independently (not Cartesian product).
-    assert '"MATCH (n) RETURN count(n)' in source or "'MATCH (n) RETURN count(n)" in source
-    assert "MATCH ()-[r]->() RETURN count(r)" in source
-    # The buggy combined form must not appear as an executed query string.
-    assert 'OPTIONAL MATCH ()-[r]->()' not in source.replace(
-        "never ``MATCH (n) OPTIONAL MATCH ()-[r]->()``", ""
-    )
+    """Regression: node and edge aggregates are independent Cypher constants."""
+    assert "OPTIONAL MATCH" not in auto_rebuild._NODES_QUERY
+    assert "OPTIONAL MATCH" not in auto_rebuild._EDGES_QUERY
+    assert auto_rebuild._NODES_QUERY.startswith("MATCH (n) RETURN count(n)")
+    assert auto_rebuild._EDGES_QUERY == "MATCH ()-[r]->() RETURN count(r) AS edges"
 
 
 # --- staleness gate -------------------------------------------------------

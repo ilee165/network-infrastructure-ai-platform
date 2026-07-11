@@ -166,4 +166,22 @@ describe("apiFetch — AbortSignal / timeout (M34)", () => {
     await expect(pending).rejects.toThrow();
     expect(mock).toHaveBeenCalled();
   });
+
+  it("timeoutMs null disables the default timeout (caller signal only)", async () => {
+    const controller = new AbortController();
+    let fetchSignal: AbortSignal | undefined;
+    const mock = vi.fn((_url: string, init?: RequestInit) => {
+      fetchSignal = init?.signal ?? undefined;
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", mock);
+    useAuthStore.setState({ accessToken: "tok", user: null, status: "authed" });
+    await apiFetch("/devices", { signal: controller.signal, timeoutMs: null });
+    expect(fetchSignal).toBe(controller.signal);
+  });
 });

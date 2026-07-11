@@ -34,8 +34,6 @@ the caller may already own, so there is no nested-loop hazard.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import json
 from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -188,36 +186,23 @@ class _SpatiumCapability(PluginCapability):
         self._client = client
         self._device_id = device_id
         self._ctx = context or SpatiumContext()
-        # One private loop per device session — httpx.AsyncClient pins its
-        # connection-pool lock to the loop that first drives it; a fresh
-        # ``asyncio.run()`` per capability call would bind the pool to a dead
-        # loop and raise RuntimeError on the second call (H9).
-        self._loop: asyncio.AbstractEventLoop | None = None
 
     def _run(self, coro: Coroutine[Any, Any, _T]) -> _T:
-        """Run *coro* to completion on this session's private event loop.
+        """Run *coro* on the shared :class:`SpatiumClient` private event loop.
 
-        Reuses one loop for the lifetime of the capability so the shared
-        :class:`SpatiumClient` / httpx pool stays bound to a live loop. Never
-        reuses a caller-owned loop (sync bridge for discovery runner /
-        conformance suite); the production async-executor path calls the
-        client directly, not through these methods.
+        Loop ownership lives on the client (one pool → one loop) so multiple
+        capability classes over the same client never bind httpx to two loops
+        (H9). The production async-executor path calls the client directly.
         """
-        if self._loop is None or self._loop.is_closed():
-            self._loop = asyncio.new_event_loop()
-        return self._loop.run_until_complete(coro)
+        return self._client.run_sync(coro)
 
     def close(self) -> None:
-        """Close the session loop and the underlying httpx client (best-effort).
+        """Close the shared client loop + httpx pool (idempotent).
 
-        Discovery runners should call this when the device session ends so the
-        private loop and connection pool are not leaked for the process lifetime.
+        Safe to call from any capability over the same client; subsequent
+        siblings see a closed client and should not issue further work.
         """
-        if self._loop is not None and not self._loop.is_closed():
-            with contextlib.suppress(Exception):
-                self._loop.run_until_complete(self._client.aclose())
-            self._loop.close()
-        self._loop = None
+        self._client.close_sync()
 
     def _record_json(self, command: str, payload: Any) -> None:
         """Record a REST payload verbatim (canonical JSON) before parsing."""
