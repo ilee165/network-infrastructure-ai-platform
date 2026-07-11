@@ -181,9 +181,13 @@ make the major impossible until the constraining package is upgraded first.
 
 **Rule:**
 
-1. If lockfile RED and recompile reverts the pin → **close** the PR and
-   `@dependabot ignore this major version` (or keep the scoped ignore in
-   `dependabot.yml`). Do **not** force-edit the lock to green.
+1. If lockfile RED and recompile reverts the pin → **confirmed constraint
+   conflict only** — close and `@dependabot ignore this major version`, or keep
+   a scoped ignore in `dependabot.yml` that cites the constrainer. Do **not**
+   force-edit the lock to green. Do **not** use close+ignore for planned
+   migrations without a constraint conflict (ignore is forward-suppressing and
+   blocks later security updates for that major). For planned migrations: close
+   *without* ignoring, or a tracked scoped ignore with owner + revisit date.
 2. Human major upgrades: lift the constrainer in `pyproject.toml`, re-lock with
    `--upgrade-package`, run integration, land as a normal PR.
 3. Schedule is **monthly**; pip majors for `redis` / `paramiko` / `websockets`

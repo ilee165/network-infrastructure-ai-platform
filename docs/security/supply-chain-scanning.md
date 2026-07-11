@@ -191,7 +191,9 @@ base-image PRs — Trivy still gates every CI image build.
 | Outcome | When |
 |---------|------|
 | **Merge** | `all-gates` green; minor/patch or low-blast change; no surprise security surface. |
-| **Close + `@dependabot ignore this major version`** | Lockfile job RED and a clean `uv pip compile` **reverts** the pin (constraint conflict), **or** the major is a planned migration without a security advisory (e.g. react-router 6→7). |
+| **Close + `@dependabot ignore this major version`** | **Confirmed constraint conflict only:** lockfile job RED and a clean `uv pip compile` **reverts** the pin. Ignore is forward-suppressing — it also blocks *future* security-update PRs for that major — so do not use it for preference or planned migrations. Prefer a scoped `ignore` entry in `dependabot.yml` that cites the constrainer + evidence (as with redis/paramiko/websockets below). |
+| **Close without ignoring** | Planned major migration without a security advisory (e.g. framework jump you are not taking yet). Monthly cadence bounds reopen noise to about one PR/month. Do **not** `@dependabot ignore this major version` here — that would suppress later security updates for the major. Packages deliberately left off the npm major-ignore list (e.g. `react-router-dom`, PR #142) must stay eligible for security majors. |
+| **Tracked ignore exception** | If reopen noise is unacceptable and there is still no constraint conflict: add a **scoped** `ignore` in `dependabot.yml` **only** with an owner, revisit date, and tracked issue (or a comment citing those). Periodic review required; remove when the migration lands or the constraint lifts. |
 | **Human-owned major PR** | Security advisory forces it, **or** you intend to lift a transitive cap (below). |
 
 **Never** hand-edit a single package line in `backend/requirements.lock.txt` to
