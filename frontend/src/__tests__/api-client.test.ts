@@ -13,7 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, apiFetch } from "../api/client";
+import { ApiError, apiFetch, DEFAULT_REQUEST_TIMEOUT_MS } from "../api/client";
 import { useAuthStore } from "../stores/auth";
 
 const REFRESH_URL = "/api/v1/auth/refresh";
@@ -165,6 +165,37 @@ describe("apiFetch — AbortSignal / timeout (M34)", () => {
     controller.abort();
     await expect(pending).rejects.toThrow();
     expect(mock).toHaveBeenCalled();
+  });
+
+  it("no caller signal still attaches the default 30s timeout signal", async () => {
+    // Spy wraps the real factory so the forwarded signal can be identity-checked:
+    // apiFetch with no caller signal must hand fetch EXACTLY the timeout signal.
+    const minted: AbortSignal[] = [];
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      const signal = realTimeout(ms);
+      minted.push(signal);
+      return signal;
+    });
+    let fetchSignal: AbortSignal | undefined;
+    const mock = vi.fn((_url: string, init?: RequestInit) => {
+      fetchSignal = init?.signal ?? undefined;
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", mock);
+    useAuthStore.setState({ accessToken: "tok", user: null, status: "authed" });
+    try {
+      await apiFetch("/devices");
+      expect(timeoutSpy).toHaveBeenCalledWith(DEFAULT_REQUEST_TIMEOUT_MS);
+      expect(fetchSignal).toBe(minted[0]);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
   });
 
   it("timeoutMs null disables the default timeout (caller signal only)", async () => {

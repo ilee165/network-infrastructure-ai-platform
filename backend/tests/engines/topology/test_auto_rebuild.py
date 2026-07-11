@@ -49,6 +49,49 @@ def test_graph_freshness_query_separates_node_and_edge_aggregates() -> None:
     assert auto_rebuild._EDGES_QUERY == "MATCH ()-[r]->() RETURN count(r) AS edges"
 
 
+class _RecordingResult:
+    def __init__(self, record: dict[str, Any] | None) -> None:
+        self._record = record
+
+    async def single(self) -> dict[str, Any] | None:
+        return self._record
+
+
+class _RecordingTx:
+    """Neo4j-shaped transaction: answers each query constant with a canned record."""
+
+    def __init__(self, records: dict[str, dict[str, Any] | None]) -> None:
+        self._records = records
+        self.queries: list[str] = []
+
+    async def run(self, query: str, **params: Any) -> _RecordingResult:
+        self.queries.append(query)
+        return _RecordingResult(self._records[query])
+
+
+@pytest.mark.asyncio
+async def test_graph_freshness_issues_both_queries_and_uses_edge_count() -> None:
+    """Behavioral guard for the Cartesian-product regression: graph_freshness
+    must issue the two aggregates as SEPARATE queries and report the edge
+    aggregate's count — a combined node×edge read (N×E inflation) cannot
+    produce these two tx.run calls."""
+
+    class _TxClient:
+        async def execute_read(self, work: Any, *args: Any, **kwargs: Any) -> Any:
+            self.tx = _RecordingTx(
+                {
+                    auto_rebuild._NODES_QUERY: {"nodes": 11, "newest": None},
+                    auto_rebuild._EDGES_QUERY: {"edges": 17},
+                }
+            )
+            return await work(self.tx, *args, **kwargs)
+
+    client = _TxClient()
+    nodes, edges, newest = await auto_rebuild.graph_freshness(client)  # type: ignore[arg-type]
+    assert (nodes, edges, newest) == (11, 17, None)
+    assert client.tx.queries == [auto_rebuild._NODES_QUERY, auto_rebuild._EDGES_QUERY]
+
+
 # --- staleness gate -------------------------------------------------------
 
 
