@@ -147,6 +147,15 @@ def create_celery_app() -> Celery:
         ],
         # M5+: ".docs"
     )
+    if settings.redis_url.startswith("sentinel://"):
+        # Kombu's Sentinel transport requires the master name (and the Sentinel
+        # AUTH password when set) via transport options — the sentinel:// URL
+        # alone carries only non-secret host coordinates (ADR-0044 §1).
+        sentinel_options: dict[str, object] = {"master_name": settings.redis_sentinel_master}
+        if settings.redis_password:
+            sentinel_options["sentinel_kwargs"] = {"password": settings.redis_password}
+        celery.conf.broker_transport_options = dict(sentinel_options)
+        celery.conf.result_backend_transport_options = dict(sentinel_options)
     celery.conf.update(
         # JSON-only serialization (no pickle — secure by default).
         task_serializer="json",
