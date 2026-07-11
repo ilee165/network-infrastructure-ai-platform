@@ -158,10 +158,18 @@ export function ChatPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  /** True while this page instance is mounted; guards post-await socket assign. */
+  const mountedRef = useRef(true);
 
-  // Close any open socket on unmount so a streaming run never leaks.
+  // Close any open socket on unmount so a streaming run never leaks — including
+  // a socket that resolves *after* cleanup already ran (M24).
   useEffect(() => {
-    return () => socketRef.current?.close();
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      socketRef.current?.close();
+      socketRef.current = null;
+    };
   }, []);
 
   const appendStep = useCallback((step: AgentTraceStep) => {
@@ -221,12 +229,21 @@ export function ChatPage() {
 
     try {
       const response = await startSession({ intent: trimmed });
-      socketRef.current = await openSessionStream(response.session.id, {
+      const socket = await openSessionStream(response.session.id, {
         onStep: appendStep,
         onEnd: finishStream,
         onError: failStream,
       });
+      if (!mountedRef.current) {
+        // Effect cleanup already ran while we awaited — close immediately.
+        socket.close();
+        return;
+      }
+      socketRef.current = socket;
     } catch (err) {
+      if (!mountedRef.current) {
+        return;
+      }
       const message =
         err instanceof ApiError ? err.problem.detail : "Failed to start the agent session.";
       failStream(message);

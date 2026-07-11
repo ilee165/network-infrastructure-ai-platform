@@ -31,6 +31,28 @@ export const REFRESH_PATH = "/auth/refresh";
 /** Where an unrecoverable auth failure sends the browser. */
 const LOGIN_PATH = "/login";
 
+/** Default per-request timeout when the caller does not supply a signal (M34). */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * Combine a caller-supplied signal with a default timeout so either abort
+ * cancels the in-flight fetch. Falls back to the timeout alone when
+ * `AbortSignal.any` is unavailable (older runtimes).
+ */
+function resolveSignal(caller?: AbortSignal | null): AbortSignal {
+  const timeout = AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS);
+  if (caller == null) {
+    return timeout;
+  }
+  const anyFactory = (
+    AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }
+  ).any;
+  if (typeof anyFactory === "function") {
+    return anyFactory([caller, timeout]);
+  }
+  return caller;
+}
+
 /** Shape of the backend `{ access_token, token_type }` token responses. */
 interface TokenResponse {
   access_token: string;
@@ -121,7 +143,8 @@ async function rawFetch(
       headers.Authorization = `Bearer ${token}`;
     }
   }
-  return fetch(`${API_BASE}${path}`, { ...init, headers });
+  const signal = resolveSignal(init.signal ?? null);
+  return fetch(`${API_BASE}${path}`, { ...init, headers, signal });
 }
 
 /** Parse a successful `Response` into `T` (`undefined` for 204). */

@@ -187,17 +187,24 @@ class _SpatiumCapability(PluginCapability):
         self._client = client
         self._device_id = device_id
         self._ctx = context or SpatiumContext()
+        # One private loop per device session — httpx.AsyncClient pins its
+        # connection-pool lock to the loop that first drives it; a fresh
+        # ``asyncio.run()`` per capability call would bind the pool to a dead
+        # loop and raise RuntimeError on the second call (H9).
+        self._loop: asyncio.AbstractEventLoop | None = None
 
-    @staticmethod
-    def _run(coro: Coroutine[Any, Any, _T]) -> _T:
-        """Run *coro* to completion on a private event loop (sync bridge).
+    def _run(self, coro: Coroutine[Any, Any, _T]) -> _T:
+        """Run *coro* to completion on this session's private event loop.
 
-        A fresh loop is used so we never assume — or clobber — a loop the caller
-        already owns. The capability methods are invoked from synchronous
-        contexts (discovery runner, conformance suite); the production
-        async-executor path calls the client directly, not through these.
+        Reuses one loop for the lifetime of the capability so the shared
+        :class:`SpatiumClient` / httpx pool stays bound to a live loop. Never
+        reuses a caller-owned loop (sync bridge for discovery runner /
+        conformance suite); the production async-executor path calls the
+        client directly, not through these methods.
         """
-        return asyncio.run(coro)
+        if self._loop is None or self._loop.is_closed():
+            self._loop = asyncio.new_event_loop()
+        return self._loop.run_until_complete(coro)
 
     def _record_json(self, command: str, payload: Any) -> None:
         """Record a REST payload verbatim (canonical JSON) before parsing."""

@@ -55,7 +55,7 @@ from app.agents.framework.approval import (
 from app.core.errors import NetOpsError
 from app.core.logging import get_logger
 from app.core.security import Role
-from app.llm.redaction import redact_payload
+from app.llm.redaction import redact_payload, redact_prompt
 from app.models.change_requests import ChangeRequestKind
 
 _logger = get_logger(__name__)
@@ -376,13 +376,16 @@ class NetOpsTool(StructuredTool):
         so the event still records *which* tool ran with *what* (redacted)
         arguments.
         """
+        # A9: ``detail`` is often ``str(exc)`` from a ValidationError and can embed
+        # secret-shaped tool-arg values — scrub it at this single chokepoint too.
+        safe_detail = redact_prompt(detail) if detail is not None else None
         await self.audit_sink.record(
             ToolAuditEvent(
                 tool_name=self.name,
                 classification=self.classification,
                 arguments=redact_payload(arguments),
                 outcome=outcome,
-                detail=detail,
+                detail=safe_detail,
                 approval=approval,
                 bounded_execution=self.bounded_execution,
             )

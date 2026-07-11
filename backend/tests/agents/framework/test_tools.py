@@ -118,7 +118,8 @@ class TestClassificationBehavior:
         )
         async def slow_capture() -> str:
             """Start a packet capture that never finishes."""
-            await asyncio.sleep(5)
+            # Event-driven hang so the bound is what times out, not a wall clock.
+            await asyncio.Event().wait()
             return "unreachable"
 
         with pytest.raises(ToolExecutionError):
@@ -126,6 +127,26 @@ class TestClassificationBehavior:
         event = audit_sink.events[-1]
         assert event.outcome == "error"
         assert "timeout" in (event.detail or "")
+
+    async def test_exception_detail_is_redacted_in_audit(
+        self, audit_sink: RecordingAuditSink
+    ) -> None:
+        """H13: exception detail carrying secret-shaped config is scrubbed at emit."""
+
+        secret_line = "snmp-server community SuperSecretCommunity RO"
+
+        @netops_tool(classification=ToolClassification.READ_ONLY, audit_sink=audit_sink)
+        async def parse_config(blob: str) -> str:
+            """Parse a config blob (test tool)."""
+            raise ValueError(f"bad config near: {secret_line}")
+
+        with pytest.raises(ValueError):
+            await parse_config.ainvoke({"blob": secret_line})
+        event = audit_sink.events[-1]
+        assert event.outcome == "error"
+        detail = event.detail or ""
+        assert "SuperSecretCommunity" not in detail
+        assert "REDACTED" in detail
 
 
 class TestDefinitionValidation:

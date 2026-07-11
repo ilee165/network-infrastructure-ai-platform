@@ -10,6 +10,7 @@ encryption (D11) lands in ``core/crypto.py`` (M1).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
@@ -127,6 +128,9 @@ def decode_access_token(token: str, settings: Settings) -> dict[str, Any]:
 def hash_password(password: str) -> str:
     """Hash *password* with bcrypt (salted, library-default work factor).
 
+    CPU-bound — prefer :func:`hash_password_async` on the API event loop so
+    concurrent requests are not stalled (perf #6 / H2).
+
     Raises:
         ValueError: If the UTF-8 encoding of *password* exceeds bcrypt's
             72-byte input limit — enforce a shorter maximum at the API layer.
@@ -141,6 +145,7 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     """Constant-time verification of *password* against a stored bcrypt hash.
 
+    CPU-bound — prefer :func:`verify_password_async` on the API event loop.
     Returns ``False`` (never raises) for over-long passwords or a malformed
     stored hash, so callers can treat any mismatch uniformly.
     """
@@ -151,3 +156,13 @@ def verify_password(password: str, hashed: str) -> bool:
         return bcrypt.checkpw(secret, hashed.encode("ascii"))
     except ValueError:
         return False
+
+
+async def hash_password_async(password: str) -> str:
+    """Async wrapper: run :func:`hash_password` off the event loop."""
+    return await asyncio.to_thread(hash_password, password)
+
+
+async def verify_password_async(password: str, hashed: str) -> bool:
+    """Async wrapper: run :func:`verify_password` off the event loop."""
+    return await asyncio.to_thread(verify_password, password, hashed)

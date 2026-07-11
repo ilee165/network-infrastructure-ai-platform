@@ -165,7 +165,11 @@ async def create_device(body: DeviceCreate, session: DbSession, user: Engineer) 
         await _ensure_credential_exists(session, body.credential_id)
     device = Device(**body.model_dump())
     session.add(device)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:  # concurrent duplicate slipping past the pre-check
+        await session.rollback()
+        raise ConflictError(f"a device with mgmt_ip {body.mgmt_ip} already exists") from exc
     await audit.record(
         session,
         actor=_actor(user),
@@ -196,7 +200,12 @@ async def update_device(
         await _ensure_credential_exists(session, updates["credential_id"])
     for field, value in updates.items():
         setattr(device, field, value)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:  # concurrent rename slipping past the pre-check
+        await session.rollback()
+        mgmt_ip = updates.get("mgmt_ip", device.mgmt_ip)
+        raise ConflictError(f"a device with mgmt_ip {mgmt_ip} already exists") from exc
     await audit.record(
         session,
         actor=_actor(user),

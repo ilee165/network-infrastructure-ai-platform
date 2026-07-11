@@ -232,7 +232,9 @@ async def _audit_unavailable(
     maker: async_sessionmaker[AsyncSession] | None,
 ) -> None:
     """Durably audit a tripped fail-closed gate (reason class only, ADR-0032 §4)."""
-    try:
+    from app.services.audit.fail_closed import audit_fail_closed
+
+    async def _write() -> None:
         if maker is not None:
             async with maker() as audit_session:
                 await audit.record(
@@ -253,5 +255,5 @@ async def _audit_unavailable(
             target_id=target_id,
             detail={"reason_class": exc.reason_class},
         )
-    except Exception:  # noqa: BLE001 — never mask the original fail-closed error
-        pass
+
+    await audit_fail_closed(_write, reason_class=exc.reason_class)

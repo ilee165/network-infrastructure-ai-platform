@@ -362,3 +362,61 @@ describe("ChatPage — error states", () => {
     expect(screen.getByLabelText("Chat message")).not.toBeDisabled();
   });
 });
+
+describe("ChatPage — unmount during stream open (M24)", () => {
+  it("closes the socket when the page unmounts before openSessionStream resolves", async () => {
+    let resolveTicket!: (value: Response) => void;
+    const deferredTicket = new Promise<Response>((resolve) => {
+      resolveTicket = resolve;
+    });
+    const fetchMock = vi.fn((url: string, init?: RequestInit): Promise<Response> => {
+      if ((init as RequestInit | undefined)?.method === "POST") {
+        if (String(url).includes("stream-ticket")) {
+          return deferredTicket;
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify(START_RESPONSE), {
+            status: 201,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { unmount } = render(
+      <QueryClientProvider client={queryClient}>
+        <ChatPage />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "test unmount" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    // Session start completed; ticket (and thus socket open) still pending.
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/agents"))).toBe(true);
+    });
+
+    unmount();
+
+    // Resolve ticket after unmount — openSessionStream may still construct a socket.
+    resolveTicket(
+      new Response(JSON.stringify({ ticket: "late-ticket" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await waitFor(() => {
+      const late = MockWebSocket.instances.find((s) => s.url.includes("late-ticket"));
+      if (late) {
+        expect(late.closed).toBe(true);
+      }
+    });
+  });
+});

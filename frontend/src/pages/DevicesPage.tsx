@@ -52,6 +52,7 @@ const RUN_VARIANT: Record<RunStatusValue, StatusPillVariant> = {
   running: "info",
   succeeded: "ok",
   failed: "error",
+  partial: "warn",
 };
 
 /** Page-level mapping from a device's status to a StatusPill tone. */

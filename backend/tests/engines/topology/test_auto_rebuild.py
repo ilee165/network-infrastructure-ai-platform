@@ -22,8 +22,13 @@ from app.models.mixins import utcnow
 class _FakeClient:
     """Minimal Neo4jClient stand-in: returns a canned freshness, records close()."""
 
-    def __init__(self, freshness: tuple[int, Any]) -> None:
-        self._freshness = freshness
+    def __init__(self, freshness: tuple[int, int, Any] | tuple[int, Any]) -> None:
+        # Accept legacy (nodes, newest) fixtures and expand to (nodes, edges, newest).
+        if len(freshness) == 2:
+            nodes, newest = freshness  # type: ignore[misc]
+            self._freshness = (nodes, 0, newest)
+        else:
+            self._freshness = freshness  # type: ignore[assignment]
         self.closed = False
 
     async def execute_read(self, work: Any, *args: Any, **kwargs: Any) -> Any:
@@ -146,7 +151,7 @@ async def test_reconcile_noop_when_graph_fresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     newest = utcnow() - timedelta(seconds=5)
-    client = _FakeClient((11, newest))  # fresh graph -> no rebuild.
+    client = _FakeClient((11, 17, newest))  # fresh graph -> no rebuild; live edges=17.
     monkeypatch.setattr(auto_rebuild, "create_client", lambda settings: client)
 
     async def _fail_timed_rebuild() -> dict[str, Any]:  # pragma: no cover
@@ -159,10 +164,12 @@ async def test_reconcile_noop_when_graph_fresh(
 
     assert summary["rebuilt"] is False
     assert summary["nodes"] == 11
+    assert summary["edges"] == 17  # live count, not hard-coded 0
     # Even on a no-op tick the textfile is written (continuous series + freshness).
     assert target.exists()
     text = target.read_text(encoding="utf-8")
     assert "topology_rebuild_seconds 0.000000" in text
+    assert "topology_rebuild_edges 17" in text
     assert "topology_graph_age_seconds" in text
 
 

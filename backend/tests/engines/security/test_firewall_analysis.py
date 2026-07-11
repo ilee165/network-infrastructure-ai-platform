@@ -335,6 +335,22 @@ class TestPosture:
         assert len(mgmt) == 1
         assert mgmt[0].severity is FindingSeverity.HIGH
 
+    def test_management_plane_any_service_from_any_source_is_high(self) -> None:
+        """Wildcard service dimension must not miss the management-plane HIGH."""
+        rules = [
+            _rule(
+                "permit-any-svc",
+                action=FirewallAction.ALLOW,
+                destination_addresses=("core-1",),
+                services=("any",),
+                logging=True,
+            )
+        ]
+        findings = analyze_security_posture(rules)
+        mgmt = [f for f in findings if "management-plane" in f.rationale]
+        assert len(mgmt) == 1
+        assert mgmt[0].severity is FindingSeverity.HIGH
+
     def test_management_plane_from_specific_source_is_not_flagged(self) -> None:
         rules = [
             _rule(

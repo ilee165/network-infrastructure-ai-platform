@@ -415,7 +415,9 @@ services:
       # Re-project only when the last projection is older than this many seconds (the
       # post-recreate EMPTY graph reads as infinitely stale -> always rebuilds; a fresh
       # graph is a no-op). 0 forces an unconditional rebuild each tick.
-      stalenessSeconds: 300
+      # ≥ 2× the CronJob schedule period (5 min) so a healthy estate is not
+      # perpetually re-projected on every tick (perf #3 / H6 companion).
+      stalenessSeconds: 600
       # The node_exporter textfile-collector dir the rebuild-duration .prom is written
       # to (the no-pushgateway pattern — a Job pod is not scrapable; the file survives
       # the pod for a node_exporter/agent to collect). Mirrors audit.chainVerify.

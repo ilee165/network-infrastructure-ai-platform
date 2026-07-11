@@ -20,7 +20,7 @@ from app.api.deps import (
 from app.api.v1.auth._shared import _EMAIL_TAKEN, REFRESH_COOKIE_NAME, router
 from app.core.config import Settings
 from app.core.errors import AuthError, BadRequestError, ConflictError, NotFoundError
-from app.core.security import decode_access_token, hash_password, verify_password
+from app.core.security import decode_access_token, hash_password_async, verify_password_async
 from app.models import User
 from app.services.audit import service as audit_service
 from app.services.auth_sessions import service as session_service
@@ -170,10 +170,10 @@ async def change_my_password(
     ``auth.password_changed``. Available to a flagged user (no forced-change
     guard) so the forced first-login change can actually be performed.
     """
-    if not verify_password(body.current_password, user.password_hash):
+    if not await verify_password_async(body.current_password, user.password_hash):
         raise BadRequestError(_BAD_CURRENT_PASSWORD)
 
-    user.password_hash = hash_password(body.new_password)
+    user.password_hash = await hash_password_async(body.new_password)
     user.must_change_password = False
 
     keep_sid = _current_sid(request, settings)

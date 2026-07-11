@@ -10,7 +10,12 @@ import type { DeviceStatus } from "./devices";
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
-export type DiscoveryRunStatus = "pending" | "running" | "succeeded" | "failed";
+export type DiscoveryRunStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "partial";
 export type { DeviceStatus } from "./devices";
 
 // ── Response shapes ───────────────────────────────────────────────────────────

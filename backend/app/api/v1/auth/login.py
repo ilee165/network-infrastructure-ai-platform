@@ -50,7 +50,7 @@ from app.api.v1.auth._shared import (
 from app.core.config import Settings
 from app.core.errors import AuthError, RateLimitedError
 from app.core.security import Role as RoleEnum
-from app.core.security import decode_access_token, verify_password
+from app.core.security import decode_access_token, verify_password_async
 from app.models import User
 from app.services import rate_limit
 from app.services.audit import service as audit_service
@@ -282,11 +282,11 @@ async def login(
         await session.execute(select(User).where(User.username == body.username))
     ).scalar_one_or_none()
     if user is None:
-        verify_password(body.password, _DUMMY_PASSWORD_HASH)  # timing equalizer
+        await verify_password_async(body.password, _DUMMY_PASSWORD_HASH)  # timing equalizer
         await _audit_login_failed(session, body.username)
         await _record_login_failure(limiter, settings, username=body.username, source=source)
         raise AuthError(_BAD_CREDENTIALS)
-    if not verify_password(body.password, user.password_hash) or not user.is_active:
+    if not await verify_password_async(body.password, user.password_hash) or not user.is_active:
         await _audit_login_failed(session, body.username)
         await _record_login_failure(limiter, settings, username=body.username, source=source)
         raise AuthError(_BAD_CREDENTIALS)

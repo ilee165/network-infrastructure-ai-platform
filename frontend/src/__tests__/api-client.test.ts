@@ -138,3 +138,30 @@ describe("apiFetch — single-flight refresh (concurrent 401s)", () => {
     expect(refreshCalls).toBe(2);
   });
 });
+
+describe("apiFetch — AbortSignal / timeout (M34)", () => {
+  it("forwards a caller AbortSignal so cancelled requests reject", async () => {
+    const controller = new AbortController();
+    const mock = vi.fn((_url: string, init?: RequestInit) => {
+      // Abort immediately after fetch is called with the signal.
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) {
+          reject(new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        signal?.addEventListener("abort", () => {
+          reject(new DOMException("Aborted", "AbortError"));
+        });
+      });
+    });
+    vi.stubGlobal("fetch", mock);
+    useAuthStore.setState({ accessToken: "tok", user: null, status: "authed" });
+    const pending = apiFetch("/devices", { signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+    expect(mock).toHaveBeenCalled();
+    const init = mock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(init?.signal).toBeDefined();
+  });
+});

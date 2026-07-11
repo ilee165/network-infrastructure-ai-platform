@@ -114,7 +114,8 @@ async def test_ready_times_out_hung_probe(
     """A hung dependency is reported as an error within the probe budget."""
 
     async def hung_probe(settings: Settings) -> None:
-        await asyncio.sleep(5)
+        # Event-driven hang: never resolves unless cancelled by the probe budget.
+        await asyncio.Event().wait()
 
     _patch_all_probes(monkeypatch, _ok_probe)
     monkeypatch.setitem(health._PROBES, "postgres", hung_probe)

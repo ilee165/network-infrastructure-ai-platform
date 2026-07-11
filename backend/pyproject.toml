@@ -94,6 +94,8 @@ dev = [
     # runners); pytest-cov combines per-worker data in-process, so the
     # --cov-fail-under=80 gate stays computed over the whole suite (ADR-0016).
     "pytest-xdist",
+    # Hard cap hung tests (F6): default 60s; de-sleep real-clock waits in suite.
+    "pytest-timeout",
     "ruff",
     "mypy",
     "import-linter",
@@ -220,6 +222,7 @@ follow_imports_for_stubs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+timeout = 60
 testpaths = ["tests"]
 markers = [
     "integration: requires compose-backed Postgres/Neo4j/Redis (excluded from the unit run)",

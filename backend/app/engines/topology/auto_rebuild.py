@@ -54,25 +54,29 @@ logger = structlog.get_logger(__name__)
 __all__ = ["main", "reconcile", "graph_freshness"]
 
 
-async def graph_freshness(client: Neo4jClient) -> tuple[int, datetime | None]:
-    """Return ``(node_count, newest_last_projected_at)`` for the projected graph.
+async def graph_freshness(client: Neo4jClient) -> tuple[int, int, datetime | None]:
+    """Return ``(node_count, edge_count, newest_last_projected_at)`` for the graph.
 
     The projector stamps ``last_projected_at`` on every node (ADR-0005 §3); the
     newest such value is the projection's freshness, and a zero node count is the
-    post-recreate EMPTY state. Both come from one read transaction.
+    post-recreate EMPTY state. Edge count is returned so a healthy no-op tick can
+    emit the live ``topology_rebuild_edges`` gauge (not a hard-coded 0).
     """
 
-    async def _read(tx: Any) -> tuple[int, datetime | None]:
+    async def _read(tx: Any) -> tuple[int, int, datetime | None]:
         result = await tx.run(
-            "MATCH (n) RETURN count(n) AS nodes, max(n.last_projected_at) AS newest"
+            "MATCH (n) "
+            "OPTIONAL MATCH ()-[r]->() "
+            "RETURN count(DISTINCT n) AS nodes, count(r) AS edges, "
+            "max(n.last_projected_at) AS newest"
         )
         record = await result.single()
         if record is None:
-            return 0, None
+            return 0, 0, None
         newest = record["newest"]
         # neo4j returns a DateTime; normalize to a stdlib datetime when present.
         newest_dt = newest.to_native() if hasattr(newest, "to_native") else newest
-        return int(record["nodes"]), newest_dt
+        return int(record["nodes"]), int(record["edges"]), newest_dt
 
     return await client.execute_read(_read)
 
@@ -142,7 +146,7 @@ async def reconcile(*, metrics_textfile: str, staleness_seconds: float) -> dict[
     client = create_client(settings)
     now = utcnow()
     try:
-        nodes_before, newest = await graph_freshness(client)
+        nodes_before, edges_before, newest = await graph_freshness(client)
         age_seconds = 0.0 if newest is None else max(0.0, (now - newest).total_seconds())
         stale = _is_stale(nodes_before, newest, staleness_seconds=staleness_seconds, now=now)
 
@@ -159,10 +163,11 @@ async def reconcile(*, metrics_textfile: str, staleness_seconds: float) -> dict[
             age_seconds = 0.0
         else:
             # Healthy steady-state: no re-projection. Record a 0s "rebuild" so the
-            # series stays continuous (and the graph age reflects freshness).
+            # series stays continuous; emit live node/edge counts (not edges=0) so
+            # topology_rebuild_edges and DR/RTO consumers keep a truthful gauge.
             seconds = 0.0
             nodes = nodes_before
-            edges = 0
+            edges = edges_before
             rebuilt = False
             observe_rebuild(seconds=seconds, nodes=nodes, edges=edges)
     finally:
@@ -206,11 +211,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--staleness-seconds",
         type=float,
-        default=0.0,
+        default=600.0,
         help=(
             "re-project only when the newest projection is older than this many "
-            "seconds (0 forces an unconditional rebuild each tick; an EMPTY graph "
-            "always rebuilds)."
+            "seconds (default 600 = 2× the 5-min schedule so a healthy estate is "
+            "not rebuilt every tick; 0 forces an unconditional rebuild; an EMPTY "
+            "graph always rebuilds)."
         ),
     )
     return parser.parse_args(argv)

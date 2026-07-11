@@ -122,4 +122,5 @@ Coordinate scheduling with P4-W3 (compliance reporting UI) to avoid churn.
 | Wave | Status |
 |------|--------|
 | 1 | ✅ Merged (PR #140, 2026-07-11) |
-| 2–7 | Pending — user calls each wave |
+| 2 | 🔄 In progress on `fix/review-wave2` — all 16 tasks implemented (T1–T16) |
+| 3–7 | Pending — user calls each wave |
