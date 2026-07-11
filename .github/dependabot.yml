@@ -1,13 +1,21 @@
 # Dependabot configuration (D16 / ADR-0016): weekly dependency updates for every
 # package ecosystem in the repo. CI (ci.yml) gates every update PR.
+#
+# Cooldown (npm + pip): hold newly published versions 7 days before PRing them —
+# most registry supply-chain compromises are caught within days of publish.
+# Cooldown applies to VERSION updates only; security updates bypass it.
 version: 2
 
 updates:
-  # Backend Python dependencies (backend/pyproject.toml).
+  # Backend Python dependencies (backend/pyproject.toml). Dependabot regenerates
+  # backend/requirements.lock.txt (uv-compiled, hash-pinned) directly, so update
+  # PRs pass the ci.yml lockfile-drift gate (verified: PR #138).
   - package-ecosystem: pip
     directory: /backend
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     labels:
       - dependencies
       - backend
@@ -17,13 +25,14 @@ updates:
     directory: /frontend
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     labels:
       - dependencies
       - frontend
     # Group interdependent toolchains so peer-linked packages bump together in a
     # single PR (a lone major bump breaks `npm ci` via ERESOLVE — see PR #12, #32,
-    # #34, #36). Majors are ignored: they require a coordinated, human-driven
-    # migration rather than an automated PR.
+    # #34, #36).
     groups:
       frontend-build:
         patterns:
@@ -39,12 +48,63 @@ updates:
           - "@types/react"
           - "@types/react-dom"
           - "@testing-library/*"
+    # Majors for the peer-linked toolchains require a coordinated, human-driven
+    # migration rather than an automated PR — but the ignore is SCOPED to those
+    # toolchains, not "*": `ignore` also suppresses Dependabot SECURITY updates,
+    # and a blanket major-ignore would silently drop a majors-only security fix
+    # in a runtime dep (react-router-dom, @tanstack/react-query, zustand,
+    # cytoscape, axe-core stay eligible for major PRs). NB: entries must be
+    # explicit names, not "react*" — that wildcard would also match
+    # react-router-dom and defeat the purpose.
     ignore:
-      - dependency-name: "*"
-        update-types:
-          - "version-update:semver-major"
+      # React stack (framework majors are migrations).
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@testing-library/*"
+        update-types: ["version-update:semver-major"]
+      # Build/test stack.
+      - dependency-name: "vite"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@vitejs/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@vitest/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vitest-axe"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "jsdom"
+        update-types: ["version-update:semver-major"]
+      # Lint stack.
+      - dependency-name: "eslint"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@eslint/js"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "eslint-plugin-*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "typescript-eslint"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "globals"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # CSS stack.
+      - dependency-name: "tailwindcss"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "postcss"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "autoprefixer"
+        update-types: ["version-update:semver-major"]
 
-  # GitHub Actions used by .github/workflows/.
+  # GitHub Actions used by .github/workflows/. All actions are SHA-pinned
+  # (ci.yml); Dependabot updates the pinned SHA and keeps the trailing `# vN`
+  # comment in sync. Grouped so the ~9 pinned actions arrive as one weekly PR.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -52,8 +112,14 @@ updates:
     labels:
       - dependencies
       - ci
+    groups:
+      gha-all:
+        patterns:
+          - "*"
 
-  # Base images in deploy/docker/*.Dockerfile.
+  # Base images in deploy/docker/*.Dockerfile. Deliberately NO cooldown: base-
+  # image bumps are how OS CVE fixes arrive (Trivy image gate), so freshness
+  # beats caution here; the scans gate every update PR.
   - package-ecosystem: docker
     directory: /deploy/docker
     schedule:
