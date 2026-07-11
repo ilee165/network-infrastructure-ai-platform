@@ -244,7 +244,7 @@ async def test_shutdown_closes_shared_redis_client(monkeypatch: pytest.MonkeyPat
             self.closed = True
 
     fake = _FakeRedisClient()
-    monkeypatch.setattr(redis_asyncio, "from_url", lambda url: fake)
+    monkeypatch.setattr(redis_asyncio, "from_url", lambda url, **kwargs: fake)
 
     app_ = create_app(
         Settings(_env_file=None, env="dev", secret_key="t", is_prod=False)  # type: ignore[arg-type]

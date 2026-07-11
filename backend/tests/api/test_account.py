@@ -510,6 +510,46 @@ def test_get_active_user_raises_forbidden_directly() -> None:
     assert exc.value.detail == "password_change_required"
 
 
+async def test_flagged_user_blocked_on_real_protected_route(
+    client, users: dict[str, User], session: AsyncSession, auth_headers
+) -> None:
+    """A must_change_password user is 403'd on a real require_role route.
+
+    Guards against the guard going dead again: ``require_role``'s ``_enforce``
+    must resolve through ``get_active_user``, not bare ``get_current_user``.
+    """
+    users["engineer"].must_change_password = True
+    await session.commit()
+
+    resp = await client.get("/api/v1/devices", headers=auth_headers("engineer"))
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "password_change_required"
+
+
+async def test_flagged_user_keeps_self_service_escape_hatches(
+    client, users: dict[str, User], session: AsyncSession, auth_headers
+) -> None:
+    """A flagged user can still read /me and change the password (documented exceptions)."""
+    users["engineer"].must_change_password = True
+    await session.commit()
+
+    me = await client.get(ME_URL, headers=auth_headers("engineer"))
+    assert me.status_code == 200
+    assert me.json()["must_change_password"] is True
+
+    changed = await client.post(
+        PASSWORD_URL,
+        headers=auth_headers("engineer"),
+        json={"current_password": TEST_PASSWORD, "new_password": "N3w-Str0ng-Passw0rd!"},
+    )
+    assert changed.status_code == 200
+
+    # Flag cleared → the protected route opens back up.
+    resp = await client.get("/api/v1/devices", headers=auth_headers("engineer"))
+    assert resp.status_code == 200
+
+
 def test_hash_password_roundtrip_helper() -> None:
     """Sanity check the helper imported for password assertions."""
     h = hash_password("some-password")

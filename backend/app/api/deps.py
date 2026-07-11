@@ -337,7 +337,7 @@ def require_role(minimum: str) -> Callable[..., Coroutine[Any, Any, User]]:
         raise ValueError(msg)
     required_rank = ROLE_RANKS[minimum]
 
-    async def _enforce(user: Annotated[User, Depends(get_current_user)]) -> User:
+    async def _enforce(user: Annotated[User, Depends(get_active_user)]) -> User:
         if ROLE_RANKS.get(user.role.name, -1) < required_rank:
             raise ForbiddenError(f"This action requires the {minimum!r} role or higher")
         return user

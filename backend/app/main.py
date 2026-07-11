@@ -57,8 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # is lazy (no connection opened until the first command), so this is safe
         # even when Redis is briefly unreachable at boot; the API limiter then
         # fails open and the login lockout fails closed, per design.
-        from redis.asyncio import from_url
-
+        from app.core.redis import create_redis_client
         from app.services.agent_stream import (
             RedisAgentStreamFanout,
             RedisStreamTicketStore,
@@ -68,7 +67,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # One Sentinel-aware client (W1-T4 wires ``redis_url`` at the Sentinel
         # service, so no static host pin) shared by the rate limiter and the
         # stateless agent-session fan-out + ticket store (ADR-0044 §2).
-        redis_client = from_url(app_settings.redis_url)
+        # create_redis_client handles the HA tier's ``sentinel://`` scheme, which
+        # redis.asyncio.from_url rejects at parse time.
+        redis_client = create_redis_client(app_settings)
         app_.state.rate_limiter = RedisRateLimiter(redis_client)
         # W2-T2: externalize WebSocket session state to Redis so any ``api``
         # replica serves any session — the pub/sub fan-out for live frames and the

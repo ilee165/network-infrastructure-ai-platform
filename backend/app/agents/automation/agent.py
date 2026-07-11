@@ -50,6 +50,8 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
+import structlog
+
 from app.agents.automation.executors import (
     ConfigChangeExecutor,
     DdiChangeExecutor,
@@ -83,6 +85,8 @@ from app.services.change_requests import (
     AutomationPrincipal,
     ChangeRequestService,
 )
+
+logger = structlog.get_logger(__name__)
 
 #: String id of this agent — equals its package name (REPO-STRUCTURE §4.1).
 AUTOMATION_NAME = "automation"
@@ -286,7 +290,20 @@ class AutomationAgent(BaseSpecialistAgent):
             ),
         )
 
-        final_state = await self._apply_and_finalize(cr, trace)
+        # From here the CR is 'executing'; an escaping exception would strand it
+        # there forever (execute() refuses non-'approved' CRs, and no reaper
+        # exists), so any unexpected raise is converted into an audited
+        # executing -> failed transition before propagating. If the CR already
+        # reached a terminal state before the raise (e.g. a trace write failed
+        # AFTER mark_completed), the terminal outcome is preserved and returned
+        # instead — never reported as a failure of a change that applied.
+        try:
+            final_state = await self._apply_and_finalize(cr, trace)
+        except Exception as exc:
+            recovered = await self._salvage_unexpected(cr, trace, exc)
+            if recovered is None:
+                raise
+            return recovered
         completed = await self._trace_recorder.complete(trace.trace_id)
         return ChangeExecutionResult(state=final_state, trace=completed)
 
@@ -508,6 +525,111 @@ class AutomationAgent(BaseSpecialistAgent):
             ),
         )
         return ChangeRequestState.FAILED
+
+    async def _salvage_unexpected(
+        self, cr: ChangeRequest, trace: ReasoningTrace, exc: Exception
+    ) -> ChangeExecutionResult | None:
+        """Best-effort salvage when :meth:`_apply_and_finalize` raised unexpectedly.
+
+        Two cases, keyed on the CR's PERSISTED state (never the exception):
+
+        * Still ``executing`` (or the state cannot be read): mirror
+          :meth:`_fail_no_executor`'s fail-closed shape — mark failed +
+          operator-alert audit + trace conclusion — and return ``None`` so the
+          caller re-raises. Every salvage step is individually guarded: the
+          original exception must propagate even when the DB itself is what
+          failed, so a salvage error is logged and swallowed rather than
+          allowed to mask the cause.
+        * Already terminal (a trace write failed AFTER ``mark_completed`` /
+          ``mark_rolled_back``): the change really happened — no failure
+          transition, no operator alert. Complete the trace and return the
+          terminal result; only if even that fails is ``None`` returned and the
+          original exception surfaced.
+
+        The persisted reason/summary carry ONLY the exception type, never
+        ``str(exc)`` — executor errors can embed credential-bearing transport
+        text, and audit/trace details are redaction-safe by contract. The full
+        exception surfaces in worker logs via the re-raise instead.
+        """
+        reason = f"unexpected {type(exc).__name__} during execution"
+        current_state: ChangeRequestState | None = None
+        try:
+            current_state = (await self._svc.get(cr.id)).state
+        except Exception:
+            logger.exception(
+                "failed to read change request state after unexpected executor error",
+                change_request_id=str(cr.id),
+            )
+
+        if current_state is not None and current_state is not ChangeRequestState.EXECUTING:
+            # Terminal outcome already persisted — preserve it. No failure
+            # audit, no re-raise; the trace hiccup is logged, not alerted.
+            logger.warning(
+                "unexpected executor error AFTER terminal CR transition; "
+                "preserving the terminal outcome",
+                change_request_id=str(cr.id),
+                state=current_state.value,
+                error_type=type(exc).__name__,
+            )
+            try:
+                await self._trace_recorder.record_step(
+                    trace.trace_id,
+                    TraceStep(
+                        kind=TraceStepKind.CONCLUSION,
+                        summary=(
+                            f"change request {cr.id} reached '{current_state.value}' "
+                            f"before an {reason}; terminal outcome preserved"
+                        ),
+                    ),
+                )
+                completed = await self._trace_recorder.complete(trace.trace_id)
+            except Exception:
+                logger.exception(
+                    "failed to record trace after terminal-state salvage",
+                    change_request_id=str(cr.id),
+                )
+                return None
+            return ChangeExecutionResult(state=current_state, trace=completed)
+
+        try:
+            await self._svc.mark_failed(cr.id, principal=self._principal)
+        except Exception:
+            logger.exception(
+                "failed to mark change request failed after unexpected executor error",
+                change_request_id=str(cr.id),
+            )
+        try:
+            async with self._svc.sessionmaker() as session:
+                await audit.record(
+                    session,
+                    actor=self._principal.actor,
+                    action=audit.AUTOMATION_ROLLBACK_FAILED,
+                    target_type="change_request",
+                    target_id=str(cr.id),
+                    detail={"reason": reason, "target_refs": cr.target_refs},
+                    reasoning_trace_id=cr.reasoning_trace_id,
+                )
+                await session.commit()
+        except Exception:
+            logger.exception(
+                "failed to audit unexpected executor error",
+                change_request_id=str(cr.id),
+            )
+        try:
+            await self._trace_recorder.record_step(
+                trace.trace_id,
+                TraceStep(
+                    kind=TraceStepKind.CONCLUSION,
+                    summary=f"change request {cr.id} marked 'failed': {reason}",
+                ),
+            )
+            await self._trace_recorder.complete(trace.trace_id)
+        except Exception:
+            logger.exception(
+                "failed to record trace for unexpected executor error",
+                change_request_id=str(cr.id),
+            )
+        return None
 
     async def _fail_no_executor(
         self, cr: ChangeRequest, trace: ReasoningTrace, *, reason: str

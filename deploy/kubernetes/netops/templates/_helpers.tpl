@@ -78,6 +78,21 @@ coordinates. Usage: {{ include "netops.redisUrl" . }}
 {{- end -}}
 
 {{/*
+netops.ollamaBaseUrl — the Ollama endpoint rendered as NETOPS_OLLAMA_BASE_URL
+(ADR-0009). An explicit config.llm.ollamaBaseUrl wins (external Ollama);
+otherwise the chart's own ollama Service name is derived from the release
+fullname so the default can never drift from the Service manifest.
+Usage: {{ include "netops.ollamaBaseUrl" . }}
+*/}}
+{{- define "netops.ollamaBaseUrl" -}}
+{{- if .Values.config.llm.ollamaBaseUrl -}}
+{{- .Values.config.llm.ollamaBaseUrl -}}
+{{- else -}}
+{{- printf "http://%s-ollama:%v" (include "netops.fullname" .) .Values.services.ollama.port -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 netops.redisSentinelMaster — the Sentinel master_name the failover-aware client
 passes in its transport options (W1-T4, ADR-0044 §1). Reads the live
 redisSentinel value when the HA tier is on (the source of truth), else the

@@ -97,8 +97,21 @@ class Settings(BaseSettings):
     #: atomicity.
     audit_synchronous_commit: Literal["remote_apply", "on", "remote_write"] = "remote_apply"
 
-    #: Celery broker/result backend + cache (ADR-0008).
+    #: Celery broker/result backend + cache (ADR-0008). With the redisSentinel HA
+    #: tier the Helm chart renders a ``sentinel://h0:26379;h1:26379;h2:26379/<db>``
+    #: URL here (ADR-0044 §1); ``app.core.redis.create_redis_client`` and the
+    #: Celery broker transport options handle that scheme.
     redis_url: str = "redis://redis:6379/0"
+
+    #: Redis AUTH password (``NETOPS_REDIS_PASSWORD``). Never embedded in
+    #: ``redis_url`` — the URL carries only non-secret coordinates (ADR-0044 §1);
+    #: empty means no AUTH (the compose/GA default).
+    redis_password: str = ""
+
+    #: Sentinel master name clients pass as ``master_name`` when ``redis_url`` is
+    #: a ``sentinel://`` URL (``NETOPS_REDIS_SENTINEL_MASTER``; mirrors the
+    #: chart's ``redisSentinel.sentinel.masterName`` default).
+    redis_sentinel_master: str = "netops-redis"
 
     #: TCP port the worker exposes its Prometheus ``/metrics`` exposition on
     #: (W3-T0, ADR-0015 §2). The Celery worker has no HTTP server, so a tiny

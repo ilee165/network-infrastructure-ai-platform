@@ -96,9 +96,9 @@ async def _probe_neo4j(settings: Settings) -> None:
 
 async def _probe_redis(settings: Settings) -> None:
     """PING the Redis broker/cache."""
-    import redis.asyncio as aioredis  # local import: keep module import light
+    from app.core.redis import create_redis_client  # local import: keep module import light
 
-    client = aioredis.from_url(settings.redis_url)
+    client = create_redis_client(settings)
     try:
         await client.ping()
     finally:

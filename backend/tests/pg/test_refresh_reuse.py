@@ -15,12 +15,18 @@ from __future__ import annotations
 import hashlib
 import uuid
 
+import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import hash_password
 from app.models.identity import RefreshSession, Role, User
 from app.models.mixins import utcnow
+
+# Required for every tests/pg/ file: the blocking pg-integration job selects
+# with `-m integration`; without this the file is DESELECTED and runs in NO job
+# (the F1 finding, 2026-07-10 testing-strategy review).
+pytestmark = pytest.mark.integration
 
 
 async def _make_user(pg_session: AsyncSession) -> User:
@@ -61,23 +67,30 @@ async def test_jti_hash_rotate_and_reuse_state_roundtrip_on_pg(
     """The rotate → replay-detect → revoke state machine persists on real PG."""
     user = await _make_user(pg_session)
 
-    # Login: session starts with the hash of the first issued jti.
+    # Login: session starts with the hash of the first issued jti. Capture the
+    # id BEFORE commit — the async session expires instances on commit and a
+    # later sync attribute load raises MissingGreenlet.
     first_jti = str(uuid.uuid4())
     session_row = RefreshSession(
         user_id=user.id,
         current_jti_hash=hashlib.sha256(first_jti.encode()).hexdigest(),
     )
     pg_session.add(session_row)
+    await pg_session.flush()
+    sid = session_row.id
     await pg_session.commit()
 
     # Legitimate rotation: the stored hash advances to the new jti.
     rotated_jti = str(uuid.uuid4())
-    session_row.current_jti_hash = hashlib.sha256(rotated_jti.encode()).hexdigest()
+    rotating = (
+        await pg_session.execute(select(RefreshSession).where(RefreshSession.id == sid))
+    ).scalar_one()
+    rotating.current_jti_hash = hashlib.sha256(rotated_jti.encode()).hexdigest()
     await pg_session.commit()
     pg_session.expire_all()
 
     reloaded = (
-        await pg_session.execute(select(RefreshSession).where(RefreshSession.id == session_row.id))
+        await pg_session.execute(select(RefreshSession).where(RefreshSession.id == sid))
     ).scalar_one()
     # The stale (first) jti no longer matches — exactly the theft signal the
     # /auth/refresh route acts on.
@@ -90,7 +103,7 @@ async def test_jti_hash_rotate_and_reuse_state_roundtrip_on_pg(
     await pg_session.commit()
     pg_session.expire_all()
     final = (
-        await pg_session.execute(select(RefreshSession).where(RefreshSession.id == session_row.id))
+        await pg_session.execute(select(RefreshSession).where(RefreshSession.id == sid))
     ).scalar_one()
     assert final.revoked_at is not None
     # No token material at rest: the column holds a 64-char hex digest only.
@@ -104,11 +117,13 @@ async def test_legacy_null_hash_row_persists_on_pg(pg_session: AsyncSession) -> 
     user = await _make_user(pg_session)
     session_row = RefreshSession(user_id=user.id)
     pg_session.add(session_row)
+    await pg_session.flush()
+    sid = session_row.id
     await pg_session.commit()
     pg_session.expire_all()
 
     reloaded = (
-        await pg_session.execute(select(RefreshSession).where(RefreshSession.id == session_row.id))
+        await pg_session.execute(select(RefreshSession).where(RefreshSession.id == sid))
     ).scalar_one()
     assert reloaded.current_jti_hash is None
     assert reloaded.revoked_at is None
