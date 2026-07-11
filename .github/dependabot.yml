@@ -1,30 +1,50 @@
-# Dependabot configuration (D16 / ADR-0016): weekly dependency updates for every
-# package ecosystem in the repo. CI (ci.yml) gates every update PR.
+# Dependabot configuration (D16 / ADR-0016): monthly dependency updates for every
+# package ecosystem in the repo. CI (ci.yml) gates every update PR. Monthly
+# cadence (was weekly) cuts PR noise after the #143–#151 batch; security updates
+# still open off-cycle when GitHub surfaces them. Operators may still open a
+# manual bump PR any time.
 #
 # Cooldown (npm + pip): hold newly published versions 7 days before PRing them —
 # most registry supply-chain compromises are caught within days of publish.
 # Cooldown applies to VERSION updates only; security updates bypass it.
+#
+# Pip major ignores (scoped, not "*"): redis / paramiko / websockets majors are
+# currently unresolvable under transitive caps (see docs/security/
+# supply-chain-scanning.md "Dependabot triage"). A blanket major-ignore would
+# suppress security updates — same rationale as the scoped npm ignores below.
 version: 2
 
 updates:
   # Backend Python dependencies (backend/pyproject.toml). Dependabot regenerates
   # backend/requirements.lock.txt (uv-compiled, hash-pinned) directly, so update
-  # PRs pass the ci.yml lockfile-drift gate (verified: PR #138).
+  # PRs pass the ci.yml lockfile-drift gate when the pin is resolvable (verified:
+  # PR #138; counter-examples #146/#149/#151 — see ignore block).
   - package-ecosystem: pip
     directory: /backend
     schedule:
-      interval: weekly
+      interval: monthly
     cooldown:
       default-days: 7
     labels:
       - dependencies
       - backend
+    # Majors blocked by transitive upper bounds today — Dependabot lock-only
+    # edits fail the lockfile gate (uv recompile reverts). Lift an entry only
+    # after upgrading the constraining package first (human PR; see
+    # supply-chain-scanning.md).
+    ignore:
+      - dependency-name: "redis"
+        update-types: ["version-update:semver-major"]   # kombu: redis<6.5 (#149)
+      - dependency-name: "paramiko"
+        update-types: ["version-update:semver-major"]   # netmiko: paramiko<5 (#146)
+      - dependency-name: "websockets"
+        update-types: ["version-update:semver-major"]   # langgraph-sdk: websockets<16 (#151)
 
   # Frontend npm dependencies (frontend/package.json + lockfile).
   - package-ecosystem: npm
     directory: /frontend
     schedule:
-      interval: weekly
+      interval: monthly
     cooldown:
       default-days: 7
     labels:
@@ -104,11 +124,11 @@ updates:
 
   # GitHub Actions used by .github/workflows/. All actions are SHA-pinned
   # (ci.yml); Dependabot updates the pinned SHA and keeps the trailing `# vN`
-  # comment in sync. Grouped so the ~9 pinned actions arrive as one weekly PR.
+  # comment in sync. Grouped so the ~9 pinned actions arrive as one monthly PR.
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     labels:
       - dependencies
       - ci
@@ -118,12 +138,13 @@ updates:
           - "*"
 
   # Base images in deploy/docker/*.Dockerfile. Deliberately NO cooldown: base-
-  # image bumps are how OS CVE fixes arrive (Trivy image gate), so freshness
-  # beats caution here; the scans gate every update PR.
+  # image bumps are how OS CVE fixes arrive (Trivy image gate). Monthly cadence
+  # can delay Dependabot-opened base bumps vs weekly — Trivy still gates every
+  # CI image build, and a manual Dockerfile bump is always available off-cycle.
   - package-ecosystem: docker
     directory: /deploy/docker
     schedule:
-      interval: weekly
+      interval: monthly
     labels:
       - dependencies
       - docker

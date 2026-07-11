@@ -178,6 +178,60 @@ Scope note: W0-T8 locks the **current resolved set** — no version bumps. The
 it is a separate follow-up once the wiring tests traverse the nested router
 structure (re-review 2026-09-23, see `backend/pyproject.toml`).
 
+## Dependabot triage (monthly)
+
+Schedule is **monthly** for all ecosystems in `.github/dependabot.yml` (pip,
+npm, github-actions, docker). Cooldown (7 days) still applies to npm/pip
+*version* updates; **security updates bypass cooldown**. Operators may open a
+manual bump PR any time. Docker monthly cadence can delay Dependabot-opened
+base-image PRs — Trivy still gates every CI image build.
+
+### Merge vs close vs human major
+
+| Outcome | When |
+|---------|------|
+| **Merge** | `all-gates` green; minor/patch or low-blast change; no surprise security surface. |
+| **Close + `@dependabot ignore this major version`** | Lockfile job RED and a clean `uv pip compile` **reverts** the pin (constraint conflict), **or** the major is a planned migration without a security advisory (e.g. react-router 6→7). |
+| **Human-owned major PR** | Security advisory forces it, **or** you intend to lift a transitive cap (below). |
+
+**Never** hand-edit a single package line in `backend/requirements.lock.txt` to
+“make CI green”. The lockfile gate recompiles from `pyproject.toml` and will
+RED any pin the full resolve does not select.
+
+### Known transitive caps (as of 2026-07-11)
+
+Re-check PyPI before lifting a pip major-ignore in `dependabot.yml`:
+
+| Package | Cap | Constrainer | Evidence |
+|---------|-----|-------------|----------|
+| `redis` | `<6.5` (kombu redis extra) | `celery[redis]` → `kombu[redis]` | closed #149 |
+| `paramiko` | `<5.0` | `netmiko` | closed #146 |
+| `websockets` | `<16` | `langgraph-sdk` | closed #151 |
+
+These three have **scoped** `version-update:semver-major` ignores under the pip
+ecosystem so monthly version-update runs do not reopen unmergeable PRs. Do
+**not** replace them with a blanket `dependency-name: "*"` major-ignore —
+`ignore` also suppresses Dependabot **security** updates (same rationale as the
+scoped npm ignores in PR #142).
+
+### Human major-upgrade procedure
+
+1. Identify the constraining package (e.g. `netmiko` for paramiko, `kombu` for redis).
+2. Bump the constrainer first (or together) in `backend/pyproject.toml` with an intentional floor/range.
+3. Re-lock with an explicit upgrade so the pin is part of the full resolve:
+
+```bash
+cd backend && uv pip compile pyproject.toml --extra dev --universal \
+  --generate-hashes --python-version 3.12 \
+  --upgrade-package <pkg> \
+  --output-file requirements.lock.txt
+```
+
+4. Run the unit suite plus relevant integration (Redis/Sentinel, SSH/netmiko, etc.).
+5. Land as a normal human PR — not a Dependabot single-pin edit. Remove or
+   narrow the matching `ignore` entry in `dependabot.yml` only after the new
+   major is on `main`.
+
 ## Local validation (how these were proven to bite)
 
 Each gate is validated two ways: (a) it PASSES on the current tree (clean, modulo the
