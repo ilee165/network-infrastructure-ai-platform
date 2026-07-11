@@ -56,6 +56,18 @@ class FakeSession:
     async def close(self) -> None:
         self.closed = True
 
+    async def run(self, query: str, **params: Any) -> FakeResult:
+        """Unmanaged auto-commit query (no driver-internal retry, unlike
+        ``execute_read``/``execute_write`` on the real driver)."""
+        self._driver.calls.append("run")
+        if self._driver.outcomes:
+            outcome = self._driver.outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+        tx = FakeTransaction()
+        self._driver.transactions.append(tx)
+        return await tx.run(query, **params)
+
     async def _execute(self, mode: str, work: Any, *args: Any, **kwargs: Any) -> Any:
         self._driver.calls.append(mode)
         if self._driver.outcomes:
@@ -294,7 +306,11 @@ async def test_health_check_returns_false_when_unreachable_without_retry(
     driver = FakeDriver(outcomes=[ServiceUnavailable("down")] * 3)
     client, _ = make_client(settings, driver, max_attempts=3)
     assert await client.health_check() is False
-    assert driver.calls == ["read"]  # single probe attempt, no retry storm
+    # Exactly one unmanaged probe: never the managed execute_read path, whose
+    # DRIVER-INTERNAL ServiceUnavailable retry (max_transaction_retry_time,
+    # jittered 30s+ sleeps) would blow any probe/pytest-timeout budget.
+    assert driver.calls == ["run"]
+    assert len(driver.outcomes) == 2  # two scripted failures left -> one attempt
 
 
 # ---------------------------------------------------------------------------
