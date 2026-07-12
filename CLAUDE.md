@@ -225,6 +225,15 @@ re-validating the platform should know:
   `admin`/`admin` default + warning when unset). `NETOPS_ADMIN_PASSWORD` is read
   by the migration, not `config.py` — the one documented exception to the
   `.env.example` ↔ `config.py` 1:1 rule.
+- **`.env.example` is GENERATED, not hand-edited (H3 closed, AR-W1-T1).**
+  `backend/scripts/generate_env_example.py` introspects `Settings` and is the
+  single source; the `config-drift` CI gate re-generates it and fails on any
+  diff, so it documents every field 1:1. Regenerate after any `Settings` change:
+  `cd backend && python scripts/generate_env_example.py --write`. The only
+  hand-maintained blocks are the two non-`Settings` exceptions (`NETOPS_ADMIN_PASSWORD`
+  above and the pgBackRest backup-tier). The same generator's `--check-chart`
+  enforces the C5/C6 seam (every Helm-rendered `NETOPS_*` key is a `Settings`
+  field or a documented exception; no secret material in a plaintext ConfigMap).
 - **`NETOPS_CORS_ORIGINS` is a JSON list** — let compose/uvicorn read `.env`
   directly; hand-sourcing it in a shell strips the quotes and breaks parsing.
 - **Image builds need egress to base registries + PyPI/npm and apk repos.** In a

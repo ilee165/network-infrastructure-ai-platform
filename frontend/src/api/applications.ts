@@ -8,58 +8,43 @@
  * UI as defense-in-depth). ``origin``/``origin_ref``/``source``/``provenance``
  * are all server-assigned — the create bodies here carry only user-supplied
  * fields, so the client can never forge a ``derived`` row or a non-manual edge.
+ *
+ * The enums and response shapes below are thin aliases over the generated
+ * OpenAPI types (AR-W1-T2): ``frontend/src/api/generated/openapi-types.ts`` is
+ * produced by ``openapi-typescript`` from ``docs/api/openapi.json`` (itself
+ * exported from the FastAPI app by ``backend/scripts/export_openapi.py``) and
+ * is re-checked for drift by the ``contract-drift`` CI job — do not hand-edit
+ * either generated file. Request bodies (``ApplicationCreate`` /
+ * ``ApplicationUpdate`` / ``ApplicationDependencyCreate``) stay hand-written:
+ * they intentionally carry only the user-supplied subset of fields (the
+ * server assigns the rest), which is narrower than the generated request
+ * schemas.
  */
 
 import { apiFetch } from "./client";
+import type { components } from "./generated/openapi-types";
 
-// ── Enums (match backend Application* / Dependency* StrEnum values) ────────────
+// ── Enums (sourced from the generated OpenAPI schema) ──────────────────────────
 
 /** How an application row came to exist (ADR-0052 §1). */
-export type ApplicationOrigin = "manual" | "derived";
+export type ApplicationOrigin = components["schemas"]["ApplicationOrigin"];
 
 /** Which source asserts a dependency row (ADR-0052 §2; ``manual`` is user-owned). */
-export type DependencySource = "manual" | "f5" | "vmware" | "dns";
+export type DependencySource = components["schemas"]["DependencySource"];
 
 /** Rebuild-safe target kinds a manual tag may point at (ADR-0052 §2.3). */
-export type DependencyTargetKind = "device" | "ip_address";
+export type DependencyTargetKind = components["schemas"]["DependencyTargetKind"];
 
-// ── Response shapes ───────────────────────────────────────────────────────────
+// ── Response shapes (sourced from the generated OpenAPI schema) ────────────────
 
 /** One application as returned by every application endpoint. */
-export interface ApplicationRead {
-  id: string;
-  name: string;
-  description: string | null;
-  fqdns: string[];
-  origin: ApplicationOrigin;
-  origin_ref: string | null;
-  owner: string | null;
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type ApplicationRead = components["schemas"]["ApplicationRead"];
 
 /** Paginated application collection (``GET /applications``). */
-export interface ApplicationListResponse {
-  items: ApplicationRead[];
-  total: number;
-  limit: number;
-  offset: number;
-}
+export type ApplicationListResponse = components["schemas"]["ApplicationListResponse"];
 
 /** One dependency row (any source) as returned by the dependency endpoints. */
-export interface ApplicationDependencyRead {
-  id: string;
-  application_id: string;
-  target_kind: DependencyTargetKind;
-  target_ref: string;
-  source: DependencySource;
-  /** Ordered evidence chain — refs only, never embedded content (ADR-0052 §2). */
-  provenance: Array<Record<string, unknown>>;
-  derived_at: string;
-  created_by: string | null;
-  created_at: string;
-}
+export type ApplicationDependencyRead = components["schemas"]["ApplicationDependencyRead"];
 
 // ── Request bodies (only user-supplied fields; the server assigns the rest) ────
 

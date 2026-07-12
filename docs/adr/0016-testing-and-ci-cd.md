@@ -47,6 +47,47 @@ flowchart LR
 - Images built once and promoted (never rebuilt per environment), feeding both Compose and Helm targets (ADR-0013).
 - Branch protection on `main`: all stages green required; coverage and import-linter are blocking, matching "every feature must include tests".
 
+### 4. Known fixture-honesty limits (F3, 2026-07-10 testing-strategy review)
+
+Two of the fixture layers section 1 relies on ("API tests", "agent tests") are
+honest approximations of the real transport, not full-fidelity substitutes —
+documented here deliberately, with the compensating controls already shipped,
+rather than left as a silent gap:
+
+- **`httpx.MockTransport` / `httpx.ASGITransport` hide real connection-pool
+  semantics.** Driving the app in-process over an ASGI transport (as the
+  entire `backend/tests/api/` suite does) never opens a real socket or
+  exercises `httpx`'s connection-pool, keep-alive, or event-loop-binding
+  behavior. This is exactly the seam that hid H9 — `spatiumddi` reusing one
+  `httpx.AsyncClient` across per-call `asyncio.run()` loops crashed only in
+  production, never in CI (`docs/reviews/2026-07-10-testing-strategy-review.md`
+  F3). **Compensating control:** Wave 2 (`docs/reviews/WAVE2-PLAN.md` T5) added
+  a loop-teardown regression test for the SpatiumDDI client that drives it
+  across separate event loops the way production does, instead of asserting
+  request/response shape alone over a fake transport.
+- **Fixture SSH hides vendor-syntax divergence.** The netmiko/Tcl fixtures the
+  config-write suite drives record and replay command *strings*; they cannot
+  certify CLI mode transitions, SSH handshake phases, or a real device's
+  intermediate echo — the seam Wave 3's review (C2/C3) found hiding a no-op
+  commit and other transport-mode bugs behind green fixture tests
+  (`docs/roadmap/LESSONS.md` L-XPORT-1). **Compensating control:** Wave 3
+  hardened those fixtures with explicit command-sequence assertions (exit/
+  re-enter pinning, anchored integrity tokens, per-step finalize checks before
+  advancing) so the fake at least proves the *sequence* a real device would
+  receive, even though it still cannot prove the device's *response* to that
+  sequence.
+- **A synthetic auth probe proves nothing about real routes.** Mounting a
+  probe route with its own `Depends(require_role(...))` shows the dependency
+  *can* raise 403 — not that any real router actually wires it in. Closed by
+  hitting real protected routes directly: `test_account.py`'s
+  `test_flagged_user_blocked_on_real_protected_route` (forced-password-change
+  guard through `require_role` -> `get_active_user`) and `test_role_matrix.py`
+  (one boundary-pair per router's own minimum `require_role` tier) both call
+  real `/api/v1/...` routes, never a mounted fake.
+
+Closing these seams for real needs a live-lab or `kind`-backed transport, which
+stays the P-phase (live-lab/`kind`) track — not a unit/API-layer addition.
+
 ## Consequences
 
 **Positive**

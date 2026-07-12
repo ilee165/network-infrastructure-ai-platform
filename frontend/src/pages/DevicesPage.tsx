@@ -57,10 +57,9 @@ export const RUN_VARIANT: Record<RunStatusValue, StatusPillVariant> = {
 
 /** Page-level mapping from a device's status to a StatusPill tone. */
 const DEVICE_VARIANT: Record<DeviceRead["status"], StatusPillVariant> = {
-  active: "ok",
   new: "neutral",
+  reachable: "ok",
   unreachable: "error",
-  decommissioned: "neutral",
 };
 
 // ── Status badge ──────────────────────────────────────────────────────────────

@@ -81,7 +81,7 @@ const DEVICE_ROW: DeviceRead = {
   model: "Catalyst 9300",
   os_version: "17.3.4",
   serial: "FCW2142P0KS",
-  status: "active",
+  status: "reachable",
   site: null,
   credential_id: null,
   last_discovered_at: "2024-01-15T10:30:00Z",
