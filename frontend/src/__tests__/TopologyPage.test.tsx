@@ -27,6 +27,8 @@ interface TapHandler {
 interface MockCyInstance {
   options: unknown;
   handlers: TapHandler[];
+  currentElements: ReturnType<typeof toCytoscapeElements>;
+  layoutRuns: number;
   on: (
     event: string,
     selectorOrHandler: string | TapHandler["handler"],
@@ -35,16 +37,25 @@ interface MockCyInstance {
   destroy: ReturnType<typeof vi.fn>;
   resize: ReturnType<typeof vi.fn>;
   fit: ReturnType<typeof vi.fn>;
-  layout: () => { run: ReturnType<typeof vi.fn> };
+  pan: () => { x: number; y: number };
+  zoom: () => number;
+  viewport: ReturnType<typeof vi.fn>;
+  batch: (fn: () => void) => void;
+  elements: () => { remove: ReturnType<typeof vi.fn> };
+  add: (els: ReturnType<typeof toCytoscapeElements>) => void;
+  layout: (opts?: unknown) => { run: () => void };
 }
 
 const cyInstances: MockCyInstance[] = [];
 
 vi.mock("cytoscape", () => {
   const factory = vi.fn((options: unknown): MockCyInstance => {
+    const remove = vi.fn();
     const instance: MockCyInstance = {
       options,
       handlers: [],
+      currentElements: [],
+      layoutRuns: 0,
       on(event, selectorOrHandler, handler?) {
         if (event === "tap") {
           if (typeof selectorOrHandler === "function") {
@@ -59,7 +70,25 @@ vi.mock("cytoscape", () => {
       destroy: vi.fn(),
       resize: vi.fn(),
       fit: vi.fn(),
-      layout: () => ({ run: vi.fn() }),
+      pan: () => ({ x: 0, y: 0 }),
+      zoom: () => 1,
+      viewport: vi.fn(),
+      batch(fn) {
+        fn();
+      },
+      elements() {
+        return { remove };
+      },
+      add(els) {
+        this.currentElements = els;
+      },
+      layout() {
+        return {
+          run: () => {
+            this.layoutRuns += 1;
+          },
+        };
+      },
     };
     cyInstances.push(instance);
     return instance;
@@ -99,9 +128,9 @@ function tapBackground(): void {
   }
 }
 
-/** The `elements` option handed to the most recent cytoscape() call. */
+/** Elements applied to the persistent cy instance (via ``cy.add``). */
 function lastElements(): ReturnType<typeof toCytoscapeElements> {
-  return (lastCy().options as { elements: ReturnType<typeof toCytoscapeElements> }).elements;
+  return lastCy().currentElements;
 }
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
