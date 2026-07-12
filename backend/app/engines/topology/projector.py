@@ -165,7 +165,15 @@ def _stale_node_sweep_cypher(label: str) -> str:
 
 
 def _wipe_label_cypher(label: str) -> str:
-    return f"MATCH (n:{label}) DETACH DELETE n"
+    """Batch wipe for large estates (Wave 5 / M5): CALL IN TRANSACTIONS.
+
+    Neo4j 5+ commits every 1000 rows so a full rebuild does not hold one
+    giant transaction against the whole projected subgraph.
+    """
+    return (
+        f"MATCH (n:{label}) "
+        f"CALL {{ WITH n DETACH DELETE n }} IN TRANSACTIONS OF 1000 ROWS"
+    )
 
 
 # ---------------------------------------------------------------------------
