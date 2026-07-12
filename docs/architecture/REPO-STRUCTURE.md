@@ -401,6 +401,33 @@ Declared in `backend/pyproject.toml`; the CI `lint` stage fails on violation (D1
 5. **independence** — all `app.plugins.vendors.*` packages are mutually independent.
 6. **layers** — `main` / (`api`, `workers`) / `agents` / `agents.framework` / `engines` / `services` / (`knowledge`, `llm`, `plugins`) / (`models`, `schemas`) / `core`.
 
+### 3.4 Services vs. engines placement charter
+
+**The rule:** engines = stateless domain computation, no session ownership;
+services = stateful orchestration + persistence + audit.
+
+Concrete guidance for judgment calls: if the code owns a DB session/transaction,
+writes an audit-trail entry, or orchestrates multiple downstream calls with side
+effects, it belongs in `services/`. If it is pure computation/transformation
+over already-fetched data with no side effects and no session ownership, it
+belongs in `engines/`. This mirrors the row 8/row 9 import rules above
+(`services` may hold a DB session; `engines` may consume the plugin registry
+but never owns persistence) — the charter exists to settle placement calls that
+those rows don't already answer.
+
+This charter freezes **new** code placement only — it does not audit or
+migrate any existing services/engines file that already deviates; that
+reconciliation is out of scope here and tracked for Wave 6.
+
+**Checklist: is this a service or an engine?**
+
+1. Does it open, own, or commit a database session/transaction? → `services/`.
+2. Does it write an `audit_log` entry (directly or by calling `core/audit.py`)? → `services/`.
+3. Does it orchestrate multiple downstream calls that have side effects (e.g. call a plugin, then persist, then enqueue a task)? → `services/`.
+4. Is it a pure function/transform over data already fetched and handed in (no I/O, no session, no audit write)? → `engines/`.
+5. Does it call the plugin registry (`plugins.base`/`plugins.registry`) to reach a vendor device, with no persistence of its own? → `engines/` (per row 9 — engines are the only consumers of the plugin registry).
+6. Still unclear after 1–5? Write an ADR rather than guessing (CLAUDE.md: do not assume).
+
 ---
 
 ## 4. Naming conventions
