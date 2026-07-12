@@ -64,12 +64,18 @@ Point fixes, each independently committable; one PR.
 - **F2** — frontend coverage measurement (coverage-v8 + CI threshold).
 - **F6** — `pytest-timeout` + de-sleep the two real-clock `sleep(5)` tests.
 
-## Wave 3 — Config-write transport (secret/change-safety surface — STRONG model)
+## Wave 3 — Config-write transport (secret/change-safety surface — STRONG model) 🔄 IN PR
 
-- **C2** — JunOS `commit confirmed` documented but never issued; JunOS config writes are effectively no-ops. Implement real confirmed-commit flow.
-- **C3** — unescaped config text interpolated into Tcl string corrupts `replace_config` staging — escape/quote properly.
-- **H7** — SSH host keys never verified — introduce known-hosts/TOFU policy.
-- **AR-W2-T1** — extract `plugins/vendors/cli_common/` shared lifecycle mixin + textfsm helpers (repo H8: ADR-0021 write engine copy-pasted 5×). One vendor per atomic commit: base → cisco_ios → eos → cisco_nxos → junos; 35 parity/plugin test files stay green **unchanged** per commit; behavioral divergence between copies is a finding, not a silent unification. Must land before any new CLI vendor wave.
+**PR #158** (`fix/review-wave3`). Decisions: [`WAVE3-DECISIONS.md`](WAVE3-DECISIONS.md). Plan: [`WAVE3-PLAN.md`](WAVE3-PLAN.md).
+
+| ID | Status |
+|----|--------|
+| **C2** | ✅ JunOS `JunosSshTransport` Option A (`commit confirmed` + confirm after verify); apply-fail vs verify-fail recovery split |
+| **C3** | ✅ Tcl 8.3-safe escaped staging for `replace_config` (chunked, fail closed, integrity length) |
+| **H7** | ✅ Default `ssh_strict` + system known_hosts; lab opt-out; host-keyed pin map on credential params |
+| **AR-W2-T1 / H8** | ✅ `cli_common` base + refits: cisco_ios, cisco_iosxe, eos, cisco_nxos, junos |
+
+Exit: merge when final HEAD re-verification green; `graphify update .` after merge.
 
 ## Wave 4 — Drift gates (AR-W0 / AR-W1)
 
