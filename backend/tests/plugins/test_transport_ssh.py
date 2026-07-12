@@ -335,7 +335,20 @@ class TestSshConfigWrite:
             transport.replace_config([long_line])
         stage = fake_netmiko.connection.config_sets[0]
         assert any("puts -nonewline $fd" in c for c in stage)
-        assert any(c.startswith("puts $fd ") for c in stage)
+        assert 'puts $fd ""' in stage
+
+    def test_replace_config_chunk_boundary_does_not_split_escapes(self) -> None:
+        """Chunk cuts must not leave a trailing bare backslash before the closing quote."""
+        # Build a line whose escaped form is longer than the chunk size and contains
+        # escapes near a 200-char boundary.
+        line = "a" * 198 + "$" + "b" * 50  # escaped: 198 a's + \$ + 50 b's
+        chunks = SshTransport._tcl_chunk_escaped(SshTransport._tcl_escape_double_quoted(line), 200)
+        for chunk in chunks:
+            assert not chunk.endswith("\\") or chunk.endswith("\\\\")
+        # Reassembly after unescaping one level of Tcl pairs recovers the line.
+        joined = "".join(chunks)
+        assert "\\$" in joined
+        assert not any(c.endswith("\\") and not c.endswith("\\\\") for c in chunks)
 
     def test_replace_config_before_open_raises(self) -> None:
         transport = SshTransport(make_params())

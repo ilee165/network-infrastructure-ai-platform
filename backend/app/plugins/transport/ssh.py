@@ -342,18 +342,39 @@ class SshTransport:
         )
 
     def _tcl_puts_line_commands(self, line: str) -> list[str]:
-        """Build chunked ``puts`` commands that write *line* plus a trailing newline."""
+        """Build chunked ``puts`` commands that write *line* plus a trailing newline.
+
+        Chunks are cut from the already-escaped string but never end on a bare
+        ``\\`` (that would escape the closing quote of the Tcl double-quoted
+        argument).
+        """
         escaped = self._tcl_escape_double_quoted(line)
         if len(escaped) <= _TCL_CHUNK_CHARS:
             return [f'puts $fd "{escaped}"']
         cmds: list[str] = []
-        chunks = [
-            escaped[i : i + _TCL_CHUNK_CHARS] for i in range(0, len(escaped), _TCL_CHUNK_CHARS)
-        ]
-        for chunk in chunks[:-1]:
+        for chunk in self._tcl_chunk_escaped(escaped, _TCL_CHUNK_CHARS):
             cmds.append(f'puts -nonewline $fd "{chunk}"')
-        cmds.append(f'puts $fd "{chunks[-1]}"')
+        # Final empty puts supplies the line terminator (matches single-puts path).
+        cmds.append('puts $fd ""')
         return cmds
+
+    @staticmethod
+    def _tcl_chunk_escaped(escaped: str, max_chars: int) -> list[str]:
+        """Split *escaped* into chunks of at most *max_chars* without trailing ``\\``."""
+        chunks: list[str] = []
+        i = 0
+        n = len(escaped)
+        while i < n:
+            end = min(i + max_chars, n)
+            # If we would end on a backslash, pull back so the escape pair stays whole.
+            if end < n and escaped[end - 1] == "\\":
+                end -= 1
+            if end <= i:
+                # Pathological: max_chars == 1 and char is "\\" — take two chars.
+                end = min(i + 2, n)
+            chunks.append(escaped[i:end])
+            i = end
+        return chunks
 
     def _raise_if_tcl_failed(self, action: str, output: str) -> None:
         """Fail closed on tclsh/IOS error text before configure replace."""
