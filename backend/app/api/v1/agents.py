@@ -299,6 +299,24 @@ def get_pcap_analyzer(
 
 SupervisorGraph = CompiledStateGraph[SupervisorState, None, SupervisorState, SupervisorState]
 
+#: Process-wide supervisor graphs keyed by (profile, model_name). The compiled
+#: graph closes over a :class:`ContextVarTraceRecorder`; each request binds the
+#: real per-session recorder before invoke (Wave 5 / agents H1).
+_SUPERVISOR_GRAPH_CACHE: dict[tuple[str, str], SupervisorGraph] = {}
+
+
+def clear_supervisor_cache() -> None:
+    """Drop cached supervisor graphs (LLM settings change / tests)."""
+    _SUPERVISOR_GRAPH_CACHE.clear()
+
+
+def invalidate_llm_runtime_caches() -> None:
+    """Clear supervisor + chat-model caches after an LLM settings mutation."""
+    from app.llm.providers import clear_chat_model_cache
+
+    clear_supervisor_cache()
+    clear_chat_model_cache()
+
 
 async def build_supervisor_for_role(
     role: Role,
@@ -314,11 +332,40 @@ async def build_supervisor_for_role(
     (DB over env, env fallback when the row is absent or the field is null);
     provider API keys and the Ollama endpoint stay env-only. Tests override
     :func:`get_supervisor_builder` to inject a scripted model instead.
+
+    Graphs are process-cached by ``(profile, model)``; *trace_recorder* is
+    bound into a task-local ContextVar so a cached graph still records into the
+    correct session.
     """
+    from app.agents.framework.traces import (
+        ContextVarTraceRecorder,
+        TraceRecorder,
+        bind_trace_recorder,
+    )
+
     async with db.get_sessionmaker()() as session:
         profile = await effective_profile_for_role(session, "reasoning", settings)
     llm: BaseChatModel = get_chat_model(profile, settings, _role="reasoning")
-    return build_default_supervisor(llm, trace_recorder=trace_recorder)  # type: ignore[arg-type]
+    # Cache key: resolved profile + the model name the factory selected.
+    if profile == "local" or (profile is None and settings.llm_profile == "local"):
+        model_name = settings.llm_local_model
+    else:
+        from app.llm.providers import DEFAULT_MODELS
+
+        selected = profile if profile is not None else settings.llm_profile
+        model_name = DEFAULT_MODELS.get(selected, settings.llm_local_model)
+    cache_key = (profile or settings.llm_profile, model_name)
+
+    graph = _SUPERVISOR_GRAPH_CACHE.get(cache_key)
+    if graph is None:
+        graph = build_default_supervisor(
+            llm, trace_recorder=ContextVarTraceRecorder()  # type: ignore[arg-type]
+        )
+        _SUPERVISOR_GRAPH_CACHE[cache_key] = graph
+
+    if trace_recorder is not None and isinstance(trace_recorder, TraceRecorder):
+        bind_trace_recorder(trace_recorder)
+    return graph
 
 
 def get_supervisor_builder() -> object:

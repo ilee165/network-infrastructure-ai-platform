@@ -115,6 +115,18 @@ class LoggingLLMAuditSink:
         _logger.info("external_llm_profile_selected", **event.model_dump())
 
 
+#: Process-wide chat-model cache keyed by (profile, model_name, temperature).
+#: Cleared on LLM settings PATCH (Wave 5 / agents H1) so profile switches take
+#: effect without a process restart. Connection reuse to Ollama/Anthropic is
+#: the primary win — LangChain clients keep HTTP pools on the instance.
+_CHAT_MODEL_CACHE: dict[tuple[str, str, float], BaseChatModel] = {}
+
+
+def clear_chat_model_cache() -> None:
+    """Drop cached provider clients (settings change / tests)."""
+    _CHAT_MODEL_CACHE.clear()
+
+
 def get_chat_model(
     profile: str | None = None,
     settings: Settings | None = None,
@@ -182,9 +194,15 @@ def get_chat_model(
     from app.core import metrics
 
     metrics.observe_llm_request(profile=selected, model=model_name)
+    cache_key = (selected, model_name, temperature)
+    cached = _CHAT_MODEL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     provider_model = _build_provider_model(selected, model_name, resolved_settings, temperature)
     # A9: central, bypass-proof redaction wraps every model the factory returns.
-    return wrap_with_redaction(provider_model)
+    wrapped = wrap_with_redaction(provider_model)
+    _CHAT_MODEL_CACHE[cache_key] = wrapped
+    return wrapped
 
 
 def _build_provider_model(

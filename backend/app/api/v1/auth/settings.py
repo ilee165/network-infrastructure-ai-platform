@@ -349,6 +349,11 @@ async def update_app_system_settings(
     )
     await session.commit()
     await session.refresh(row)
+    # Wave 5 / agents H1: drop process-cached supervisor graphs + chat clients
+    # so the next agent request rebuilds against the new profile selection.
+    from app.api.v1.agents import invalidate_llm_runtime_caches
+
+    invalidate_llm_runtime_caches()
     return SystemSettingsResponse(
         llm_profile=row.llm_profile,
         llm_role_reasoning=row.llm_role_reasoning,
