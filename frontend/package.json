@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "check:chunks": "node scripts/check-chunk-split.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
