@@ -19,7 +19,6 @@ never directly on the FastAPI event loop (ADR-0007 §3, ADR-0008).
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import re
 from collections.abc import Mapping, Sequence
@@ -50,6 +49,7 @@ _NETMIKO_FAILURES: tuple[type[Exception], ...] = (NetmikoBaseException, SSHExcep
 
 #: Tclsh / IOS error markers in staged-file output — fail closed before
 #: ``configure replace`` so a corrupt stage never becomes running config (C3).
+#: Includes Tcl 8.3.x phrasing (IOS embedded tclsh is 8.3, not 8.6).
 _TCL_ERROR_MARKERS: Final[tuple[str, ...]] = (
     "invalid command name",
     "syntax error",
@@ -57,14 +57,18 @@ _TCL_ERROR_MARKERS: Final[tuple[str, ...]] = (
     "no such file",
     "couldn't open",
     "permission denied",
+    "bad option",
+    "wrong # args",
     "% invalid",
     "% error",
     "tclsh: ",
 )
 
-#: Match ``puts`` / stage path used when writing the base64 blob to flash.
+#: Staged candidate path for ``configure replace`` (Cisco-family).
 _STAGED_CONFIG_PATH: Final[str] = "flash:netops-rollback.cfg"
-_STAGED_B64_PATH: Final[str] = "flash:netops-rollback.b64"
+
+#: Max chars per escaped Tcl double-quoted chunk (device CLI line limits).
+_TCL_CHUNK_CHARS: Final[int] = 200
 
 #: vendor_id -> netmiko ``device_type`` for vendors whose plugin id differs
 #: from the netmiko driver name. Vendors absent here fall back to their
@@ -253,10 +257,11 @@ class SshTransport:
         predicate (§3) used by ``CONFIG_RESTORE`` apply and by rollback for both
         operations.
 
-        Mechanism (Wave 3 C3): base64-encode the candidate, stage via Tcl
-        *without* embedding raw config in a double-quoted string (avoids Tcl
-        substitution of ``$``, ``"``, ``[``/``]``), decode on-box to a
-        deterministic flash file, verify staged length, then
+        Mechanism (Wave 3 C3): stage the candidate with Tcl ``puts`` of
+        **escaped** lines (Tcl 8.3-safe — IOS embedded tclsh has no
+        ``binary decode base64``). Every ``$``, ``"``, ``[``, ``]``, ``\\`` is
+        escaped so Tcl cannot substitute or truncate the payload. Long lines are
+        chunked under the device CLI limit. Staged length is verified before
         ``configure replace <file> force``. Any tclsh error output fails closed
         **before** replace is issued.
 
@@ -264,67 +269,38 @@ class SshTransport:
         """
         self._refuse_junos_write("replace_config")
         connection = self._require_connection()
-        candidate = "\n".join(lines)
-        if not candidate.endswith("\n"):
-            candidate = candidate + "\n"
+        line_list = list(lines)
+        # puts writes a trailing newline per line — match that in expected length.
+        expected_len = sum(len(line) + 1 for line in line_list)
         staged = _STAGED_CONFIG_PATH
-        staged_b64 = _STAGED_B64_PATH
         timeout = self._params.read_timeout
-        payload_b64 = base64.b64encode(candidate.encode("utf-8")).decode("ascii")
-        expected_len = len(candidate.encode("utf-8"))
+        output = ""
         try:
             with contextlib.suppress(*_NETMIKO_FAILURES):
                 connection.send_command(f"delete /force {staged}", read_timeout=timeout)
-            with contextlib.suppress(*_NETMIKO_FAILURES):
-                connection.send_command(f"delete /force {staged_b64}", read_timeout=timeout)
 
-            # Stage base64 text with Tcl puts — payload is A-Za-z0-9+/= only, so
-            # double-quoted Tcl is safe (no $, ", [, ] from config body).
-            stage_cmds = [
-                "do tclsh",
-                f'puts [open "{staged_b64}" w+] "{payload_b64}"',
-                "tclquit",
-            ]
+            stage_cmds = ["do tclsh", f'set fd [open "{staged}" w+]']
+            for line in line_list:
+                stage_cmds.extend(self._tcl_puts_line_commands(line))
+            stage_cmds.extend(["close $fd", "tclquit"])
             stage_out = connection.send_config_set(stage_cmds, read_timeout=timeout)
             if not isinstance(stage_out, str):  # pragma: no cover
                 raise SshTransportError(
                     f"SSH config stage for {self._params.host}:{self._params.port} "
                     "returned non-text output"
                 )
-            self._raise_if_tcl_failed("stage base64", stage_out)
+            self._raise_if_tcl_failed("stage config", stage_out)
 
-            # Decode on-box: binary base64 -d is available on IOS-XE/NX-OS/EOS
-            # flash tooling paths that already use configure replace; fall back
-            # to Tcl base64 decode when the binary is missing (classic IOS).
-            decode_out = connection.send_command(
-                f"tclsh\n"
-                f"set b64 [open {{{staged_b64}}} r]\n"
-                f"set data [read $b64]\n"
-                f"close $b64\n"
-                f"set bin [binary decode base64 $data]\n"
-                f'set out [open "{staged}" w+]\n'
-                f"puts -nonewline $out $bin\n"
-                f"close $out\n"
-                f"tclquit",
-                read_timeout=timeout,
-            )
-            if not isinstance(decode_out, str):  # pragma: no cover
-                raise SshTransportError(
-                    f"SSH config decode for {self._params.host}:{self._params.port} "
-                    "returned non-text output"
-                )
-            self._raise_if_tcl_failed("decode base64 stage", decode_out)
-
-            # Integrity: staged file size must match plaintext byte length.
-            size_out = connection.send_command(
-                f"tclsh\n"
-                f'set f [open "{staged}" r]\n'
-                f"set body [read $f]\n"
-                f"close $f\n"
-                f"puts [string bytelength $body]\n"
-                f"tclquit",
-                read_timeout=timeout,
-            )
+            # Integrity: staged file length must match expected (line-oriented tclsh).
+            size_cmds = [
+                "do tclsh",
+                f'set f [open "{staged}" r]',
+                "set body [read $f]",
+                "close $f",
+                "puts [string length $body]",
+                "tclquit",
+            ]
+            size_out = connection.send_config_set(size_cmds, read_timeout=timeout)
             if not isinstance(size_out, str):  # pragma: no cover
                 raise SshTransportError(
                     f"SSH stage size check for {self._params.host}:{self._params.port} "
@@ -337,20 +313,47 @@ class SshTransport:
                 f"configure replace {staged} force",
                 read_timeout=timeout,
             )
+        except SshTransportError:
             with contextlib.suppress(*_NETMIKO_FAILURES):
                 connection.send_command(f"delete /force {staged}", read_timeout=timeout)
-            with contextlib.suppress(*_NETMIKO_FAILURES):
-                connection.send_command(f"delete /force {staged_b64}", read_timeout=timeout)
-        except SshTransportError:
             raise
         except _NETMIKO_FAILURES as exc:
+            with contextlib.suppress(*_NETMIKO_FAILURES):
+                connection.send_command(f"delete /force {staged}", read_timeout=timeout)
             raise SshTransportError(self._failure_message("config replace", exc)) from exc
+        with contextlib.suppress(*_NETMIKO_FAILURES):
+            connection.send_command(f"delete /force {staged}", read_timeout=timeout)
         if not isinstance(output, str):  # pragma: no cover - structured output never requested
             raise SshTransportError(
                 f"SSH config replace for {self._params.host}:{self._params.port} "
                 "returned non-text output"
             )
         return output
+
+    @staticmethod
+    def _tcl_escape_double_quoted(text: str) -> str:
+        """Escape *text* for inclusion inside a Tcl double-quoted string (Tcl 8.3)."""
+        return (
+            text.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("$", "\\$")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+        )
+
+    def _tcl_puts_line_commands(self, line: str) -> list[str]:
+        """Build chunked ``puts`` commands that write *line* plus a trailing newline."""
+        escaped = self._tcl_escape_double_quoted(line)
+        if len(escaped) <= _TCL_CHUNK_CHARS:
+            return [f'puts $fd "{escaped}"']
+        cmds: list[str] = []
+        chunks = [
+            escaped[i : i + _TCL_CHUNK_CHARS] for i in range(0, len(escaped), _TCL_CHUNK_CHARS)
+        ]
+        for chunk in chunks[:-1]:
+            cmds.append(f'puts -nonewline $fd "{chunk}"')
+        cmds.append(f'puts $fd "{chunks[-1]}"')
+        return cmds
 
     def _raise_if_tcl_failed(self, action: str, output: str) -> None:
         """Fail closed on tclsh/IOS error text before configure replace."""
@@ -364,7 +367,7 @@ class SshTransport:
             )
 
     def _assert_staged_length(self, size_output: str, expected: int) -> None:
-        """Parse staged-file byte length from tclsh output; raise on mismatch."""
+        """Parse staged-file length from tclsh output; raise on mismatch."""
         matches = re.findall(r"\b(\d+)\b", size_output)
         if not matches:
             raise SshTransportError(

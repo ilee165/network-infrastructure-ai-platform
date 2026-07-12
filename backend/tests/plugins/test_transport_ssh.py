@@ -9,7 +9,6 @@ conformance.
 
 from __future__ import annotations
 
-import base64
 import dataclasses
 import re
 from typing import Any
@@ -64,32 +63,47 @@ class FakeConnection:
         self.enabled = False
         self.disconnected = False
         self.staged_plain_len: int | None = None
+        self._force_size_output: str | None = None
 
     def send_command(self, command: str, read_timeout: float = 10.0) -> str:
         if self.send_error is not None:
             raise self.send_error
         self.commands.append((command, read_timeout))
-        if command in self.outputs:
-            return self.outputs[command]
-        # Multi-line tclsh helpers from replace_config (Wave 3 C3).
-        if "string bytelength" in command:
-            if self.staged_plain_len is not None:
-                return str(self.staged_plain_len)
-            return "0"
-        if "binary decode base64" in command:
-            return "decoded"
         return self.outputs.get(command, "")
 
     def send_config_set(self, config_commands: list[str], read_timeout: float = 10.0) -> str:
         if self.config_error is not None:
             raise self.config_error
         self.config_sets.append(list(config_commands))
-        for cmd in config_commands:
-            match = re.search(
-                r'puts \[open "flash:netops-rollback\.b64" w\+\] "([A-Za-z0-9+/=]+)"', cmd
-            )
-            if match:
-                self.staged_plain_len = len(base64.b64decode(match.group(1)))
+        joined = "\n".join(config_commands)
+        if any("set fd [open" in c for c in config_commands):
+
+            def _unescape_tcl(s: str) -> str:
+                out: list[str] = []
+                i = 0
+                while i < len(s):
+                    if s[i] == "\\" and i + 1 < len(s):
+                        out.append(s[i + 1])
+                        i += 2
+                    else:
+                        out.append(s[i])
+                        i += 1
+                return "".join(out)
+
+            total = 0
+            for cmd in config_commands:
+                m = re.search(r'puts(?: -nonewline)? \$fd "(.*)"\s*$', cmd)
+                if not m:
+                    continue
+                total += len(_unescape_tcl(m.group(1)))
+                if cmd.startswith("puts $fd "):
+                    total += 1  # puts adds trailing newline
+            self.staged_plain_len = total
+        if "string length" in joined:
+            if self._force_size_output is not None:
+                return self._force_size_output
+            if self.staged_plain_len is not None:
+                return str(self.staged_plain_len)
         return self.config_set_output
 
     def enable(self) -> str:
@@ -250,19 +264,19 @@ class TestSshConfigWrite:
         with SshTransport(make_params()) as transport:
             output = transport.replace_config(["hostname core-rtr01", "!", "end"])
         assert output == "applied 3 lines"
-        # Candidate staged as base64 (Wave 3 C3) before replace.
-        assert fake_netmiko.connection.config_sets
+        # Candidate staged via escaped puts (Wave 3 C3) before replace.
+        assert len(fake_netmiko.connection.config_sets) >= 2  # stage + size check
         stage = fake_netmiko.connection.config_sets[0]
         assert stage[0] == "do tclsh"
-        assert "flash:netops-rollback.b64" in stage[1]
-        assert "hostname core-rtr01" not in stage[1]  # raw config not in Tcl string
+        assert any("set fd [open" in c for c in stage)
+        assert any("puts $fd" in c for c in stage)
         issued = [command for command, _timeout in fake_netmiko.connection.commands]
         assert "configure replace flash:netops-rollback.cfg force" in issued
 
-    def test_replace_config_base64_roundtrip_hostile_payloads(
+    def test_replace_config_escapes_hostile_tcl_metacharacters(
         self, fake_netmiko: FakeConnectHandler
     ) -> None:
-        """Tcl metacharacters must not appear raw in the stage command."""
+        """Raw Tcl metacharacters must not appear unescaped in stage commands."""
         hostile = [
             'banner motd ^C$variable "quoted" [brackets]\\path^C',
             "as-path access-list 1 permit _100$",
@@ -273,15 +287,12 @@ class TestSshConfigWrite:
         fake_netmiko.connection.outputs["configure replace flash:netops-rollback.cfg force"] = "ok"
         with SshTransport(make_params()) as transport:
             transport.replace_config(hostile)
-        stage_line = fake_netmiko.connection.config_sets[0][1]
-        assert "$variable" not in stage_line
-        assert "[brackets]" not in stage_line
-        # Base64 alphabet only in the puts payload.
-        payload = re.search(r'w\+\] "([A-Za-z0-9+/=]+)"', stage_line)
-        assert payload is not None
-        decoded = base64.b64decode(payload.group(1)).decode("utf-8")
-        for line in hostile:
-            assert line in decoded
+        stage = "\n".join(fake_netmiko.connection.config_sets[0])
+        assert re.search(r"(?<!\\)\$variable", stage) is None
+        assert re.search(r"(?<!\\)\[brackets\]", stage) is None
+        assert "\\$variable" in stage
+        assert "\\[brackets\\]" in stage
+        assert '\\"' in stage
 
     def test_replace_config_tcl_error_fails_closed_before_apply(
         self, fake_netmiko: FakeConnectHandler
@@ -295,28 +306,36 @@ class TestSshConfigWrite:
         issued = [command for command, _timeout in fake_netmiko.connection.commands]
         assert not any(c.startswith("configure replace") for c in issued)
 
+    def test_replace_config_bad_option_fails_closed(self, fake_netmiko: FakeConnectHandler) -> None:
+        fake_netmiko.connection.config_set_output = 'bad option "decode": must be format or scan'
+        with (
+            SshTransport(make_params()) as transport,
+            pytest.raises(SshTransportError, match="configure replace not attempted"),
+        ):
+            transport.replace_config(["hostname x"])
+        issued = [command for command, _timeout in fake_netmiko.connection.commands]
+        assert not any(c.startswith("configure replace") for c in issued)
+
     def test_replace_config_size_mismatch_fails_closed(
         self, fake_netmiko: FakeConnectHandler
     ) -> None:
-        # Stage succeeds but size check reports wrong length.
-        fake_netmiko.connection.staged_plain_len = 1  # will be overwritten by stage then we force
-        with SshTransport(make_params()) as transport:
-
-            def _size_wrong(command: str, read_timeout: float = 10.0) -> str:
-                fake_netmiko.connection.commands.append((command, read_timeout))
-                if "string bytelength" in command:
-                    return "99999"
-                if "binary decode base64" in command:
-                    return "decoded"
-                if command.startswith("configure replace"):
-                    return "should-not-run"
-                return ""
-
-            fake_netmiko.connection.send_command = _size_wrong  # type: ignore[method-assign]
-            with pytest.raises(SshTransportError, match="stage integrity"):
-                transport.replace_config(["hostname x"])
+        fake_netmiko.connection._force_size_output = "99999"
+        with (
+            SshTransport(make_params()) as transport,
+            pytest.raises(SshTransportError, match="stage integrity"),
+        ):
+            transport.replace_config(["hostname x"])
         issued = [c for c, _ in fake_netmiko.connection.commands]
         assert not any(c.startswith("configure replace") for c in issued)
+
+    def test_replace_config_chunks_long_lines(self, fake_netmiko: FakeConnectHandler) -> None:
+        long_line = "x" * 500
+        fake_netmiko.connection.outputs["configure replace flash:netops-rollback.cfg force"] = "ok"
+        with SshTransport(make_params()) as transport:
+            transport.replace_config([long_line])
+        stage = fake_netmiko.connection.config_sets[0]
+        assert any("puts -nonewline $fd" in c for c in stage)
+        assert any(c.startswith("puts $fd ") for c in stage)
 
     def test_replace_config_before_open_raises(self) -> None:
         transport = SshTransport(make_params())
