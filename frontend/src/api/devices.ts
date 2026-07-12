@@ -3,73 +3,35 @@
  *
  * Mirrors the backend schemas in ``app/schemas/devices.py`` and the
  * routes in ``app/api/v1/devices.py`` (M1-15).
+ *
+ * Enums and response shapes are thin aliases over the generated OpenAPI types
+ * (AR-W1-T2): ``frontend/src/api/generated/openapi-types.ts`` is produced by
+ * ``openapi-typescript`` from ``docs/api/openapi.json`` (itself exported from
+ * the FastAPI app by ``backend/scripts/export_openapi.py``) and is re-checked
+ * for drift by the ``contract-drift`` CI job — do not hand-edit either
+ * generated file. This closes the H14-class enum-drift seam (the previous
+ * hand-rolled ``DeviceStatus``/``InterfaceOperStatus``/``InterfaceDuplex``
+ * unions had extra values — e.g. ``"active"``/``"decommissioned"`` — never
+ * sent by the wire contract).
  */
 
 import { apiFetch } from "./client";
+import type { components } from "./generated/openapi-types";
 
-// ── Enums (match backend DeviceStatus / normalized enums) ─────────────────────
+// ── Enums (sourced from the generated OpenAPI schema) ──────────────────────────
 
-export type DeviceStatus = "new" | "active" | "unreachable" | "decommissioned";
-export type InterfaceAdminStatus = "up" | "down";
-export type InterfaceOperStatus = "up" | "down" | "testing" | "unknown";
-export type InterfaceDuplex = "full" | "half" | "auto" | "unknown";
-export type NeighborProtocol = "lldp" | "cdp";
+export type DeviceStatus = components["schemas"]["DeviceStatus"];
+export type InterfaceAdminStatus = components["schemas"]["InterfaceAdminStatus"];
+export type InterfaceOperStatus = components["schemas"]["InterfaceOperStatus"];
+export type InterfaceDuplex = components["schemas"]["InterfaceDuplex"];
+export type NeighborProtocol = components["schemas"]["NeighborProtocol"];
 
-// ── Response shapes ───────────────────────────────────────────────────────────
+// ── Response shapes (sourced from the generated OpenAPI schema) ────────────────
 
-export interface DeviceRead {
-  id: string;
-  hostname: string;
-  mgmt_ip: string;
-  vendor_id: string | null;
-  model: string | null;
-  os_version: string | null;
-  serial: string | null;
-  status: DeviceStatus;
-  site: string | null;
-  credential_id: string | null;
-  last_discovered_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface DeviceListResponse {
-  items: DeviceRead[];
-  total: number;
-  limit: number;
-  offset: number;
-}
-
-export interface DeviceInterfaceRead {
-  id: string;
-  name: string;
-  description: string | null;
-  admin_status: InterfaceAdminStatus;
-  oper_status: InterfaceOperStatus;
-  mac_address: string | null;
-  ip_address: string | null;
-  mtu: number | null;
-  speed_mbps: number | null;
-  duplex: InterfaceDuplex | null;
-  vlan_id: number | null;
-  input_errors: number | null;
-  output_errors: number | null;
-  collected_at: string;
-  source_vendor: string;
-}
-
-export interface DeviceNeighborRead {
-  id: string;
-  protocol: NeighborProtocol;
-  local_interface: string;
-  neighbor_name: string;
-  neighbor_interface: string | null;
-  neighbor_platform: string | null;
-  neighbor_address: string | null;
-  neighbor_capabilities: string[];
-  collected_at: string;
-  source_vendor: string;
-}
+export type DeviceRead = components["schemas"]["DeviceRead"];
+export type DeviceListResponse = components["schemas"]["DeviceListResponse"];
+export type DeviceInterfaceRead = components["schemas"]["DeviceInterfaceRead"];
+export type DeviceNeighborRead = components["schemas"]["DeviceNeighborRead"];
 
 // ── Query-string params ───────────────────────────────────────────────────────
 

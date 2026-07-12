@@ -31,7 +31,7 @@ const DEVICE_LIST: DeviceListResponse = {
       model: "Catalyst 9300",
       os_version: "17.3.4",
       serial: null,
-      status: "active",
+      status: "reachable",
       site: null,
       credential_id: null,
       last_discovered_at: null,

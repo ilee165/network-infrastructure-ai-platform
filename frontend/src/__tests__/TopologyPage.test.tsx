@@ -168,7 +168,7 @@ function makeDevice(overrides: Partial<DeviceRead>): DeviceRead {
     model: "Catalyst 9300",
     os_version: null,
     serial: null,
-    status: "active",
+    status: "reachable",
     site: "hq-dc",
     credential_id: null,
     last_discovered_at: null,
