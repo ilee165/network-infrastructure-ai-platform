@@ -42,4 +42,10 @@ Thumbs.db
 # Graphify dev-time codebase graph (regenerable; see .claude/agents/README.md)
 graphify-out/
 
+# Grafana dashboards vendored into the chart at build time (W4-T2b, ADR-0046 §4):
+# deploy/observability/dashboards/*.json is the canonical source; this copy is
+# produced by deploy/observability/dashboards/sync-to-chart.sh (Helm .Files.Get
+# cannot read outside the chart root) and is never committed.
+deploy/kubernetes/netops/dashboards/
+
 debug.log

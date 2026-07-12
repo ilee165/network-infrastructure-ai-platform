@@ -677,6 +677,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
 
+      # W4-T2b (ADR-0046 §4): sync the canonical dashboards-as-code source
+      # (deploy/observability/dashboards/*.json) into the chart's own tree
+      # (deploy/kubernetes/netops/dashboards/, gitignored build artifact) BEFORE
+      # any helm lint/template — Helm `.Files.Get`/`.Files.Glob` cannot read
+      # outside the chart root.
+      - name: Sync dashboards into chart (ADR-0046 §4)
+        run: bash deploy/observability/dashboards/sync-to-chart.sh
+
       # ADR-0031 §3 / ADR-0049 blocker 3 require every copy of the packet-analysis
       # seccomp profiles to stay byte-for-byte identical. A one-sided edit — e.g. a
       # syscall added to one copy only — is a silent security drift. Two profiles,
@@ -2344,6 +2352,14 @@ jobs:
             https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
           tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
           kubeconform -v
+
+      # W4-T2b (ADR-0046 §4): sync the canonical dashboards-as-code source into
+      # the chart's own tree before rendering — the dashboard-lint bite proof
+      # above already ran the sync once, but this job's render step must not
+      # depend on step ordering inside that script; re-run it explicitly here
+      # (idempotent) immediately before the render that needs it.
+      - name: Sync dashboards into chart (ADR-0046 §4)
+        run: bash deploy/observability/dashboards/sync-to-chart.sh
 
       - name: Render + kubeconform the dashboards provisioning ConfigMap
         run: |

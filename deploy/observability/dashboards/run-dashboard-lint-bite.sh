@@ -90,23 +90,33 @@ echo "-- negative (c): delete a dashboard (drop a §335 subject) → must fail -
 run_negative "missing-subject" 'rm -f netops-redis.json'
 
 # ---------------------------------------------------------------------------
-# VENDOR SYNC: the chart embeds a vendored copy of the dashboards
+# VENDOR SYNC: the chart embeds a copy of the dashboards
 # (deploy/kubernetes/netops/dashboards/) so helm `.Files.Get` can reach them
 # (it cannot read outside the chart root). The canonical source is this dir
-# (deploy/observability/dashboards/). A drift between the two = the chart ships a
-# STALE dashboard while the lint passes the fresh one (a false-green). Assert the
-# two trees are byte-identical for the *.json files; a drift fails the gate.
+# (deploy/observability/dashboards/). That copy is produced at BUILD TIME by
+# sync-to-chart.sh (it is not a committed file — see .gitignore). This section
+# runs the real sync-to-chart.sh first, so the check exercises the actual copy
+# mechanism end-to-end, then asserts the two trees are byte-identical for the
+# *.json files as a sanity check: a broken/partial copy script (e.g. one that
+# silently drops a file, or leaves a stale/renamed one behind) would still ship
+# a STALE dashboard while the lint passes the fresh one (a false-green) — this
+# check still has real value even with a real sync step in the loop.
 # ---------------------------------------------------------------------------
+SYNC_SCRIPT="${HERE}/sync-to-chart.sh"
 CHART_DASHBOARDS="${HERE}/../../kubernetes/netops/dashboards"
-echo "-- vendor sync: canonical dashboards == chart-embedded copy --"
+echo "-- vendor sync: run sync-to-chart.sh, then assert canonical == chart-embedded copy --"
 sync_fail=0
+if ! bash "${SYNC_SCRIPT}"; then
+  echo "FAIL: sync-to-chart.sh did not complete successfully" >&2
+  sync_fail=1
+fi
 for f in "${HERE}"/*.json; do
   base="$(basename "${f}")"
   if [ ! -f "${CHART_DASHBOARDS}/${base}" ]; then
-    echo "FAIL: ${base} missing from the chart vendored copy (${CHART_DASHBOARDS})" >&2
+    echo "FAIL: ${base} missing from the chart-embedded copy (${CHART_DASHBOARDS}) after sync" >&2
     sync_fail=1
   elif ! cmp -s "${f}" "${CHART_DASHBOARDS}/${base}"; then
-    echo "FAIL: ${base} DIFFERS between canonical and chart-vendored copy (drift)" >&2
+    echo "FAIL: ${base} DIFFERS between canonical and chart-embedded copy after sync (broken copy script)" >&2
     sync_fail=1
   fi
 done
@@ -114,12 +124,12 @@ done
 for f in "${CHART_DASHBOARDS}"/*.json; do
   base="$(basename "${f}")"
   if [ ! -f "${HERE}/${base}" ]; then
-    echo "FAIL: ${base} exists in the chart copy but not in the canonical source" >&2
+    echo "FAIL: ${base} exists in the chart copy but not in the canonical source (broken copy script)" >&2
     sync_fail=1
   fi
 done
 if [ "${sync_fail}" -eq 0 ]; then
-  echo "PASS: canonical and chart-vendored dashboards are byte-identical (no drift)"
+  echo "PASS: sync-to-chart.sh copied canonical and chart-embedded dashboards byte-identically (no drift)"
 else
   fail=1
 fi
@@ -128,4 +138,4 @@ if [ "${fail}" -ne 0 ]; then
   echo "::error::dashboard-lint bite FAILED" >&2
   exit 1
 fi
-echo "dashboard-lint bite: all directions correct (committed dashboards pass; a missing signal / renamed metric / dropped subject each fail the lint; canonical and chart-vendored copies are in sync)."
+echo "dashboard-lint bite: all directions correct (committed dashboards pass; a missing signal / renamed metric / dropped subject each fail the lint; sync-to-chart.sh copies the canonical dashboards into the chart byte-identically)."

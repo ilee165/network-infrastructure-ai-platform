@@ -49,11 +49,15 @@ metadata:
   {{- end }}
 data:
   {{- /*
-  Embed every committed dashboard JSON. `.Files.Glob` walks the chart-relative
-  path; the dashboards live OUTSIDE the chart dir (deploy/observability/dashboards),
-  so they are vendored into the chart at deploy/kubernetes/netops/dashboards/ (a
-  copy kept in lockstep by the sync check) and embedded from there. Each entry is
-  keyed by its filename so the sidecar provisions one dashboard per key.
+  Embed every dashboard JSON. `.Files.Glob` walks the chart-relative path; the
+  canonical dashboards live OUTSIDE the chart dir (deploy/observability/dashboards)
+  and Helm cannot read outside the chart root, so
+  deploy/observability/dashboards/sync-to-chart.sh copies them into
+  deploy/kubernetes/netops/dashboards/ at BUILD TIME (run before `helm lint`/
+  `helm template`/`helm package`; wired into CI ahead of every render — see
+  .github/workflows/ci.yml). That copy is a build artifact, not a checked-in
+  file (see .gitignore), and is embedded from there. Each entry is keyed by its
+  filename so the sidecar provisions one dashboard per key.
   */}}
   {{- $root := . }}
   {{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
