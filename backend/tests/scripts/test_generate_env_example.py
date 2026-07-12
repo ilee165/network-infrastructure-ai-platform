@@ -140,6 +140,14 @@ def test_chart_managed_baseline_matches_live_intersection() -> None:
     assert gen.chart_managed_fields() == gen._CHART_MANAGED_BASELINE
 
 
+def test_chart_scan_reaches_subdirectory_templates() -> None:
+    # Regression for a real gap: templates/ has admission/, backup/, policy/
+    # subdirectories a non-recursive glob silently skips. NETOPS_KEK_REF is
+    # rendered ONLY in deploy/kubernetes/netops/templates/backup/*.yaml, so
+    # this only passes if the scan actually walks subdirectories.
+    assert "NETOPS_KEK_REF" in gen.rendered_chart_keys()
+
+
 def test_all_chart_exceptions_are_non_settings_keys() -> None:
     settings_keys = gen.settings_env_keys()
     for key in gen.CHART_KEY_EXCEPTIONS:

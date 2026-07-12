@@ -414,6 +414,7 @@ CHART_KEY_EXCEPTIONS: dict[str, str] = {
     "NETOPS_PG_USER_ENC": "locally url-encoded user for DSN assembly (Job shell var)",
     "NETOPS_PG_PASS_ENC": "locally url-encoded password for DSN assembly (Job shell var)",
     "NETOPS_NEO4J_AUTH": "neo4j user/pass via secretKeyRef (Secret); split to NEO4J_PASSWORD",
+    "NETOPS_KEK_REF": "KEK reference via secretKeyRef (drill Jobs); not a ConfigMap literal",
     # Class B
     "NETOPS_REDIS_HOST": "backward-compat single-instance coordinate (redis_url is the field)",
     "NETOPS_REDIS_PORT": "backward-compat single-instance coordinate (redis_url is the field)",
@@ -446,7 +447,14 @@ CONFIGMAP_REFERENCE_SAFE: frozenset[str] = frozenset(
 
 
 def _read_templates() -> list[tuple[Path, str]]:
-    files = sorted(CHART_TEMPLATES_DIR.glob("*.yaml")) + sorted(CHART_TEMPLATES_DIR.glob("*.tpl"))
+    """Read every chart template, recursively.
+
+    ``templates/`` has subdirectories (``admission/``, ``backup/``, ``policy/``);
+    a non-recursive glob silently skips them, which defeats the coverage/orphan
+    checks below for exactly the files most likely to need a new
+    :data:`CHART_KEY_EXCEPTIONS` entry (drill Jobs that shell-assemble DSNs).
+    """
+    files = sorted(CHART_TEMPLATES_DIR.rglob("*.yaml")) + sorted(CHART_TEMPLATES_DIR.rglob("*.tpl"))
     return [(f, f.read_text(encoding="utf-8")) for f in files]
 
 
