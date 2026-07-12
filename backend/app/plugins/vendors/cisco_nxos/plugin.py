@@ -27,7 +27,7 @@ NX-OS-specific decisions (ADR-0025):
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import ClassVar
 from uuid import UUID
@@ -37,7 +37,6 @@ from app.plugins.base import (
     AclCapability,
     BgpCapability,
     Capability,
-    ChangeOutcome,
     ChangePlan,
     ChangeResult,
     CommandTransport,
@@ -45,7 +44,6 @@ from app.plugins.base import (
     ConfigDeployCapability,
     ConfigRestoreCapability,
     ConfigSnapshotRef,
-    ConfigWriteTransport,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
     HaStatusCapability,
@@ -53,7 +51,6 @@ from app.plugins.base import (
     NeighborsCapability,
     OspfCapability,
     PluginCapability,
-    RollbackResult,
     RoutesCapability,
     SnmpReadTransport,
     VendorPlugin,
@@ -64,6 +61,7 @@ from app.plugins.vendors.cisco_nxos.parsers import (
     SNMP_OID_SYSNAME,
     SNMP_OID_SYSOBJECTID,
 )
+from app.plugins.vendors.cli_common import CliConfigWriteMixin
 from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     NormalizedAclEntry,
@@ -384,68 +382,20 @@ def _management_path_hits(baseline: str, end_state: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
-class _CiscoNxosConfigWriteCapability(PluginCapability):
+class _CiscoNxosConfigWriteCapability(CliConfigWriteMixin):
     """Capture-before -> apply -> verify-after -> rollback engine (ADR-0021/0025 §5).
 
-    Mirrors ``_CiscoIosConfigWriteCapability``: rollback is a ``configure
-    replace`` replay of the captured pre-change baseline (same tier as
-    ``cisco_ios``). The :class:`~app.plugins.base.ConfigWriteTransport`
-    exposes no NX-OS named-checkpoint primitive, so this path does **not**
-    issue ``checkpoint`` / ``rollback running-config checkpoint``; restoring
-    equality with the captured baseline via config-replace is the inverse.
-
-    The capability **never self-authorizes**: every entry point first asserts
-    the :class:`ChangePlan` attests an ``executing`` CR (ADR-0021 §2).
+    Wave 3 T4: inherits :class:`~app.plugins.vendors.cli_common.CliConfigWriteMixin`.
+    NX-OS keeps management-path guardrail as defence-in-depth (ADR-0025 §5);
+    rollback remains configure-replace of the captured baseline (no named
+    checkpoint surface on ConfigWriteTransport).
     """
 
-    def __init__(self, transport: ConfigWriteTransport, device_id: UUID) -> None:
-        super().__init__()
-        self._transport = transport
-        self._device_id = device_id
+    vendor_label: ClassVar[str] = "cisco_nxos"
+    _show_running_command: ClassVar[str] = SHOW_RUNNING_CONFIG
 
-    # -- transport helpers ---------------------------------------------------
-
-    def _capture_running(self) -> str:
-        """Capture the live running config verbatim (recorded for audit)."""
-        return self._record_raw(
-            SHOW_RUNNING_CONFIG, self._transport.send_command(SHOW_RUNNING_CONFIG)
-        )
-
-    def _send_config(self, lines: list[str]) -> None:
-        """Merge *lines* in config mode (``configure terminal`` / additive)."""
-        output = self._transport.send_config(lines)
-        self._record_raw("configure terminal\n" + "\n".join(lines), output)
-
-    def _replace_config(self, lines: list[str]) -> None:
-        """Replace running config with exactly *lines* (``configure replace`` on NX-OS)."""
-        output = self._transport.replace_config(lines)
-        self._record_raw("configure replace\n" + "\n".join(lines), output)
-
-    @staticmethod
-    def _require_executing(plan: ChangePlan, operation: str) -> None:
-        """Refuse the write unless the plan attests an ``executing`` CR (§2)."""
-        if not plan.is_executing:
-            raise PluginError(
-                f"cisco_nxos: {operation} refused — change request "
-                f"'{plan.change_request_id}' is '{plan.cr_state}', not 'executing' "
-                "(ADR-0021 §2: a config write executes only as the execution step of "
-                "an approved, claimed ChangeRequest)"
-            )
-
-    @staticmethod
-    def _diff_summary(before: str, after: str) -> tuple[str, ...]:
-        """Redaction-safe summary of a config change (never raw config text)."""
-        before_set = set(before.splitlines())
-        after_lines = after.splitlines()
-        after_set = set(after_lines)
-        added = sum(1 for line in after_lines if line not in before_set)
-        removed = sum(1 for line in before.splitlines() if line not in after_set)
-        summary: list[str] = []
-        if added:
-            summary.append(f"+{added} line(s)")
-        if removed:
-            summary.append(f"-{removed} line(s)")
-        return tuple(summary)
+    def _normalize_captured(self, raw: str) -> str:
+        return _normalize_config(raw)
 
     def _reject_management_path(self, operation: str, baseline: str, end_state: str) -> None:
         """Refuse a change that touches the NX-OS management path (ADR-0021 §4.2 / ADR-0025 §5).
@@ -466,91 +416,6 @@ class _CiscoNxosConfigWriteCapability(PluginCapability):
                 "strand the worker before the rollback fires. Use a console/OOB-fallback "
                 "path for management-plane changes."
             )
-
-    def _execute(
-        self,
-        *,
-        plan: ChangePlan,
-        operation: str,
-        project: Callable[[str], str],
-        config_lines: list[str],
-        apply: Callable[[list[str]], None],
-    ) -> ChangeResult:
-        """Run the ADR-0021 §3 contract with configure-replace baseline rollback (§5)."""
-        self._require_executing(plan, operation)
-
-        baseline = _normalize_config(self._capture_running())
-        end_state = project(baseline)
-
-        self._reject_management_path(operation, baseline, end_state)
-
-        if baseline == end_state:
-            return ChangeResult(
-                change_request_id=plan.change_request_id,
-                outcome=ChangeOutcome.NO_OP,
-                verified=True,
-                applied_diff=(),
-                rollback=None,
-            )
-
-        applied_diff = self._diff_summary(baseline, end_state)
-
-        apply_failed = False
-        try:
-            apply(config_lines)
-        except Exception:  # noqa: BLE001
-            apply_failed = True
-
-        verified = False
-        if not apply_failed:
-            after = _normalize_config(self._capture_running())
-            verified = after == end_state
-
-        if verified:
-            return ChangeResult(
-                change_request_id=plan.change_request_id,
-                outcome=ChangeOutcome.APPLIED,
-                verified=True,
-                applied_diff=applied_diff,
-                rollback=None,
-            )
-
-        # Apply errored or verify-after failed → configure-replace baseline rollback.
-        rollback = self._rollback_to_baseline(baseline)
-        outcome = ChangeOutcome.ROLLED_BACK if rollback.succeeded else ChangeOutcome.ROLLBACK_FAILED
-        return ChangeResult(
-            change_request_id=plan.change_request_id,
-            outcome=outcome,
-            verified=False,
-            applied_diff=applied_diff,
-            rollback=rollback,
-        )
-
-    def _rollback_to_baseline(self, baseline_normalized: str) -> RollbackResult:
-        """Replace the device config with the captured baseline (ADR-0021 §4 / ADR-0025 §5).
-
-        NX-OS uses ``configure replace`` (via ``replace_config``) to roll back
-        to the captured pre-change baseline — the stronger primitive than
-        classic IOS's bare baseline-replay. Success is an asserted equality
-        (re-captured config normalizes equal to baseline), not an assumption.
-        """
-        try:
-            self._replace_config(baseline_normalized.splitlines())
-            after = _normalize_config(self._capture_running())
-        except Exception as exc:  # noqa: BLE001
-            return RollbackResult(
-                attempted=True,
-                succeeded=False,
-                verified=False,
-                detail=f"baseline replace failed ({type(exc).__name__})",
-            )
-        equal = after == baseline_normalized
-        return RollbackResult(
-            attempted=True,
-            succeeded=equal,
-            verified=equal,
-            detail=None if equal else "re-captured config did not normalize equal to the baseline",
-        )
 
 
 class CiscoNxosConfigRestore(_CiscoNxosConfigWriteCapability, ConfigRestoreCapability):
