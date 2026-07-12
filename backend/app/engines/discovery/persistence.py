@@ -12,21 +12,25 @@ writes it down in evidence-first order (D11):
    each carrying the ``raw_artifact_id`` of the artifact whose command
    produced it.
 
-PORTABILITY DECISION (fixed): upserts are select-by-natural-key then
-update-or-insert in Python — no dialect-specific ``ON CONFLICT`` — so the
-same code runs on aiosqlite in unit tests and PostgreSQL in production;
-volumes are modest at MVP. Optional natural-key components map Pydantic
-``None`` → ``''`` sentinel (see :mod:`app.models.inventory` docstring).
+PORTABILITY (Wave 5 / perf #8): normalized upserts use dialect
+``INSERT ... ON CONFLICT DO UPDATE`` (PostgreSQL + SQLite) over values lists
+so 10k-route devices stay in the seconds, not tens of seconds. A light
+SELECT of natural keys alone drives insert/update counts. Optional natural-key
+components map Pydantic ``None`` → ``''`` sentinel (see
+:mod:`app.models.inventory` docstring).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from enum import Enum
 from typing import Any
 from uuid import UUID
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engines.discovery.engine import DeviceCollectionResult
@@ -119,8 +123,18 @@ async def upsert_device(
 
 
 # ---------------------------------------------------------------------------
-# Normalized upserts (select-by-natural-key, then update-or-insert)
+# Normalized upserts (bulk INSERT ... ON CONFLICT DO UPDATE)
 # ---------------------------------------------------------------------------
+
+#: Cap multi-row INSERT parameter count (SQLite ~999 vars; stay well under).
+_UPSERT_BATCH_SIZE = 200
+
+
+def _wire_value(value: Any) -> Any:
+    """Coerce enums to wire values for dialect insert statements."""
+    if isinstance(value, Enum):
+        return value.value
+    return value
 
 
 async def _upsert_rows(
@@ -130,28 +144,56 @@ async def _upsert_rows(
     key_fields: tuple[str, ...],
     items: dict[tuple[Any, ...], dict[str, Any]],
 ) -> UpsertCounts:
-    """Generic natural-key upsert: one SELECT per pass, then per-row merge.
+    """Generic natural-key bulk upsert (PG + SQLite ON CONFLICT).
 
     ``items`` maps the natural-key tuple (excluding ``device_id``) to the
     non-key column values; duplicate keys in the input were already collapsed
     (last one wins) so a single pass can never violate the unique constraint.
-    """
-    existing_rows = (
-        await session.execute(select(orm_cls).where(orm_cls.device_id == device.id))  # type: ignore[attr-defined]
-    ).scalars()
-    existing = {tuple(getattr(row, field) for field in key_fields): row for row in existing_rows}
 
-    counts: UpsertCounts = {"inserted": 0, "updated": 0}
+    Counts come from a light key-only SELECT; writes are batched dialect inserts.
+    """
+    if not items:
+        return {"inserted": 0, "updated": 0}
+
+    key_cols = [getattr(orm_cls, field) for field in key_fields]
+    existing_result = await session.execute(
+        select(*key_cols).where(orm_cls.device_id == device.id)  # type: ignore[attr-defined]
+    )
+    existing_keys: set[tuple[Any, ...]] = set()
+    for row in existing_result.all():
+        # Normalize enum members from the DB to wire values for set membership.
+        existing_keys.add(tuple(_wire_value(v) for v in row))
+
+    def _key_tuple(key: tuple[Any, ...]) -> tuple[Any, ...]:
+        return tuple(_wire_value(v) for v in key)
+
+    counts: UpsertCounts = {
+        "inserted": sum(1 for k in items if _key_tuple(k) not in existing_keys),
+        "updated": sum(1 for k in items if _key_tuple(k) in existing_keys),
+    }
+
+    dialect_name = session.bind.dialect.name if session.bind is not None else "sqlite"
+    insert_fn = pg_insert if dialect_name == "postgresql" else sqlite_insert
+    conflict_cols = ["device_id", *key_fields]
+
+    payload: list[dict[str, Any]] = []
     for key, values in items.items():
-        row = existing.get(key)
-        if row is None:
-            key_values = dict(zip(key_fields, key, strict=True))
-            session.add(orm_cls(device_id=device.id, **key_values, **values))
-            counts["inserted"] += 1
-        else:
-            for column, value in values.items():
-                setattr(row, column, value)
-            counts["updated"] += 1
+        row_dict: dict[str, Any] = {"device_id": device.id}
+        for field, raw in zip(key_fields, key, strict=True):
+            row_dict[field] = _wire_value(raw)
+        for column, value in values.items():
+            row_dict[column] = _wire_value(value)
+        payload.append(row_dict)
+
+    value_columns = list(next(iter(items.values())).keys())
+    for start in range(0, len(payload), _UPSERT_BATCH_SIZE):
+        batch = payload[start : start + _UPSERT_BATCH_SIZE]
+        stmt = insert_fn(orm_cls).values(batch)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=conflict_cols,
+            set_={col: stmt.excluded[col] for col in value_columns},
+        )
+        await session.execute(stmt)
     await session.flush()
     return counts
 
