@@ -2226,8 +2226,8 @@ jobs:
   # fails on any diff (H3: docs ⊇ Settings), and runs the chart key-coverage +
   # ConfigMap secret-safety checks (C5/C6: every rendered NETOPS_* key is a
   # Settings field or a documented exception; no secret material in a plaintext
-  # ConfigMap). NOT yet in the `all-gates` needs list — T7 wires it. pipefail so
-  # a piped invocation cannot mask a non-zero exit.
+  # ConfigMap). Wired into the `all-gates` needs list (T7, AR-W1-T3). pipefail
+  # so a piped invocation cannot mask a non-zero exit.
   config-drift:
     name: config-drift (.env.example + chart key coverage)
     runs-on: ubuntu-latest
@@ -2301,8 +2301,8 @@ jobs:
   # (a pure FastAPI `.openapi()` schema export — no live infra, lifespan never
   # runs); `openapi-typescript` is the single source for
   # frontend/src/api/generated/openapi-types.ts. This job re-exports the spec and
-  # regenerates the TS types, failing on any drift from the committed files. NOT
-  # yet in the `all-gates` needs list — T7 wires it. pipefail so a piped
+  # regenerates the TS types, failing on any drift from the committed files.
+  # Wired into the `all-gates` needs list (T7, AR-W1-T3). pipefail so a piped
   # invocation cannot mask a non-zero exit.
   contract-drift:
     name: contract-drift (OpenAPI spec + generated TS types)
@@ -2622,7 +2622,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, packet-analysis-bite-proof, lockfile, observability, drill-bite-proofs]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, packet-analysis-bite-proof, lockfile, observability, drill-bite-proofs, config-drift, contract-drift]
     steps:
       - name: Assert every gate succeeded
         env:
