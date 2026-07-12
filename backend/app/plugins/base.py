@@ -171,6 +171,11 @@ class ConnectionParams(BaseModel):
         min_length=1,
         description="Opaque reference to a vault entry (device_credentials.id) — never a secret.",
     )
+    #: Optional pinned host-key fingerprint for this session's host (Wave 3 H7).
+    #: Not a secret. Prefer materializing from
+    #: ``DeviceCredential.params["host_key_fingerprints"][host]`` so shared
+    #: credentials cannot pin the wrong device. No Device/API column this wave.
+    host_key_fingerprint: str | None = None
 
 
 def _utcnow() -> datetime:

@@ -1783,6 +1783,9 @@ config:
   # NETOPS_JUNOS_COMMIT_CONFIRMED_MINUTES — must cover apply + verify-after +
   # confirming commit; bump for large configs / slow control planes (1–60).
   junosCommitConfirmedMinutes: 2
+  # SSH host-key strict checking (Wave 3 H7). NETOPS_SSH_STRICT — default true.
+  # false is lab-only AutoAdd opt-out.
+  sshStrict: true
   # -- KEK backend + prod-grade gating (W6-T2, ADR-0032 §2). EVERY value here is
   #    a non-secret REFERENCE — a key ARN, a vault URI/key name, a transit key,
   #    or an INDIRECT credential_ref login handle (k8s-auth role / AppRole id).

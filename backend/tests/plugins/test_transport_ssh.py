@@ -18,6 +18,7 @@ from netmiko.exceptions import (
     NetmikoAuthenticationException,
     NetmikoTimeoutException,
     ReadException,
+    SSHException,
 )
 
 from app.core.errors import PluginError
@@ -42,6 +43,30 @@ def make_params(**overrides: Any) -> SshParams:
     return SshParams(**defaults)
 
 
+class _FakeRemoteKey:
+    def __init__(self, material: bytes = b"test-host-key-material") -> None:
+        self._material = material
+
+    def asbytes(self) -> bytes:
+        return self._material
+
+
+class _FakeParamikoTransport:
+    def __init__(self, key: _FakeRemoteKey | None = None) -> None:
+        self._key = key if key is not None else _FakeRemoteKey()
+
+    def get_remote_server_key(self) -> _FakeRemoteKey:
+        return self._key
+
+
+class _FakeRemoteConn:
+    def __init__(self, key: _FakeRemoteKey | None = None) -> None:
+        self._transport = _FakeParamikoTransport(key)
+
+    def get_transport(self) -> _FakeParamikoTransport:
+        return self._transport
+
+
 class FakeConnection:
     """In-memory stand-in for a connected netmiko ``BaseConnection``."""
 
@@ -52,6 +77,7 @@ class FakeConnection:
         disconnect_error: Exception | None = None,
         config_error: Exception | None = None,
         config_set_output: str = "configured",
+        host_key: _FakeRemoteKey | None = None,
     ) -> None:
         self.outputs = outputs or {}
         self.send_error = send_error
@@ -64,6 +90,7 @@ class FakeConnection:
         self.disconnected = False
         self.staged_plain_len: int | None = None
         self._force_size_output: str | None = None
+        self.remote_conn = _FakeRemoteConn(host_key)
 
     def send_command(self, command: str, read_timeout: float = 10.0) -> str:
         if self.send_error is not None:
@@ -192,6 +219,50 @@ class TestSshTransportSession:
         assert fake_netmiko.kwargs["port"] == 2222
         assert fake_netmiko.kwargs["secret"] == ENABLE_SECRET
         assert fake_netmiko.kwargs["conn_timeout"] == 7.0
+        # Wave 3 H7: strict host keys by default.
+        assert fake_netmiko.kwargs["ssh_strict"] is True
+        assert fake_netmiko.kwargs["system_host_keys"] is True
+
+    def test_ssh_strict_opt_out_disables_system_host_keys(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        with SshTransport(make_params(ssh_strict=False, system_host_keys=True)):
+            pass
+        assert fake_netmiko.kwargs is not None
+        assert fake_netmiko.kwargs["ssh_strict"] is False
+        assert fake_netmiko.kwargs["system_host_keys"] is False
+
+    def test_pinned_fingerprint_accepted(self, fake_netmiko: FakeConnectHandler) -> None:
+        from app.plugins.transport.ssh import _connection_host_key_fingerprint
+
+        presented = _connection_host_key_fingerprint(fake_netmiko.connection)
+        assert presented is not None
+        with SshTransport(make_params(host_key_fingerprint=presented)):
+            pass
+
+    def test_pinned_fingerprint_mismatch_rejected(self, fake_netmiko: FakeConnectHandler) -> None:
+        with (
+            pytest.raises(SshTransportError, match="pin mismatch"),
+            SshTransport(make_params(host_key_fingerprint="SHA256:not-the-real-key")),
+        ):
+            pass
+        assert fake_netmiko.connection.disconnected is True
+
+    def test_unknown_host_key_error_names_remediation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class HostKeyError(SSHException):
+            pass
+
+        handler = FakeConnectHandler(error=HostKeyError("Host key not found in known_hosts"))
+        monkeypatch.setattr(ssh_module, "ConnectHandler", handler)
+        with (
+            pytest.raises(SshTransportError, match="known_hosts") as excinfo,
+            SshTransport(make_params()),
+        ):
+            pass
+        assert "host_key_fingerprints" in str(excinfo.value)
+        assert "NETOPS_SSH_STRICT" in str(excinfo.value)
 
     def test_enable_called_when_enable_secret_present(
         self, fake_netmiko: FakeConnectHandler

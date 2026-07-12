@@ -19,7 +19,11 @@ never directly on the FastAPI event loop (ADR-0007 §3, ADR-0008).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
+import hashlib
+import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -30,6 +34,8 @@ from netmiko import ConnectHandler
 from netmiko.exceptions import NetmikoBaseException, SSHException
 
 from app.core.errors import PluginError
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from netmiko import BaseConnection
@@ -120,6 +126,10 @@ class SshParams:
     ``commit_confirmed_minutes`` is consumed only by
     :class:`~app.plugins.transport.junos_ssh.JunosSshTransport` (JunOS
     ``commit confirmed <N>``); Cisco-family ignore it.
+
+    Host-key policy (Wave 3 H7): ``ssh_strict`` / ``system_host_keys`` default
+    true (secure by default). Optional ``host_key_fingerprint`` is a
+    non-secret pin (``SHA256:…`` or hex MD5) verified after connect.
     """
 
     host: str
@@ -131,6 +141,9 @@ class SshParams:
     conn_timeout: float = 10.0
     read_timeout: float = 30.0
     commit_confirmed_minutes: int = 2
+    ssh_strict: bool = True
+    system_host_keys: bool = True
+    host_key_fingerprint: str | None = None
 
     def __repr__(self) -> str:
         enable_secret = _REDACTED if self.enable_secret is not None else None
@@ -139,7 +152,9 @@ class SshParams:
             f"username={self.username!r}, password={_REDACTED!r}, port={self.port!r}, "
             f"enable_secret={enable_secret!r}, conn_timeout={self.conn_timeout!r}, "
             f"read_timeout={self.read_timeout!r}, "
-            f"commit_confirmed_minutes={self.commit_confirmed_minutes!r})"
+            f"commit_confirmed_minutes={self.commit_confirmed_minutes!r}, "
+            f"ssh_strict={self.ssh_strict!r}, system_host_keys={self.system_host_keys!r}, "
+            f"host_key_fingerprint={self.host_key_fingerprint!r})"
         )
 
 
@@ -161,6 +176,15 @@ class SshTransport:
 
     def __enter__(self) -> SshTransport:
         params = self._params
+        if not params.ssh_strict:
+            logger.warning(
+                "SSH host-key verification DISABLED for %s:%s (device_type=%r); "
+                "lab-only NETOPS_SSH_STRICT=false / SshParams.ssh_strict=False — "
+                "do not use in production",
+                params.host,
+                params.port,
+                params.device_type,
+            )
         try:
             connection = ConnectHandler(
                 host=params.host,
@@ -170,10 +194,18 @@ class SshTransport:
                 port=params.port,
                 secret=params.enable_secret or "",
                 conn_timeout=params.conn_timeout,
+                # Wave 3 H7: default strict + system known_hosts (not AutoAdd).
+                ssh_strict=params.ssh_strict,
+                system_host_keys=params.system_host_keys and params.ssh_strict,
             )
         except _NETMIKO_FAILURES as exc:
-            raise SshTransportError(self._failure_message("connect", exc)) from exc
+            raise SshTransportError(self._host_key_failure_message(exc)) from exc
         self._connection = connection
+        try:
+            self._verify_pinned_fingerprint(connection)
+        except SshTransportError:
+            self._close()
+            raise
         if params.enable_secret is not None:
             try:
                 connection.enable()
@@ -309,10 +341,16 @@ class SshTransport:
             self._raise_if_tcl_failed("stage size check", size_out)
             self._assert_staged_length(size_out, expected_len)
 
-            output = connection.send_command(
+            replace_out = connection.send_command(
                 f"configure replace {staged} force",
                 read_timeout=timeout,
             )
+            if not isinstance(replace_out, str):  # pragma: no cover
+                raise SshTransportError(
+                    f"SSH config replace for {self._params.host}:{self._params.port} "
+                    "returned non-text output"
+                )
+            output = replace_out
         except SshTransportError:
             with contextlib.suppress(*_NETMIKO_FAILURES):
                 connection.send_command(f"delete /force {staged}", read_timeout=timeout)
@@ -323,11 +361,6 @@ class SshTransport:
             raise SshTransportError(self._failure_message("config replace", exc)) from exc
         with contextlib.suppress(*_NETMIKO_FAILURES):
             connection.send_command(f"delete /force {staged}", read_timeout=timeout)
-        if not isinstance(output, str):  # pragma: no cover - structured output never requested
-            raise SshTransportError(
-                f"SSH config replace for {self._params.host}:{self._params.port} "
-                "returned non-text output"
-            )
         return output
 
     @staticmethod
@@ -452,3 +485,89 @@ class SshTransport:
             f"SSH {action} failed for {params.host}:{params.port} "
             f"(device_type={params.device_type!r}): {type(exc).__name__}"
         )
+
+    def _host_key_failure_message(self, exc: Exception) -> str:
+        """Connect failure message; name host-key remediation when applicable."""
+        base = self._failure_message("connect", exc)
+        text = f"{type(exc).__name__} {exc}".lower()
+        if any(
+            token in text
+            for token in (
+                "host key",
+                "hostkey",
+                "known_hosts",
+                "not found in known_hosts",
+                "rejectpolicy",
+            )
+        ):
+            return (
+                f"{base}: host key verification failed. Remediation: add the "
+                f"device host key to the platform known_hosts, or pin "
+                f"host_key_fingerprints[{self._params.host!r}] on the SSH "
+                f"credential params (SHA256:…), or set NETOPS_SSH_STRICT=false "
+                f"only in an isolated lab"
+            )
+        return base
+
+    def _verify_pinned_fingerprint(self, connection: BaseConnection) -> None:
+        """If a pin is configured, compare against the presented host key."""
+        expected = self._params.host_key_fingerprint
+        if not expected:
+            return
+        presented = _connection_host_key_fingerprint(connection)
+        if presented is None:
+            raise SshTransportError(
+                f"SSH host-key pin configured for {self._params.host}:{self._params.port} "
+                f"but the session did not expose a remote host key; "
+                f"cannot verify pin {expected!r}"
+            )
+        if not _fingerprints_match(expected, presented):
+            raise SshTransportError(
+                f"SSH host-key pin mismatch for {self._params.host}:{self._params.port}: "
+                f"expected {expected!r}, presented {presented!r}. Remediation: update "
+                f"credential params host_key_fingerprints[{self._params.host!r}] or "
+                f"investigate host substitution / MITM"
+            )
+
+
+def _connection_host_key_fingerprint(connection: BaseConnection) -> str | None:
+    """Return ``SHA256:…`` fingerprint of the remote host key, if available."""
+    remote = getattr(connection, "remote_conn", None)
+    if remote is None:
+        return None
+    get_transport = getattr(remote, "get_transport", None)
+    transport_obj = (
+        get_transport()
+        if callable(get_transport)
+        else getattr(remote, "transport", None)  # some netmiko drivers
+    )
+    if transport_obj is None:
+        return None
+    get_key = getattr(transport_obj, "get_remote_server_key", None)
+    if not callable(get_key):
+        return None
+    key = get_key()
+    if key is None:
+        return None
+    # Prefer OpenSSH-style SHA256 base64 fingerprint.
+    raw = key.asbytes() if hasattr(key, "asbytes") else str(key).encode()
+    asbytes = raw if isinstance(raw, (bytes, bytearray)) else bytes(raw)
+    digest = hashlib.sha256(asbytes).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _fingerprints_match(expected: str, presented: str) -> bool:
+    """Compare fingerprints case-insensitively; accept SHA256: with/without padding."""
+    exp = expected.strip().replace(" ", "")
+    pres = presented.strip().replace(" ", "")
+    if exp.lower().startswith("sha256:") and pres.lower().startswith("sha256:"):
+        return exp.split(":", 1)[1].rstrip("=").lower() == pres.split(":", 1)[1].rstrip("=").lower()
+    # Hex MD5 (legacy OpenSSH) comparison.
+    exp_hex = exp.lower().removeprefix("md5:")
+    pres_hex = pres.lower().removeprefix("md5:")
+    try:
+        return binascii.unhexlify(exp_hex.replace(":", "")) == binascii.unhexlify(
+            pres_hex.replace(":", "")
+        )
+    except binascii.Error:
+        return exp.lower() == pres.lower()
