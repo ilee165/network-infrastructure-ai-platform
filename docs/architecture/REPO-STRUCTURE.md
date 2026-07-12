@@ -650,4 +650,4 @@ above, not a silent contract addition. Tracked here so they don't stay invisible
 
 ---
 
-*End of REPO-STRUCTURE.md — Phase 2 scaffolding (`M0` in `docs/roadmap/MVP.md`) creates the tree in section 2 as amended by the section 9 as-built record, and wires the import-linter contracts in section 3.3 before any feature code lands (remaining contracts: M1 entry gate, see section 9).*
+*End of REPO-STRUCTURE.md — Phase 2 scaffolding (`M0` in `docs/roadmap/MVP.md`) creates the tree in section 2 as amended by the section 9 as-built record, and wires the import-linter contracts in section 3.3 (the full six-contract set, plus the additional narrow contracts noted in section 9, are wired as of AR-W0-T1 / PR #159 — see section 9 for status).*

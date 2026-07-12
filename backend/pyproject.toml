@@ -361,7 +361,8 @@ ignore_imports = [
 ]
 # No new entries may be added to this allowlist without updating this
 # contract (and its REPO-STRUCTURE §3.3 contract-2 description) — new
-# agents -> engines/services/plugins/models/db edges are real violations.
+# agents -> engines/services/plugins/models/db/knowledge edges are real
+# violations.
 
 [[tool.importlinter.contracts]]
 name = "app.engines only reaches plugins via the registry, never a vendor package or the llm layer (REPO-STRUCTURE §3.3 contract 3, §3.2 row 9)"
