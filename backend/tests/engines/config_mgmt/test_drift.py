@@ -164,6 +164,27 @@ async def test_clean_device_has_no_drift(session: AsyncSession) -> None:
     assert result.current_hash == snap.content_hash
 
 
+async def test_identical_content_hash_skips_difflib(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wave 5: matching hashes must not enter unified_diff (large-config path)."""
+    device_id = uuid.uuid4()
+    snap = await _capture(session, device_id=device_id, config=RUNNING_CONFIG)
+    await approve_baseline(session, snapshot=snap, actor="engineer-1")
+    await session.commit()
+
+    def _boom(*_a: object, **_k: object) -> list[str]:
+        raise AssertionError("difflib.unified_diff must not run on equal content_hash")
+
+    monkeypatch.setattr(
+        "app.engines.config_mgmt.drift.difflib.unified_diff",
+        _boom,
+    )
+    result = await detect_drift(session, device_id=device_id, actor="engineer-1")
+    assert result.has_drift is False
+    assert result.diff == ""
+
+
 async def test_out_of_band_change_flags_exactly_that_hunk(session: AsyncSession) -> None:
     device_id = uuid.uuid4()
     baseline = await _capture(session, device_id=device_id, config=RUNNING_CONFIG)
