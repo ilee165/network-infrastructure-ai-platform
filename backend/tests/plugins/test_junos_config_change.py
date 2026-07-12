@@ -459,7 +459,7 @@ class TestRollbackFailedNeverSilent:
         assert result.verified is True  # end-state was correct
         assert result.rollback is not None
         assert result.rollback.attempted is False
-        assert "confirm_config failed" in (result.rollback.detail or "")
+        assert "confirm after verify failed" in (result.rollback.detail or "")
         assert transport.confirm_calls == 2  # initial + one retry
 
 
