@@ -422,7 +422,7 @@ reconciliation is out of scope here and tracked for Wave 6.
 **Checklist: is this a service or an engine?**
 
 1. Does it open, own, or commit a database session/transaction? → `services/`.
-2. Does it write an `audit_log` entry (directly or by calling `core/audit.py`)? → `services/`.
+2. Does it write an `audit_log` entry (directly or by calling `app/services/audit/`)? → `services/`.
 3. Does it orchestrate multiple downstream calls that have side effects (e.g. call a plugin, then persist, then enqueue a task)? → `services/`.
 4. Is it a pure function/transform over data already fetched and handed in (no I/O, no session, no audit write)? → `engines/`.
 5. Does it call the plugin registry (`plugins.base`/`plugins.registry`) to reach a vendor device, with no persistence of its own? → `engines/` (per row 9 — engines are the only consumers of the plugin registry).
