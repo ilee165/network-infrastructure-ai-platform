@@ -483,7 +483,7 @@ class _JunosConfigWriteCapability(PluginCapability):
         apply_failed = False
         try:
             apply(config_lines)
-        except Exception:  # noqa: BLE001 — any apply failure triggers rollback
+        except Exception:  # noqa: BLE001 — any apply failure triggers recovery
             apply_failed = True
 
         verified = False
@@ -527,9 +527,15 @@ class _JunosConfigWriteCapability(PluginCapability):
                 rollback=None,
             )
 
-        # Apply errored or verify-after failed → do NOT confirm; structured
-        # rollback to baseline is the primary path (timer is the backstop).
-        rollback = self._rollback_to_baseline(baseline)
+        # Do NOT confirm. Recovery depends on whether commit confirmed landed:
+        # - apply_failed: no tentative commit — do not permanent ``rollback 1``
+        #   (that rewinds one generation *past* baseline). Re-assert baseline.
+        # - verify-fail after apply: commit confirmed is armed → permanent
+        #   ``rollback 1`` + ``commit`` (timer is backstop if that fails).
+        if apply_failed:
+            rollback = self._recover_after_apply_failure(baseline)
+        else:
+            rollback = self._rollback_to_baseline(baseline)
         outcome = ChangeOutcome.ROLLED_BACK if rollback.succeeded else ChangeOutcome.ROLLBACK_FAILED
         return ChangeResult(
             change_request_id=plan.change_request_id,
@@ -539,8 +545,39 @@ class _JunosConfigWriteCapability(PluginCapability):
             rollback=rollback,
         )
 
+    def _recover_after_apply_failure(self, baseline_normalized: str) -> RollbackResult:
+        """Recover when apply raised before a successful ``commit confirmed``.
+
+        No tentative commit is armed — permanent ``rollback 1`` would rewind
+        history past the pre-change baseline. Re-capture and assert equality;
+        do not call :meth:`~app.plugins.base.ConfigWriteTransport.rollback_config`.
+        """
+        try:
+            after = _normalize_config(self._capture_config())
+        except Exception as exc:  # noqa: BLE001
+            return RollbackResult(
+                attempted=True,
+                succeeded=False,
+                verified=False,
+                detail=f"post-apply-failure re-capture failed ({type(exc).__name__})",
+            )
+        equal = after == baseline_normalized
+        return RollbackResult(
+            attempted=True,
+            succeeded=equal,
+            verified=equal,
+            detail=(
+                None
+                if equal
+                else (
+                    "apply failed before commit confirmed but running config no longer "
+                    "matches the pre-change baseline"
+                )
+            ),
+        )
+
     def _rollback_to_baseline(self, baseline_normalized: str) -> RollbackResult:
-        """Roll back to the pre-change point via permanent ``rollback N`` + ``commit``.
+        """Roll back after verify-fail via permanent ``rollback N`` + ``commit``.
 
         See ADR-0026 §3.1 / Wave 3 T1 pin 2: after a failed verify (with an
         unconfirmed ``commit confirmed`` still pending), structured recovery is

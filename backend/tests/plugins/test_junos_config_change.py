@@ -272,30 +272,24 @@ class TestRestore:
         assert result.rollback is not None
         assert result.rollback.succeeded is True
         assert result.rollback.verified is True
+        # Apply failed before commit confirmed — must NOT permanent rollback 1
+        assert transport.rollback_calls == []
 
-    def test_restore_apply_error_rollback_failure_surfaces_rollback_failed(
+    def test_restore_apply_error_diverged_device_surfaces_rollback_failed(
         self, device_id: UUID
     ) -> None:
-        """Spec §5(d): if the pre-apply failure cannot be recovered, the result is
-        ROLLBACK_FAILED — never silently ROLLED_BACK (ADR-0021 §3)."""
+        """If apply fails before commit confirmed but running config already drifted,
+        recovery cannot claim rolled_back without a permanent inverse (ADR-0021 §3)."""
 
-        class _RestoreBrokenRollbackTransport(JunosConfigWriteFakeTransport):
+        class _DivergedOnApplyFailTransport(JunosConfigWriteFakeTransport):
             def replace_config(self, lines: list[str]) -> str:
                 self.replace_batches.append(list(lines))
-                is_apply = self._begin_write()
-                if is_apply:
-                    # Apply raises before any committed state lands.
-                    raise RuntimeError("JunOS commit check failed")
-                self._running = "\n".join(lines) + "\n"
-                return ""
+                self._begin_write()
+                # Mutate then raise — models a partial failure before confirmed commit.
+                self._running = "set system host-name BROKEN-MID-APPLY\n"
+                raise RuntimeError("JunOS commit check failed")
 
-            def rollback_config(self, n: int = 1) -> str:
-                self.rollback_calls.append(n)
-                # Permanent rollback lands a config that does NOT match the baseline.
-                self._running = "set system host-name BROKEN-AFTER-ROLLBACK\n"
-                return ""
-
-        transport = _RestoreBrokenRollbackTransport(_DRIFTED)
+        transport = _DivergedOnApplyFailTransport(_DRIFTED)
         cap = JunosConfigRestore(transport, device_id)
 
         result = cap.restore(_SnapshotStub(_BASELINE), plan=_executing_plan())
@@ -305,6 +299,7 @@ class TestRestore:
         assert result.verified is False
         assert result.rollback is not None
         assert result.rollback.succeeded is False
+        assert transport.rollback_calls == []  # no permanent rollback 1 on apply-fail
 
     def test_restore_junos_volatile_header_tolerated(self, device_id: UUID) -> None:
         """JunOS ``## Last commit:`` header does not defeat normalize equality."""
@@ -410,6 +405,7 @@ class TestDeploy:
         assert result.outcome is ChangeOutcome.ROLLED_BACK
         assert result.rollback is not None
         assert result.rollback.succeeded is True
+        assert transport.rollback_calls == []  # apply-fail: no permanent rollback 1
 
 
 # ---------------------------------------------------------------------------
@@ -419,11 +415,18 @@ class TestDeploy:
 
 class TestRollbackFailedNeverSilent:
     def test_deploy_rollback_failure_surfaces_rollback_failed(self, device_id: UUID) -> None:
+        """Verify-fail path: permanent rollback_config lands wrong config → ROLLBACK_FAILED."""
+
         class _BrokenRollbackTransport(JunosConfigWriteFakeTransport):
             def send_config(self, lines: list[str]) -> str:
                 self.config_batches.append(list(lines))
                 self._begin_write()
-                return ""  # apply does not land
+                # Apply "lands" a wrong end-state so verify-after fails (commit confirmed armed).
+                present = self._running.splitlines()
+                present_set = set(present)
+                merged = present + [line for line in lines if line not in present_set]
+                self._running = "\n".join(merged) + "\nset system host-name CORRUPT\n"
+                return ""
 
             def rollback_config(self, n: int = 1) -> str:
                 self.rollback_calls.append(n)
