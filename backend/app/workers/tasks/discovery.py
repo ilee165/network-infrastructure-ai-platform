@@ -189,13 +189,17 @@ class _MaterializedCredential:
 
 async def _prepare(
     run_id: UUID, target_ip: str, credential_name: str | None
-) -> tuple[list[_MaterializedCredential], UUID]:
+) -> tuple[list[_MaterializedCredential], UUID, str | None]:
     """Load + decrypt the run's credentials and resolve the engine device id.
 
     Decryptions are audited with ``reason="discovery"`` (committed here so the
     audit trail survives even if collection subsequently fails). The returned
     device id is the existing inventory id for ``mgmt_ip`` when known, else a
     fresh placeholder (persistence keys rows on the upserted device anyway).
+
+    When the inventory already has a device at *target_ip*, its ``vendor_id``
+    is returned as a detection hint so SSH vendor try-order prefers the known
+    driver (Wave 5 / perf #1).
     """
     async with _session() as session:
         run = await session.get(DiscoveryRun, run_id)
@@ -239,11 +243,13 @@ async def _prepare(
                     params=dict(row.params or {}),
                 )
             )
-        device_id = (
-            await session.execute(select(Device.id).where(Device.mgmt_ip == target_ip))
+        device_row = (
+            await session.execute(select(Device).where(Device.mgmt_ip == target_ip))
         ).scalar_one_or_none()
         await session.commit()  # decrypt audit rows
-        return materialized, device_id or uuid.uuid4()
+        preferred_vendor = device_row.vendor_id if device_row is not None else None
+        device_id = device_row.id if device_row is not None else uuid.uuid4()
+        return materialized, device_id, preferred_vendor
 
 
 async def _persist(
@@ -290,19 +296,42 @@ def _instantiate(
     return ctor(transport, device_id)
 
 
+def _ssh_vendor_candidates(
+    registry: PluginRegistry, preferred_vendor: str | None = None
+) -> list[str]:
+    """Order SSH discovery vendor ids: known vendor first, then registry order.
+
+    Wave 5 / perf #1: a re-discovery of a known device should open ~1 SSH
+    session with the correct driver instead of thrashing every registered
+    vendor driver (each wrong ConnectHandler costs seconds).
+    """
+    candidates = [
+        vid for vid in registry.vendor_ids() if registry.get_plugin(vid).supports(Capability.DISCOVERY_SSH)
+    ]
+    if preferred_vendor and preferred_vendor in candidates:
+        rest = [v for v in candidates if v != preferred_vendor]
+        return [preferred_vendor, *rest]
+    return candidates
+
+
 def _collect_over_ssh(
     registry: PluginRegistry,
     target_ip: str,
     creds: list[_MaterializedCredential],
     device_id: UUID,
+    *,
+    preferred_vendor: str | None = None,
 ) -> _CollectionOutcome:
-    """Detect the vendor over SSH and collect every CLI capability it declares."""
+    """Detect the vendor over SSH and collect every CLI capability it declares.
+
+    Vendor try-order prefers *preferred_vendor* (prior inventory vendor_id)
+    when set so rediscovery amortizes to one successful handshake.
+    """
     outcome = _CollectionOutcome()
+    vendor_order = _ssh_vendor_candidates(registry, preferred_vendor)
     for cred in creds:
-        for vendor_id in registry.vendor_ids():
+        for vendor_id in vendor_order:
             plugin = registry.get_plugin(vendor_id)
-            if not plugin.supports(Capability.DISCOVERY_SSH):
-                continue
             from app.plugins.transport import ssh_params_from
 
             params = ssh_params_from(
@@ -321,6 +350,7 @@ def _collect_over_ssh(
                     facts = probe.get_device_facts()
                     detected = registry.get_plugin(facts.vendor_id)
                     capabilities = [c for c in _CLI_CAPABILITIES if detected.supports(c)]
+                    # Reuse this session for full collection (no second handshake).
                     result = discovery_engine.collect_device(
                         detected,
                         {TransportKind.SSH: transport},
@@ -445,7 +475,9 @@ def collect_device(
     reached over any protocol so Celery retries it (transient failure).
     """
     run_uuid = uuid.UUID(run_id)
-    creds, device_id = asyncio.run(_prepare(run_uuid, target_ip, credential_name))
+    creds, device_id, preferred_vendor = asyncio.run(
+        _prepare(run_uuid, target_ip, credential_name)
+    )
     registry = _registry()
     ssh_creds = [c for c in creds if c.kind is CredentialKind.SSH]
     snmp_creds = [c for c in creds if c.kind in (CredentialKind.SNMP_V2C, CredentialKind.SNMP_V3)]
@@ -454,7 +486,13 @@ def collect_device(
     transient: PluginError | None = None
     failures: list[str] = []
     if ssh_creds:
-        outcome = _collect_over_ssh(registry, target_ip, ssh_creds, device_id)
+        outcome = _collect_over_ssh(
+            registry,
+            target_ip,
+            ssh_creds,
+            device_id,
+            preferred_vendor=preferred_vendor,
+        )
         failures.extend(outcome.failures)
         if outcome.result is None and not outcome.connected:
             transient = outcome.transport_error
