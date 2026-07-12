@@ -12,7 +12,7 @@
  * references — so "explain all AI decisions" holds for the operator reading it.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useTransition } from "react";
 import {
   openSessionStream,
   startSession,
@@ -47,7 +47,7 @@ function stepMeta(kind: string): { label: string; className: string } {
 
 // ── Reasoning-trace viewer ────────────────────────────────────────────────────
 
-function TraceStepRow({ step }: { step: AgentTraceStep }) {
+const TraceStepRow = memo(function TraceStepRow({ step }: { step: AgentTraceStep }) {
   const meta = stepMeta(step.kind);
   return (
     <li data-testid="trace-step" className="flex flex-col gap-1 border-l-2 border-carbon-700 pl-3">
@@ -88,9 +88,9 @@ function TraceStepRow({ step }: { step: AgentTraceStep }) {
       ) : null}
     </li>
   );
-}
+});
 
-function TraceViewer({ steps }: { steps: AgentTraceStep[] }) {
+const TraceViewer = memo(function TraceViewer({ steps }: { steps: AgentTraceStep[] }) {
   if (steps.length === 0) {
     return null;
   }
@@ -101,12 +101,12 @@ function TraceViewer({ steps }: { steps: AgentTraceStep[] }) {
       </summary>
       <ol className="mt-2 flex flex-col gap-3">
         {steps.map((step, i) => (
-          <TraceStepRow key={`${step.occurred_at}-${i}`} step={step} />
+          <TraceStepRow key={`${step.kind}-${step.occurred_at}-${i}`} step={step} />
         ))}
       </ol>
     </details>
   );
-}
+});
 
 // ── Transcript ────────────────────────────────────────────────────────────────
 
@@ -124,15 +124,15 @@ interface AgentTurn {
 
 type Turn = UserTurn | AgentTurn;
 
-function UserBubble({ text }: { text: string }) {
+const UserBubble = memo(function UserBubble({ text }: { text: string }) {
   return (
     <div className="flex justify-end">
       <p className="max-w-xl rounded-lg bg-accent/10 px-3 py-2 text-xs text-zinc-100">{text}</p>
     </div>
   );
-}
+});
 
-function AgentBubble({ turn }: { turn: AgentTurn }) {
+const AgentBubble = memo(function AgentBubble({ turn }: { turn: AgentTurn }) {
   return (
     <div className="flex flex-col gap-1">
       {turn.streaming && turn.answer === "" ? (
@@ -148,7 +148,7 @@ function AgentBubble({ turn }: { turn: AgentTurn }) {
       <TraceViewer steps={turn.steps} />
     </div>
   );
-}
+});
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
@@ -157,9 +157,13 @@ export function ChatPage() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [, startTransition] = useTransition();
   const socketRef = useRef<WebSocket | null>(null);
   /** True while this page instance is mounted; guards post-await socket assign. */
   const mountedRef = useRef(true);
+  /** rAF-batched step buffer (Wave 5 / perf #15) — flush once per frame. */
+  const pendingStepsRef = useRef<AgentTraceStep[]>([]);
+  const rafRef = useRef<number | null>(null);
 
   // Close any open socket on unmount so a streaming run never leaks — including
   // a socket that resolves *after* cleanup already ran (M24).
@@ -169,19 +173,42 @@ export function ChatPage() {
       mountedRef.current = false;
       socketRef.current?.close();
       socketRef.current = null;
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      pendingStepsRef.current = [];
     };
   }, []);
 
-  const appendStep = useCallback((step: AgentTraceStep) => {
-    setTurns((prev) => {
-      const next = [...prev];
-      const last = next[next.length - 1];
-      if (last && last.role === "agent") {
-        next[next.length - 1] = { ...last, steps: [...last.steps, step] };
-      }
-      return next;
+  const flushSteps = useCallback(() => {
+    rafRef.current = null;
+    const batch = pendingStepsRef.current;
+    if (batch.length === 0) {
+      return;
+    }
+    pendingStepsRef.current = [];
+    startTransition(() => {
+      setTurns((prev) => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last && last.role === "agent") {
+          next[next.length - 1] = { ...last, steps: [...last.steps, ...batch] };
+        }
+        return next;
+      });
     });
-  }, []);
+  }, [startTransition]);
+
+  const appendStep = useCallback(
+    (step: AgentTraceStep) => {
+      pendingStepsRef.current.push(step);
+      if (rafRef.current === null) {
+        rafRef.current = requestAnimationFrame(flushSteps);
+      }
+    },
+    [flushSteps],
+  );
 
   const finishStream = useCallback((end: AgentStreamEnd) => {
     setTurns((prev) => {
@@ -273,9 +300,9 @@ export function ChatPage() {
 
         {turns.map((turn, i) =>
           turn.role === "user" ? (
-            <UserBubble key={i} text={turn.text} />
+            <UserBubble key={`user-${i}`} text={turn.text} />
           ) : (
-            <AgentBubble key={i} turn={turn} />
+            <AgentBubble key={`agent-${i}`} turn={turn} />
           ),
         )}
       </div>
