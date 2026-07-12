@@ -30,11 +30,21 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /build
 
-# Dependencies are FROZEN in backend/pyproject.toml (the single source of
-# truth); the app package is required for the hatchling build.
+# Layer-cache strategy (Wave 5 / perf #13): install the hash-pinned lockfile
+# BEFORE copying application source so a source-only change reuses the dep
+# layer (typically 2–5 min saved per rebuild). The lock is the resolved
+# floor for CI + images (docs/security/supply-chain-scanning.md); pyproject
+# remains the human-edited constraint surface.
+#
+#   1. pip install --require-hashes -r requirements.lock.txt  (deps only)
+#   2. COPY app + pyproject
+#   3. pip install --no-deps .  (project package only — hatchling wheel)
+COPY backend/requirements.lock.txt ./requirements.lock.txt
+RUN pip install --require-hashes -r requirements.lock.txt
+
 COPY backend/pyproject.toml ./pyproject.toml
 COPY backend/app ./app
-RUN pip install .
+RUN pip install --no-deps .
 
 # ---- runtime: slim, non-root, venv + migrations only ------------------------
 FROM python:3.12-slim AS runtime
