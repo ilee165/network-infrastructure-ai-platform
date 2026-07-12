@@ -29,6 +29,18 @@ EXPOSE-DON'T-BUNDLE (ADR-0015 alt.1 / ADR-0046 §4)
   operator; the dashboard descriptions FLAG it (and the lint asserts the FLAG).
 */ -}}
 {{- if .Values.observability.grafanaDashboards.enabled }}
+{{- /*
+FAIL LOUD ON AN UNSYNCED CHART (PR #159 review): before the build-time copy
+step existed, deploy/kubernetes/netops/dashboards/ was a checked-in file, so
+.Files.Glob below could never come up empty. Now it's a gitignored build
+artifact (see .gitignore) produced by sync-to-chart.sh, so a render taken
+without that step first — e.g. a manual `helm install`/`helm template`/`helm
+package` outside CI — would otherwise silently ship an empty-data ConfigMap:
+the sidecar provisions nothing and nothing errors. Fail instead.
+*/ -}}
+{{- if not (.Files.Glob "dashboards/*.json") }}
+{{- fail "observability.grafanaDashboards.enabled=true but deploy/kubernetes/netops/dashboards/ is empty. Run deploy/observability/dashboards/sync-to-chart.sh before helm lint/template/package (that directory is a gitignored build artifact, not a checked-in file — see deploy/kubernetes/netops/README.md)." }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -49,11 +61,15 @@ metadata:
   {{- end }}
 data:
   {{- /*
-  Embed every committed dashboard JSON. `.Files.Glob` walks the chart-relative
-  path; the dashboards live OUTSIDE the chart dir (deploy/observability/dashboards),
-  so they are vendored into the chart at deploy/kubernetes/netops/dashboards/ (a
-  copy kept in lockstep by the sync check) and embedded from there. Each entry is
-  keyed by its filename so the sidecar provisions one dashboard per key.
+  Embed every dashboard JSON. `.Files.Glob` walks the chart-relative path; the
+  canonical dashboards live OUTSIDE the chart dir (deploy/observability/dashboards)
+  and Helm cannot read outside the chart root, so
+  deploy/observability/dashboards/sync-to-chart.sh copies them into
+  deploy/kubernetes/netops/dashboards/ at BUILD TIME (run before `helm lint`/
+  `helm template`/`helm package`; wired into CI ahead of every render — see
+  .github/workflows/ci.yml). That copy is a build artifact, not a checked-in
+  file (see .gitignore), and is embedded from there. Each entry is keyed by its
+  filename so the sidecar provisions one dashboard per key.
   */}}
   {{- $root := . }}
   {{- range $path, $_ := .Files.Glob "dashboards/*.json" }}

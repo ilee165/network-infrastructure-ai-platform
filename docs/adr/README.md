@@ -37,7 +37,7 @@
 | [0030](0030-backup-and-disaster-recovery-baseline.md) | Backup and Disaster Recovery Baseline | Accepted | P1 W0 |
 | [0031](0031-packet-sandbox-os-isolation.md) | Packet Capture Sandbox OS-Level Isolation | Accepted | P1 W0 |
 | [0032](0032-kms-backed-master-key-and-rotation.md) | KMS-Backed Master Key and Rotation | Accepted | P1 W0 |
-| [0033](0033-prompt-injection-eval-suite.md) | Prompt-Injection Eval Suite | Proposed | P1 W7 |
+| [0033](0033-prompt-injection-eval-suite.md) | Prompt-Injection Eval Suite | Accepted | P1 W7 |
 | [0034](0034-firewall-policy-capability-and-normalized-models.md) | `FIREWALL_POLICY` Capability + `NormalizedFirewallRule` / `NormalizedNatRule` | Accepted | P2 W0 |
 | [0035](0035-palo-alto-panos-plugin.md) | Palo Alto PAN-OS Vendor Plugin (XML API) | Accepted | P2 W0 |
 | [0036](0036-fortinet-fortios-plugin.md) | Fortinet FortiOS Vendor Plugin (REST + SSH fallback) | Accepted | P2 W0 |
@@ -46,14 +46,14 @@
 | [0039](0039-mtls-between-containers.md) | mTLS Between Containers (cert-manager) | Accepted | P2 W0 |
 | [0040](0040-device-credential-rotation.md) | Device Credential Rotation + Per-Credential Scoping | Accepted | P2 W0 |
 | [0041](0041-collector-network-segmentation.md) | Collector Network Segmentation (NetworkPolicy Egress) | Accepted | P2 W0 |
-| [0042](0042-postgres-ha-cloudnativepg-sync-audit.md) | Postgres HA — CloudNativePG (1 primary + 2 replicas) + PgBouncer + Synchronous Audit Write Path | Proposed | P3 W0 |
-| [0043](0043-api-hpa-keda-autoscaling.md) | api Horizontal Pod Autoscaler + KEDA Per-Queue Worker Autoscaling | Proposed | P3 W0 |
-| [0044](0044-redis-sentinel-websocket-fanout.md) | Redis Sentinel + Stateless WebSocket Fan-Out via Redis Pub/Sub | Proposed | P3 W0 |
-| [0045](0045-audit-siem-export.md) | Audit→SIEM Export (RFC5424 syslog + CEF over TLS + HTTPS/JSON push, at-least-once, export-lag SLO) | Proposed | P3 W0 |
-| [0046](0046-observability-slo-enforcement.md) | Observability-SLO Enforcement (recording rules, multi-window burn-rate alerts, golden-signal dashboards, fault-injection MTTD) | Proposed | P3 W0 |
-| [0047](0047-reliability-scale-drill-harness.md) | Reliability/Scale Drill Harness + N-2 Upgrade Rehearsal (reduced-scale mechanism proof + named certified-scale ceiling) | Proposed | P3 W0 |
-| [0048](0048-kind-harness-gate-promotion.md) | kind-harness Gate Promotion — mTLS-handshake + collector-egress-deny live assertions → blocking in `all-gates` | Proposed | P3 W0 |
-| [0049](0049-packet-analysis-sandbox-resolution.md) | Packet-Analysis Sandbox Resolution — executor-split (short-lived seccomp'd capture child), not a weaker worker | Proposed | Audit W3 |
+| [0042](0042-postgres-ha-cloudnativepg-sync-audit.md) | Postgres HA — CloudNativePG (1 primary + 2 replicas) + PgBouncer + Synchronous Audit Write Path | Accepted | P3 W0 |
+| [0043](0043-api-hpa-keda-autoscaling.md) | api Horizontal Pod Autoscaler + KEDA Per-Queue Worker Autoscaling | Accepted | P3 W0 |
+| [0044](0044-redis-sentinel-websocket-fanout.md) | Redis Sentinel + Stateless WebSocket Fan-Out via Redis Pub/Sub | Accepted | P3 W0 |
+| [0045](0045-audit-siem-export.md) | Audit→SIEM Export (RFC5424 syslog + CEF over TLS + HTTPS/JSON push, at-least-once, export-lag SLO) | Accepted | P3 W0 |
+| [0046](0046-observability-slo-enforcement.md) | Observability-SLO Enforcement (recording rules, multi-window burn-rate alerts, golden-signal dashboards, fault-injection MTTD) | Accepted | P3 W0 |
+| [0047](0047-reliability-scale-drill-harness.md) | Reliability/Scale Drill Harness + N-2 Upgrade Rehearsal (reduced-scale mechanism proof + named certified-scale ceiling) | Accepted | P3 W0 |
+| [0048](0048-kind-harness-gate-promotion.md) | kind-harness Gate Promotion — mTLS-handshake + collector-egress-deny live assertions → blocking in `all-gates` | Rejected | P3 W0 |
+| [0049](0049-packet-analysis-sandbox-resolution.md) | Packet-Analysis Sandbox Resolution — executor-split (short-lived seccomp'd capture child), not a weaker worker | Accepted | Audit W3 |
 | [0050](0050-f5-bigip-plugin.md) | F5 BIG-IP Vendor Plugin (iControl REST) — `ADC_SERVICES` Capability, Normalized ADC Models, UCS Archive Backup | Proposed | P4 W0 |
 | [0051](0051-vmware-plugin.md) | VMware vSphere Vendor Plugin (pyVmomi) — `VIRTUALIZATION_INVENTORY` Capability, Normalized Virtualization Models, Read-Only vCenter Role | Proposed | P4 W0 |
 | [0052](0052-application-dependency-topology.md) | Application-Dependency Topology — PG-Backed `Application`/`DEPENDS_ON` Layer, Four Derivation Sources, Direct-Write Tagging Under RBAC | Proposed | P4 W0 |

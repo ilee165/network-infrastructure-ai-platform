@@ -401,6 +401,33 @@ Declared in `backend/pyproject.toml`; the CI `lint` stage fails on violation (D1
 5. **independence** — all `app.plugins.vendors.*` packages are mutually independent.
 6. **layers** — `main` / (`api`, `workers`) / `agents` / `agents.framework` / `engines` / `services` / (`knowledge`, `llm`, `plugins`) / (`models`, `schemas`) / `core`.
 
+### 3.4 Services vs. engines placement charter
+
+**The rule:** engines = stateless domain computation, no session ownership;
+services = stateful orchestration + persistence + audit.
+
+Concrete guidance for judgment calls: if the code owns a DB session/transaction,
+writes an audit-trail entry, or orchestrates multiple downstream calls with side
+effects, it belongs in `services/`. If it is pure computation/transformation
+over already-fetched data with no side effects and no session ownership, it
+belongs in `engines/`. This mirrors the row 8/row 9 import rules above
+(`services` may hold a DB session; `engines` may consume the plugin registry
+but never owns persistence) — the charter exists to settle placement calls that
+those rows don't already answer.
+
+This charter freezes **new** code placement only — it does not audit or
+migrate any existing services/engines file that already deviates; that
+reconciliation is out of scope here and tracked for Wave 6.
+
+**Checklist: is this a service or an engine?**
+
+1. Does it open, own, or commit a database session/transaction? → `services/`.
+2. Does it write an `audit_log` entry (directly or by calling `app/services/audit/`)? → `services/`.
+3. Does it orchestrate multiple downstream calls that have side effects (e.g. call a plugin, then persist, then enqueue a task)? → `services/`.
+4. Is it a pure function/transform over data already fetched and handed in (no I/O, no session, no audit write)? → `engines/`.
+5. Does it call the plugin registry (`plugins.base`/`plugins.registry`) to reach a vendor device, with no persistence of its own? → `engines/` (per row 9 — engines are the only consumers of the plugin registry).
+6. Still unclear after 1–5? Write an ADR rather than guessing (CLAUDE.md: do not assume).
+
 ---
 
 ## 4. Naming conventions
@@ -589,11 +616,38 @@ noted. Other agents must build against the **as-built** column.
 | A6 | `deploy/docker/.env.example` | `.env.example` at the repo root (compose reads it via `env_file: ../../.env` and `--env-file .env` from the repo root) | **RATIFIED** |
 | A7 | `LICENSE` at repo root (P1) | Absent — license choice still open via `docs/consultant/QUESTIONS.md` | **OPEN** — add once the license is decided |
 
-Import-linter status: `backend/pyproject.toml` (frozen at M0) declares only a subset of the
-section 3.3 contracts; contracts 1, 2, 5, and 6 — and the extension of the core contract's
-forbidden modules to `app.agents`/`app.llm`/`app.plugins`/`app.schemas` — must be wired when
-pyproject is next unfrozen. This is an M1 entry gate item.
+Import-linter status: `backend/pyproject.toml` wires the full section 3.3 six-contract set
+(AR-W0-T1) — contracts 1-5 as `forbidden`/`independence` contracts (contract 4's core
+forbidden-modules list extended to `app.agents`/`app.llm`/`app.plugins`/`app.schemas` alongside
+the pre-existing `app.api`/`app.db`/`app.main`/`app.models`/`app.workers`) plus contract 6 as a
+single ordered `layers` contract following the section 3.1 dependency graph (a higher layer may
+import any lower layer, never the reverse). Contract 2 is declared with `allow_indirect_imports =
+true` so specialists reaching engines/services/models *through* `app.agents.framework` (row 10,
+which is excluded from the contract's source modules) are not misflagged — only direct
+specialist-to-forbidden-module imports count. A handful of pre-existing edges that the section 3.2
+table forbids narrowly but that the coarser layers/forbidden contracts cannot cleanly express
+without over- or under-enforcing are named in per-edge `ignore_imports` allowlists with inline
+comments (burn-down references where applicable); see the contracts themselves for the current
+list.
+
+PR #159 review (post-AR-W0-T1) found the layer-tier ordering structurally hides several row-level
+edges the six-contract set doesn't separately enforce — a higher layer importing a lower one
+passes the `layers` contract even when section 3.2's per-row MUST-NOT column forbids that specific
+edge. Four narrow additional `forbidden` contracts close the confirmed, zero-live-import gaps:
+`app.plugins -> app.db`/`app.models` (row 6, folded into contract 1), `app.engines -> app.llm`
+(row 9, folded into contract 3), `app.llm -> app.db` (row 4, partial — see below), and
+`app.agents.framework -> app.plugins` (row 10, new contract). Contract 2 was also extended to
+forbid specialists reaching `app.knowledge` directly (row 11), with matching `ignore_imports`
+entries for four pre-existing `app.agents.troubleshooting.tools` reads (same AR-W2-T2 read-facade
+burn-down as its other allowlisted edges).
+
+Two edges in this same hidden class remain **open, not contracted here**: `app.llm ->
+app.models` (row 4 — `app/llm/runtime_settings.py` reads `SystemSetting` directly; live today) and
+`app.api -> app.models` (row 12 — live in 17+ `app/api/v1/*` files). Both were flagged as
+non-blocking, mention-only debt during the PR #159 review rather than fixes to land in this wave;
+closing them needs a deliberate `ignore_imports`/allowlist decision like the ones already made
+above, not a silent contract addition. Tracked here so they don't stay invisible.
 
 ---
 
-*End of REPO-STRUCTURE.md — Phase 2 scaffolding (`M0` in `docs/roadmap/MVP.md`) creates the tree in section 2 as amended by the section 9 as-built record, and wires the import-linter contracts in section 3.3 before any feature code lands (remaining contracts: M1 entry gate, see section 9).*
+*End of REPO-STRUCTURE.md — Phase 2 scaffolding (`M0` in `docs/roadmap/MVP.md`) creates the tree in section 2 as amended by the section 9 as-built record, and wires the import-linter contracts in section 3.3 (the full six-contract set, plus the additional narrow contracts noted in section 9, are wired as of AR-W0-T1 / PR #159 — see section 9 for status).*

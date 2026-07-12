@@ -169,6 +169,15 @@ data stores native (`pg_isready` / Neo4j / `redis-cli ping`). `api` carries a
 
 ## Chart-validation + policy-as-test
 
+> **Dashboards prerequisite.** If `observability.grafanaDashboards.enabled=true`,
+> run `deploy/observability/dashboards/sync-to-chart.sh` before any `helm
+> lint`/`helm template`/`helm package`/`helm install` — `dashboards/` under this
+> chart is a gitignored build artifact copied from the canonical
+> `deploy/observability/dashboards/` source, not a checked-in file. CI runs the
+> sync automatically ahead of every render; a manual/local invocation without it
+> first now fails loudly (`fail` guard in the dashboards ConfigMap template)
+> instead of silently shipping an empty dashboard set.
+
 The chart is gated in CI (`.github/workflows/ci.yml` `infra` job) by:
 `helm lint` → `helm template` → `kubeconform -strict` → `kube-linter` →
 `conftest test --all-namespaces` (the Rego in `deploy/kubernetes/policy/rego/`

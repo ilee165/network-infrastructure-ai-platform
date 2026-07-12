@@ -32,8 +32,9 @@ build/CI host, so a pixel-level render is not the gate. The biting layer is:
    signals present; every panel target binds to a known `slo:` / `netops_*` /
    documented-exporter series; exporter-backed subjects FLAG the named-deferral.
 2. `run-dashboard-lint-bite.sh` — proves the lint **bites**: a dropped golden
-   signal, a renamed metric, and a dropped subject each fail; canonical source ==
-   chart-vendored copy (no embed drift).
+   signal, a renamed metric, and a dropped subject each fail; runs
+   `sync-to-chart.sh` and then asserts canonical source == chart-embedded copy
+   (no embed drift).
 3. `helm template … --set observability.grafanaDashboards.enabled=true` +
    `kubeconform` on the provisioning ConfigMap (run in the CI `observability` job).
 
@@ -42,6 +43,14 @@ Run locally:
 ```bash
 python deploy/observability/dashboards/lint_dashboards.py
 bash   deploy/observability/dashboards/run-dashboard-lint-bite.sh
+```
+
+Before running `helm lint`/`helm template`/`helm package` against
+`deploy/kubernetes/netops` locally, sync the canonical dashboards into the
+chart first (CI does this automatically — see below):
+
+```bash
+bash deploy/observability/dashboards/sync-to-chart.sh
 ```
 
 ## Provisioning
@@ -57,9 +66,13 @@ observability:
 
 This renders `…-grafana-dashboards` ConfigMap labelled `grafana_dashboard: "1"`
 (override `sidecarLabel` for a different sidecar) embedding every dashboard JSON.
-The chart embeds a **vendored copy** at `deploy/kubernetes/netops/dashboards/`
-(Helm `.Files.Get` cannot read outside the chart root); the bite script asserts it
-stays byte-identical to this canonical source.
+Helm `.Files.Get` cannot read outside the chart root, so
+`sync-to-chart.sh` copies this canonical source into
+`deploy/kubernetes/netops/dashboards/` at **build time**, before every
+`helm lint`/`helm template`/`helm package` (CI wires this into both the `infra`
+and `observability` jobs — see `.github/workflows/ci.yml`). That copy is a
+build artifact, not a committed file (`.gitignore`); the bite script re-runs
+the sync and asserts the result stays byte-identical to this canonical source.
 
 ## FLAGGED — named-deferred (not fabricated)
 
