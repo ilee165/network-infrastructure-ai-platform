@@ -2219,6 +2219,82 @@ jobs:
           fi
           echo "frontend lockfile: in sync."
 
+  # Config single-source drift gate (AR-W1-T1, closes H3 + the C5/C6 seam).
+  # backend/scripts/generate_env_example.py introspects app.core.config.Settings
+  # and is the single source for `.env.example` (every field, 1:1) and for the
+  # Helm-chart config-key contract. This job re-generates `.env.example` and
+  # fails on any diff (H3: docs ⊇ Settings), and runs the chart key-coverage +
+  # ConfigMap secret-safety checks (C5/C6: every rendered NETOPS_* key is a
+  # Settings field or a documented exception; no secret material in a plaintext
+  # ConfigMap). NOT yet in the `all-gates` needs list — T7 wires it. pipefail so
+  # a piped invocation cannot mask a non-zero exit.
+  config-drift:
+    name: config-drift (.env.example + chart key coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      # The generator imports app.core.config, so the backend package + its
+      # runtime deps must be importable (no dev extras needed for introspection).
+      - name: Install backend (editable)
+        run: pip install -e ./backend
+
+      - name: .env.example in sync with Settings — RED gate
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/generate_env_example.py --check
+
+      - name: Helm chart config-key coverage + ConfigMap secret-safety — RED gate
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/generate_env_example.py --check-chart
+
+      # BITE proof (the run-and-bite rule for a NEW gate): plant a REAL new
+      # Settings field and require a fresh `--check` subprocess to go RED (the
+      # committed .env.example is now stale relative to the mutated Settings);
+      # then restore config.py and require GREEN. Proves the drift gate is not a
+      # false-green. config.py is restored from git; the committed tree is
+      # unchanged after this step.
+      - name: Prove config-drift gate bites (planted scratch field)
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          python - <<'PY'
+          import pathlib
+          p = pathlib.Path("app/core/config.py")
+          s = p.read_text(encoding="utf-8")
+          marker = '    env: Literal["dev", "prod"] = "dev"\n'
+          assert marker in s, "anchor line for the planted field not found"
+          planted = (
+              '    #: Wave4 config-drift bite scratch field (planted in CI; reverted below).\n'
+              '    wave4_bite_scratch_field: str = "x"\n'
+          )
+          p.write_text(s.replace(marker, marker + planted, 1), encoding="utf-8")
+          PY
+          if python scripts/generate_env_example.py --check; then
+            echo "::error::config-drift did NOT bite on a planted Settings field (false-green)"
+            git checkout -- app/core/config.py
+            exit 1
+          fi
+          echo "planted field correctly detected (gate bites); reverting."
+          git checkout -- app/core/config.py
+          python scripts/generate_env_example.py --check
+          echo "config-drift bite proof: RED on planted field, GREEN after revert."
+
   # Observability SLO gate (P3 W3-T3, ADR-0046 §6; PRODUCTION.md §11 G-OBS §385).
   # Validates the SLO recording rules (W3-T2) AND the multi-window burn-rate alert
   # rules (W3-T3) with `promtool check rules`, runs the `promtool test rules` cases
