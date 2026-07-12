@@ -71,11 +71,44 @@ Production readiness audit, 2026-07-09 (HEAD `5403c3b`). Backend ~3589 unit test
 
 ## 7. Frontend production bundle size
 
-- **Severity:** Low
-- **Location:** `vite build` advisory — main JS ~861 kB minified / ~257 kB gzip
-- **Root cause:** Single chunk; topology/cytoscape weight.
-- **Proposed fix:** Route-level `import()` code-splitting for heavy pages.
-- **Effort:** M | **Risk:** Low
+- **Severity:** Low → **CLOSED (Wave 5 T10)** on `fix/review-wave5`
+- **Location:** was single ~895 kB JS chunk; now entry ~23 kB + vendor ~252 kB + cytoscape ~443 kB + per-route chunks
+- **Fix shipped:** `React.lazy` routes + `manualChunks` + CI `check:chunks` gate
+
+---
+
+## 8. Wave 5 deferred structural ceilings (provenance: WAVE5-PLAN)
+
+Explicitly **not** fixed in Wave 5 point-fix wave — record here so they do not evaporate.
+
+### 8a. Audit chain global lock (#7)
+
+- **Severity:** Medium (throughput ceiling, deliberate design)
+- **Location:** audit write path / ADR-0038 + ADR-0042
+- **Root cause:** Global advisory lock for hash-chain integrity
+- **Proposed fix:** Sharded keys / async outbox only if a real throughput requirement materializes; Wave 7 retention ADR is the venue
+- **Effort:** L | **Risk:** High (correctness)
+
+### 8b. Route-table streaming + BGP bulk path (#8 memory / workers H2)
+
+- **Severity:** Medium (memory triple-hold + fixed read_timeout on large route tables)
+- **Location:** discovery collection / persistence of large BGP tables
+- **Root cause:** Collect-parse-persist holds full tables in memory
+- **Proposed fix:** Streaming design before any BGP-core use case; bulk upsert half shipped as Wave 5 T3
+- **Effort:** L | **Risk:** Medium
+
+### 8c. Anthropic `cache_control` + router intent cache (agents M2/H6)
+
+- **Severity:** Low–Medium (token cost)
+- **Location:** agent prompts / supervisor router
+- **Root cause:** Full prompts re-paid every turn; no provider prompt cache
+- **Proposed fix:** Needs eval re-run to prove no routing regression; agents-focused follow-up
+- **Effort:** M | **Risk:** Medium (routing quality)
+
+### 8d. Remaining Wave 5 tasks on `fix/review-wave5` (if PR ships without them)
+
+- **T2** orchestrator chord/callback (blocking `.get` pool hold) — largest orchestration regression surface; needs spec review
+- **T4** delta topology projection (scoped inventory + safe stale sweep) — needs spec review; risk of silent app-layer wipe (ADR-0052 §5)
 
 ---
 
@@ -88,6 +121,7 @@ Production readiness audit, 2026-07-09 (HEAD `5403c3b`). Backend ~3589 unit test
 | Monolithic `auth.py` (~1.5k LOC) | **CLOSED** — package split |
 | Topology unbounded full-graph UI | **CLOSED** — scoped reads + `topology_max_nodes` 413 (Wave 5) |
 | Shared UI primitives missing | **CLOSED** — Wave 4 components |
+| Frontend single ~895 kB chunk | **CLOSED** — Wave 5 T10 lazy + cytoscape split |
 
 ---
 
