@@ -207,8 +207,16 @@ async def enforce_api_rate_limit(
     window = settings.rate_limit_window_secs
     worst: rate_limit.RateLimitResult | None = None
     try:
-        for key in keys:
-            result = await limiter.hit(key, limit=limit, window_secs=window)
+        # Prefer pipelined multi-key hit when the Redis backend exposes it
+        # (Wave 5: collapses principal+token from ~4 RTTs to 1).
+        hit_many = getattr(limiter, "hit_many", None)
+        if callable(hit_many):
+            results = await hit_many(keys, limit=limit, window_secs=window)
+        else:
+            results = [
+                await limiter.hit(key, limit=limit, window_secs=window) for key in keys
+            ]
+        for result in results:
             if result.allowed:
                 continue
             if worst is None or result.retry_after_secs > worst.retry_after_secs:

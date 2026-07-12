@@ -116,14 +116,35 @@ class InMemoryRateLimiter:
         self._counters.pop(key, None)
 
 
+#: Atomic fixed-window hit (Wave 5 / perf quick-win): one Redis RTT per key
+#: instead of INCR + EXPIRE/TTL (2–3 RTTs). Returns {count, ttl_secs}.
+_HIT_LUA = """
+local count = redis.call('INCR', KEYS[1])
+local ttl
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+  ttl = tonumber(ARGV[1])
+else
+  ttl = redis.call('TTL', KEYS[1])
+  if ttl < 0 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+    ttl = tonumber(ARGV[1])
+  end
+end
+return {count, ttl}
+"""
+
+
 class RedisRateLimiter:
     """Redis-backed fixed-window counter shared across ``api`` replicas (ADR-0008).
 
-    One ``INCR`` plus (on the first hit of a window) one ``EXPIRE`` — O(1), no
-    read-modify-write race, and keyed by principal/token so load spreads across
-    keys rather than contending on one global counter (G-SCA). Any backend error
-    is wrapped in :class:`RateLimitBackendError`; the raw SDK exception (which
-    can contain a credentialed DSN) is never re-raised or logged here.
+    One Lua script per hit (``INCR`` + ``EXPIRE``/``TTL`` in a single RTT) —
+    O(1), no read-modify-write race, and keyed by principal/token so load
+    spreads across keys rather than contending on one global counter (G-SCA).
+    :meth:`hit_many` pipelines several keys into one network round-trip.
+    Any backend error is wrapped in :class:`RateLimitBackendError`; the raw
+    redis SDK exception (which can contain a credentialed DSN) is never
+    re-raised or logged here.
     """
 
     #: Key namespace so rate-limit counters never collide with other Redis users
@@ -134,28 +155,36 @@ class RedisRateLimiter:
         self._redis = redis
 
     async def hit(self, key: str, *, limit: int, window_secs: int) -> RateLimitResult:
-        redis_key = f"{self._PREFIX}{key}"
+        results = await self.hit_many([key], limit=limit, window_secs=window_secs)
+        return results[0]
+
+    async def hit_many(
+        self, keys: list[str], *, limit: int, window_secs: int
+    ) -> list[RateLimitResult]:
+        """Hit several keys in one pipeline (principal + token = 1 RTT, not 4)."""
+        if not keys:
+            return []
         try:
-            count = int(await self._redis.incr(redis_key))
-            if count == 1:
-                # First hit starts the window's TTL; subsequent hits ride it out.
-                await self._redis.expire(redis_key, window_secs)
-                ttl = window_secs
-            else:
-                ttl = int(await self._redis.ttl(redis_key))
-                if ttl < 0:
-                    # No TTL set (e.g. a crash between INCR and EXPIRE): re-arm so
-                    # the counter cannot become a permanent lock.
-                    await self._redis.expire(redis_key, window_secs)
-                    ttl = window_secs
+            pipe = self._redis.pipeline(transaction=False)
+            for key in keys:
+                # redis-py eval: (script, numkeys, *keys_and_args) — args as str.
+                pipe.eval(_HIT_LUA, 1, f"{self._PREFIX}{key}", str(window_secs))
+            raw_rows = await pipe.execute()
         except Exception as exc:  # noqa: BLE001 — wrap *any* SDK/transport error
             raise RateLimitBackendError("rate-limit backend unavailable") from exc
-        return RateLimitResult(
-            allowed=count <= limit,
-            count=count,
-            limit=limit,
-            retry_after_secs=max(0, ttl) if count > limit else 0,
-        )
+        out: list[RateLimitResult] = []
+        for raw in raw_rows:
+            count = int(raw[0])
+            ttl = int(raw[1])
+            out.append(
+                RateLimitResult(
+                    allowed=count <= limit,
+                    count=count,
+                    limit=limit,
+                    retry_after_secs=max(0, ttl) if count > limit else 0,
+                )
+            )
+        return out
 
     async def peek(self, key: str) -> int:
         try:
