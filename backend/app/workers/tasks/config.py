@@ -78,7 +78,9 @@ from app.plugins.transport import (
     SshParams,
     SshTransport,
     SshTransportError,
+    make_ssh_transport,
     netmiko_device_type,
+    ssh_params_from,
 )
 from app.services import audit, credentials
 from app.workers.celery_app import celery_app
@@ -119,8 +121,12 @@ def _key_provider() -> KeyProvider:
 
 
 def _open_ssh(params: SshParams) -> SshTransport:
-    """Context-managed SSH transport for *params* (netmiko-backed)."""
-    return SshTransport(params)
+    """Context-managed SSH transport for *params* (netmiko-backed).
+
+    Uses :func:`make_ssh_transport` so JunOS write sessions get
+    :class:`~app.plugins.transport.junos_ssh.JunosSshTransport` (Wave 3 C2).
+    """
+    return make_ssh_transport(params)
 
 
 @asynccontextmanager
@@ -233,12 +239,14 @@ def _fetch_running_config(
     if not plugin.supports(Capability.CONFIG_BACKUP):
         raise PluginError(f"vendor {context.vendor_id!r} does not support config backup")
     cred = context.credential
-    params = SshParams(
+    # Host-key policy + pin (Wave 3 H7 / B4): shared helper for all SSH open sites.
+    params = ssh_params_from(
         host=context.mgmt_ip,
         device_type=netmiko_device_type(context.vendor_id, cred.params),
         username=cred.username or "",
         password=cred.secret,
-        port=int(cred.params.get("port", 22)),
+        cred_params=cred.params,
+        settings=get_settings(),
     )
     with _open_ssh(params) as transport:
         impl_cls = plugin.get_capability(Capability.CONFIG_BACKUP)

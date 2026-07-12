@@ -11,6 +11,7 @@ Design rules (M1-08):
   ``repr``/``str`` (secure by default).
 """
 
+from app.plugins.transport.junos_ssh import JunosSshTransport
 from app.plugins.transport.snmp import (
     SnmpAuthProtocol,
     SnmpClient,
@@ -26,9 +27,11 @@ from app.plugins.transport.ssh import (
     SshTransportError,
     netmiko_device_type,
 )
+from app.plugins.transport.ssh_params import host_key_fingerprint_for, ssh_params_from
 
 __all__ = [
     "NETMIKO_DEVICE_TYPES",
+    "JunosSshTransport",
     "SnmpAuthProtocol",
     "SnmpClient",
     "SnmpPrivProtocol",
@@ -38,5 +41,22 @@ __all__ = [
     "SshParams",
     "SshTransport",
     "SshTransportError",
+    "host_key_fingerprint_for",
+    "make_ssh_transport",
     "netmiko_device_type",
+    "ssh_params_from",
 ]
+
+
+def make_ssh_transport(params: SshParams) -> SshTransport:
+    """Return the correct SSH transport for *params.device_type*.
+
+    ``juniper_junos`` → :class:`JunosSshTransport` (commit-confirmed writes).
+    All other device types → :class:`SshTransport` (Cisco-family / generic).
+
+    Wire this on **config write** open paths only; read-only workers may keep
+    constructing :class:`SshTransport` directly (Wave 3 Q4).
+    """
+    if params.device_type == "juniper_junos":
+        return JunosSshTransport(params)
+    return SshTransport(params)

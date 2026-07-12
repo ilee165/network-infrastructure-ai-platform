@@ -303,12 +303,14 @@ def _collect_over_ssh(
             plugin = registry.get_plugin(vendor_id)
             if not plugin.supports(Capability.DISCOVERY_SSH):
                 continue
-            params = SshParams(
+            from app.plugins.transport import ssh_params_from
+
+            params = ssh_params_from(
                 host=target_ip,
                 device_type=netmiko_device_type(vendor_id, cred.params),
                 username=cred.username or "",
                 password=cred.secret,
-                port=int(cred.params.get("port", 22)),
+                cred_params=cred.params,
             )
             try:
                 with _open_ssh(params) as transport:

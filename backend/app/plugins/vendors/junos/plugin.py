@@ -46,7 +46,7 @@ source of command text for this plugin (REPO-STRUCTURE §6 step 7).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import ClassVar
 from uuid import UUID
@@ -56,7 +56,6 @@ from app.plugins.base import (
     AclCapability,
     BgpCapability,
     Capability,
-    ChangeOutcome,
     ChangePlan,
     ChangeResult,
     CommandTransport,
@@ -64,7 +63,6 @@ from app.plugins.base import (
     ConfigDeployCapability,
     ConfigRestoreCapability,
     ConfigSnapshotRef,
-    ConfigWriteTransport,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
     InterfacesCapability,
@@ -76,6 +74,7 @@ from app.plugins.base import (
     SnmpReadTransport,
     VendorPlugin,
 )
+from app.plugins.vendors.cli_common import CliConfigWriteMixin
 from app.plugins.vendors.junos import parsers
 from app.plugins.vendors.junos.parsers import (
     SNMP_OID_SYSDESCR,
@@ -338,200 +337,82 @@ def _normalize_config(raw_config: str) -> str:
     return f"{body}\n" if body else ""
 
 
-class _JunosConfigWriteCapability(PluginCapability):
+class _JunosConfigWriteCapability(CliConfigWriteMixin):
     """Shared capture-before -> apply -> verify-after -> rollback engine (ADR-0021 §3).
 
-    **JunOS rollback (ADR-0026 §3.1)**: The config-write surfaces model the JunOS
-    candidate-config + ``commit confirmed`` transaction:
+    Wave 3 T4: inherits :class:`~app.plugins.vendors.cli_common.CliConfigWriteMixin`
+    with JunOS Option A overrides:
 
-    - ``send_config(lines)`` → ``load merge`` into the candidate + ``commit confirmed``;
-      on verify-after success → confirming ``commit``. Deploy apply surface.
-    - ``replace_config(lines)`` → ``load override`` into the candidate +
-      ``commit confirmed``; on verify-after success → confirming ``commit``; on
-      verify-after failure → ``rollback N``. Restore apply + rollback surface.
+    - capture via ``show configuration | display set``
+    - apply audit labels: load merge / load override + commit confirmed
+    - no management-path guardrail (native dead-man)
+    - apply-fail: re-assert baseline **without** permanent ``rollback 1``
+    - verify-fail: permanent ``rollback_config(1)`` (not another commit confirmed)
 
-    **No management-path guardrail** (ADR-0026 §3.1): JunOS provides
-    ``commit confirmed`` natively — the device auto-reverts at the timeout even if
-    the worker loses the session. The ADR-0021 §4.2 guardrail that ``cisco_ios``
-    and ``eos`` carry is therefore **not applied** here; this is not an oversight
-    but the explicit consequence of JunOS supplying a native dead-man revert
-    (ADR-0026 §3 "closes, by construction, the highest-blast-radius hole
-    ADR-0021 had to special-case for classic IOS").
-
-    **Tracked gap — worker crash during ``commit confirmed`` window** (ADR-0026 §3.2.1):
-    if the Celery worker dies after ``commit confirmed`` but before the confirming
-    ``commit`` or ``rollback N``, the device correctly auto-reverts at the timeout
-    but the CR remains stuck in ``executing``. This is deferred to a future ADR;
-    see ADR-0026 §3.2.1 for the three reaper paths under consideration.
-
-    The capability **never self-authorizes**: every entry point first asserts
-    the :class:`ChangePlan` attests an ``executing`` CR (ADR-0021 §2).
+    **Tracked gap** (ADR-0026 §3.2.1): unconfirmed window spans apply + verify-after.
     """
 
-    def __init__(self, transport: ConfigWriteTransport, device_id: UUID) -> None:
-        super().__init__()
-        self._transport = transport
-        self._device_id = device_id
+    vendor_label: ClassVar[str] = "junos"
+    _show_running_command: ClassVar[str] = SHOW_CONFIGURATION_SET
+
+    def _normalize_captured(self, raw: str) -> str:
+        return _normalize_config(raw)
 
     def _capture_config(self) -> str:
-        """Capture the live committed configuration verbatim (recorded for audit)."""
-        return self._record_raw(
-            SHOW_CONFIGURATION_SET,
-            self._transport.send_command(SHOW_CONFIGURATION_SET),
-        )
+        """Alias used by JunOS-specific call sites; same as mixin capture."""
+        return self._capture_running()
 
     def _send_config(self, lines: list[str]) -> None:
-        """Merge *lines* into the candidate and commit confirmed (deploy apply surface).
-
-        Models: ``load merge`` of fragment lines → ``commit confirmed <N>``.
-        The transport's ``send_config`` method drives this sequence; the plugin
-        records the verbatim device output for audit.
-        """
+        """Merge *lines* into the candidate and commit confirmed (deploy apply surface)."""
         output = self._transport.send_config(lines)
         self._record_raw("load merge + commit confirmed\n" + "\n".join(lines), output)
 
     def _replace_config(self, lines: list[str]) -> None:
-        """Override the candidate with exactly *lines* and commit confirmed.
-
-        Models: ``load override`` of the full config set-form → ``commit confirmed <N>``.
-        Used for ``CONFIG_RESTORE`` apply and for ``rollback N`` / re-baseline on
-        both operations (ADR-0026 §3.1: the only surface that can re-establish equality
-        with a captured baseline, since a merge cannot remove device-only lines).
-        Records the verbatim device output for audit.
-        """
+        """Override the candidate with exactly *lines* and commit confirmed."""
         output = self._transport.replace_config(lines)
         self._record_raw("load override + commit confirmed\n" + "\n".join(lines), output)
 
-    @staticmethod
-    def _require_executing(plan: ChangePlan, operation: str) -> None:
-        """Refuse the write unless the plan attests an ``executing`` CR (ADR-0021 §2).
+    def _after_verified(self) -> None:
+        """Option A confirming commit (mixin default); keep explicit for clarity."""
+        self._transport.confirm_config()
 
-        JunOS candidate-config writes are gated by the same CR-state check as all
-        other vendors: the plugin cannot self-authorize; it verifies the attestation
-        supplied by the Automation-Agent executor (ADR-0020 four-eyes spine,
-        ADR-0026 §3.2: "``_require_executing(plan)`` is unchanged").
-        """
-        if not plan.is_executing:
-            raise PluginError(
-                f"junos: {operation} refused — change request "
-                f"'{plan.change_request_id}' is '{plan.cr_state}', not 'executing' "
-                "(ADR-0021 §2: a config write executes only as the execution step of "
-                "an approved, claimed ChangeRequest)"
-            )
-
-    @staticmethod
-    def _diff_summary(before: str, after: str) -> tuple[str, ...]:
-        """Redaction-safe summary of a config change (line counts only).
-
-        Reports only the count of added/removed normalized lines, so a
-        :class:`ChangeResult` carries no config secrets while still recording
-        that (and how much) changed (ADR-0021 §3 / ADR-0026 §4).
-        """
-        before_lines = before.splitlines()
-        after_lines = after.splitlines()
-        before_set = set(before_lines)
-        after_set = set(after_lines)
-        added = sum(1 for line in after_lines if line not in before_set)
-        removed = sum(1 for line in before_lines if line not in after_set)
-        summary: list[str] = []
-        if added:
-            summary.append(f"+{added} line(s)")
-        if removed:
-            summary.append(f"-{removed} line(s)")
-        return tuple(summary)
-
-    def _execute(
-        self,
-        *,
-        plan: ChangePlan,
-        operation: str,
-        project: Callable[[str], str],
-        config_lines: list[str],
-        apply: Callable[[list[str]], None],
-    ) -> ChangeResult:
-        """Run the ADR-0021 §3 contract and return a structured :class:`ChangeResult`.
-
-        JunOS note: no management-path guardrail is applied here (ADR-0026 §3.1:
-        ``commit confirmed`` provides the native dead-man revert unconditionally, so
-        a connectivity-severing change auto-reverts at the timeout even if the worker
-        dies — the ADR-0021 §4.2 guardrail is not needed). See class docstring for
-        the tracked gap when the worker crashes during the ``commit confirmed`` window.
-        """
-        self._require_executing(plan, operation)
-
-        # Capture the FRESH pre-change baseline — the authoritative rollback target.
-        baseline = _normalize_config(self._capture_config())
-        end_state = project(baseline)
-
-        # Idempotency: if the device already satisfies the intended end-state,
-        # complete without touching it.
-        if baseline == end_state:
-            return ChangeResult(
-                change_request_id=plan.change_request_id,
-                outcome=ChangeOutcome.NO_OP,
-                verified=True,
-                applied_diff=(),
-                rollback=None,
-            )
-
-        applied_diff = self._diff_summary(baseline, end_state)
-
-        apply_failed = False
+    def _recover_apply_failure(self, baseline_normalized: str) -> RollbackResult:
+        """Apply failed before commit confirmed — do not permanent rollback 1."""
         try:
-            apply(config_lines)
-        except Exception:  # noqa: BLE001 — any apply failure triggers rollback
-            apply_failed = True
-
-        verified = False
-        if not apply_failed:
-            after = _normalize_config(self._capture_config())
-            verified = after == end_state
-
-        if verified:
-            return ChangeResult(
-                change_request_id=plan.change_request_id,
-                outcome=ChangeOutcome.APPLIED,
-                verified=True,
-                applied_diff=applied_diff,
-                rollback=None,
-            )
-
-        # Apply errored or verify-after failed → structured rollback to baseline.
-        rollback = self._rollback_to_baseline(baseline)
-        outcome = ChangeOutcome.ROLLED_BACK if rollback.succeeded else ChangeOutcome.ROLLBACK_FAILED
-        return ChangeResult(
-            change_request_id=plan.change_request_id,
-            outcome=outcome,
-            verified=False,
-            applied_diff=applied_diff,
-            rollback=rollback,
-        )
-
-    def _rollback_to_baseline(self, baseline_normalized: str) -> RollbackResult:
-        """Roll back to the captured baseline via ``rollback N`` / ``load override``.
-
-        See ADR-0026 §3.1 for the full vendor mapping.
-
-        JunOS rollback is a ``replace_config`` of the captured pre-change baseline,
-        modelling the JunOS ``rollback N`` primitive (addressable to the exact prior
-        committed configuration point — a single atomic device-side operation,
-        ADR-0026 §3.1: "the cleanest possible mapping ... a single addressable inverse,
-        not a re-create or a line replay"). The rollback success criterion is the
-        symmetric asserted equality: re-captured config must normalize equal to the
-        baseline (ADR-0021 §3: "rollback success is an asserted equality, never an
-        assumption"). A rollback that cannot reach the device or whose re-capture does
-        not normalize equal is ``succeeded=False`` → caller surfaces ``rollback_failed``,
-        never ``rolled_back`` (ADR-0021 §3).
-        """
-        try:
-            self._replace_config(baseline_normalized.splitlines())
-            after = _normalize_config(self._capture_config())
-        except Exception as exc:  # noqa: BLE001 — unreachable device = rollback-failed
+            after = self._normalize_captured(self._capture_running())
+        except Exception as exc:  # noqa: BLE001
             return RollbackResult(
                 attempted=True,
                 succeeded=False,
                 verified=False,
-                detail=f"rollback N / load override failed ({type(exc).__name__})",
+                detail=f"post-apply-failure re-capture failed ({type(exc).__name__})",
+            )
+        equal = after == baseline_normalized
+        return RollbackResult(
+            attempted=True,
+            succeeded=equal,
+            verified=equal,
+            detail=(
+                None
+                if equal
+                else (
+                    "apply failed before commit confirmed but running config no longer "
+                    "matches the pre-change baseline"
+                )
+            ),
+        )
+
+    def _rollback_to_baseline(self, baseline_normalized: str) -> RollbackResult:
+        """Verify-fail path: permanent ``rollback N`` + ``commit`` (not commit confirmed)."""
+        try:
+            self._transport.rollback_config(1)
+            after = self._normalize_captured(self._capture_running())
+        except Exception as exc:  # noqa: BLE001
+            return RollbackResult(
+                attempted=True,
+                succeeded=False,
+                verified=False,
+                detail=f"rollback N + commit failed ({type(exc).__name__})",
             )
         equal = after == baseline_normalized
         return RollbackResult(

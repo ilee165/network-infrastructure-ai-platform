@@ -171,6 +171,11 @@ class ConnectionParams(BaseModel):
         min_length=1,
         description="Opaque reference to a vault entry (device_credentials.id) — never a secret.",
     )
+    #: Optional pinned host-key fingerprint for this session's host (Wave 3 H7).
+    #: Not a secret. Prefer materializing from
+    #: ``DeviceCredential.params["host_key_fingerprints"][host]`` so shared
+    #: credentials cannot pin the wrong device. No Device/API column this wave.
+    host_key_fingerprint: str | None = None
 
 
 def _utcnow() -> datetime:
@@ -240,11 +245,20 @@ class ConfigWriteTransport(CommandTransport, Protocol):
       captured baseline (ADR-0021 §4: "configure replace ... otherwise replay of
       the captured pre-change baseline as the inverse"). A merge cannot satisfy
       the symmetric equal-to-baseline predicate of §3.
+    - :meth:`confirm_config` finalizes a vendor confirmed-commit window after
+      verify-after success (JunOS confirming ``commit``). On Cisco-family
+      transports apply is already permanent — implementations are a typed
+      **no-op** so a shared lifecycle can always call this after verify without
+      ``hasattr`` sniffing (Wave 3 / ADR-0026 Option A).
+    - :meth:`rollback_config` is the addressable inverse (JunOS ``rollback N``).
+      Cisco-family uses :meth:`replace_config` for baseline replay instead;
+      those transports raise a typed error if this is called.
 
     ``send_command`` (inherited) is used to capture/verify the running config
-    around the write. Both are satisfied by
-    :class:`app.plugins.transport.ssh.SshTransport`; tests use in-memory fakes.
-    Implementations return device output verbatim.
+    around the write. Satisfied by
+    :class:`app.plugins.transport.ssh.SshTransport` /
+    :class:`app.plugins.transport.junos_ssh.JunosSshTransport`; tests use
+    in-memory fakes. Implementations return device output verbatim.
     """
 
     def send_config(self, lines: Sequence[str]) -> str:
@@ -259,6 +273,22 @@ class ConfigWriteTransport(CommandTransport, Protocol):
         so a post-replace re-capture can normalize **equal** to the supplied
         target — the precondition for the symmetric rollback/restore equality
         predicate (§3). Returns the device output verbatim.
+        """
+        ...
+
+    def confirm_config(self) -> str:
+        """Finalize a pending confirmed commit after verify-after success.
+
+        JunOS: confirming ``commit``. Cisco-family: no-op (apply already final).
+        Returns device output verbatim (empty string for a no-op).
+        """
+        ...
+
+    def rollback_config(self, n: int = 1) -> str:
+        """Roll back *n* commits and commit (JunOS ``rollback N`` + ``commit``).
+
+        Cisco-family transports raise a typed error — use :meth:`replace_config`
+        of the captured baseline instead.
         """
         ...
 

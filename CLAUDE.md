@@ -197,6 +197,12 @@ discipline derived from prior milestones:
   layer cache does not re-ship the pre-patch packages (e.g. c-ares CVE-2026-33630
   on 2026-07-10; see `docs/roadmap/LESSONS.md` **L-IMG-1**). Do **not** silence
   the finding in `.trivyignore-image` when an upstream patch exists.
+- **Device write / SSH transport (L-XPORT-1):** string-recording fakes do not
+  certify CLI mode, handshake phase, or device echo. Pin exit/re-enter for
+  multi-mode CLIs; enforce host-key pins at handshake (serialize any global
+  policy monkey-patch); check each multi-step finalize command before the next;
+  use anchored integrity tokens and never scan intermediate `set body` / `puts`
+  echoes for error markers. See `docs/roadmap/LESSONS.md` **L-XPORT-1**.
 
 ### Build & runtime verification
 

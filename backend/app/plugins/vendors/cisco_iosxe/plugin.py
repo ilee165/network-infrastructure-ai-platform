@@ -15,7 +15,7 @@ single source of command text for this plugin (REPO-STRUCTURE §6 step 7).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import ClassVar
 from uuid import UUID
@@ -25,7 +25,6 @@ from app.plugins.base import (
     AclCapability,
     BgpCapability,
     Capability,
-    ChangeOutcome,
     ChangePlan,
     ChangeResult,
     CommandTransport,
@@ -33,14 +32,12 @@ from app.plugins.base import (
     ConfigDeployCapability,
     ConfigRestoreCapability,
     ConfigSnapshotRef,
-    ConfigWriteTransport,
     DiscoverySnmpCapability,
     DiscoverySshCapability,
     InterfacesCapability,
     NeighborsCapability,
     OspfCapability,
     PluginCapability,
-    RollbackResult,
     RoutesCapability,
     SnmpReadTransport,
     VendorPlugin,
@@ -59,6 +56,7 @@ from app.plugins.vendors.cisco_ios.parsers import (
 # single source of truth, ADR-0021 §4.2). IOS-XE shares the IOS config syntax,
 # so the same delta-scoped scan applies unchanged.
 from app.plugins.vendors.cisco_ios.plugin import _management_path_hits
+from app.plugins.vendors.cli_common import CliConfigWriteMixin
 from app.schemas.discovery import DeviceFacts
 from app.schemas.normalized import (
     NormalizedAclEntry,
@@ -257,60 +255,19 @@ def _normalize_config(raw_config: str) -> str:
     return f"{body}\n" if body else ""
 
 
-class _CiscoIosXeConfigWriteCapability(PluginCapability):
+class _CiscoIosXeConfigWriteCapability(CliConfigWriteMixin):
     """Shared capture-before -> apply -> verify-after -> rollback engine (ADR-0021 §3).
 
-    Mirrors :class:`~app.plugins.vendors.cisco_ios.plugin._CiscoIosConfigWriteCapability`
-    with IOS-XE differences:
-
-    - **Rollback primitive**: rollback is a ``configure replace`` of the captured
-      pre-change baseline. IOS-XE *can* support ``configure replace ... commit-confirm
-      <timer>`` (dead-man auto-revert), but the production ``replace_config`` transport
-      does NOT arm one — it issues a plain ``configure replace <file> force``. Because
-      no dead-man primitive is actually armed, the management-path guardrail
-      (ADR-0021 §4.2) **IS applied here** (a change touching the management path is
-      refused before any write); relaxing it would require a real commit-confirm
-      apply surface that does not yet exist.
-    - **Same verify-after and rollback contract**: the re-captured config must normalize
-      equal to the intended end-state (apply) or to the captured baseline (rollback);
-      ``rollback_failed`` is surfaced when the equality predicate does not hold
-      (never silently closed, ADR-0021 §3).
-    - **Same apply surfaces**: RESTORE and rollback use ``replace_config``; DEPLOY
-      uses ``send_config`` (merge).
-
-    The capability **never self-authorizes**: every entry point first asserts the
-    :class:`~app.plugins.base.ChangePlan` attests an ``executing`` CR (ADR-0021 §2).
+    Wave 3 T4: inherits :class:`~app.plugins.vendors.cli_common.CliConfigWriteMixin`.
+    IOS-XE keeps the management-path guardrail because production
+    ``replace_config`` does not arm commit-confirm (ADR-0021 §4.2).
     """
 
-    def __init__(self, transport: ConfigWriteTransport, device_id: UUID) -> None:
-        super().__init__()
-        self._transport = transport
-        self._device_id = device_id
+    vendor_label: ClassVar[str] = "cisco_iosxe"
+    _show_running_command: ClassVar[str] = SHOW_RUNNING_CONFIG
 
-    def _capture_running(self) -> str:
-        """Capture the live running config verbatim (recorded for audit)."""
-        return self._record_raw(
-            SHOW_RUNNING_CONFIG, self._transport.send_command(SHOW_RUNNING_CONFIG)
-        )
-
-    def _send_config(self, lines: list[str]) -> None:
-        """Merge *lines* in config mode (send_config_set); record verbatim output."""
-        output = self._transport.send_config(lines)
-        self._record_raw("configure terminal\n" + "\n".join(lines), output)
-
-    def _replace_config(self, lines: list[str]) -> None:
-        """Replace the running config with exactly *lines* (configure replace).
-
-        IOS-XE native config-replace primitive (ADR-0021 §4): the apply surface
-        for ``CONFIG_RESTORE`` and the rollback surface for both operations. The
-        production ``SshTransport.replace_config`` issues a plain ``configure
-        replace <file> force`` — it does NOT arm a ``commit-confirm`` /
-        rollback-timer dead-man revert, so this path provides no device-side
-        auto-revert (see :meth:`_reject_management_path`). Records the verbatim
-        device output for audit.
-        """
-        output = self._transport.replace_config(lines)
-        self._record_raw("configure replace\n" + "\n".join(lines), output)
+    def _normalize_captured(self, raw: str) -> str:
+        return _normalize_config(raw)
 
     def _reject_management_path(self, operation: str, baseline: str, end_state: str) -> None:
         """Refuse a change that touches the management path (ADR-0021 §4.2).
@@ -337,133 +294,6 @@ class _CiscoIosXeConfigWriteCapability(PluginCapability):
                 "(ADR-0021 §4.2: management-path guardrail). Out of M5 scope until a "
                 "commit-confirm apply surface exists — use a console/OOB-fallback path."
             )
-
-    @staticmethod
-    def _require_executing(plan: ChangePlan, operation: str) -> None:
-        """Refuse the write unless the plan attests an ``executing`` CR (§2)."""
-        if not plan.is_executing:
-            raise PluginError(
-                f"cisco_iosxe: {operation} refused — change request "
-                f"'{plan.change_request_id}' is '{plan.cr_state}', not 'executing' "
-                "(ADR-0021 §2: a config write executes only as the execution step of "
-                "an approved, claimed ChangeRequest)"
-            )
-
-    @staticmethod
-    def _diff_summary(before: str, after: str) -> tuple[str, ...]:
-        """Redaction-safe summary of a config change (line counts only)."""
-        before_lines = before.splitlines()
-        after_lines = after.splitlines()
-        before_set = set(before_lines)
-        after_set = set(after_lines)
-        added = sum(1 for line in after_lines if line not in before_set)
-        removed = sum(1 for line in before_lines if line not in after_set)
-        summary: list[str] = []
-        if added:
-            summary.append(f"+{added} line(s)")
-        if removed:
-            summary.append(f"-{removed} line(s)")
-        return tuple(summary)
-
-    def _execute(
-        self,
-        *,
-        plan: ChangePlan,
-        operation: str,
-        project: Callable[[str], str],
-        config_lines: list[str],
-        apply: Callable[[list[str]], None],
-    ) -> ChangeResult:
-        """Run the ADR-0021 §3 contract and return a structured :class:`ChangeResult`.
-
-        ``project`` maps the captured baseline to the intended normalized end-state.
-        ``apply`` is the write surface (DEPLOY merges via ``send_config``; RESTORE
-        replaces via ``replace_config``).
-
-        IOS-XE note: the management-path guardrail (ADR-0021 §4.2) IS applied here.
-        ADR-0021 §4 would permit relaxing it only if the executor armed a device-side
-        ``commit-confirm`` dead-man auto-revert, but no transport implements that
-        primitive (``SshTransport.replace_config`` issues a plain ``configure replace
-        ... force``), so IOS-XE is an image without a dead-man primitive and a
-        management-path change must be refused before any write.
-        """
-        self._require_executing(plan, operation)
-
-        baseline = _normalize_config(self._capture_running())
-        end_state = project(baseline)
-
-        # Management-path guardrail BEFORE any device write (ADR-0021 §4.2): scoped
-        # to the *delta* vs the captured baseline so replaying a snapshot whose mgmt
-        # lines already match is not spuriously refused.
-        self._reject_management_path(operation, baseline, end_state)
-
-        if baseline == end_state:
-            return ChangeResult(
-                change_request_id=plan.change_request_id,
-                outcome=ChangeOutcome.NO_OP,
-                verified=True,
-                applied_diff=(),
-                rollback=None,
-            )
-
-        applied_diff = self._diff_summary(baseline, end_state)
-
-        apply_failed = False
-        try:
-            apply(config_lines)
-        except Exception:  # noqa: BLE001
-            apply_failed = True
-
-        verified = False
-        if not apply_failed:
-            after = _normalize_config(self._capture_running())
-            verified = after == end_state
-
-        if verified:
-            return ChangeResult(
-                change_request_id=plan.change_request_id,
-                outcome=ChangeOutcome.APPLIED,
-                verified=True,
-                applied_diff=applied_diff,
-                rollback=None,
-            )
-
-        rollback = self._rollback_to_baseline(baseline)
-        outcome = ChangeOutcome.ROLLED_BACK if rollback.succeeded else ChangeOutcome.ROLLBACK_FAILED
-        return ChangeResult(
-            change_request_id=plan.change_request_id,
-            outcome=outcome,
-            verified=False,
-            applied_diff=applied_diff,
-            rollback=rollback,
-        )
-
-    def _rollback_to_baseline(self, baseline_normalized: str) -> RollbackResult:
-        """Replace the device with the captured baseline and verify equality (§4).
-
-        IOS-XE rollback uses ``configure replace`` of the captured pre-change
-        baseline (the production transport issues a plain ``configure replace ...
-        force`` — no ``commit-confirm`` timer is armed). A replace that cannot reach
-        the device or cannot re-establish equality surfaces ``rollback_failed``
-        (never silently closed, ADR-0021 §3).
-        """
-        try:
-            self._replace_config(baseline_normalized.splitlines())
-            after = _normalize_config(self._capture_running())
-        except Exception as exc:  # noqa: BLE001
-            return RollbackResult(
-                attempted=True,
-                succeeded=False,
-                verified=False,
-                detail=f"baseline replace failed ({type(exc).__name__})",
-            )
-        equal = after == baseline_normalized
-        return RollbackResult(
-            attempted=True,
-            succeeded=equal,
-            verified=equal,
-            detail=None if equal else "re-captured config did not normalize equal to the baseline",
-        )
 
 
 class CiscoIosXeConfigRestore(_CiscoIosXeConfigWriteCapability, ConfigRestoreCapability):

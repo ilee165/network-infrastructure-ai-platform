@@ -413,6 +413,39 @@ class Settings(BaseSettings):
     #: Fixed-window length (seconds) for the OIDC callback budget above.
     oidc_callback_window_secs: int = 60
 
+    # -- JunOS commit-confirmed window (Wave 3 / ADR-0026 Option A) ------------
+    # Minutes for ``commit confirmed <N>``. Under Option A the unconfirmed window
+    # must cover apply → verify-after → confirming ``commit``. Verify-after is
+    # one ``show configuration | display set`` + normalize/diff (seconds); bump
+    # for large configs / slow control planes. Floor 1 (JunOS minute unit);
+    # cap 60 to block fat-fingered multi-hour unconfirmed windows.
+    # --------------------------------------------------------------------------
+
+    #: JunOS ``commit confirmed <N>`` timer in minutes (``NETOPS_JUNOS_COMMIT_CONFIRMED_MINUTES``).
+    junos_commit_confirmed_minutes: int = Field(default=2, ge=1, le=60)
+
+    # -- SSH host-key verification (Wave 3 H7) ---------------------------------
+    # Default ON (secure by default). Lab-only opt-out via NETOPS_SSH_STRICT=false
+    # restores AutoAddPolicy with a logged warning. Per-host pins ride
+    # DeviceCredential.params["host_key_fingerprints"][host] (shared-cred safe).
+    # --------------------------------------------------------------------------
+
+    #: When true (default), SSH sessions use strict host-key checking + system
+    #: known_hosts (``NETOPS_SSH_STRICT``). Set false only in isolated labs.
+    #: Rejected when :attr:`production` is true (secure by default).
+    ssh_strict: bool = True
+
+    @model_validator(mode="after")
+    def _require_strict_ssh_in_production(self) -> Settings:
+        """Lab opt-out must never disable host-key verification in production."""
+        if self.production and not self.ssh_strict:
+            raise ValueError(
+                "NETOPS_SSH_STRICT must remain true in production "
+                "(NETOPS_ENV=prod or NETOPS_IS_PROD=true) — host-key verification "
+                "cannot be disabled on a production posture"
+            )
+        return self
+
     @property
     def oidc_enabled(self) -> bool:
         """OIDC is active only when an issuer + client id + secret-ref are set.

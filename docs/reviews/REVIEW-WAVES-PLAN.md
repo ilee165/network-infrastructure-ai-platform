@@ -64,12 +64,20 @@ Point fixes, each independently committable; one PR.
 - **F2** — frontend coverage measurement (coverage-v8 + CI threshold).
 - **F6** — `pytest-timeout` + de-sleep the two real-clock `sleep(5)` tests.
 
-## Wave 3 — Config-write transport (secret/change-safety surface — STRONG model)
+## Wave 3 — Config-write transport (secret/change-safety surface — STRONG model) 🔄 IN PR
 
-- **C2** — JunOS `commit confirmed` documented but never issued; JunOS config writes are effectively no-ops. Implement real confirmed-commit flow.
-- **C3** — unescaped config text interpolated into Tcl string corrupts `replace_config` staging — escape/quote properly.
-- **H7** — SSH host keys never verified — introduce known-hosts/TOFU policy.
-- **AR-W2-T1** — extract `plugins/vendors/cli_common/` shared lifecycle mixin + textfsm helpers (repo H8: ADR-0021 write engine copy-pasted 5×). One vendor per atomic commit: base → cisco_ios → eos → cisco_nxos → junos; 35 parity/plugin test files stay green **unchanged** per commit; behavioral divergence between copies is a finding, not a silent unification. Must land before any new CLI vendor wave.
+**PR #158** (`fix/review-wave3`). Decisions: [`WAVE3-DECISIONS.md`](WAVE3-DECISIONS.md). Plan: [`WAVE3-PLAN.md`](WAVE3-PLAN.md).
+
+| ID | Status |
+|----|--------|
+| **C2** | 🔄 JunOS Option A + B1/B6 review fixes (per-step rollback check, exit after `commit confirmed`) — re-verify at final HEAD |
+| **C3** | 🔄 Escaped staging + B2/B3/F3 (parity-aware chunks, `NETOPS-LEN=` without body echo, stage marker scan skips `puts` echoes) — re-verify at final HEAD |
+| **H7** | 🔄 Default strict + pin; B4/B5 + prod gate; pin-policy connect window serialized — re-verify at final HEAD |
+| **AR-W2-T1 / H8** | ✅ `cli_common` base + refits: cisco_ios, cisco_iosxe, eos, cisco_nxos, junos |
+
+Exit: merge when final HEAD re-verification green; `graphify update .` after merge.
+
+**Named follow-ups (do not evaporate):** F1 live-lab JunOS `load … terminal` via channel expect; F2 control-byte (`0x03`) escape in Tcl stage; F5 `textfsm_helpers` refit or descope; F6 import-linter `app.plugins` boundary contract; F7 document confirm-hook / detail-string divergences; F8 timer-expiry races on verify+confirm; F9 opt-out `caplog` + RejectPolicy fake tests; F10 EOS/NX-OS non-`tclsh` restore surface; chart/compose `known_hosts` mount + first-connect capture.
 
 ## Wave 4 — Drift gates (AR-W0 / AR-W1)
 

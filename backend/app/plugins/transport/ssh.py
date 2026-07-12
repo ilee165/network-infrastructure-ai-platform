@@ -19,7 +19,13 @@ never directly on the FastAPI event loop (ADR-0007 §3, ADR-0008).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
+import hashlib
+import logging
+import re
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import TracebackType
@@ -29,6 +35,17 @@ from netmiko import ConnectHandler
 from netmiko.exceptions import NetmikoBaseException, SSHException
 
 from app.core.errors import PluginError
+
+logger = logging.getLogger(__name__)
+
+#: Serializes the paramiko MissingHostKeyPolicy monkey-patch window so concurrent
+#: SSH opens cannot cross-apply one host's pin policy to another (PR #158 re-review).
+_PIN_POLICY_LOCK = threading.Lock()
+
+try:
+    import paramiko  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover - netmiko requires paramiko
+    paramiko = None
 
 if TYPE_CHECKING:
     from netmiko import BaseConnection
@@ -45,6 +62,29 @@ _REDACTED = "***REDACTED***"
 
 #: Netmiko (and re-exported paramiko) failures wrapped into SshTransportError.
 _NETMIKO_FAILURES: tuple[type[Exception], ...] = (NetmikoBaseException, SSHException)
+
+#: Tclsh / IOS error markers in staged-file output — fail closed before
+#: ``configure replace`` so a corrupt stage never becomes running config (C3).
+#: Includes Tcl 8.3.x phrasing (IOS embedded tclsh is 8.3, not 8.6).
+_TCL_ERROR_MARKERS: Final[tuple[str, ...]] = (
+    "invalid command name",
+    "syntax error",
+    "can't read",
+    "no such file",
+    "couldn't open",
+    "permission denied",
+    "bad option",
+    "wrong # args",
+    "% invalid",
+    "% error",
+    "tclsh: ",
+)
+
+#: Staged candidate path for ``configure replace`` (Cisco-family).
+_STAGED_CONFIG_PATH: Final[str] = "flash:netops-rollback.cfg"
+
+#: Max chars per escaped Tcl double-quoted chunk (device CLI line limits).
+_TCL_CHUNK_CHARS: Final[int] = 200
 
 #: vendor_id -> netmiko ``device_type`` for vendors whose plugin id differs
 #: from the netmiko driver name. Vendors absent here fall back to their
@@ -93,6 +133,13 @@ class SshParams:
     ``enable_secret`` triggers privileged-exec escalation when set.
     ``conn_timeout`` bounds session establishment; ``read_timeout`` bounds
     each command's output collection (seconds).
+    ``commit_confirmed_minutes`` is consumed only by
+    :class:`~app.plugins.transport.junos_ssh.JunosSshTransport` (JunOS
+    ``commit confirmed <N>``); Cisco-family ignore it.
+
+    Host-key policy (Wave 3 H7): ``ssh_strict`` / ``system_host_keys`` default
+    true (secure by default). Optional ``host_key_fingerprint`` is a
+    non-secret pin (``SHA256:…`` or hex MD5) verified after connect.
     """
 
     host: str
@@ -103,6 +150,10 @@ class SshParams:
     enable_secret: str | None = None
     conn_timeout: float = 10.0
     read_timeout: float = 30.0
+    commit_confirmed_minutes: int = 2
+    ssh_strict: bool = True
+    system_host_keys: bool = True
+    host_key_fingerprint: str | None = None
 
     def __repr__(self) -> str:
         enable_secret = _REDACTED if self.enable_secret is not None else None
@@ -110,7 +161,10 @@ class SshParams:
             f"SshParams(host={self.host!r}, device_type={self.device_type!r}, "
             f"username={self.username!r}, password={_REDACTED!r}, port={self.port!r}, "
             f"enable_secret={enable_secret!r}, conn_timeout={self.conn_timeout!r}, "
-            f"read_timeout={self.read_timeout!r})"
+            f"read_timeout={self.read_timeout!r}, "
+            f"commit_confirmed_minutes={self.commit_confirmed_minutes!r}, "
+            f"ssh_strict={self.ssh_strict!r}, system_host_keys={self.system_host_keys!r}, "
+            f"host_key_fingerprint={self.host_key_fingerprint!r})"
         )
 
 
@@ -132,19 +186,47 @@ class SshTransport:
 
     def __enter__(self) -> SshTransport:
         params = self._params
-        try:
-            connection = ConnectHandler(
-                host=params.host,
-                device_type=params.device_type,
-                username=params.username,
-                password=params.password,
-                port=params.port,
-                secret=params.enable_secret or "",
-                conn_timeout=params.conn_timeout,
+        if not params.ssh_strict:
+            logger.warning(
+                "SSH host-key verification DISABLED for %s:%s (device_type=%r); "
+                "lab-only NETOPS_SSH_STRICT=false / SshParams.ssh_strict=False — "
+                "do not use in production",
+                params.host,
+                params.port,
+                params.device_type,
             )
+        # B5: when a pin is set, install a MissingHostKeyPolicy that accepts only
+        # the matching fingerprint *before* auth (SSH host-key phase precedes
+        # password auth). When pin is absent, netmiko's ssh_strict/RejectPolicy
+        # applies as usual.
+        connect_kwargs: dict[str, Any] = {
+            "host": params.host,
+            "device_type": params.device_type,
+            "username": params.username,
+            "password": params.password,
+            "port": params.port,
+            "secret": params.enable_secret or "",
+            "conn_timeout": params.conn_timeout,
+            "ssh_strict": params.ssh_strict if not params.host_key_fingerprint else True,
+            "system_host_keys": (params.system_host_keys and params.ssh_strict)
+            or bool(params.host_key_fingerprint and params.system_host_keys),
+        }
+        try:
+            with _pinned_host_key_policy(params.host_key_fingerprint):
+                connection = ConnectHandler(**connect_kwargs)
         except _NETMIKO_FAILURES as exc:
-            raise SshTransportError(self._failure_message("connect", exc)) from exc
+            raise SshTransportError(self._host_key_failure_message(exc)) from exc
         self._connection = connection
+        try:
+            # Defense in depth: re-check pin after connect if policy was not used.
+            self._verify_pinned_fingerprint(connection)
+        except SshTransportError:
+            self._close()
+            raise
+        except BaseException:
+            # Match enable() safety net — never leak the session on unexpected errors.
+            self._close()
+            raise
         if params.enable_secret is not None:
             try:
                 connection.enable()
@@ -199,7 +281,12 @@ class SshTransport:
         :meth:`replace_config`. Used only as the execution step of an approved
         ChangeRequest (the Automation Agent, Wave 4); the capability layer
         captures/verifies around it.
+
+        Refuses ``juniper_junos`` — that platform must use
+        :class:`~app.plugins.transport.junos_ssh.JunosSshTransport` via
+        :func:`make_ssh_transport` (Wave 3 C2).
         """
+        self._refuse_junos_write("send_config")
         connection = self._require_connection()
         try:
             output = connection.send_config_set(list(lines), read_timeout=self._params.read_timeout)
@@ -223,40 +310,201 @@ class SshTransport:
         predicate (§3) used by ``CONFIG_RESTORE`` apply and by rollback for both
         operations.
 
-        Mechanism: stage the candidate config to a deterministic file on the
-        device filesystem, then run ``configure replace <file> force``
-        (force = non-interactive), and clean the staged file up. Output of the
-        replace command is returned verbatim for the audit trail.
+        Mechanism (Wave 3 C3): stage the candidate with Tcl ``puts`` of
+        **escaped** lines (Tcl 8.3-safe — IOS embedded tclsh has no
+        ``binary decode base64``). Every ``$``, ``"``, ``[``, ``]``, ``\\`` is
+        escaped so Tcl cannot substitute or truncate the payload. Long lines are
+        chunked under the device CLI limit. Staged length is verified before
+        ``configure replace <file> force``. Any tclsh error output fails closed
+        **before** replace is issued.
+
+        Refuses ``juniper_junos`` — use :class:`~app.plugins.transport.junos_ssh.JunosSshTransport`.
         """
+        self._refuse_junos_write("replace_config")
         connection = self._require_connection()
-        candidate = "\n".join(lines)
-        staged = "flash:netops-rollback.cfg"
+        line_list = list(lines)
+        # puts writes a trailing newline per line — match that in expected length.
+        expected_len = sum(len(line) + 1 for line in line_list)
+        staged = _STAGED_CONFIG_PATH
+        timeout = self._params.read_timeout
+        output = ""
         try:
-            # Stage the candidate, replace against it, then remove the staging file.
             with contextlib.suppress(*_NETMIKO_FAILURES):
-                connection.send_command(
-                    f"delete /force {staged}", read_timeout=self._params.read_timeout
+                connection.send_command(f"delete /force {staged}", read_timeout=timeout)
+
+            stage_cmds = ["do tclsh", f'set fd [open "{staged}" w+]']
+            for line in line_list:
+                stage_cmds.extend(self._tcl_puts_line_commands(line))
+            stage_cmds.extend(["close $fd", "tclquit"])
+            stage_out = connection.send_config_set(stage_cmds, read_timeout=timeout)
+            if not isinstance(stage_out, str):  # pragma: no cover
+                raise SshTransportError(
+                    f"SSH config stage for {self._params.host}:{self._params.port} "
+                    "returned non-text output"
                 )
-            connection.send_config_set(
-                ["do tclsh", f'puts [open "{staged}" w+] "{candidate}"', "tclquit"],
-                read_timeout=self._params.read_timeout,
-            )
-            output = connection.send_command(
+            self._raise_if_tcl_failed("stage config", stage_out)
+
+            # Integrity: anchored token avoids hostname digits in prompt echoes (B3).
+            # F3: do NOT ``set body [read $f]`` then print length — interactive
+            # tclsh echoes the result of ``set``, i.e. the entire staged config,
+            # and error-marker scan would false-abort on banners containing
+            # "syntax error" / "permission denied". Nested read is not separately
+            # echoed; only the NETOPS-LEN line is printed.
+            size_cmds = [
+                "do tclsh",
+                f'set f [open "{staged}" r]',
+                'puts "NETOPS-LEN=[string length [read $f]]"',
+                "close $f",
+                "tclquit",
+            ]
+            size_out = connection.send_config_set(size_cmds, read_timeout=timeout)
+            if not isinstance(size_out, str):  # pragma: no cover
+                raise SshTransportError(
+                    f"SSH stage size check for {self._params.host}:{self._params.port} "
+                    "returned non-text output"
+                )
+            self._raise_if_tcl_failed("stage size check", size_out)
+            self._assert_staged_length(size_out, expected_len)
+
+            replace_out = connection.send_command(
                 f"configure replace {staged} force",
-                read_timeout=self._params.read_timeout,
+                read_timeout=timeout,
             )
-            with contextlib.suppress(*_NETMIKO_FAILURES):
-                connection.send_command(
-                    f"delete /force {staged}", read_timeout=self._params.read_timeout
+            if not isinstance(replace_out, str):  # pragma: no cover
+                raise SshTransportError(
+                    f"SSH config replace for {self._params.host}:{self._params.port} "
+                    "returned non-text output"
                 )
+            output = replace_out
+        except SshTransportError:
+            with contextlib.suppress(*_NETMIKO_FAILURES):
+                connection.send_command(f"delete /force {staged}", read_timeout=timeout)
+            raise
         except _NETMIKO_FAILURES as exc:
+            with contextlib.suppress(*_NETMIKO_FAILURES):
+                connection.send_command(f"delete /force {staged}", read_timeout=timeout)
             raise SshTransportError(self._failure_message("config replace", exc)) from exc
-        if not isinstance(output, str):  # pragma: no cover - structured output never requested
-            raise SshTransportError(
-                f"SSH config replace for {self._params.host}:{self._params.port} "
-                "returned non-text output"
-            )
+        with contextlib.suppress(*_NETMIKO_FAILURES):
+            connection.send_command(f"delete /force {staged}", read_timeout=timeout)
         return output
+
+    @staticmethod
+    def _tcl_escape_double_quoted(text: str) -> str:
+        """Escape *text* for inclusion inside a Tcl double-quoted string (Tcl 8.3)."""
+        return (
+            text.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("$", "\\$")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+        )
+
+    def _tcl_puts_line_commands(self, line: str) -> list[str]:
+        """Build chunked ``puts`` commands that write *line* plus a trailing newline.
+
+        Chunks are cut from the already-escaped string but never end on a bare
+        ``\\`` (that would escape the closing quote of the Tcl double-quoted
+        argument).
+        """
+        escaped = self._tcl_escape_double_quoted(line)
+        if len(escaped) <= _TCL_CHUNK_CHARS:
+            return [f'puts $fd "{escaped}"']
+        cmds: list[str] = []
+        for chunk in self._tcl_chunk_escaped(escaped, _TCL_CHUNK_CHARS):
+            cmds.append(f'puts -nonewline $fd "{chunk}"')
+        # Final empty puts supplies the line terminator (matches single-puts path).
+        cmds.append('puts $fd ""')
+        return cmds
+
+    @staticmethod
+    def _tcl_chunk_escaped(escaped: str, max_chars: int) -> list[str]:
+        """Split *escaped* into chunks of at most *max_chars* without unpaired trailing ``\\``.
+
+        B2: pull back only when the run of backslashes ending at ``end-1`` has
+        **odd** length (pair-opening ``\\``). An even run is complete ``\\\\`` pairs
+        and must not be shortened (that would create a bare trailing backslash).
+        """
+        chunks: list[str] = []
+        i = 0
+        n = len(escaped)
+        while i < n:
+            end = min(i + max_chars, n)
+            if end < n and escaped[end - 1] == "\\":
+                run = 0
+                j = end - 1
+                while j >= i and escaped[j] == "\\":
+                    run += 1
+                    j -= 1
+                if run % 2 == 1:
+                    end -= 1
+            if end <= i:
+                # Pathological: need at least one full escape pair.
+                end = min(i + 2, n)
+            chunks.append(escaped[i:end])
+            i = end
+        return chunks
+
+    def _raise_if_tcl_failed(self, action: str, output: str) -> None:
+        """Fail closed on tclsh/IOS error text before configure replace.
+
+        Ignores lines that look like echoed ``puts $fd "…"`` stage commands so a
+        config banner containing e.g. ``permission denied`` does not false-abort
+        the stage (F3 residual on stage_out; size path uses NETOPS-LEN only).
+        """
+        scan_lines = [
+            line
+            for line in output.splitlines()
+            if "puts $fd" not in line and "puts -nonewline $fd" not in line
+        ]
+        lowered = "\n".join(scan_lines).lower()
+        if any(marker in lowered for marker in _TCL_ERROR_MARKERS):
+            snippet = (next((ln.strip() for ln in scan_lines if ln.strip()), "(empty)"))[:200]
+            raise SshTransportError(
+                f"SSH {action} failed for {self._params.host}:{self._params.port} "
+                f"(device_type={self._params.device_type!r}): tclsh error "
+                f"({snippet!r}); configure replace not attempted"
+            )
+
+    def _assert_staged_length(self, size_output: str, expected: int) -> None:
+        """Parse anchored ``NETOPS-LEN=N`` token from tclsh output (B3)."""
+        match = re.search(r"NETOPS-LEN=(\d+)", size_output)
+        if not match:
+            raise SshTransportError(
+                f"SSH stage size check failed for {self._params.host}:{self._params.port}: "
+                "could not parse NETOPS-LEN token; configure replace not attempted"
+            )
+        actual = int(match.group(1))
+        if actual != expected:
+            raise SshTransportError(
+                f"SSH stage integrity failed for {self._params.host}:{self._params.port}: "
+                f"staged {actual} bytes, expected {expected}; configure replace not attempted"
+            )
+
+    def confirm_config(self) -> str:
+        """No-op finalize for Cisco-family (apply is already permanent).
+
+        Typed :class:`~app.plugins.base.ConfigWriteTransport` surface so a shared
+        lifecycle can call confirm after verify-after without capability sniffing.
+        JunOS overrides this on :class:`~app.plugins.transport.junos_ssh.JunosSshTransport`.
+        """
+        return ""
+
+    def rollback_config(self, n: int = 1) -> str:
+        """Cisco-family has no ``rollback N`` — use :meth:`replace_config` instead."""
+        raise SshTransportError(
+            f"SSH rollback_config is not supported for device_type="
+            f"{self._params.device_type!r} on {self._params.host}:{self._params.port}; "
+            "use replace_config with the captured baseline (ADR-0021 §4)"
+        )
+
+    def _refuse_junos_write(self, surface: str) -> None:
+        """Belt-and-suspenders: base Cisco-shaped writes must not run on JunOS."""
+        if self._params.device_type == "juniper_junos":
+            raise SshTransportError(
+                f"SSH {surface} refused for device_type='juniper_junos' on "
+                f"{self._params.host}:{self._params.port}: use JunosSshTransport via "
+                "make_ssh_transport (Wave 3 / ADR-0026 commit-confirmed flow)"
+            )
 
     def _require_connection(self) -> BaseConnection:
         """Return the open netmiko connection or raise if used outside the context."""
@@ -282,3 +530,144 @@ class SshTransport:
             f"SSH {action} failed for {params.host}:{params.port} "
             f"(device_type={params.device_type!r}): {type(exc).__name__}"
         )
+
+    def _host_key_failure_message(self, exc: Exception) -> str:
+        """Connect failure message; name host-key remediation when applicable."""
+        base = self._failure_message("connect", exc)
+        text = f"{type(exc).__name__} {exc}".lower()
+        if any(
+            token in text
+            for token in (
+                "host key",
+                "hostkey",
+                "known_hosts",
+                "not found in known_hosts",
+                "rejectpolicy",
+            )
+        ):
+            return (
+                f"{base}: host key verification failed. Remediation: add the "
+                f"device host key to the platform known_hosts, or pin "
+                f"host_key_fingerprints[{self._params.host!r}] on the SSH "
+                f"credential params (SHA256:…), or set NETOPS_SSH_STRICT=false "
+                f"only in an isolated lab"
+            )
+        return base
+
+    def _verify_pinned_fingerprint(self, connection: BaseConnection) -> None:
+        """If a pin is configured, compare against the presented host key."""
+        expected = self._params.host_key_fingerprint
+        if not expected:
+            return
+        presented = _connection_host_key_fingerprint(connection)
+        if presented is None:
+            raise SshTransportError(
+                f"SSH host-key pin configured for {self._params.host}:{self._params.port} "
+                f"but the session did not expose a remote host key; "
+                f"cannot verify pin {expected!r}"
+            )
+        if not _fingerprints_match(expected, presented):
+            raise SshTransportError(
+                f"SSH host-key pin mismatch for {self._params.host}:{self._params.port}: "
+                f"expected {expected!r}, presented {presented!r}. Remediation: update "
+                f"credential params host_key_fingerprints[{self._params.host!r}] or "
+                f"investigate host substitution / MITM"
+            )
+
+
+class _PinnedHostKeyPolicy:
+    """paramiko MissingHostKeyPolicy: accept only if fingerprint matches the pin.
+
+    Host-key verification runs before password authentication in the SSH
+    handshake, so a pin mismatch never sends the device credential (B5).
+    """
+
+    def __init__(self, expected_fingerprint: str) -> None:
+        self._expected = expected_fingerprint
+
+    def missing_host_key(self, client: Any, hostname: str, key: Any) -> None:
+        presented = _fingerprint_from_paramiko_key(key)
+        if presented is None or not _fingerprints_match(self._expected, presented):
+            raise SSHException(
+                f"Host key pin mismatch for {hostname!r}: expected "
+                f"{self._expected!r}, presented {presented!r}"
+            )
+        # Accept: cache so the remainder of the handshake proceeds.
+        client.get_host_keys().add(hostname, key.get_name(), key)
+
+
+@contextlib.contextmanager
+def _pinned_host_key_policy(fingerprint: str | None) -> Any:
+    """While *fingerprint* is set, force paramiko clients to use the pin policy.
+
+    Holds :data:`_PIN_POLICY_LOCK` for the connect window so concurrent sessions
+    cannot cross-apply pins (fail-closed flaky-connect under discovery fan-out).
+    """
+    if not fingerprint or paramiko is None:
+        yield
+        return
+    policy = _PinnedHostKeyPolicy(fingerprint)
+    original = paramiko.SSHClient.set_missing_host_key_policy
+
+    def _install(self: Any, _policy: Any = None) -> None:  # noqa: ANN401
+        # Ignore netmiko's Reject/AutoAdd choice; pin policy is authoritative.
+        original(self, policy)
+
+    with _PIN_POLICY_LOCK:
+        paramiko.SSHClient.set_missing_host_key_policy = _install
+        try:
+            yield
+        finally:
+            paramiko.SSHClient.set_missing_host_key_policy = original
+
+
+def _fingerprint_from_paramiko_key(key: Any) -> str | None:
+    if key is None:
+        return None
+    raw = key.asbytes() if hasattr(key, "asbytes") else str(key).encode()
+    asbytes = raw if isinstance(raw, (bytes, bytearray)) else bytes(raw)
+    digest = hashlib.sha256(asbytes).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _connection_host_key_fingerprint(connection: BaseConnection) -> str | None:
+    """Return ``SHA256:…`` fingerprint of the remote host key, if available."""
+    remote = getattr(connection, "remote_conn", None)
+    if remote is None:
+        return None
+    get_transport = getattr(remote, "get_transport", None)
+    transport_obj = (
+        get_transport()
+        if callable(get_transport)
+        else getattr(remote, "transport", None)  # some netmiko drivers
+    )
+    if transport_obj is None:
+        return None
+    get_key = getattr(transport_obj, "get_remote_server_key", None)
+    if not callable(get_key):
+        return None
+    key = get_key()
+    if key is None:
+        return None
+    # Prefer OpenSSH-style SHA256 base64 fingerprint.
+    raw = key.asbytes() if hasattr(key, "asbytes") else str(key).encode()
+    asbytes = raw if isinstance(raw, (bytes, bytearray)) else bytes(raw)
+    digest = hashlib.sha256(asbytes).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _fingerprints_match(expected: str, presented: str) -> bool:
+    """Compare fingerprints case-insensitively; accept SHA256: with/without padding."""
+    exp = expected.strip().replace(" ", "")
+    pres = presented.strip().replace(" ", "")
+    if exp.lower().startswith("sha256:") and pres.lower().startswith("sha256:"):
+        return exp.split(":", 1)[1].rstrip("=").lower() == pres.split(":", 1)[1].rstrip("=").lower()
+    # Hex MD5 (legacy OpenSSH) comparison.
+    exp_hex = exp.lower().removeprefix("md5:")
+    pres_hex = pres.lower().removeprefix("md5:")
+    try:
+        return binascii.unhexlify(exp_hex.replace(":", "")) == binascii.unhexlify(
+            pres_hex.replace(":", "")
+        )
+    except binascii.Error:
+        return exp.lower() == pres.lower()

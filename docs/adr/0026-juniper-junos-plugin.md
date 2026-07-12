@@ -143,3 +143,30 @@ Device credentials come **only** from the encrypted vault (`device_credentials`,
 
 5. **Introduce a JunOS-specific normalized firewall model now (anticipating `FIREWALL_POLICY`).**
    Rejected for this wave. `PRODUCTION.md` §2.2 scopes JunOS ACL to **firewall filters → `NormalizedAclEntry`**, and `FIREWALL_POLICY` + its `NormalizedFirewallRule` (PROPOSED) are deliberately introduced in **Wave 2** by two firewall vendors (PAN-OS + FortiOS) so the firewall model is validated across vendors before being declared stable (`PRODUCTION.md` §2.3). Adding a Juniper-only firewall model here would pre-empt that cross-vendor validation and contradict ADR-0006's "extend the schema only via migration + review" discipline.
+
+---
+
+## Addendum — Wave 3 (2026-07-11): implementation gap closed (Option A)
+
+**Status:** Accepted addendum (does not rewrite the Decision body above).
+
+### Implementation gap that was closed
+
+Prior to Wave 3, plugin docstrings and this ADR promised `load` → `commit confirmed <N>` → confirming `commit`, but production `SshTransport.send_config` only called netmiko `send_config_set` and `replace_config` issued Cisco `flash:`/`tclsh`/`configure replace` syntax. JunOS deploy/restore/rollback therefore never committed — the dead-man auto-revert cited as the safety control did not exist on the wire.
+
+Wave 3 T1 lands `JunosSshTransport` (selected via `make_ssh_transport` when `device_type == juniper_junos` on the config write open path) implementing:
+
+1. **Apply:** `configure` → `load merge|override terminal` → `commit check` → `commit confirmed <N>`
+2. **Verify-after:** unchanged plugin re-capture + normalize equality (ADR-0021 §3)
+3. **Confirm:** `confirm_config()` → confirming `commit` only on the verified success branch
+4. **Failure:** confirming `commit` withheld; structured `replace_config`/`rollback N` primary; confirmed timer is the backstop
+
+### Option A and the widened worker-crash window (§3.2.1)
+
+Under Option A the unconfirmed device window spans **apply + verify-after + confirming commit**, not apply alone. Device fail-safe direction is unchanged (auto-revert at `N`). The CR-orphan gap in §3.2.1 is correspondingly wider and remains a tracked deferred reaper item.
+
+`N` is `NETOPS_JUNOS_COMMIT_CONFIRMED_MINUTES` (default 2, bounds 1–60). Operators may increase it for large configs / slow control planes so the timer survives apply → verify-after → confirm.
+
+### Protocol note
+
+`ConfigWriteTransport.confirm_config()` is a typed surface: JunOS implements confirming `commit`; Cisco-family transports no-op so a shared lifecycle can always call it after verify without capability sniffing.

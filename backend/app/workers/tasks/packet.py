@@ -573,7 +573,6 @@ async def _load_ssh_context(device_id: UUID) -> _EosCaptureContext:
     """Resolve the EOS device's SSH params from inventory + vault (seam in tests)."""
     from app.models import Device, DeviceStatus  # noqa: F401 — kept for parity/clarity
     from app.models.inventory import CredentialKind, DeviceCredential
-    from app.plugins.transport import SshParams
     from app.services import credentials
 
     async with _session() as session:
@@ -596,12 +595,14 @@ async def _load_ssh_context(device_id: UUID) -> _EosCaptureContext:
             target=device,
             sessionmaker=credentials.autonomous_sessionmaker(session),
         )
-        params = SshParams(
+        from app.plugins.transport import ssh_params_from
+
+        params = ssh_params_from(
             host=device.mgmt_ip,
             device_type="arista_eos",
             username=row.username or "",
             password=secret.plaintext.decode("utf-8"),
-            port=int((row.params or {}).get("port", 22)),
+            cred_params=dict(row.params or {}),
         )
         await session.commit()  # decrypt audit row
         return _EosCaptureContext(params=params)
