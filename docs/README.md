@@ -15,9 +15,13 @@
 
 | Document | Description |
 |---|---|
-| [README.md](adr/README.md) | Index of ADR-0001..0032. ADRs 0001–0016 are the binding D1–D16 decisions (Accepted); 0017–0024 are M4/M5 milestone-feature ADRs (Accepted); 0025–0032 are P1 wave ADRs (Proposed). |
+| [README.md](adr/README.md) | Index of ADR-0001..0053. ADRs 0001–0016 are the binding D1–D16 decisions (Accepted); 0017–0024 are M4/M5/M-DDI milestone-feature ADRs (Accepted); 0025–0033 are P1 wave ADRs (Accepted); 0034–0041 are P2 wave ADRs (Accepted); 0042–0049 are P3-wave/audit ADRs (Accepted, except 0048 Rejected); 0050–0053 are P4 wave ADRs (Proposed). |
 | `0001`–`0016` | One ADR per binding decision: monorepo, backend stack, LangGraph orchestration, Postgres+pgvector, Neo4j projection, plugin system, device connectivity, Celery jobs, multi-LLM abstraction, authn/z, security model, frontend stack, deployment, packet analysis, observability, testing/CI-CD. |
-| `0017`–`0032` | Milestone-feature and P1 wave ADRs: config snapshot/drift, compliance rules, doc generation/RAG, ChangeRequest workflow, config deploy/restore, Infoblox/SpatiumDDI DDI plugins, packet sandbox, NX-OS/JunOS/BlueCat plugins, OIDC/SSO, K8s/Helm GA, backup/DR, packet OS-isolation, KMS-backed master key. |
+| `0017`–`0024` | Milestone-feature ADRs: config snapshot/drift, compliance rules, doc generation/RAG, ChangeRequest workflow, config deploy/restore, Infoblox WAPI/DDI capability interfaces, packet sandbox, SpatiumDDI client. |
+| `0025`–`0033` | P1 wave ADRs: NX-OS/JunOS/BlueCat plugins, OIDC/SSO, K8s/Helm GA chart, backup/DR baseline, packet-sandbox OS isolation, KMS-backed master key, prompt-injection eval suite. |
+| `0034`–`0041` | P2 wave ADRs: firewall-policy capability + normalized models, PAN-OS/FortiOS plugins, Security Agent, audit-log hash chaining, mTLS between containers, device credential rotation, collector network segmentation. |
+| `0042`–`0049` | P3-wave/audit ADRs: Postgres HA (CloudNativePG), api HPA/KEDA autoscaling, Redis Sentinel + WebSocket fan-out, audit→SIEM export, observability-SLO enforcement, reliability/scale drill harness, kind-harness gate promotion (Rejected), packet-analysis sandbox resolution. |
+| `0050`–`0053` | P4 wave ADRs (Proposed): F5 BIG-IP plugin, VMware vSphere plugin, application-dependency topology, compliance & audit reporting suite. |
 
 ## roadmap/
 
