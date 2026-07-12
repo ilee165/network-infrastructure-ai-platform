@@ -57,6 +57,13 @@ from app import db
 from app.core.config import get_settings
 from app.engines.topology.app_derivation import derive_application_dependencies
 from app.engines.topology.app_derivation_store import apply_derivation_plan
+from app.engines.topology.inventory_load import (
+    InventoryBundle,
+    filter_derived_for_scope,
+    interface_ids_for_scope,
+    load_inventory,
+    run_touched_device_ids,
+)
 from app.engines.topology.projector import project
 from app.engines.topology.snapshots import upsert_snapshot
 from app.engines.topology.sync import derive_topology, snapshot_lists
@@ -108,54 +115,15 @@ async def _session() -> AsyncIterator[AsyncSession]:
 
 
 # ---------------------------------------------------------------------------
-# Inventory loading
+# Inventory loading (shared with rebuild — Wave 5 T4)
 # ---------------------------------------------------------------------------
 
 
-class _Inventory:
-    """The row sets a projection pass derives from (inventory + app layer)."""
-
-    __slots__ = (
-        "application_dependencies",
-        "applications",
-        "devices",
-        "interfaces",
-        "neighbors",
-        "routes",
-    )
-
-    def __init__(
-        self,
-        devices: list[Device],
-        interfaces: list[NormalizedInterfaceRow],
-        routes: list[NormalizedRouteRow],
-        neighbors: list[NormalizedNeighborRow],
-        applications: list[Application],
-        application_dependencies: list[ApplicationDependency],
-    ) -> None:
-        self.devices = devices
-        self.interfaces = interfaces
-        self.routes = routes
-        self.neighbors = neighbors
-        self.applications = applications
-        self.application_dependencies = application_dependencies
-
-
-async def _load_inventory(session: AsyncSession) -> _Inventory:
-    """Load every device + normalized row + application row (whole inventory).
-
-    The application layer is part of EVERY projection pass (ADR-0052 §5), and
-    this single loader reads ``applications`` AND ``application_dependencies``
-    together — both or neither — so a pass can never sweep one side's valid
-    graph elements because only the other was loaded.
-    """
-    devices = list((await session.execute(select(Device))).scalars())
-    interfaces = list((await session.execute(select(NormalizedInterfaceRow))).scalars())
-    routes = list((await session.execute(select(NormalizedRouteRow))).scalars())
-    neighbors = list((await session.execute(select(NormalizedNeighborRow))).scalars())
-    applications = list((await session.execute(select(Application))).scalars())
-    dependencies = list((await session.execute(select(ApplicationDependency))).scalars())
-    return _Inventory(devices, interfaces, routes, neighbors, applications, dependencies)
+async def _load_inventory(
+    session: AsyncSession, *, device_ids: frozenset[UUID] | None = None
+) -> InventoryBundle:
+    """Load inventory; optional *device_ids* scopes interface/route/neighbor rows."""
+    return await load_inventory(session, device_ids=device_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +205,14 @@ async def _derive_applications() -> dict[str, Any]:
 
 
 async def _project_run(run_id: UUID) -> dict[str, Any]:
-    """Derive, project incrementally, and snapshot the whole inventory.
+    """Derive, project (delta when possible), and snapshot.
+
+    Wave 5 / perf #9: when the discovery run touched a subset of devices
+    (``raw_artifacts`` for *run_id*), interface/route/neighbor rows are loaded
+    only for that touch-set and Neo4j writes are filtered to those devices
+    (``stale_sweep=False`` so untouched estate nodes are not deleted). Full
+    rebuild remains the GC path. Snapshots still record the derived multiset
+    for this pass (diff foundation).
 
     Returns a JSON-safe stats block describing what was projected. Raised
     exceptions propagate to :func:`sync_after_run`, which isolates them from
@@ -245,9 +220,14 @@ async def _project_run(run_id: UUID) -> dict[str, Any]:
     """
     projected_at = utcnow()
     client = _neo4j_client()
+    stats: dict[str, Any] = {"ok": True, "projected_at": projected_at.isoformat()}
     try:
         async with _session() as session:
-            inventory = await _load_inventory(session)
+            touched = await run_touched_device_ids(session, run_id)
+            # Scope normalized-row load when we have a non-empty touch set;
+            # empty touch set (no artifacts) falls back to full inventory.
+            scope = touched if touched else None
+            inventory = await _load_inventory(session, device_ids=scope)
             derived = derive_topology(
                 inventory.devices,
                 inventory.interfaces,
@@ -260,27 +240,57 @@ async def _project_run(run_id: UUID) -> dict[str, Any]:
                 derived.nodes, derived.edges, derived.applications
             )
 
+            proj_nodes = derived.nodes
+            proj_edges = derived.edges
+            proj_apps = derived.applications
+            delta = False
+            if scope is not None:
+                iface_ids = interface_ids_for_scope(inventory.interfaces, scope)
+                proj_nodes, proj_edges, proj_apps = filter_derived_for_scope(
+                    nodes=derived.nodes,
+                    edges=derived.edges,
+                    applications=derived.applications,
+                    scope_device_ids=scope,
+                    scope_interface_ids=iface_ids,
+                )
+                delta = True
+
             await ensure_constraints(client)
             await project(
                 client,
-                derived.nodes,
-                derived.edges,
+                proj_nodes,
+                proj_edges,
                 projected_at,
-                applications=derived.applications,
+                applications=proj_apps,
+                # Delta path: upsert only; no estate-wide stale sweep (Option B).
+                stale_sweep=not delta,
             )
 
             await upsert_snapshot(session, run_id=run_id, nodes=node_list, edges=edge_list)
             await session.commit()
+
+            stats.update(
+                {
+                    "nodes": len(node_list),
+                    "edges": len(edge_list),
+                    "nodes_written": (
+                        len(proj_nodes.devices)
+                        + len(proj_nodes.interfaces)
+                        + len(proj_nodes.ip_addresses)
+                        + len(proj_nodes.subnets)
+                        + len(proj_nodes.vlans)
+                        + len(proj_nodes.vrfs)
+                        + len(proj_nodes.sites)
+                    ),
+                    "delta": delta,
+                    "scope_devices": len(scope) if scope is not None else None,
+                    "unresolved_neighbors": derived.l2_report.unresolved_neighbors,
+                }
+            )
     finally:
         await client.close()
 
-    return {
-        "ok": True,
-        "projected_at": projected_at.isoformat(),
-        "nodes": len(node_list),
-        "edges": len(edge_list),
-        "unresolved_neighbors": derived.l2_report.unresolved_neighbors,
-    }
+    return stats
 
 
 async def _record_sync_stats(

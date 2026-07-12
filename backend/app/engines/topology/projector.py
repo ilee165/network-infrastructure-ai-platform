@@ -390,12 +390,13 @@ async def project(
     applications: DerivedApplications,
     dns: DerivedDns | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    stale_sweep: bool = True,
 ) -> None:
     """Make the graph converge to one derivation pass (incremental sync).
 
     Upserts every derived node and edge stamped with *projected_at*, then
-    deletes every node/edge of the projected labels / relationship types that
-    was *not* stamped in this pass (its key is absent from the derivation).
+    (when *stale_sweep* is true) deletes every node/edge of the projected
+    labels / relationship types that was *not* stamped in this pass.
     Elements outside the projected labels and types are never touched.
 
     Parameters
@@ -423,6 +424,11 @@ async def project(
         DNS elements are stamped this pass) like any other empty derivation.
     batch_size:
         Rows per ``UNWIND`` statement (bounds memory per round trip).
+    stale_sweep:
+        When ``True`` (default / full rebuild path), delete unstamped projected
+        elements estate-wide. When ``False`` (Wave 5 delta discovery-sync), only
+        upsert the provided elements — GC of removed edges is deferred to
+        full rebuild so a partial pass cannot wipe untouched devices.
     """
     if projected_at.tzinfo is None:
         raise ValueError("projected_at must be timezone-aware")
@@ -447,18 +453,20 @@ async def project(
             for batch in _chunks(rows, batch_size):
                 await session.run(cypher, rows=batch)
 
-        # Stale sweep: every projected type/label, even ones derived empty —
-        # an element can only survive by being re-stamped above.
-        for rel_type in PROJECTED_REL_TYPES:
-            await session.run(_stale_edge_sweep_cypher(rel_type), projected_at=projected_at)
-        for label in PROJECTED_NODE_LABELS:
-            await session.run(_stale_node_sweep_cypher(label), projected_at=projected_at)
+        if stale_sweep:
+            # Stale sweep: every projected type/label, even ones derived empty —
+            # an element can only survive by being re-stamped above.
+            for rel_type in PROJECTED_REL_TYPES:
+                await session.run(_stale_edge_sweep_cypher(rel_type), projected_at=projected_at)
+            for label in PROJECTED_NODE_LABELS:
+                await session.run(_stale_node_sweep_cypher(label), projected_at=projected_at)
 
     logger.info(
         "topology_projection_complete",
         nodes_upserted=node_count,
         edges_upserted=edge_count,
         projected_at=projected_at.isoformat(),
+        stale_sweep=stale_sweep,
     )
 
 

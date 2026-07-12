@@ -105,10 +105,13 @@ Explicitly **not** fixed in Wave 5 point-fix wave — record here so they do not
 - **Proposed fix:** Needs eval re-run to prove no routing regression; agents-focused follow-up
 - **Effort:** M | **Risk:** Medium (routing quality)
 
-### 8d. Remaining Wave 5 tasks on `fix/review-wave5` (if PR ships without them)
+### 8d. Wave 5 T4 delta path GC
 
-- **T2** orchestrator chord/callback (blocking `.get` pool hold) — largest orchestration regression surface; needs spec review
-- **T4** delta topology projection (scoped inventory + safe stale sweep) — needs spec review; risk of silent app-layer wipe (ADR-0052 §5)
+- **Severity:** Low (deferred GC)
+- **Location:** `project(..., stale_sweep=False)` on discovery-sync delta path
+- **Root cause:** Scoped projection skips estate-wide stale sweep so untouched devices are never wiped; removed interfaces on a *touched* device also wait for full rebuild GC
+- **Proposed fix:** Scoped stale sweep by device keys (Option A) or rely on periodic auto-rebuild / manual rebuild (current)
+- **Effort:** M | **Risk:** Medium
 
 ---
 

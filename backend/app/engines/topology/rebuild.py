@@ -122,18 +122,20 @@ async def _load_inventory(
 ]:
     """Load every device + normalized row + application row (whole inventory).
 
-    The application layer is part of EVERY projection pass (ADR-0052 §5), and
-    this single loader reads ``applications`` AND ``application_dependencies``
-    together — both or neither — so a rebuild can never sweep one side's valid
-    graph elements because only the other was loaded.
+    Delegates to the shared Wave 5 loader so rebuild and discovery-sync cannot
+    drift. The application layer is part of EVERY projection pass (ADR-0052 §5).
     """
-    devices = list((await session.execute(select(Device))).scalars())
-    interfaces = list((await session.execute(select(NormalizedInterfaceRow))).scalars())
-    routes = list((await session.execute(select(NormalizedRouteRow))).scalars())
-    neighbors = list((await session.execute(select(NormalizedNeighborRow))).scalars())
-    applications = list((await session.execute(select(Application))).scalars())
-    dependencies = list((await session.execute(select(ApplicationDependency))).scalars())
-    return devices, interfaces, routes, neighbors, applications, dependencies
+    from app.engines.topology.inventory_load import load_inventory
+
+    bundle = await load_inventory(session, device_ids=None)
+    return (
+        bundle.devices,
+        bundle.interfaces,
+        bundle.routes,
+        bundle.neighbors,
+        bundle.applications,
+        bundle.application_dependencies,
+    )
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

@@ -133,5 +133,5 @@ Coordinate scheduling with P4-W3 (compliance reporting UI) to avoid churn.
 | 2 | ✅ Merged (PR #141) |
 | 3 | ✅ Merged (PR #158) |
 | 4 | ✅ Merged (PR #159 / #160) |
-| 5 | 🔄 In progress on `fix/review-wave5` — T1,T3,T5–T15 shipped; **T2 + T4 remaining** (spec-review tasks) |
+| 5 | 🔄 On `fix/review-wave5` — T1–T15 shipped (chord fan-out + delta projection included) |
 | 6–7 | Pending — user calls each wave |
