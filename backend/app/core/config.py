@@ -171,6 +171,25 @@ class Settings(BaseSettings):
     #: the historical baked-in choice so unset deployments are unchanged.
     llm_local_model: str = "llama3.1:8b"
 
+    #: Per-call LLM HTTP timeout in seconds (Wave 5 / perf #11). Applies to
+    #: Ollama and Anthropic clients; ``0`` means provider default (not recommended
+    #: in production — wedged providers should fail bounded).
+    llm_call_timeout_seconds: float = Field(default=120.0, ge=0)
+
+    #: Ollama ``num_ctx`` context window for chat models (Wave 5).
+    ollama_num_ctx: int = Field(default=8192, ge=512, le=131072)
+
+    #: Ollama ``keep_alive`` model residency hint (Wave 5), e.g. ``"5m"`` or ``"-1"``.
+    ollama_keep_alive: str = "5m"
+
+    #: Max characters of a ToolMessage body re-sent in the ReAct loop (Wave 5).
+    #: Oversized tool outputs are truncated with a marker so prompts stay bounded.
+    agent_tool_output_max_chars: int = Field(default=8000, ge=256)
+
+    #: Max conversation turns (user/assistant/tool message groups) kept in the
+    #: ReAct window before older messages are dropped (Wave 5).
+    agent_history_max_turns: int = Field(default=40, ge=4)
+
     #: Allowed browser origins; set via a JSON list, e.g. ``["https://ops.example.com"]``.
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
