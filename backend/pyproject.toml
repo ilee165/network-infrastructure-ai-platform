@@ -236,8 +236,11 @@ markers = [
 
 # ---------------------------------------------------------------------------
 # Module boundaries (REPO-STRUCTURE §3.3). The full six-contract set is wired
-# (AR-W0-T1); see REPO-STRUCTURE §9 "Import-linter status" for the as-built
-# note.
+# (AR-W0-T1), plus additional narrow contracts closing §3.2-row edges the
+# layer-tier ordering can't structurally catch (PR #159 review: app.plugins ->
+# app.db/app.models, app.engines -> app.llm, app.llm -> app.db,
+# app.agents.framework -> app.plugins, and specialists -> app.knowledge). See
+# REPO-STRUCTURE §9 "Import-linter status" for the as-built note.
 # ---------------------------------------------------------------------------
 [tool.importlinter]
 root_package = "app"
@@ -273,13 +276,13 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "app.plugins does not import app.agents (REPO-STRUCTURE §3.3 contract 1, §3.2 rows 6-7)"
+name = "app.plugins does not import app.agents, app.db, or app.models (REPO-STRUCTURE §3.3 contract 1, §3.2 row 6)"
 type = "forbidden"
 source_modules = ["app.plugins"]
-forbidden_modules = ["app.agents"]
+forbidden_modules = ["app.agents", "app.db", "app.models"]
 
 [[tool.importlinter.contracts]]
-name = "app.agents specialists (excluding framework) do not reach engines/services/plugins/models/db directly (REPO-STRUCTURE §3.3 contract 2, §3.2 row 11)"
+name = "app.agents specialists (excluding framework) do not reach engines/services/plugins/models/db/knowledge directly (REPO-STRUCTURE §3.3 contract 2, §3.2 row 11)"
 type = "forbidden"
 source_modules = [
     "app.agents.automation",
@@ -296,6 +299,7 @@ source_modules = [
 forbidden_modules = [
     "app.db",
     "app.engines",
+    "app.knowledge",
     "app.models",
     "app.plugins",
     "app.services",
@@ -347,16 +351,41 @@ ignore_imports = [
     "app.agents.automation.agent -> app.services.audit.service",
     "app.agents.automation.agent -> app.services.change_requests",
     "app.agents.troubleshooting.tools -> app.services.credentials",
+    # Pre-existing direct app.knowledge reads (graph client + topology-impact
+    # helpers) in the troubleshooting tool wrappers, ahead of the same read
+    # facade.
+    # burn-down: AR-W2-T2 (agent read-facade)
+    "app.agents.troubleshooting.tools -> app.knowledge",
+    "app.agents.troubleshooting.tools -> app.knowledge.schema",
+    "app.agents.troubleshooting.tools -> app.knowledge.topology_read",
 ]
 # No new entries may be added to this allowlist without updating this
 # contract (and its REPO-STRUCTURE §3.3 contract-2 description) — new
 # agents -> engines/services/plugins/models/db edges are real violations.
 
 [[tool.importlinter.contracts]]
-name = "app.engines only reaches plugins via the registry, never a vendor package (REPO-STRUCTURE §3.3 contract 3, §3.2 row 9)"
+name = "app.engines only reaches plugins via the registry, never a vendor package or the llm layer (REPO-STRUCTURE §3.3 contract 3, §3.2 row 9)"
 type = "forbidden"
 source_modules = ["app.engines"]
-forbidden_modules = ["app.plugins.vendors"]
+forbidden_modules = ["app.llm", "app.plugins.vendors"]
+
+[[tool.importlinter.contracts]]
+# Partial row 4 coverage: this closes only the app.llm -> app.db edge PR #159
+# review confirmed has zero live imports. app.llm -> app.models is a SEPARATE,
+# already-live violation of the same row (llm/runtime_settings.py:31) and is
+# intentionally NOT covered here — see the debt note in the PR body/REPO-
+# STRUCTURE §9 rather than silently allowlisting it in a contract named as if
+# it enforced the full row.
+name = "app.llm does not import app.db (REPO-STRUCTURE §3.2 row 4, partial)"
+type = "forbidden"
+source_modules = ["app.llm"]
+forbidden_modules = ["app.db"]
+
+[[tool.importlinter.contracts]]
+name = "app.agents.framework does not import app.plugins directly (REPO-STRUCTURE §3.2 row 10)"
+type = "forbidden"
+source_modules = ["app.agents.framework"]
+forbidden_modules = ["app.plugins"]
 
 [[tool.importlinter.contracts]]
 name = "app.plugins.vendors.* packages are mutually independent (REPO-STRUCTURE §3.3 contract 5, §3.2 row 7, D6)"

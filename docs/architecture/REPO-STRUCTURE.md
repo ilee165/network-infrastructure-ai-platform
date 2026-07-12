@@ -616,7 +616,7 @@ noted. Other agents must build against the **as-built** column.
 | A6 | `deploy/docker/.env.example` | `.env.example` at the repo root (compose reads it via `env_file: ../../.env` and `--env-file .env` from the repo root) | **RATIFIED** |
 | A7 | `LICENSE` at repo root (P1) | Absent — license choice still open via `docs/consultant/QUESTIONS.md` | **OPEN** — add once the license is decided |
 
-Import-linter status: `backend/pyproject.toml` now wires the full section 3.3 six-contract set
+Import-linter status: `backend/pyproject.toml` wires the full section 3.3 six-contract set
 (AR-W0-T1) — contracts 1-5 as `forbidden`/`independence` contracts (contract 4's core
 forbidden-modules list extended to `app.agents`/`app.llm`/`app.plugins`/`app.schemas` alongside
 the pre-existing `app.api`/`app.db`/`app.main`/`app.models`/`app.workers`) plus contract 6 as a
@@ -629,6 +629,24 @@ table forbids narrowly but that the coarser layers/forbidden contracts cannot cl
 without over- or under-enforcing are named in per-edge `ignore_imports` allowlists with inline
 comments (burn-down references where applicable); see the contracts themselves for the current
 list.
+
+PR #159 review (post-AR-W0-T1) found the layer-tier ordering structurally hides several row-level
+edges the six-contract set doesn't separately enforce — a higher layer importing a lower one
+passes the `layers` contract even when section 3.2's per-row MUST-NOT column forbids that specific
+edge. Four narrow additional `forbidden` contracts close the confirmed, zero-live-import gaps:
+`app.plugins -> app.db`/`app.models` (row 6, folded into contract 1), `app.engines -> app.llm`
+(row 9, folded into contract 3), `app.llm -> app.db` (row 4, partial — see below), and
+`app.agents.framework -> app.plugins` (row 10, new contract). Contract 2 was also extended to
+forbid specialists reaching `app.knowledge` directly (row 11), with matching `ignore_imports`
+entries for four pre-existing `app.agents.troubleshooting.tools` reads (same AR-W2-T2 read-facade
+burn-down as its other allowlisted edges).
+
+Two edges in this same hidden class remain **open, not contracted here**: `app.llm ->
+app.models` (row 4 — `app/llm/runtime_settings.py` reads `SystemSetting` directly; live today) and
+`app.api -> app.models` (row 12 — live in 17+ `app/api/v1/*` files). Both were flagged as
+non-blocking, mention-only debt during the PR #159 review rather than fixes to land in this wave;
+closing them needs a deliberate `ignore_imports`/allowlist decision like the ones already made
+above, not a silent contract addition. Tracked here so they don't stay invisible.
 
 ---
 
