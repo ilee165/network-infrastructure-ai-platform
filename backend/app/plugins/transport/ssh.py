@@ -25,6 +25,7 @@ import contextlib
 import hashlib
 import logging
 import re
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import TracebackType
@@ -36,6 +37,10 @@ from netmiko.exceptions import NetmikoBaseException, SSHException
 from app.core.errors import PluginError
 
 logger = logging.getLogger(__name__)
+
+#: Serializes the paramiko MissingHostKeyPolicy monkey-patch window so concurrent
+#: SSH opens cannot cross-apply one host's pin policy to another (PR #158 re-review).
+_PIN_POLICY_LOCK = threading.Lock()
 
 try:
     import paramiko  # type: ignore[import-untyped]
@@ -340,13 +345,16 @@ class SshTransport:
             self._raise_if_tcl_failed("stage config", stage_out)
 
             # Integrity: anchored token avoids hostname digits in prompt echoes (B3).
-            # Do not echo the full config body (false-positive error markers — F3).
+            # F3: do NOT ``set body [read $f]`` then print length — interactive
+            # tclsh echoes the result of ``set``, i.e. the entire staged config,
+            # and error-marker scan would false-abort on banners containing
+            # "syntax error" / "permission denied". Nested read is not separately
+            # echoed; only the NETOPS-LEN line is printed.
             size_cmds = [
                 "do tclsh",
                 f'set f [open "{staged}" r]',
-                "set body [read $f]",
+                'puts "NETOPS-LEN=[string length [read $f]]"',
                 "close $f",
-                'puts "NETOPS-LEN=[string length $body]"',
                 "tclquit",
             ]
             size_out = connection.send_config_set(size_cmds, read_timeout=timeout)
@@ -437,10 +445,20 @@ class SshTransport:
         return chunks
 
     def _raise_if_tcl_failed(self, action: str, output: str) -> None:
-        """Fail closed on tclsh/IOS error text before configure replace."""
-        lowered = output.lower()
+        """Fail closed on tclsh/IOS error text before configure replace.
+
+        Ignores lines that look like echoed ``puts $fd "…"`` stage commands so a
+        config banner containing e.g. ``permission denied`` does not false-abort
+        the stage (F3 residual on stage_out; size path uses NETOPS-LEN only).
+        """
+        scan_lines = [
+            line
+            for line in output.splitlines()
+            if "puts $fd" not in line and "puts -nonewline $fd" not in line
+        ]
+        lowered = "\n".join(scan_lines).lower()
         if any(marker in lowered for marker in _TCL_ERROR_MARKERS):
-            snippet = output.strip().splitlines()[0][:200] if output.strip() else "(empty)"
+            snippet = (next((ln.strip() for ln in scan_lines if ln.strip()), "(empty)"))[:200]
             raise SshTransportError(
                 f"SSH {action} failed for {self._params.host}:{self._params.port} "
                 f"(device_type={self._params.device_type!r}): tclsh error "
@@ -580,7 +598,11 @@ class _PinnedHostKeyPolicy:
 
 @contextlib.contextmanager
 def _pinned_host_key_policy(fingerprint: str | None) -> Any:
-    """While *fingerprint* is set, force paramiko clients to use the pin policy."""
+    """While *fingerprint* is set, force paramiko clients to use the pin policy.
+
+    Holds :data:`_PIN_POLICY_LOCK` for the connect window so concurrent sessions
+    cannot cross-apply pins (fail-closed flaky-connect under discovery fan-out).
+    """
     if not fingerprint or paramiko is None:
         yield
         return
@@ -591,11 +613,12 @@ def _pinned_host_key_policy(fingerprint: str | None) -> Any:
         # Ignore netmiko's Reject/AutoAdd choice; pin policy is authoritative.
         original(self, policy)
 
-    paramiko.SSHClient.set_missing_host_key_policy = _install
-    try:
-        yield
-    finally:
-        paramiko.SSHClient.set_missing_host_key_policy = original
+    with _PIN_POLICY_LOCK:
+        paramiko.SSHClient.set_missing_host_key_policy = _install
+        try:
+            yield
+        finally:
+            paramiko.SSHClient.set_missing_host_key_policy = original
 
 
 def _fingerprint_from_paramiko_key(key: Any) -> str | None:

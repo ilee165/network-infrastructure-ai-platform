@@ -126,6 +126,11 @@ class FakeConnection:
                 if cmd.startswith("puts $fd "):
                     total += 1  # puts adds trailing newline
             self.staged_plain_len = total
+            # Echo stage commands like interactive tclsh (F3 residual surface:
+            # marker text inside puts payloads must not false-abort).
+            if self.config_set_output != "configured":
+                return self.config_set_output
+            return "\n".join(config_commands)
         if "string length" in joined or "NETOPS-LEN=" in joined:
             if self._force_size_output is not None:
                 # Preserve anchored-token shape when forcing a bad length.
@@ -242,6 +247,20 @@ class TestSshTransportSession:
         assert presented is not None
         with SshTransport(make_params(host_key_fingerprint=presented)):
             pass
+
+    def test_pin_policy_lock_serializes_monkey_patch_window(self) -> None:
+        """Re-review item 2: pin policy install/restore holds the process lock."""
+        from app.plugins.transport.ssh import _PIN_POLICY_LOCK, _pinned_host_key_policy
+
+        # Without a fingerprint the lock is not taken (no-op path).
+        with _pinned_host_key_policy(None):
+            assert _PIN_POLICY_LOCK.acquire(blocking=False)
+            _PIN_POLICY_LOCK.release()
+        # With a fingerprint the lock is held for the connect window.
+        with _pinned_host_key_policy("SHA256:deadbeef"):
+            assert not _PIN_POLICY_LOCK.acquire(blocking=False)
+        assert _PIN_POLICY_LOCK.acquire(blocking=False)
+        _PIN_POLICY_LOCK.release()
 
     def test_pinned_fingerprint_mismatch_rejected(self, fake_netmiko: FakeConnectHandler) -> None:
         with (
@@ -367,6 +386,34 @@ class TestSshConfigWrite:
         assert "\\$variable" in stage
         assert "\\[brackets\\]" in stage
         assert '\\"' in stage
+
+    def test_replace_config_f3_banner_markers_do_not_false_abort(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        """F3: error-marker text inside staged config/puts echoes must not abort.
+
+        FakeConnection echoes stage commands (including ``puts $fd "…"`` lines).
+        Without the puts-line filter + nested NETOPS-LEN read, banners containing
+        "permission denied" / "syntax error" would false-abort before replace.
+        """
+        banner_lines = [
+            "banner motd ^CAccess denied: permission denied for guests^C",
+            "banner login ^CInvalid login may cause syntax error messages^C",
+            "hostname edge-01",
+        ]
+        fake_netmiko.connection.outputs["configure replace flash:netops-rollback.cfg force"] = (
+            "applied"
+        )
+        with SshTransport(make_params()) as transport:
+            output = transport.replace_config(banner_lines)
+        assert output == "applied"
+        issued = [command for command, _timeout in fake_netmiko.connection.commands]
+        assert "configure replace flash:netops-rollback.cfg force" in issued
+        # Size path must not ``set body [read $f]`` (would echo full config into scan).
+        size = fake_netmiko.connection.config_sets[1]
+        size_joined = "\n".join(size)
+        assert "set body" not in size_joined
+        assert "NETOPS-LEN=[string length [read $f]]" in size_joined
 
     def test_replace_config_tcl_error_fails_closed_before_apply(
         self, fake_netmiko: FakeConnectHandler

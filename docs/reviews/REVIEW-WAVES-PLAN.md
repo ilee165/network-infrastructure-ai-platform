@@ -70,12 +70,14 @@ Point fixes, each independently committable; one PR.
 
 | ID | Status |
 |----|--------|
-| **C2** | 🔄 JunOS Option A landed; review blockers B1/B6 addressed in follow-up fix (per-step rollback check, exit config after `commit confirmed`) — re-verify at final HEAD |
-| **C3** | 🔄 Escaped staging + fail-closed; B2/B3 addressed (parity-aware chunks, `NETOPS-LEN=` token) — re-verify at final HEAD |
-| **H7** | 🔄 Default strict + pin; B4/B5 + prod gate: shared `ssh_params_from` on all SSH open sites, handshake pin policy, `NETOPS_SSH_STRICT` rejected in production |
+| **C2** | 🔄 JunOS Option A + B1/B6 review fixes (per-step rollback check, exit after `commit confirmed`) — re-verify at final HEAD |
+| **C3** | 🔄 Escaped staging + B2/B3/F3 (parity-aware chunks, `NETOPS-LEN=` without body echo, stage marker scan skips `puts` echoes) — re-verify at final HEAD |
+| **H7** | 🔄 Default strict + pin; B4/B5 + prod gate; pin-policy connect window serialized — re-verify at final HEAD |
 | **AR-W2-T1 / H8** | ✅ `cli_common` base + refits: cisco_ios, cisco_iosxe, eos, cisco_nxos, junos |
 
-Exit: merge when final HEAD re-verification green; `graphify update .` after merge. Known follow-ups tracked in PR review (F1 live-lab JunOS, F10 EOS/NX-OS staging surface, known_hosts chart mount).
+Exit: merge when final HEAD re-verification green; `graphify update .` after merge.
+
+**Named follow-ups (do not evaporate):** F1 live-lab JunOS `load … terminal` via channel expect; F2 control-byte (`0x03`) escape in Tcl stage; F5 `textfsm_helpers` refit or descope; F6 import-linter `app.plugins` boundary contract; F7 document confirm-hook / detail-string divergences; F8 timer-expiry races on verify+confirm; F9 opt-out `caplog` + RejectPolicy fake tests; F10 EOS/NX-OS non-`tclsh` restore surface; chart/compose `known_hosts` mount + first-connect capture.
 
 ## Wave 4 — Drift gates (AR-W0 / AR-W1)
 

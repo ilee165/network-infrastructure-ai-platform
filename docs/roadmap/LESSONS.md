@@ -202,13 +202,69 @@ with a major bump.
 
 ---
 
+## Transport / device CLI (Wave 3)
+
+### L-XPORT-1 — String-recording fakes cannot certify device-mode or handshake semantics
+
+**Bit us:** Wave 3 (PR #158) shipped JunOS `commit confirmed` and SSH host-key
+pins that looked green under unit fakes which only record command strings.
+Review then found:
+
+- **Mode contradiction (B6):** transport stayed in config mode after
+  `commit confirmed` while verify-after used operational `show` → every real
+  write would false-fail and permanent-rollback a good change.
+- **Post-auth pin (B5):** fingerprint checked after `ConnectHandler` returned,
+  so password already went to a possibly-substituted host; pin also could not
+  satisfy `ssh_strict=True` without known_hosts.
+- **Rollback confirm hazard (B1):** bare `commit` after failed `rollback N`
+  permanently confirms the bad tentative config — joined-output fail check
+  runs too late.
+- **Integrity parse / echo (B3/F3):** free-floating digit parse picks hostname
+  digits; `set body [read $f]` echoes the whole config into the error-marker
+  scanner.
+
+**Why:** Fakes that only assert ordered strings cannot model CLI mode, SSH
+handshake phases, concurrent monkey-patches, or device echo of intermediate
+`set` results. The same epistemic gap let original C2 (no-op commit) ship
+behind green plugin suites.
+
+**Rule:**
+
+1. For multi-mode CLI (JunOS candidate / Cisco config): **pin exit/re-enter**
+   in the transport and test with a **mode-tracking fake** that rejects
+   operational commands while in config mode (or vice versa).
+2. For host-key / auth: prefer **handshake-time** policy (pin as
+   `MissingHostKeyPolicy`) over post-connect checks; if you must monkey-patch
+   a global client method, **serialize the window** (lock) and document residual
+   concurrency risk until per-client injection exists.
+3. Multi-step device sequences that can finalize state (`commit`, `configure
+   replace`): **check each step before the next** — never join outputs and
+   fail only at the end.
+4. Device-side integrity / error scans: use **anchored tokens**
+   (`NETOPS-LEN=N`); never `matches[-1]` on free digits; never
+   `set body [read file]` then scan that echo for error markers — nest the
+   read or use `file size` so the config body is not re-echoed into the scan
+   surface.
+5. Do not claim a review finding “fixed” in a code comment unless the
+   intermediate echo / scan path is actually gone.
+
+**Hits next:** Any new vendor write transport, restore staging path, or SSH
+open site; containerlab / live-lab verification before declaring
+hardware-closed (F1).
+
+**Evidence:** PR #158 re-review (`d8403a3` + follow-up); `docs/reviews/WAVE3-PLAN.md`
+exit criteria; `backend/app/plugins/transport/{ssh,junos_ssh,ssh_params}.py`.
+
+---
+
 ## Related
 
 | Doc | Scope |
 |---|---|
-| `CLAUDE.md` § Orchestrated builds / Build & runtime | Standing agent rules (includes L-FE-1 / L-IMG-1 one-liners) |
+| `CLAUDE.md` § Orchestrated builds / Build & runtime | Standing agent rules (includes L-FE-1 / L-IMG-1 / L-XPORT-1 one-liners) |
 | `P1-W4-LESSONS.md` | Helm/K8s GA chart wave (L1–L8) |
 | `docs/security/image-supply-chain.md` | Trivy / SBOM / cosign / admission controls |
 | `docs/security/supply-chain-scanning.md` | Lockfile gate + Dependabot triage (L-DEP-1) |
 | `deploy/docker/frontend.Dockerfile` | `apk upgrade` cache-bust comment mechanism |
 | `docs/reviews/WAVE2-PLAN.md` / PR #141 | Source of L-ASYNC-1 … L-TEST-1 |
+| `docs/reviews/WAVE3-PLAN.md` / PR #158 | Source of L-XPORT-1 |
