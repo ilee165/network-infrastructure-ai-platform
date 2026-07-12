@@ -414,6 +414,7 @@ class TestDiscoveryRoleMatrix:
             "/api/v1/discovery/runs", json=_discovery_payload(), headers=auth_headers("engineer")
         )
         assert resp.status_code == 202
+        assert len(sent_tasks) == 1
 
     async def test_operator_one_tier_below_engineer_is_403(
         self,
