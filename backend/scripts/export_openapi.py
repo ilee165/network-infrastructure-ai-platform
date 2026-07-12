@@ -11,9 +11,17 @@ This module exports :func:`app.main.create_app`'s schema via ``FastAPI.openapi()
 — a pure schema-generation call. It does **not** trigger the app's ``lifespan``
 (no DB/Redis/Neo4j/KMS connections are opened): ``lifespan`` only runs on actual
 ASGI startup (``TestClient``/``uvicorn``), never on bare ``FastAPI()``
-construction or a direct ``.openapi()`` call, so a default (env-var-free)
+construction or a direct ``.openapi()`` call, so a default
 :class:`~app.core.config.Settings` is enough to build the app and export its
-schema in CI with no live infra.
+schema in CI with no live infra. Note this is NOT env-var-free: ``Settings()``
+still reads ``NETOPS_*`` process env vars and a ``.env`` file per its normal
+``pydantic-settings`` construction — a malformed value (e.g. non-JSON
+``NETOPS_CORS_ORIGINS``) makes the export crash, not silently drift. What *is*
+true is that no ``Settings`` **value** changes the exported schema shape today
+(router inclusion, title, and version in ``create_app`` are unconditional) —
+that invariant is what determinism actually rests on, and it would need
+revisiting if ``create_app`` ever grows settings-conditional route
+registration (e.g. an OIDC-gated route set).
 
 Output is a single JSON file with ``sort_keys=True`` and a trailing newline, so
 re-running the export twice from the same code produces a byte-identical file —
@@ -54,8 +62,9 @@ def export_schema() -> dict[str, Any]:
 
     A fresh :class:`~fastapi.FastAPI` instance is used (not the module-level
     ``app.main.app`` singleton) so the export never depends on process-local
-    ``get_settings()`` caching or on any environment the CI runner happens to
-    have set.
+    ``get_settings()`` caching. ``Settings()`` itself still reads process env /
+    ``.env`` (see the module docstring) — the schema SHAPE is what's
+    environment-independent, not the construction call.
     """
     app = create_app(Settings())
     schema: dict[str, Any] = app.openapi()
