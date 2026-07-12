@@ -54,7 +54,7 @@ from typing import Any, cast
 from uuid import UUID
 
 import structlog
-from celery import group
+from celery import chord, group
 from pydantic import ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -97,7 +97,12 @@ from app.schemas.normalized import NormalizedNeighbor
 from app.services import audit, credentials
 from app.workers.celery_app import celery_app
 
-__all__ = ["collect_device", "purge_expired_artifacts", "run_discovery"]
+__all__ = [
+    "collect_device",
+    "continue_discovery_wave",
+    "purge_expired_artifacts",
+    "run_discovery",
+]
 
 logger = structlog.get_logger(__name__)
 
@@ -458,13 +463,17 @@ def _collect_over_snmp(
 
 
 @celery_app.task(
+    bind=True,
     name="discovery.collect_device",
     autoretry_for=(SshTransportError, SnmpTransportError),
     max_retries=2,
     retry_backoff=True,
 )
 def collect_device(
-    run_id: str, target_ip: str, credential_name: str | None = None
+    self: Any,
+    run_id: str,
+    target_ip: str,
+    credential_name: str | None = None,
 ) -> dict[str, Any]:
     """Contact *target_ip*, detect its vendor, collect, and persist.
 
@@ -472,7 +481,9 @@ def collect_device(
     ``neighbors`` (serialized :class:`NormalizedNeighbor` records the run
     orchestrator expands from), ``capability_errors``, and per-type upsert
     ``counts``. Raises the last transport error when the device was never
-    reached over any protocol so Celery retries it (transient failure).
+    reached so Celery retries it (transient failure). After retries are
+    exhausted, returns ``ok=False`` instead of raising so a wave **chord**
+    still completes with partial results (Wave 5 / perf #2).
     """
     run_uuid = uuid.UUID(run_id)
     creds, device_id, preferred_vendor = asyncio.run(
@@ -511,6 +522,17 @@ def collect_device(
                 target_ip=target_ip,
                 error_type=type(transient).__name__,
             )
+            # Chord-safe: after the last retry, fold into ok=False so the wave
+            # callback still runs (Wave 5).
+            max_retries = int(getattr(self, "max_retries", 0) or 0)
+            retries = int(getattr(getattr(self, "request", None), "retries", 0) or 0)
+            if retries >= max_retries:
+                return {
+                    "ok": False,
+                    "target_ip": target_ip,
+                    "error": f"{type(transient).__name__}: {transient}",
+                    "neighbors": [],
+                }
             raise transient
         error = "; ".join(failures) or "no usable credentials configured for this run"
         logger.warning("discovery.device_failed", run_id=run_id, target_ip=target_ip, error=error)
@@ -596,30 +618,186 @@ async def _finish_run(
         await session.commit()
 
 
-def _dispatch_wave(run_id: str, wave: list[str]) -> list[dict[str, Any]]:
-    """Fan one wave out as a Celery group and gather per-device summaries.
+def _normalize_wave_results(
+    raw_results: list[Any], wave: list[str]
+) -> list[dict[str, Any]]:
+    """Fold chord/group header results into per-device summaries.
 
-    A child task that exhausted its retries surfaces here as an exception;
-    it is folded into an ``ok=False`` summary so one dead device degrades
-    the run to ``partial`` instead of aborting it.
+    Children that still raise (or return ExceptionInfo) become ``ok=False`` so
+    one dead device degrades the run to ``partial`` instead of aborting it.
     """
-    job = group(collect_device.s(run_id, target) for target in wave)
-    group_result = job.apply_async()
     results: list[dict[str, Any]] = []
-    for target, child in zip(wave, group_result.results, strict=True):
-        try:
-            results.append(child.get(disable_sync_subtasks=False))
-        except Exception as exc:
-            # Transport errors carry coordinates + exception class only (D11).
+    # Chord may pass fewer/more if a member was revoked; zip to wave length.
+    padded: list[Any] = list(raw_results) if raw_results is not None else []
+    while len(padded) < len(wave):
+        padded.append(None)
+    for target, item in zip(wave, padded, strict=False):
+        if isinstance(item, dict) and "ok" in item:
+            results.append(item)
+            continue
+        if isinstance(item, BaseException):
             results.append(
                 {
                     "ok": False,
                     "target_ip": target,
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": f"{type(item).__name__}: {item}",
                     "neighbors": [],
                 }
             )
+            continue
+        # Celery ExceptionInfo / unexpected shapes
+        results.append(
+            {
+                "ok": False,
+                "target_ip": target,
+                "error": f"wave_member_failed: {type(item).__name__}: {item!r}",
+                "neighbors": [],
+            }
+        )
     return results
+
+
+def _finalize_discovery_run(
+    run_id: str,
+    stats: dict[str, Any],
+    *,
+    started_monotonic: float,
+) -> dict[str, Any]:
+    """Terminal status, metrics, topology trigger — shared by chord body."""
+    run_uuid = uuid.UUID(run_id)
+    if stats["devices_succeeded"] == 0:
+        status = DiscoveryRunStatus.FAILED
+        error: str | None = "no device could be discovered"
+    elif stats["devices_failed"] > 0:
+        status = DiscoveryRunStatus.PARTIAL
+        error = None
+    else:
+        status = DiscoveryRunStatus.SUCCEEDED
+        error = None
+    asyncio.run(_finish_run(run_uuid, status, stats, error))
+    metrics.observe_discovery_run(
+        status=status.value, duration_seconds=time.monotonic() - started_monotonic
+    )
+    logger.info("discovery.run_finished", run_id=run_id, status=status.value)
+    if status is not DiscoveryRunStatus.FAILED:
+        _trigger_topology_sync(run_id)
+    return {"run_id": run_id, "status": status.value, "stats": stats}
+
+
+def _enqueue_discovery_wave(
+    run_id: str,
+    wave: list[str],
+    *,
+    hop: int,
+    visited: list[str],
+    stats: dict[str, Any],
+    plan: dict[str, Any],
+    started_monotonic: float,
+) -> dict[str, Any]:
+    """Dispatch one wave as a Celery chord (Wave 5 / perf #2).
+
+    Header = per-device ``collect_device`` group; body =
+    :func:`continue_discovery_wave` which either expands the next hop or
+    finalizes the run. The orchestrator task **does not** ``.get()`` on
+    children — it only schedules the chord, freeing the worker slot while
+    collection runs. Under ``task_always_eager`` the chord runs inline and
+    this function returns the body's final result for unit tests.
+    """
+    if not wave:
+        return _finalize_discovery_run(run_id, stats, started_monotonic=started_monotonic)
+
+    header = group(collect_device.s(run_id, target) for target in wave)
+    body = continue_discovery_wave.s(
+        run_id,
+        hop,
+        list(visited),
+        stats,
+        plan,
+        list(wave),
+        started_monotonic,
+    )
+    async_result = chord(header)(body)
+    if celery_app.conf.task_always_eager:
+        # Eager tests: resolve the full cascade synchronously for assertable
+        # return values; production never blocks the orchestrator on children.
+        return cast("dict[str, Any]", async_result.get(disable_sync_subtasks=True))
+    return {
+        "run_id": run_id,
+        "status": DiscoveryRunStatus.RUNNING.value,
+        "dispatched_wave": hop,
+        "targets": list(wave),
+    }
+
+
+@celery_app.task(name="discovery.continue_wave")
+def continue_discovery_wave(
+    results: list[Any],
+    run_id: str,
+    hop: int,
+    visited: list[str],
+    stats: dict[str, Any],
+    plan: dict[str, Any],
+    wave: list[str],
+    started_monotonic: float,
+) -> dict[str, Any]:
+    """Chord body: fold one wave's results, expand or finalize (Wave 5).
+
+    Signature is Celery-chord style: the header results list is the first
+    positional argument, then the bound continuation state.
+    """
+    run_uuid = uuid.UUID(run_id)
+    hop_limit = int(plan["hop_limit"])
+    allowlist = list(plan["allowlist"])
+    normalized = _normalize_wave_results(results, wave)
+    visited_set = set(visited)
+    visited_set.update(wave)
+
+    succeeded = [r for r in normalized if r.get("ok")]
+    failed = [r for r in normalized if not r.get("ok")]
+    stats = copy.deepcopy(stats)
+    stats["devices_succeeded"] = int(stats.get("devices_succeeded", 0)) + len(succeeded)
+    stats["devices_failed"] = int(stats.get("devices_failed", 0)) + len(failed)
+    waves = list(stats.get("waves") or [])
+    waves.append(
+        {
+            "hop": hop,
+            "targets": list(wave),
+            "succeeded": len(succeeded),
+            "failed": len(failed),
+        }
+    )
+    stats["waves"] = waves
+    asyncio.run(_record_stats(run_uuid, stats))
+    logger.info(
+        "discovery.wave_completed",
+        run_id=run_id,
+        hop=hop,
+        targets=len(wave),
+        succeeded=len(succeeded),
+        failed=len(failed),
+    )
+
+    if hop >= hop_limit:
+        return _finalize_discovery_run(run_id, stats, started_monotonic=started_monotonic)
+
+    neighbors = [
+        NormalizedNeighbor.model_validate(item)
+        for summary in succeeded
+        for item in summary.get("neighbors", [])
+    ]
+    next_targets = next_wave(neighbors, visited_set, allowlist)
+    if not next_targets:
+        return _finalize_discovery_run(run_id, stats, started_monotonic=started_monotonic)
+
+    return _enqueue_discovery_wave(
+        run_id,
+        next_targets,
+        hop=hop + 1,
+        visited=sorted(visited_set),
+        stats=stats,
+        plan=plan,
+        started_monotonic=started_monotonic,
+    )
 
 
 @celery_app.task(name="discovery.run")
@@ -630,6 +808,11 @@ def run_discovery(run_id: str) -> dict[str, Any]:
     ``hop < hop_limit`` using the LLDP/CDP neighbor addresses returned by the
     wave's ``collect_device`` tasks, deduplicated against visited targets and
     bounded by the subnet allowlist (:func:`next_wave`).
+
+    Wave 5 / perf #2: fan-out uses Celery **chords** so this orchestrator does
+    not hold a worker pool slot while children run (no blocking
+    ``.get(disable_sync_subtasks=False)``). Continuation lives in
+    :func:`continue_discovery_wave`.
     """
     run_uuid = uuid.UUID(run_id)
     started_monotonic = time.monotonic()
@@ -641,68 +824,17 @@ def run_discovery(run_id: str) -> dict[str, Any]:
         return {"run_id": run_id, "status": DiscoveryRunStatus.FAILED.value}
     logger.info("discovery.run_started", run_id=run_id, seeds=plan.seeds, hop_limit=plan.hop_limit)
 
-    visited: set[str] = set()
-    wave = list(plan.seeds)
-    hop = 0
+    plan_dict = plan.model_dump(mode="json")
     stats: dict[str, Any] = {"waves": [], "devices_succeeded": 0, "devices_failed": 0}
-    while wave:
-        results = _dispatch_wave(run_id, wave)
-        visited.update(wave)
-        succeeded = [r for r in results if r.get("ok")]
-        failed = [r for r in results if not r.get("ok")]
-        stats["devices_succeeded"] += len(succeeded)
-        stats["devices_failed"] += len(failed)
-        stats["waves"].append(
-            {
-                "hop": hop,
-                "targets": list(wave),
-                "succeeded": len(succeeded),
-                "failed": len(failed),
-            }
-        )
-        asyncio.run(_record_stats(run_uuid, stats))
-        logger.info(
-            "discovery.wave_completed",
-            run_id=run_id,
-            hop=hop,
-            targets=len(wave),
-            succeeded=len(succeeded),
-            failed=len(failed),
-        )
-        if hop >= plan.hop_limit:
-            break
-        neighbors = [
-            NormalizedNeighbor.model_validate(item)
-            for summary in succeeded
-            for item in summary.get("neighbors", [])
-        ]
-        wave = next_wave(neighbors, visited, plan.allowlist)
-        hop += 1
-
-    if stats["devices_succeeded"] == 0:
-        status = DiscoveryRunStatus.FAILED
-        error: str | None = "no device could be discovered"
-    elif stats["devices_failed"] > 0:
-        status = DiscoveryRunStatus.PARTIAL
-        error = None
-    else:
-        status = DiscoveryRunStatus.SUCCEEDED
-        error = None
-    asyncio.run(_finish_run(run_uuid, status, stats, error))
-    # Discovery success-rate + duration SLI (ADR-0015 §2 / ADR-0046 §1): record the
-    # terminal status and the run wall-clock once the run is finished + committed.
-    metrics.observe_discovery_run(
-        status=status.value, duration_seconds=time.monotonic() - started_monotonic
+    return _enqueue_discovery_wave(
+        run_id,
+        list(plan.seeds),
+        hop=0,
+        visited=[],
+        stats=stats,
+        plan=plan_dict,
+        started_monotonic=started_monotonic,
     )
-    logger.info("discovery.run_finished", run_id=run_id, status=status.value)
-
-    # Project the refreshed inventory into Neo4j once the run has devices
-    # (SUCCEEDED or PARTIAL). The topology sync is fire-and-forget: it runs on
-    # its own queue and its failure never reflects back on this run's status
-    # (ADR-0005 failure isolation; the run is already finished + committed).
-    if status is not DiscoveryRunStatus.FAILED:
-        _trigger_topology_sync(run_id)
-    return {"run_id": run_id, "status": status.value, "stats": stats}
 
 
 def _trigger_topology_sync(run_id: str) -> None:

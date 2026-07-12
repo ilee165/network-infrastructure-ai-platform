@@ -489,13 +489,13 @@ def test_status_running_persisted_before_first_wave(
     )
 
     observed: list[DiscoveryRunStatus] = []
-    original = tasks._dispatch_wave
+    original = tasks._enqueue_discovery_wave
 
-    def _spy(run_id_str: str, wave: list[str]) -> list[dict[str, Any]]:
+    def _spy(*args: Any, **kwargs: Any) -> dict[str, Any]:
         observed.append(_fetch_run(db_url, run_id).status)
-        return original(run_id_str, wave)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(tasks, "_dispatch_wave", _spy)
+    monkeypatch.setattr(tasks, "_enqueue_discovery_wave", _spy)
     tasks.run_discovery.apply(args=[str(run_id)]).get()
 
     assert observed == [DiscoveryRunStatus.RUNNING]
@@ -547,9 +547,12 @@ def test_collect_device_gives_up_after_max_retries(
 
     result = tasks.collect_device.apply(args=[str(run_id), "10.0.0.1"])
 
-    assert result.state == "FAILURE"
-    with pytest.raises(SshTransportError):
-        result.get()
+    # Wave 5: after retries exhausted, return ok=False (chord-safe) rather than
+    # FAILURE so a discovery wave chord can still complete with partial results.
+    assert result.state == "SUCCESS"
+    payload = result.get()
+    assert payload["ok"] is False
+    assert "SshTransportError" in payload["error"]
     # initial attempt + max_retries(2) retries
     assert fakes.ssh_attempts["10.0.0.1"] == 3
     assert tasks.collect_device.max_retries == 2
