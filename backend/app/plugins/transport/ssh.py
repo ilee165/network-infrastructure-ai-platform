@@ -93,6 +93,9 @@ class SshParams:
     ``enable_secret`` triggers privileged-exec escalation when set.
     ``conn_timeout`` bounds session establishment; ``read_timeout`` bounds
     each command's output collection (seconds).
+    ``commit_confirmed_minutes`` is consumed only by
+    :class:`~app.plugins.transport.junos_ssh.JunosSshTransport` (JunOS
+    ``commit confirmed <N>``); Cisco-family ignore it.
     """
 
     host: str
@@ -103,6 +106,7 @@ class SshParams:
     enable_secret: str | None = None
     conn_timeout: float = 10.0
     read_timeout: float = 30.0
+    commit_confirmed_minutes: int = 2
 
     def __repr__(self) -> str:
         enable_secret = _REDACTED if self.enable_secret is not None else None
@@ -110,7 +114,8 @@ class SshParams:
             f"SshParams(host={self.host!r}, device_type={self.device_type!r}, "
             f"username={self.username!r}, password={_REDACTED!r}, port={self.port!r}, "
             f"enable_secret={enable_secret!r}, conn_timeout={self.conn_timeout!r}, "
-            f"read_timeout={self.read_timeout!r})"
+            f"read_timeout={self.read_timeout!r}, "
+            f"commit_confirmed_minutes={self.commit_confirmed_minutes!r})"
         )
 
 
@@ -199,7 +204,12 @@ class SshTransport:
         :meth:`replace_config`. Used only as the execution step of an approved
         ChangeRequest (the Automation Agent, Wave 4); the capability layer
         captures/verifies around it.
+
+        Refuses ``juniper_junos`` — that platform must use
+        :class:`~app.plugins.transport.junos_ssh.JunosSshTransport` via
+        :func:`make_ssh_transport` (Wave 3 C2).
         """
+        self._refuse_junos_write("send_config")
         connection = self._require_connection()
         try:
             output = connection.send_config_set(list(lines), read_timeout=self._params.read_timeout)
@@ -227,7 +237,10 @@ class SshTransport:
         device filesystem, then run ``configure replace <file> force``
         (force = non-interactive), and clean the staged file up. Output of the
         replace command is returned verbatim for the audit trail.
+
+        Refuses ``juniper_junos`` — use :class:`~app.plugins.transport.junos_ssh.JunosSshTransport`.
         """
+        self._refuse_junos_write("replace_config")
         connection = self._require_connection()
         candidate = "\n".join(lines)
         staged = "flash:netops-rollback.cfg"
@@ -257,6 +270,32 @@ class SshTransport:
                 "returned non-text output"
             )
         return output
+
+    def confirm_config(self) -> str:
+        """No-op finalize for Cisco-family (apply is already permanent).
+
+        Typed :class:`~app.plugins.base.ConfigWriteTransport` surface so a shared
+        lifecycle can call confirm after verify-after without capability sniffing.
+        JunOS overrides this on :class:`~app.plugins.transport.junos_ssh.JunosSshTransport`.
+        """
+        return ""
+
+    def rollback_config(self, n: int = 1) -> str:
+        """Cisco-family has no ``rollback N`` — use :meth:`replace_config` instead."""
+        raise SshTransportError(
+            f"SSH rollback_config is not supported for device_type="
+            f"{self._params.device_type!r} on {self._params.host}:{self._params.port}; "
+            "use replace_config with the captured baseline (ADR-0021 §4)"
+        )
+
+    def _refuse_junos_write(self, surface: str) -> None:
+        """Belt-and-suspenders: base Cisco-shaped writes must not run on JunOS."""
+        if self._params.device_type == "juniper_junos":
+            raise SshTransportError(
+                f"SSH {surface} refused for device_type='juniper_junos' on "
+                f"{self._params.host}:{self._params.port}: use JunosSshTransport via "
+                "make_ssh_transport (Wave 3 / ADR-0026 commit-confirmed flow)"
+            )
 
     def _require_connection(self) -> BaseConnection:
         """Return the open netmiko connection or raise if used outside the context."""

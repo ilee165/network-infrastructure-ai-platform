@@ -78,6 +78,7 @@ from app.plugins.transport import (
     SshParams,
     SshTransport,
     SshTransportError,
+    make_ssh_transport,
     netmiko_device_type,
 )
 from app.services import audit, credentials
@@ -119,8 +120,12 @@ def _key_provider() -> KeyProvider:
 
 
 def _open_ssh(params: SshParams) -> SshTransport:
-    """Context-managed SSH transport for *params* (netmiko-backed)."""
-    return SshTransport(params)
+    """Context-managed SSH transport for *params* (netmiko-backed).
+
+    Uses :func:`make_ssh_transport` so JunOS write sessions get
+    :class:`~app.plugins.transport.junos_ssh.JunosSshTransport` (Wave 3 C2).
+    """
+    return make_ssh_transport(params)
 
 
 @asynccontextmanager
@@ -239,6 +244,7 @@ def _fetch_running_config(
         username=cred.username or "",
         password=cred.secret,
         port=int(cred.params.get("port", 22)),
+        commit_confirmed_minutes=get_settings().junos_commit_confirmed_minutes,
     )
     with _open_ssh(params) as transport:
         impl_cls = plugin.get_capability(Capability.CONFIG_BACKUP)

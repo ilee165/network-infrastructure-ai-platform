@@ -61,6 +61,8 @@ data:
   NETOPS_OIDC_ENABLED: {{ .Values.config.oidc.enabled | quote }}
   NETOPS_OIDC_ISSUER: {{ .Values.config.oidc.issuer | quote }}
   NETOPS_OIDC_CLIENT_ID: {{ .Values.config.oidc.clientId | quote }}
+  # JunOS commit confirmed <N> minutes (Wave 3 / ADR-0026 Option A).
+  NETOPS_JUNOS_COMMIT_CONFIRMED_MINUTES: {{ .Values.config.junosCommitConfirmedMinutes | default 2 | quote }}
   # KMS master-key REFERENCE provider (ADR-0032 / D11). The handle/path is
   # resolved at runtime — this is the provider selector, NOT the key.
   NETOPS_KMS_PROVIDER: {{ .Values.secrets.kms.provider | quote }}

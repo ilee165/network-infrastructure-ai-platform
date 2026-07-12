@@ -82,6 +82,8 @@ class JunosConfigWriteFakeTransport:
         self.config_batches: list[list[str]] = []
         self.replace_batches: list[list[str]] = []
         self.commands: list[str] = []
+        self.confirm_calls: int = 0
+        self.rollback_calls: list[int] = []
         self.corrupt_apply: bool = False
         self.raise_on_apply: bool = False
         self._writes = 0
@@ -101,6 +103,7 @@ class JunosConfigWriteFakeTransport:
         return is_apply
 
     def send_config(self, lines: list[str]) -> str:
+        """Apply-only (commit confirmed) — confirming commit is :meth:`confirm_config`."""
         self.config_batches.append(list(lines))
         is_apply = self._begin_write()
         if is_apply and self.corrupt_apply:
@@ -112,11 +115,21 @@ class JunosConfigWriteFakeTransport:
         return ""
 
     def replace_config(self, lines: list[str]) -> str:
+        """Apply-only override — confirming commit is :meth:`confirm_config`."""
         self.replace_batches.append(list(lines))
         is_apply = self._begin_write()
         if is_apply and self.corrupt_apply:
             return ""
         self._running = "\n".join(lines) + "\n"
+        return ""
+
+    def confirm_config(self) -> str:
+        """Option A: confirming commit after verify-after success."""
+        self.confirm_calls += 1
+        return ""
+
+    def rollback_config(self, n: int = 1) -> str:
+        self.rollback_calls.append(n)
         return ""
 
 
@@ -197,6 +210,7 @@ class TestRestore:
         assert result.rollback is None
         assert result.applied_diff
         assert transport.commands.count(SHOW_CONFIGURATION_SET) >= 2
+        assert transport.confirm_calls == 1  # Option A: confirm after verify
         assert cap.raw_outputs
 
     def test_restore_uses_replace_config(self, device_id: UUID) -> None:
@@ -232,6 +246,7 @@ class TestRestore:
         assert result.rollback is not None
         assert result.rollback.succeeded is True
         assert result.rollback.verified is True
+        assert transport.confirm_calls == 0  # Option A: never confirm bad change
 
     def test_restore_apply_error_rolls_back(self, device_id: UUID) -> None:
         """Spec §5(d): a pre-apply transport failure on the restore path leaves no committed
@@ -321,6 +336,7 @@ class TestDeploy:
         assert result.rollback is None
         assert transport.config_batches
         assert transport.commands.count(SHOW_CONFIGURATION_SET) >= 2
+        assert transport.confirm_calls == 1
 
     def test_deploy_uses_send_config_merge(self, device_id: UUID) -> None:
         """JunOS deploy apply surface must be send_config (load merge + commit confirmed)."""
@@ -354,6 +370,7 @@ class TestDeploy:
         assert result.rollback is not None
         assert result.rollback.succeeded is True
         assert result.rollback.verified is True
+        assert transport.confirm_calls == 0
 
     def test_deploy_rollback_uses_replace_config(self, device_id: UUID) -> None:
         """JunOS rollback (rollback N / load override) must use replace_config."""

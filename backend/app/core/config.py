@@ -413,6 +413,17 @@ class Settings(BaseSettings):
     #: Fixed-window length (seconds) for the OIDC callback budget above.
     oidc_callback_window_secs: int = 60
 
+    # -- JunOS commit-confirmed window (Wave 3 / ADR-0026 Option A) ------------
+    # Minutes for ``commit confirmed <N>``. Under Option A the unconfirmed window
+    # must cover apply → verify-after → confirming ``commit``. Verify-after is
+    # one ``show configuration | display set`` + normalize/diff (seconds); bump
+    # for large configs / slow control planes. Floor 1 (JunOS minute unit);
+    # cap 60 to block fat-fingered multi-hour unconfirmed windows.
+    # --------------------------------------------------------------------------
+
+    #: JunOS ``commit confirmed <N>`` timer in minutes (``NETOPS_JUNOS_COMMIT_CONFIRMED_MINUTES``).
+    junos_commit_confirmed_minutes: int = Field(default=2, ge=1, le=60)
+
     @property
     def oidc_enabled(self) -> bool:
         """OIDC is active only when an issuer + client id + secret-ref are set.

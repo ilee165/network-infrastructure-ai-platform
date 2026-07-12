@@ -107,6 +107,12 @@ class _ConfigWriteFixtureTransport:
         self._running = "\n".join(lines) + "\n"
         return ""
 
+    def confirm_config(self) -> str:
+        return ""
+
+    def rollback_config(self, n: int = 1) -> str:
+        return ""
+
 
 def _executing_plan() -> ChangePlan:
     return ChangePlan(

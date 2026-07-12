@@ -133,6 +133,13 @@ class ConfigWriteFakeTransport:
         self._running = "\n".join(lines) + "\n"
         return ""
 
+    def confirm_config(self) -> str:
+        """Cisco-family no-op (apply already final)."""
+        return ""
+
+    def rollback_config(self, n: int = 1) -> str:
+        raise NotImplementedError("use replace_config for baseline rollback")
+
 
 @pytest.fixture()
 def device_id() -> UUID:

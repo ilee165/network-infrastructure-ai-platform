@@ -358,11 +358,15 @@ class _JunosConfigWriteCapability(PluginCapability):
     (ADR-0026 §3 "closes, by construction, the highest-blast-radius hole
     ADR-0021 had to special-case for classic IOS").
 
-    **Tracked gap — worker crash during ``commit confirmed`` window** (ADR-0026 §3.2.1):
-    if the Celery worker dies after ``commit confirmed`` but before the confirming
-    ``commit`` or ``rollback N``, the device correctly auto-reverts at the timeout
-    but the CR remains stuck in ``executing``. This is deferred to a future ADR;
-    see ADR-0026 §3.2.1 for the three reaper paths under consideration.
+    **Tracked gap — worker crash during ``commit confirmed`` window** (ADR-0026 §3.2.1,
+    Wave 3 Option A widen): under Option A the unconfirmed window spans **apply
+    (``commit confirmed``) + verify-after (re-capture + normalize + equality) +
+    confirming ``commit``**, not apply alone. If the Celery worker dies anywhere
+    in that span before the confirming ``commit`` or structured ``rollback N``,
+    the device still auto-reverts at the timeout (safe fail direction) but the CR
+    remains stuck in ``executing``. This is deferred to a future ADR; see
+    ADR-0026 §3.2.1 / the Wave 3 addendum for the three reaper paths under
+    consideration.
 
     The capability **never self-authorizes**: every entry point first asserts
     the :class:`ChangePlan` attests an ``executing`` CR (ADR-0021 §2).
@@ -488,6 +492,10 @@ class _JunosConfigWriteCapability(PluginCapability):
             verified = after == end_state
 
         if verified:
+            # Option A: confirming commit only after verify-after success
+            # (ADR-0026 §3.1). Withheld on the failure branch so the confirmed
+            # timer / structured rollback can reclaim the bad change.
+            self._transport.confirm_config()
             return ChangeResult(
                 change_request_id=plan.change_request_id,
                 outcome=ChangeOutcome.APPLIED,
@@ -496,7 +504,8 @@ class _JunosConfigWriteCapability(PluginCapability):
                 rollback=None,
             )
 
-        # Apply errored or verify-after failed → structured rollback to baseline.
+        # Apply errored or verify-after failed → do NOT confirm; structured
+        # rollback to baseline is the primary path (timer is the backstop).
         rollback = self._rollback_to_baseline(baseline)
         outcome = ChangeOutcome.ROLLED_BACK if rollback.succeeded else ChangeOutcome.ROLLBACK_FAILED
         return ChangeResult(

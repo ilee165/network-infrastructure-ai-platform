@@ -250,6 +250,115 @@ class TestSshConfigWrite:
         assert "ReadException" in str(excinfo.value)
         assert "config replace" in str(excinfo.value)
 
+    def test_confirm_config_is_noop_for_cisco_family(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        with SshTransport(make_params()) as transport:
+            assert transport.confirm_config() == ""
+        assert fake_netmiko.connection.commands == []
+
+    def test_rollback_config_refused_for_cisco_family(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        with (
+            SshTransport(make_params()) as transport,
+            pytest.raises(SshTransportError, match="not supported"),
+        ):
+            transport.rollback_config(1)
+
+    def test_base_transport_refuses_junos_send_config(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        with (
+            SshTransport(make_params(device_type="juniper_junos")) as transport,
+            pytest.raises(SshTransportError, match="JunosSshTransport"),
+        ):
+            transport.send_config(["set system host-name x"])
+
+    def test_base_transport_refuses_junos_replace_config(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        with (
+            SshTransport(make_params(device_type="juniper_junos")) as transport,
+            pytest.raises(SshTransportError, match="JunosSshTransport"),
+        ):
+            transport.replace_config(["set system host-name x"])
+
+
+class TestJunosSshTransport:
+    """Wave 3 C2: JunOS commit-confirmed sequence (Option A)."""
+
+    def test_send_config_sequence_ends_at_commit_confirmed_not_commit(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        from app.plugins.transport import JunosSshTransport, make_ssh_transport
+
+        params = make_params(device_type="juniper_junos", commit_confirmed_minutes=2)
+        assert isinstance(make_ssh_transport(params), JunosSshTransport)
+        lines = ["set system host-name lab-mx"]
+        with JunosSshTransport(params) as transport:
+            transport.send_config(lines)
+        issued = [command for command, _timeout in fake_netmiko.connection.commands]
+        assert issued[0] == "configure"
+        assert issued[1] == "load merge terminal"
+        assert "set system host-name lab-mx" in issued
+        assert "commit check" in issued
+        assert "commit confirmed 2" in issued
+        # Option A: no confirming commit inside apply
+        assert issued.count("commit") == 0
+        conf_idx = issued.index("commit confirmed 2")
+        check_idx = issued.index("commit check")
+        assert check_idx < conf_idx
+
+    def test_replace_config_uses_load_override(self, fake_netmiko: FakeConnectHandler) -> None:
+        from app.plugins.transport import JunosSshTransport
+
+        params = make_params(device_type="juniper_junos", commit_confirmed_minutes=3)
+        with JunosSshTransport(params) as transport:
+            transport.replace_config(["set system host-name restored"])
+        issued = [command for command, _timeout in fake_netmiko.connection.commands]
+        assert "load override terminal" in issued
+        assert "commit confirmed 3" in issued
+        assert issued.count("commit") == 0
+
+    def test_confirm_config_issues_commit(self, fake_netmiko: FakeConnectHandler) -> None:
+        from app.plugins.transport import JunosSshTransport
+
+        with JunosSshTransport(make_params(device_type="juniper_junos")) as transport:
+            transport.confirm_config()
+        issued = [command for command, _timeout in fake_netmiko.connection.commands]
+        assert issued == ["commit"]
+
+    def test_commit_check_failure_skips_commit_confirmed(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        from app.plugins.transport import JunosSshTransport
+
+        fake_netmiko.connection.outputs["commit check"] = "error: missing mandatory statement"
+        with (
+            JunosSshTransport(make_params(device_type="juniper_junos")) as transport,
+            pytest.raises(SshTransportError, match="commit check"),
+        ):
+            transport.send_config(["set system host-name bad"])
+        issued = [command for command, _timeout in fake_netmiko.connection.commands]
+        assert "commit check" in issued
+        assert not any(c.startswith("commit confirmed") for c in issued)
+        assert "commit" not in issued
+
+    def test_rollback_config_orders_rollback_before_commit(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        from app.plugins.transport import JunosSshTransport
+
+        with JunosSshTransport(make_params(device_type="juniper_junos")) as transport:
+            transport.rollback_config(1)
+        issued = [command for command, _timeout in fake_netmiko.connection.commands]
+        assert issued[0] == "configure"
+        assert issued[1] == "rollback 1"
+        assert issued[2] == "commit"
+        # Never bare commit before rollback
+        assert issued.index("rollback 1") < issued.index("commit")
+
 
 class TestSshErrorWrapping:
     def test_error_is_plugin_error(self) -> None:
