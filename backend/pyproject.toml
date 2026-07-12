@@ -235,18 +235,28 @@ markers = [
 ]
 
 # ---------------------------------------------------------------------------
-# Module boundaries (REPO-STRUCTURE §3.3). Only the contracts whose member
-# packages exist at M0 are declared; the full six-contract set lands as the
-# agents/engines/plugins/services packages are created (M1+).
+# Module boundaries (REPO-STRUCTURE §3.3). The full six-contract set is wired
+# (AR-W0-T1); see REPO-STRUCTURE §9 "Import-linter status" for the as-built
+# note.
 # ---------------------------------------------------------------------------
 [tool.importlinter]
 root_package = "app"
 
 [[tool.importlinter.contracts]]
-name = "app.core imports nothing app-internal (REPO-STRUCTURE §3.2 row 1)"
+name = "app.core imports nothing app-internal (REPO-STRUCTURE §3.3 contract 4, §3.2 row 1)"
 type = "forbidden"
 source_modules = ["app.core"]
-forbidden_modules = ["app.api", "app.db", "app.main", "app.models", "app.workers"]
+forbidden_modules = [
+    "app.agents",
+    "app.api",
+    "app.db",
+    "app.llm",
+    "app.main",
+    "app.models",
+    "app.plugins",
+    "app.schemas",
+    "app.workers",
+]
 
 [[tool.importlinter.contracts]]
 name = "app.knowledge imports only core/schemas/models/llm (REPO-STRUCTURE §3.2 row 5)"
@@ -260,4 +270,186 @@ forbidden_modules = [
     "app.plugins",
     "app.services",
     "app.workers",
+]
+
+[[tool.importlinter.contracts]]
+name = "app.plugins does not import app.agents (REPO-STRUCTURE §3.3 contract 1, §3.2 rows 6-7)"
+type = "forbidden"
+source_modules = ["app.plugins"]
+forbidden_modules = ["app.agents"]
+
+[[tool.importlinter.contracts]]
+name = "app.agents specialists (excluding framework) do not reach engines/services/plugins/models/db directly (REPO-STRUCTURE §3.3 contract 2, §3.2 row 11)"
+type = "forbidden"
+source_modules = [
+    "app.agents.automation",
+    "app.agents.configuration",
+    "app.agents.consultant",
+    "app.agents.ddi",
+    "app.agents.discovery",
+    "app.agents.documentation",
+    "app.agents.master_architect",
+    "app.agents.packet_analysis",
+    "app.agents.security",
+    "app.agents.troubleshooting",
+]
+forbidden_modules = [
+    "app.db",
+    "app.engines",
+    "app.models",
+    "app.plugins",
+    "app.services",
+]
+# Indirect-only (allow_indirect_imports=true): specialists legitimately reach
+# engines/services/models via app.agents.framework (row 10), which is excluded
+# from source_modules above but not from the dependency graph, so a default
+# (indirect-checking) forbidden contract would flag every specialist that uses
+# the framework's tool wrappers at all. Only *direct* specialist -> forbidden
+# imports are real violations here.
+allow_indirect_imports = true
+ignore_imports = [
+    # Pre-existing direct DB/model reads in the discovery + troubleshooting
+    # read-only tool wrappers, ahead of a typed read facade in agents/framework.
+    # burn-down: AR-W2-T2 (agent read-facade)
+    "app.agents.discovery.tools -> app.db",
+    "app.agents.discovery.tools -> app.models",
+    "app.agents.troubleshooting.tools -> app.db",
+    "app.agents.troubleshooting.tools -> app.models",
+    # Pre-existing direct app.models.change_requests reads (enum/state lookups)
+    # in the automation/ddi/security tool + agent modules, ahead of the same
+    # read facade.
+    # burn-down: AR-W2-T2 (agent read-facade)
+    "app.agents.automation.executors -> app.models.change_requests",
+    "app.agents.automation.agent -> app.models.change_requests",
+    "app.agents.ddi.tools -> app.models.change_requests",
+    "app.agents.security.tools -> app.models.change_requests",
+    # Pre-existing direct app.engines reads (planner/finding/firewall-analysis
+    # types) in the discovery/packet_analysis/security tool + agent modules,
+    # ahead of the same read facade.
+    # burn-down: AR-W2-T2 (agent read-facade)
+    "app.agents.discovery.tools -> app.engines.discovery.planner",
+    "app.agents.packet_analysis.agent -> app.engines.packet",
+    "app.agents.packet_analysis.tools -> app.engines.packet",
+    "app.agents.security.tools -> app.engines.security.firewall",
+    # Pre-existing direct app.plugins reads (transport/registry/capability
+    # types) in the automation/troubleshooting tool + agent modules, ahead of
+    # the same read facade.
+    # burn-down: AR-W2-T2 (agent read-facade)
+    "app.agents.automation.agent -> app.plugins.base",
+    "app.agents.automation.executors -> app.plugins.base",
+    "app.agents.troubleshooting.tools -> app.plugins.base",
+    "app.agents.troubleshooting.tools -> app.plugins.registry",
+    "app.agents.troubleshooting.tools -> app.plugins.transport",
+    # Pre-existing direct app.services reads (audit/change-request/credential
+    # services) in the automation/troubleshooting tool + agent modules, ahead
+    # of the same read facade.
+    # burn-down: AR-W2-T2 (agent read-facade)
+    "app.agents.automation.agent -> app.services.audit.service",
+    "app.agents.automation.agent -> app.services.change_requests",
+    "app.agents.troubleshooting.tools -> app.services.credentials",
+]
+# No new entries may be added to this allowlist without updating this
+# contract (and its REPO-STRUCTURE §3.3 contract-2 description) — new
+# agents -> engines/services/plugins/models/db edges are real violations.
+
+[[tool.importlinter.contracts]]
+name = "app.engines only reaches plugins via the registry, never a vendor package (REPO-STRUCTURE §3.3 contract 3, §3.2 row 9)"
+type = "forbidden"
+source_modules = ["app.engines"]
+forbidden_modules = ["app.plugins.vendors"]
+
+[[tool.importlinter.contracts]]
+name = "app.plugins.vendors.* packages are mutually independent (REPO-STRUCTURE §3.3 contract 5, §3.2 row 7, D6)"
+type = "independence"
+modules = [
+    "app.plugins.vendors.bluecat",
+    "app.plugins.vendors.cisco_ios",
+    "app.plugins.vendors.cisco_iosxe",
+    "app.plugins.vendors.cisco_nxos",
+    "app.plugins.vendors.eos",
+    "app.plugins.vendors.f5_bigip",
+    "app.plugins.vendors.fortios",
+    "app.plugins.vendors.infoblox",
+    "app.plugins.vendors.junos",
+    "app.plugins.vendors.panos",
+    "app.plugins.vendors.spatiumddi",
+    "app.plugins.vendors.vmware",
+]
+ignore_imports = [
+    # Pre-existing CLI-parser reuse: cisco_iosxe/eos show-output is parsed by
+    # the same ntc-templates "cisco_ios" platform key (ADR-0007), so both
+    # import cisco_ios parser/management-path helpers directly instead of via
+    # a shared non-vendor module (contrast app.plugins.vendors.cli_common,
+    # which is not itself a vendor package). Reverses D6 "vendor packages are
+    # independent and individually removable". Flagged as an open question in
+    # the T1 report, not fixed here (zero behavior change).
+    "app.plugins.vendors.cisco_iosxe.** -> app.plugins.vendors.cisco_ios.**",
+    "app.plugins.vendors.eos.** -> app.plugins.vendors.cisco_ios.**",
+]
+
+# The layers contract's tails are relative to the "app" container (REPO-STRUCTURE
+# §3.3 contract 6). Order is highest layer first; a higher layer may import any
+# lower layer (not only the one directly below), and the reverse is forbidden
+# (import-linter 2.13 LayersContract semantics). Tiers joined with "|" are
+# independent siblings that may not import each other (e.g. the ten specialist
+# agent packages, or knowledge/llm/plugins, must not reach across); "app.db"
+# gets its own tier per REPO-STRUCTURE §9 A1 (a special-cased top-level module,
+# analogous in dependency order to models/schemas, sitting just above core
+# because nothing in models/schemas/knowledge/llm/plugins/core imports it and
+# it only imports app.core.config).
+[[tool.importlinter.contracts]]
+name = "Layered architecture (REPO-STRUCTURE §3.3 contract 6, §3.1 dependency graph)"
+type = "layers"
+containers = ["app"]
+layers = [
+    "main",
+    "api | workers",
+    "agents.master_architect | agents.consultant | agents.discovery | agents.troubleshooting | agents.packet_analysis | agents.configuration | agents.ddi | agents.documentation | agents.security | agents.automation",
+    "agents.framework",
+    "engines",
+    "services",
+    "knowledge | llm | plugins",
+    "models | schemas",
+    "db",
+    "core",
+]
+ignore_imports = [
+    # REPO-STRUCTURE row 12: API enqueues Celery jobs via task signatures
+    # only (app.api.v1.discovery / app.api.v1.agents -> app.workers.celery_app).
+    "app.api.** -> app.workers.celery_app",
+    # REPO-STRUCTURE row 5: knowledge needs an llm provider for embeddings (D9).
+    "app.knowledge.embedding -> app.llm.redaction",
+    # Pre-existing agent-session run bridge: app.services.agent_session.service
+    # drives the supervisor graph directly. Reverses REPO-STRUCTURE row 8
+    # ("services MUST NOT import agents"). Flagged as an open question in the
+    # T1 report, not fixed here (zero behavior change).
+    "app.services.agent_session.service -> app.agents.framework.*",
+    # Pre-existing direct enqueue from a discovery agent tool, reaching past a
+    # service facade into app.workers. Flagged as an open question in the T1
+    # report, not fixed here (zero behavior change).
+    "app.agents.discovery.tools -> app.workers.celery_app",
+    # Pre-existing bidirectional models<->schemas cross-import: Normalized*
+    # Pydantic schemas (app.schemas.normalized) are reused as ORM row
+    # projections in app.models.adc/virtualization/inventory, and several API
+    # schemas reuse model enums directly. Reverses REPO-STRUCTURE rows 2-3
+    # ("MAY import: core" only). Flagged as an open question in the T1
+    # report, not fixed here (zero behavior change).
+    "app.models.adc -> app.schemas.normalized",
+    "app.models.virtualization -> app.schemas.normalized",
+    "app.models.inventory -> app.schemas.normalized",
+    "app.schemas.agents_api -> app.models.agents",
+    "app.schemas.applications -> app.models.applications",
+    "app.schemas.changes_api -> app.models.change_requests",
+    "app.schemas.config_mgmt -> app.models.config_mgmt",
+    "app.schemas.credentials -> app.models.inventory",
+    "app.schemas.devices -> app.models.inventory",
+    "app.schemas.discovery_api -> app.models.inventory",
+    # Pre-existing schemas -> engines reach-through (enum/type reuse for API
+    # response shaping). Reverses REPO-STRUCTURE row 2 ("schemas MAY import:
+    # core" only) and the layer order itself. Flagged as an open question in
+    # the T1 report, not fixed here (zero behavior change).
+    "app.schemas.config_mgmt -> app.engines.config_mgmt.compliance.engine",
+    "app.schemas.config_mgmt -> app.engines.config_mgmt.compliance.schema",
+    "app.schemas.discovery_api -> app.engines.discovery.planner",
+    "app.schemas.topology -> app.engines.topology.diff",
 ]

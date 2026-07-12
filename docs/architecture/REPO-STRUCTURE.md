@@ -589,10 +589,19 @@ noted. Other agents must build against the **as-built** column.
 | A6 | `deploy/docker/.env.example` | `.env.example` at the repo root (compose reads it via `env_file: ../../.env` and `--env-file .env` from the repo root) | **RATIFIED** |
 | A7 | `LICENSE` at repo root (P1) | Absent — license choice still open via `docs/consultant/QUESTIONS.md` | **OPEN** — add once the license is decided |
 
-Import-linter status: `backend/pyproject.toml` (frozen at M0) declares only a subset of the
-section 3.3 contracts; contracts 1, 2, 5, and 6 — and the extension of the core contract's
-forbidden modules to `app.agents`/`app.llm`/`app.plugins`/`app.schemas` — must be wired when
-pyproject is next unfrozen. This is an M1 entry gate item.
+Import-linter status: `backend/pyproject.toml` now wires the full section 3.3 six-contract set
+(AR-W0-T1) — contracts 1-5 as `forbidden`/`independence` contracts (contract 4's core
+forbidden-modules list extended to `app.agents`/`app.llm`/`app.plugins`/`app.schemas` alongside
+the pre-existing `app.api`/`app.db`/`app.main`/`app.models`/`app.workers`) plus contract 6 as a
+single ordered `layers` contract following the section 3.1 dependency graph (a higher layer may
+import any lower layer, never the reverse). Contract 2 is declared with `allow_indirect_imports =
+true` so specialists reaching engines/services/models *through* `app.agents.framework` (row 10,
+which is excluded from the contract's source modules) are not misflagged — only direct
+specialist-to-forbidden-module imports count. A handful of pre-existing edges that the section 3.2
+table forbids narrowly but that the coarser layers/forbidden contracts cannot cleanly express
+without over- or under-enforcing are named in per-edge `ignore_imports` allowlists with inline
+comments (burn-down references where applicable); see the contracts themselves for the current
+list.
 
 ---
 
