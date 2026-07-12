@@ -19,7 +19,9 @@ never directly on the FastAPI event loop (ADR-0007 §3, ADR-0008).
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import TracebackType
@@ -45,6 +47,24 @@ _REDACTED = "***REDACTED***"
 
 #: Netmiko (and re-exported paramiko) failures wrapped into SshTransportError.
 _NETMIKO_FAILURES: tuple[type[Exception], ...] = (NetmikoBaseException, SSHException)
+
+#: Tclsh / IOS error markers in staged-file output — fail closed before
+#: ``configure replace`` so a corrupt stage never becomes running config (C3).
+_TCL_ERROR_MARKERS: Final[tuple[str, ...]] = (
+    "invalid command name",
+    "syntax error",
+    "can't read",
+    "no such file",
+    "couldn't open",
+    "permission denied",
+    "% invalid",
+    "% error",
+    "tclsh: ",
+)
+
+#: Match ``puts`` / stage path used when writing the base64 blob to flash.
+_STAGED_CONFIG_PATH: Final[str] = "flash:netops-rollback.cfg"
+_STAGED_B64_PATH: Final[str] = "flash:netops-rollback.b64"
 
 #: vendor_id -> netmiko ``device_type`` for vendors whose plugin id differs
 #: from the netmiko driver name. Vendors absent here fall back to their
@@ -233,35 +253,96 @@ class SshTransport:
         predicate (§3) used by ``CONFIG_RESTORE`` apply and by rollback for both
         operations.
 
-        Mechanism: stage the candidate config to a deterministic file on the
-        device filesystem, then run ``configure replace <file> force``
-        (force = non-interactive), and clean the staged file up. Output of the
-        replace command is returned verbatim for the audit trail.
+        Mechanism (Wave 3 C3): base64-encode the candidate, stage via Tcl
+        *without* embedding raw config in a double-quoted string (avoids Tcl
+        substitution of ``$``, ``"``, ``[``/``]``), decode on-box to a
+        deterministic flash file, verify staged length, then
+        ``configure replace <file> force``. Any tclsh error output fails closed
+        **before** replace is issued.
 
         Refuses ``juniper_junos`` — use :class:`~app.plugins.transport.junos_ssh.JunosSshTransport`.
         """
         self._refuse_junos_write("replace_config")
         connection = self._require_connection()
         candidate = "\n".join(lines)
-        staged = "flash:netops-rollback.cfg"
+        if not candidate.endswith("\n"):
+            candidate = candidate + "\n"
+        staged = _STAGED_CONFIG_PATH
+        staged_b64 = _STAGED_B64_PATH
+        timeout = self._params.read_timeout
+        payload_b64 = base64.b64encode(candidate.encode("utf-8")).decode("ascii")
+        expected_len = len(candidate.encode("utf-8"))
         try:
-            # Stage the candidate, replace against it, then remove the staging file.
             with contextlib.suppress(*_NETMIKO_FAILURES):
-                connection.send_command(
-                    f"delete /force {staged}", read_timeout=self._params.read_timeout
+                connection.send_command(f"delete /force {staged}", read_timeout=timeout)
+            with contextlib.suppress(*_NETMIKO_FAILURES):
+                connection.send_command(f"delete /force {staged_b64}", read_timeout=timeout)
+
+            # Stage base64 text with Tcl puts — payload is A-Za-z0-9+/= only, so
+            # double-quoted Tcl is safe (no $, ", [, ] from config body).
+            stage_cmds = [
+                "do tclsh",
+                f'puts [open "{staged_b64}" w+] "{payload_b64}"',
+                "tclquit",
+            ]
+            stage_out = connection.send_config_set(stage_cmds, read_timeout=timeout)
+            if not isinstance(stage_out, str):  # pragma: no cover
+                raise SshTransportError(
+                    f"SSH config stage for {self._params.host}:{self._params.port} "
+                    "returned non-text output"
                 )
-            connection.send_config_set(
-                ["do tclsh", f'puts [open "{staged}" w+] "{candidate}"', "tclquit"],
-                read_timeout=self._params.read_timeout,
+            self._raise_if_tcl_failed("stage base64", stage_out)
+
+            # Decode on-box: binary base64 -d is available on IOS-XE/NX-OS/EOS
+            # flash tooling paths that already use configure replace; fall back
+            # to Tcl base64 decode when the binary is missing (classic IOS).
+            decode_out = connection.send_command(
+                f"tclsh\n"
+                f"set b64 [open {{{staged_b64}}} r]\n"
+                f"set data [read $b64]\n"
+                f"close $b64\n"
+                f"set bin [binary decode base64 $data]\n"
+                f'set out [open "{staged}" w+]\n'
+                f"puts -nonewline $out $bin\n"
+                f"close $out\n"
+                f"tclquit",
+                read_timeout=timeout,
             )
+            if not isinstance(decode_out, str):  # pragma: no cover
+                raise SshTransportError(
+                    f"SSH config decode for {self._params.host}:{self._params.port} "
+                    "returned non-text output"
+                )
+            self._raise_if_tcl_failed("decode base64 stage", decode_out)
+
+            # Integrity: staged file size must match plaintext byte length.
+            size_out = connection.send_command(
+                f"tclsh\n"
+                f'set f [open "{staged}" r]\n'
+                f"set body [read $f]\n"
+                f"close $f\n"
+                f"puts [string bytelength $body]\n"
+                f"tclquit",
+                read_timeout=timeout,
+            )
+            if not isinstance(size_out, str):  # pragma: no cover
+                raise SshTransportError(
+                    f"SSH stage size check for {self._params.host}:{self._params.port} "
+                    "returned non-text output"
+                )
+            self._raise_if_tcl_failed("stage size check", size_out)
+            self._assert_staged_length(size_out, expected_len)
+
             output = connection.send_command(
                 f"configure replace {staged} force",
-                read_timeout=self._params.read_timeout,
+                read_timeout=timeout,
             )
             with contextlib.suppress(*_NETMIKO_FAILURES):
-                connection.send_command(
-                    f"delete /force {staged}", read_timeout=self._params.read_timeout
-                )
+                connection.send_command(f"delete /force {staged}", read_timeout=timeout)
+            with contextlib.suppress(*_NETMIKO_FAILURES):
+                connection.send_command(f"delete /force {staged_b64}", read_timeout=timeout)
+        except SshTransportError:
+            raise
         except _NETMIKO_FAILURES as exc:
             raise SshTransportError(self._failure_message("config replace", exc)) from exc
         if not isinstance(output, str):  # pragma: no cover - structured output never requested
@@ -270,6 +351,32 @@ class SshTransport:
                 "returned non-text output"
             )
         return output
+
+    def _raise_if_tcl_failed(self, action: str, output: str) -> None:
+        """Fail closed on tclsh/IOS error text before configure replace."""
+        lowered = output.lower()
+        if any(marker in lowered for marker in _TCL_ERROR_MARKERS):
+            snippet = output.strip().splitlines()[0][:200] if output.strip() else "(empty)"
+            raise SshTransportError(
+                f"SSH {action} failed for {self._params.host}:{self._params.port} "
+                f"(device_type={self._params.device_type!r}): tclsh error "
+                f"({snippet!r}); configure replace not attempted"
+            )
+
+    def _assert_staged_length(self, size_output: str, expected: int) -> None:
+        """Parse staged-file byte length from tclsh output; raise on mismatch."""
+        matches = re.findall(r"\b(\d+)\b", size_output)
+        if not matches:
+            raise SshTransportError(
+                f"SSH stage size check failed for {self._params.host}:{self._params.port}: "
+                "could not parse staged file length; configure replace not attempted"
+            )
+        actual = int(matches[-1])
+        if actual != expected:
+            raise SshTransportError(
+                f"SSH stage integrity failed for {self._params.host}:{self._params.port}: "
+                f"staged {actual} bytes, expected {expected}; configure replace not attempted"
+            )
 
     def confirm_config(self) -> str:
         """No-op finalize for Cisco-family (apply is already permanent).
