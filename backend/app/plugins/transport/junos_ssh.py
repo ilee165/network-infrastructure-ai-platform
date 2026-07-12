@@ -30,14 +30,15 @@ __all__ = ["JunosSshTransport"]
 _NETMIKO_FAILURES: tuple[type[Exception], ...] = (NetmikoBaseException, SSHException)
 
 #: Substrings that indicate commit-check / commit failure in JunOS CLI output.
+#: Kept narrow to avoid false-failing informational CLI text.
 _FAILURE_MARKERS: Final[tuple[str, ...]] = (
     "error:",
-    "error ",
-    "failed",
-    "invalid",
     "syntax error",
     "missing mandatory",
 )
+
+#: End-of-file for ``load … terminal`` (JunOS expects Ctrl-D to finish the paste).
+_LOAD_TERMINAL_EOF: Final[str] = "\x04"
 
 
 class JunosSshTransport(SshTransport):
@@ -110,18 +111,26 @@ class JunosSshTransport(SshTransport):
         connection = self._require_connection()
         timeout = self._params.read_timeout
         minutes = self._params.commit_confirmed_minutes
+        if not 1 <= minutes <= 60:
+            raise SshTransportError(
+                f"SSH commit confirmed minutes must be 1..60 for "
+                f"{self._params.host}:{self._params.port}, got {minutes}"
+            )
         load_cmd = f"load {mode} terminal"
         parts: list[str] = []
         try:
             # Exact ordered sequence (unit tests pin these strings):
             # configure → load {merge|override} terminal → <set-form body> →
-            # commit check → commit confirmed <N>
+            # Ctrl-D (end terminal load) → commit check → commit confirmed <N>
             # Confirming ``commit`` is deliberately NOT issued here (Option A).
             parts.append(str(connection.send_command("configure", read_timeout=timeout)))
             parts.append(str(connection.send_command(load_cmd, read_timeout=timeout)))
             body = "\n".join(lines)
             if body:
                 parts.append(str(connection.send_command(body, read_timeout=timeout)))
+            # JunOS ``load … terminal`` waits for EOF (Ctrl-D) before accepting
+            # further CLI; without this, commit check is swallowed as load input.
+            parts.append(str(connection.send_command(_LOAD_TERMINAL_EOF, read_timeout=timeout)))
             check_out = str(connection.send_command("commit check", read_timeout=timeout))
             parts.append(check_out)
             self._raise_if_cli_failed("commit check", check_out)

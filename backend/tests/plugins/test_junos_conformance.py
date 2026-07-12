@@ -90,6 +90,7 @@ class _ConfigWriteFixtureTransport:
 
     def __init__(self, running: str) -> None:
         self._running = running
+        self._pre_apply: str | None = None
 
     def send_command(self, command: str) -> str:
         if command == SHOW_CONFIGURATION_SET:
@@ -97,6 +98,7 @@ class _ConfigWriteFixtureTransport:
         raise AssertionError(f"unexpected command sent to device: {command!r}")
 
     def send_config(self, lines: Sequence[str]) -> str:
+        self._pre_apply = self._running
         present = self._running.splitlines()
         present_set = set(present)
         merged = present + [line for line in lines if line not in present_set]
@@ -104,6 +106,7 @@ class _ConfigWriteFixtureTransport:
         return ""
 
     def replace_config(self, lines: Sequence[str]) -> str:
+        self._pre_apply = self._running
         self._running = "\n".join(lines) + "\n"
         return ""
 
@@ -111,6 +114,8 @@ class _ConfigWriteFixtureTransport:
         return ""
 
     def rollback_config(self, n: int = 1) -> str:
+        if self._pre_apply is not None:
+            self._running = self._pre_apply
         return ""
 
 

@@ -302,13 +302,15 @@ class TestJunosSshTransport:
         assert issued[0] == "configure"
         assert issued[1] == "load merge terminal"
         assert "set system host-name lab-mx" in issued
+        assert "\x04" in issued  # Ctrl-D ends load … terminal
         assert "commit check" in issued
         assert "commit confirmed 2" in issued
         # Option A: no confirming commit inside apply
         assert issued.count("commit") == 0
         conf_idx = issued.index("commit confirmed 2")
         check_idx = issued.index("commit check")
-        assert check_idx < conf_idx
+        eof_idx = issued.index("\x04")
+        assert eof_idx < check_idx < conf_idx
 
     def test_replace_config_uses_load_override(self, fake_netmiko: FakeConnectHandler) -> None:
         from app.plugins.transport import JunosSshTransport

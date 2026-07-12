@@ -86,7 +86,9 @@ class JunosConfigWriteFakeTransport:
         self.rollback_calls: list[int] = []
         self.corrupt_apply: bool = False
         self.raise_on_apply: bool = False
+        self.raise_on_confirm: bool = False
         self._writes = 0
+        self._pre_apply: str | None = None
 
     def send_command(self, command: str) -> str:
         self.commands.append(command)
@@ -98,6 +100,8 @@ class JunosConfigWriteFakeTransport:
         """Advance the write counter; return whether this is the apply (first) write."""
         self._writes += 1
         is_apply = self._writes == 1
+        if is_apply:
+            self._pre_apply = self._running
         if is_apply and self.raise_on_apply:
             raise RuntimeError("JunOS commit confirmed failed")
         return is_apply
@@ -126,10 +130,15 @@ class JunosConfigWriteFakeTransport:
     def confirm_config(self) -> str:
         """Option A: confirming commit after verify-after success."""
         self.confirm_calls += 1
+        if self.raise_on_confirm:
+            raise RuntimeError("JunOS confirming commit failed")
         return ""
 
     def rollback_config(self, n: int = 1) -> str:
+        """Permanent inverse: restore pre-apply committed config (models rollback N + commit)."""
         self.rollback_calls.append(n)
+        if self._pre_apply is not None:
+            self._running = self._pre_apply
         return ""
 
 
@@ -247,6 +256,7 @@ class TestRestore:
         assert result.rollback.succeeded is True
         assert result.rollback.verified is True
         assert transport.confirm_calls == 0  # Option A: never confirm bad change
+        assert transport.rollback_calls == [1]  # permanent rollback N + commit
 
     def test_restore_apply_error_rolls_back(self, device_id: UUID) -> None:
         """Spec §5(d): a pre-apply transport failure on the restore path leaves no committed
@@ -276,7 +286,12 @@ class TestRestore:
                 if is_apply:
                     # Apply raises before any committed state lands.
                     raise RuntimeError("JunOS commit check failed")
-                # Rollback replace lands a config that does NOT match the baseline.
+                self._running = "\n".join(lines) + "\n"
+                return ""
+
+            def rollback_config(self, n: int = 1) -> str:
+                self.rollback_calls.append(n)
+                # Permanent rollback lands a config that does NOT match the baseline.
                 self._running = "set system host-name BROKEN-AFTER-ROLLBACK\n"
                 return ""
 
@@ -371,9 +386,10 @@ class TestDeploy:
         assert result.rollback.succeeded is True
         assert result.rollback.verified is True
         assert transport.confirm_calls == 0
+        assert transport.rollback_calls == [1]
 
-    def test_deploy_rollback_uses_replace_config(self, device_id: UUID) -> None:
-        """JunOS rollback (rollback N / load override) must use replace_config."""
+    def test_deploy_rollback_uses_rollback_config(self, device_id: UUID) -> None:
+        """JunOS failure path uses permanent rollback_config (not commit confirmed)."""
         transport = JunosConfigWriteFakeTransport(_BASELINE)
         transport.corrupt_apply = True
         cap = JunosConfigDeploy(transport, device_id)
@@ -381,7 +397,8 @@ class TestDeploy:
         cap.deploy(_FRAGMENT, plan=_executing_plan())
 
         assert transport.config_batches  # merge apply
-        assert transport.replace_batches  # replace rollback
+        assert transport.rollback_calls == [1]
+        assert transport.replace_batches == []  # no second commit confirmed
 
     def test_deploy_apply_error_rolls_back(self, device_id: UUID) -> None:
         transport = JunosConfigWriteFakeTransport(_BASELINE)
@@ -408,9 +425,8 @@ class TestRollbackFailedNeverSilent:
                 self._begin_write()
                 return ""  # apply does not land
 
-            def replace_config(self, lines: list[str]) -> str:
-                self.replace_batches.append(list(lines))
-                self._begin_write()
+            def rollback_config(self, n: int = 1) -> str:
+                self.rollback_calls.append(n)
                 self._running = "set system host-name BROKEN-AFTER-ROLLBACK\n"
                 return ""
 
@@ -425,6 +441,23 @@ class TestRollbackFailedNeverSilent:
         assert result.rollback is not None
         assert result.rollback.succeeded is False
         assert result.rollback.verified is False
+        assert transport.rollback_calls == [1]
+
+    def test_confirm_failure_after_verify_surfaces_structured_failure(
+        self, device_id: UUID
+    ) -> None:
+        transport = JunosConfigWriteFakeTransport(_BASELINE)
+        transport.raise_on_confirm = True
+        cap = JunosConfigDeploy(transport, device_id)
+
+        result = cap.deploy(_FRAGMENT, plan=_executing_plan())
+
+        assert result.outcome is ChangeOutcome.ROLLBACK_FAILED
+        assert result.verified is True  # end-state was correct
+        assert result.rollback is not None
+        assert result.rollback.attempted is False
+        assert "confirm_config failed" in (result.rollback.detail or "")
+        assert transport.confirm_calls == 2  # initial + one retry
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +500,7 @@ class TestDeployResidualDiff:
         assert result.outcome is ChangeOutcome.ROLLED_BACK
         assert result.rollback is not None
         assert result.rollback.succeeded is True
+        assert transport.rollback_calls == [1]
 
 
 # ---------------------------------------------------------------------------

@@ -495,7 +495,30 @@ class _JunosConfigWriteCapability(PluginCapability):
             # Option A: confirming commit only after verify-after success
             # (ADR-0026 §3.1). Withheld on the failure branch so the confirmed
             # timer / structured rollback can reclaim the bad change.
-            self._transport.confirm_config()
+            try:
+                self._transport.confirm_config()
+            except Exception:  # noqa: BLE001 — one retry, then structured failure
+                try:
+                    self._transport.confirm_config()
+                except Exception as exc:  # noqa: BLE001
+                    # End-state was correct but permanent commit failed — do not
+                    # claim APPLIED (device may still auto-revert at timeout).
+                    return ChangeResult(
+                        change_request_id=plan.change_request_id,
+                        outcome=ChangeOutcome.ROLLBACK_FAILED,
+                        verified=True,
+                        applied_diff=applied_diff,
+                        rollback=RollbackResult(
+                            attempted=False,
+                            succeeded=False,
+                            verified=False,
+                            detail=(
+                                f"confirm_config failed after verify-after "
+                                f"({type(exc).__name__}); device may auto-revert "
+                                "at commit confirmed timeout"
+                            ),
+                        ),
+                    )
             return ChangeResult(
                 change_request_id=plan.change_request_id,
                 outcome=ChangeOutcome.APPLIED,
@@ -517,30 +540,29 @@ class _JunosConfigWriteCapability(PluginCapability):
         )
 
     def _rollback_to_baseline(self, baseline_normalized: str) -> RollbackResult:
-        """Roll back to the captured baseline via ``rollback N`` / ``load override``.
+        """Roll back to the pre-change point via permanent ``rollback N`` + ``commit``.
 
-        See ADR-0026 §3.1 for the full vendor mapping.
+        See ADR-0026 §3.1 / Wave 3 T1 pin 2: after a failed verify (with an
+        unconfirmed ``commit confirmed`` still pending), structured recovery is
+        ``rollback 1`` then **permanent** ``commit`` — never another
+        ``commit confirmed`` of the baseline (that would make the bad tentative
+        config the auto-revert target). The confirmed timer is only the backstop
+        if this path itself fails.
 
-        JunOS rollback is a ``replace_config`` of the captured pre-change baseline,
-        modelling the JunOS ``rollback N`` primitive (addressable to the exact prior
-        committed configuration point — a single atomic device-side operation,
-        ADR-0026 §3.1: "the cleanest possible mapping ... a single addressable inverse,
-        not a re-create or a line replay"). The rollback success criterion is the
-        symmetric asserted equality: re-captured config must normalize equal to the
-        baseline (ADR-0021 §3: "rollback success is an asserted equality, never an
-        assumption"). A rollback that cannot reach the device or whose re-capture does
-        not normalize equal is ``succeeded=False`` → caller surfaces ``rollback_failed``,
-        never ``rolled_back`` (ADR-0021 §3).
+        Success criterion remains asserted equality: re-captured config must
+        normalize equal to the baseline (ADR-0021 §3).
         """
         try:
-            self._replace_config(baseline_normalized.splitlines())
+            # Permanent inverse — JunosSshTransport.rollback_config issues
+            # configure → rollback N → commit (not commit confirmed).
+            self._transport.rollback_config(1)
             after = _normalize_config(self._capture_config())
         except Exception as exc:  # noqa: BLE001 — unreachable device = rollback-failed
             return RollbackResult(
                 attempted=True,
                 succeeded=False,
                 verified=False,
-                detail=f"rollback N / load override failed ({type(exc).__name__})",
+                detail=f"rollback N + commit failed ({type(exc).__name__})",
             )
         equal = after == baseline_normalized
         return RollbackResult(
