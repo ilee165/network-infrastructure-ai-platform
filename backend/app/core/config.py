@@ -37,6 +37,22 @@ class Settings(BaseSettings):
     #: Async SQLAlchemy DSN — asyncpg driver; host is the compose service name.
     database_url: str = "postgresql+asyncpg://netops:netops@postgres:5432/netops"
 
+    #: SQLAlchemy async engine pool size per process (Wave 5 / startup H2).
+    #: Size so ``api_replicas × (db_pool_size + db_max_overflow) +
+    #: worker_processes × celery_concurrency × (db_pool_size + db_max_overflow)
+    #: ≤ Postgres max_connections`` (minus admin headroom). Defaults match
+    #: SQLAlchemy's historical defaults so unset deployments are unchanged.
+    db_pool_size: int = Field(default=5, ge=1, le=100)
+
+    #: Extra connections beyond :attr:`db_pool_size` under burst (Wave 5).
+    db_max_overflow: int = Field(default=10, ge=0, le=100)
+
+    #: Celery worker ``-c`` concurrency (Wave 5). Compose/Helm should pass this
+    #: through to the worker command; keep
+    #: ``celery_worker_concurrency × (db_pool_size + db_max_overflow)`` within
+    #: the Postgres connection budget when co-located with the API pool.
+    celery_worker_concurrency: int = Field(default=2, ge=1, le=64)
+
     # -- api/worker -> Postgres mTLS (W4-T4, ADR-0039 §4) ----------------------
     # When the deployment mounts cert-manager-issued client material, the engine
     # presents a CLIENT certificate and verifies the SERVER (the ``verify-full``

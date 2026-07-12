@@ -120,7 +120,13 @@ def create_engine(settings: Settings) -> AsyncEngine:
     asyncpg driver when SSL is configured; a plaintext deployment is unchanged.
     """
     connect_args = build_ssl_connect_args(settings)
-    return create_async_engine(settings.database_url, pool_pre_ping=True, connect_args=connect_args)
+    return create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        connect_args=connect_args,
+    )
 
 
 def create_reader_engine(settings: Settings) -> AsyncEngine:
@@ -138,7 +144,13 @@ def create_reader_engine(settings: Settings) -> AsyncEngine:
     """
     connect_args = build_ssl_connect_args(settings)
     reader_url = settings.database_reader_url or settings.database_url
-    return create_async_engine(reader_url, pool_pre_ping=True, connect_args=connect_args)
+    return create_async_engine(
+        reader_url,
+        pool_pre_ping=True,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        connect_args=connect_args,
+    )
 
 
 def create_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
