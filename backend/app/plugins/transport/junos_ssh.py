@@ -9,15 +9,17 @@ JunOS deploy/restore issue a real ``load`` → ``commit check`` →
 Option A (ADR-faithful):
 
 - :meth:`send_config` / :meth:`replace_config` end at ``commit confirmed <N>``
-  (device state is tentatively active; dead-man timer armed).
-- :meth:`confirm_config` issues the confirming ``commit`` **after** plugin
-  verify-after success.
+  then **exit config mode** so verify-after operational commands work (B6).
+- :meth:`confirm_config` re-enters config and issues confirming ``commit``.
 - On verify-after failure the plugin withholds confirm and runs structured
   rollback; the confirmed timer is the backstop if rollback cannot complete.
+- :meth:`rollback_config` fails closed if ``rollback N`` errors — never issues
+  bare ``commit`` after a failed rollback (B1).
 """
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 from typing import Final, Literal
 
@@ -48,66 +50,73 @@ class JunosSshTransport(SshTransport):
         """``load merge`` of *lines* (set-form) → ``commit check`` → ``commit confirmed <N>``.
 
         Does **not** issue the confirming ``commit`` — that is
-        :meth:`confirm_config` after verify-after (Option A).
+        :meth:`confirm_config` after verify-after (Option A). Exits config mode
+        after the confirmed commit so operational-mode capture works.
         """
         return self._confirmed_load(lines, mode="merge")
 
     def replace_config(self, lines: Sequence[str]) -> str:
         """``load override`` of *lines* → ``commit check`` → ``commit confirmed <N>``.
 
-        Restore/rollback apply surface. Confirming ``commit`` is still
+        Restore apply surface. Confirming ``commit`` is still
         :meth:`confirm_config` after verify-after.
         """
         return self._confirmed_load(lines, mode="override")
 
     def confirm_config(self) -> str:
-        """Confirming ``commit`` — makes a pending confirmed commit permanent."""
+        """Confirming ``commit`` — re-enter config, commit, exit (B6 mode discipline)."""
         connection = self._require_connection()
+        timeout = self._params.read_timeout
+        parts: list[str] = []
         try:
-            output = connection.send_command("commit", read_timeout=self._params.read_timeout)
+            parts.append(str(connection.send_command("configure", read_timeout=timeout)))
+            commit_out = str(connection.send_command("commit", read_timeout=timeout))
+            parts.append(commit_out)
+            self._raise_if_cli_failed("commit confirm", commit_out)
+            self._exit_config(connection, parts, timeout)
+        except SshTransportError:
+            self._best_effort_exit(connection, timeout)
+            raise
         except _NETMIKO_FAILURES as exc:
+            self._best_effort_exit(connection, timeout)
             raise SshTransportError(self._failure_message("commit confirm", exc)) from exc
-        if not isinstance(output, str):  # pragma: no cover
-            raise SshTransportError(
-                f"SSH commit confirm for {self._params.host}:{self._params.port} "
-                "returned non-text output"
-            )
-        self._raise_if_cli_failed("commit confirm", output)
-        return output
+        return "\n".join(parts)
 
     def rollback_config(self, n: int = 1) -> str:
-        """``rollback N`` + ``commit`` — commits the rolled-back baseline, not the bad change.
+        """``rollback N`` + ``commit`` — never bare commit if rollback failed (B1).
 
         Ordering is intentional: never a bare ``commit`` before ``rollback``.
+        Each step is checked; a failed ``rollback N`` raises without sending
+        ``commit`` (which would permanently confirm a pending bad change).
         """
-        if n < 0:
+        if n < 1:
             raise SshTransportError(
-                f"SSH rollback_config n must be >= 0 for {self._params.host}:{self._params.port}"
+                f"SSH rollback_config n must be >= 1 for {self._params.host}:{self._params.port}"
             )
         connection = self._require_connection()
         timeout = self._params.read_timeout
         parts: list[str] = []
         try:
             parts.append(str(connection.send_command("configure", read_timeout=timeout)))
-            parts.append(str(connection.send_command(f"rollback {n}", read_timeout=timeout)))
-            parts.append(str(connection.send_command("commit", read_timeout=timeout)))
-            # Exit config mode best-effort (not part of the commit contract).
-            exit_mode = getattr(connection, "exit_config_mode", None)
-            if callable(exit_mode):
-                try:
-                    exit_mode()
-                except _NETMIKO_FAILURES:
-                    parts.append(str(connection.send_command("exit", read_timeout=timeout)))
-            else:
-                parts.append(str(connection.send_command("exit", read_timeout=timeout)))
+            rb_out = str(connection.send_command(f"rollback {n}", read_timeout=timeout))
+            parts.append(rb_out)
+            # B1: fail closed BEFORE commit — a bare commit after failed rollback
+            # permanently confirms the bad tentative config.
+            self._raise_if_cli_failed("rollback", rb_out)
+            commit_out = str(connection.send_command("commit", read_timeout=timeout))
+            parts.append(commit_out)
+            self._raise_if_cli_failed("rollback commit", commit_out)
+            self._exit_config(connection, parts, timeout)
+        except SshTransportError:
+            self._best_effort_exit(connection, timeout)
+            raise
         except _NETMIKO_FAILURES as exc:
+            self._best_effort_exit(connection, timeout)
             raise SshTransportError(self._failure_message("rollback", exc)) from exc
-        joined = "\n".join(parts)
-        self._raise_if_cli_failed("rollback", joined)
-        return joined
+        return "\n".join(parts)
 
     def _confirmed_load(self, lines: Sequence[str], *, mode: Literal["merge", "override"]) -> str:
-        """Enter config, load candidate, commit check, commit confirmed — no final confirm."""
+        """Enter config, load candidate, commit check, commit confirmed, exit config."""
         connection = self._require_connection()
         timeout = self._params.read_timeout
         minutes = self._params.commit_confirmed_minutes
@@ -121,7 +130,7 @@ class JunosSshTransport(SshTransport):
         try:
             # Exact ordered sequence (unit tests pin these strings):
             # configure → load {merge|override} terminal → <set-form body> →
-            # Ctrl-D (end terminal load) → commit check → commit confirmed <N>
+            # Ctrl-D → commit check → commit confirmed <N> → exit
             # Confirming ``commit`` is deliberately NOT issued here (Option A).
             parts.append(str(connection.send_command("configure", read_timeout=timeout)))
             parts.append(str(connection.send_command(load_cmd, read_timeout=timeout)))
@@ -139,11 +148,40 @@ class JunosSshTransport(SshTransport):
             )
             parts.append(confirmed)
             self._raise_if_cli_failed("commit confirmed", confirmed)
+            # B6: leave config mode so plugin verify-after can run operational show.
+            self._exit_config(connection, parts, timeout)
         except SshTransportError:
+            # F4: discard dirty candidate on failure (best-effort).
+            self._discard_candidate(connection, timeout)
             raise
         except _NETMIKO_FAILURES as exc:
+            self._discard_candidate(connection, timeout)
             raise SshTransportError(self._failure_message(f"config {mode}", exc)) from exc
         return "\n".join(parts)
+
+    def _exit_config(self, connection: object, parts: list[str], timeout: float) -> None:
+        """Leave configuration mode (operational mode for show / verify-after)."""
+        exit_mode = getattr(connection, "exit_config_mode", None)
+        if callable(exit_mode):
+            try:
+                exit_mode()
+                return
+            except _NETMIKO_FAILURES:
+                pass
+        parts.append(str(connection.send_command("exit", read_timeout=timeout)))  # type: ignore[attr-defined]
+
+    def _best_effort_exit(self, connection: object, timeout: float) -> None:
+        with_context: list[str] = []
+        try:
+            self._exit_config(connection, with_context, timeout)
+        except Exception:  # noqa: BLE001
+            return
+
+    def _discard_candidate(self, connection: object, timeout: float) -> None:
+        """Best-effort rollback 0 + exit so a failed load does not poison the candidate."""
+        with contextlib.suppress(Exception):
+            connection.send_command("rollback 0", read_timeout=timeout)  # type: ignore[attr-defined]
+        self._best_effort_exit(connection, timeout)
 
     def _raise_if_cli_failed(self, action: str, output: str) -> None:
         """Fail closed on known JunOS error markers in *output* (device text, not exceptions)."""

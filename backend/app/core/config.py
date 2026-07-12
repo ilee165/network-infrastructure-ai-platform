@@ -432,7 +432,19 @@ class Settings(BaseSettings):
 
     #: When true (default), SSH sessions use strict host-key checking + system
     #: known_hosts (``NETOPS_SSH_STRICT``). Set false only in isolated labs.
+    #: Rejected when :attr:`production` is true (secure by default).
     ssh_strict: bool = True
+
+    @model_validator(mode="after")
+    def _require_strict_ssh_in_production(self) -> Settings:
+        """Lab opt-out must never disable host-key verification in production."""
+        if self.production and not self.ssh_strict:
+            raise ValueError(
+                "NETOPS_SSH_STRICT must remain true in production "
+                "(NETOPS_ENV=prod or NETOPS_IS_PROD=true) — host-key verification "
+                "cannot be disabled on a production posture"
+            )
+        return self
 
     @property
     def oidc_enabled(self) -> bool:

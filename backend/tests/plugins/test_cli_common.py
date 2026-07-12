@@ -21,7 +21,9 @@ class TestTextfsmHelpers:
 
     def test_address_or_none(self) -> None:
         assert str(address_or_none("10.0.0.1")) == "10.0.0.1"
+        assert str(address_or_none("2001:db8::1")) == "2001:db8::1"
         assert address_or_none("") is None
+        assert address_or_none(None) is None
         assert address_or_none("not-an-ip") is None
 
     def test_statuses_from_link_protocol(self) -> None:
@@ -31,6 +33,11 @@ class TestTextfsmHelpers:
         admin, oper = statuses_from_link_protocol("administratively down", "down")
         assert admin is InterfaceAdminStatus.DOWN
         assert oper is InterfaceOperStatus.DOWN
+        admin, oper = statuses_from_link_protocol("down", "down")
+        assert admin is InterfaceAdminStatus.UP
+        assert oper is InterfaceOperStatus.DOWN
+        admin, oper = statuses_from_link_protocol("up", "testing")
+        assert oper is InterfaceOperStatus.UNKNOWN
 
 
 class TestCliConfigWriteMixinShape:

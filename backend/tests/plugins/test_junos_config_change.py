@@ -394,6 +394,7 @@ class TestDeploy:
         assert transport.config_batches  # merge apply
         assert transport.rollback_calls == [1]
         assert transport.replace_batches == []  # no second commit confirmed
+        assert transport.confirm_calls == 0  # never confirm before structured rollback
 
     def test_deploy_apply_error_rolls_back(self, device_id: UUID) -> None:
         transport = JunosConfigWriteFakeTransport(_BASELINE)

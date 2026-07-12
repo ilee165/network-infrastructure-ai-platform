@@ -27,6 +27,7 @@ from app.plugins.transport.ssh import (
     SshTransportError,
     netmiko_device_type,
 )
+from app.plugins.transport.ssh_params import host_key_fingerprint_for, ssh_params_from
 
 __all__ = [
     "NETMIKO_DEVICE_TYPES",
@@ -40,8 +41,10 @@ __all__ = [
     "SshParams",
     "SshTransport",
     "SshTransportError",
+    "host_key_fingerprint_for",
     "make_ssh_transport",
     "netmiko_device_type",
+    "ssh_params_from",
 ]
 
 

@@ -37,6 +37,11 @@ from app.core.errors import PluginError
 
 logger = logging.getLogger(__name__)
 
+try:
+    import paramiko  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover - netmiko requires paramiko
+    paramiko = None
+
 if TYPE_CHECKING:
     from netmiko import BaseConnection
 
@@ -185,25 +190,36 @@ class SshTransport:
                 params.port,
                 params.device_type,
             )
+        # B5: when a pin is set, install a MissingHostKeyPolicy that accepts only
+        # the matching fingerprint *before* auth (SSH host-key phase precedes
+        # password auth). When pin is absent, netmiko's ssh_strict/RejectPolicy
+        # applies as usual.
+        connect_kwargs: dict[str, Any] = {
+            "host": params.host,
+            "device_type": params.device_type,
+            "username": params.username,
+            "password": params.password,
+            "port": params.port,
+            "secret": params.enable_secret or "",
+            "conn_timeout": params.conn_timeout,
+            "ssh_strict": params.ssh_strict if not params.host_key_fingerprint else True,
+            "system_host_keys": (params.system_host_keys and params.ssh_strict)
+            or bool(params.host_key_fingerprint and params.system_host_keys),
+        }
         try:
-            connection = ConnectHandler(
-                host=params.host,
-                device_type=params.device_type,
-                username=params.username,
-                password=params.password,
-                port=params.port,
-                secret=params.enable_secret or "",
-                conn_timeout=params.conn_timeout,
-                # Wave 3 H7: default strict + system known_hosts (not AutoAdd).
-                ssh_strict=params.ssh_strict,
-                system_host_keys=params.system_host_keys and params.ssh_strict,
-            )
+            with _pinned_host_key_policy(params.host_key_fingerprint):
+                connection = ConnectHandler(**connect_kwargs)
         except _NETMIKO_FAILURES as exc:
             raise SshTransportError(self._host_key_failure_message(exc)) from exc
         self._connection = connection
         try:
+            # Defense in depth: re-check pin after connect if policy was not used.
             self._verify_pinned_fingerprint(connection)
         except SshTransportError:
+            self._close()
+            raise
+        except BaseException:
+            # Match enable() safety net — never leak the session on unexpected errors.
             self._close()
             raise
         if params.enable_secret is not None:
@@ -323,13 +339,14 @@ class SshTransport:
                 )
             self._raise_if_tcl_failed("stage config", stage_out)
 
-            # Integrity: staged file length must match expected (line-oriented tclsh).
+            # Integrity: anchored token avoids hostname digits in prompt echoes (B3).
+            # Do not echo the full config body (false-positive error markers — F3).
             size_cmds = [
                 "do tclsh",
                 f'set f [open "{staged}" r]',
                 "set body [read $f]",
                 "close $f",
-                "puts [string length $body]",
+                'puts "NETOPS-LEN=[string length $body]"',
                 "tclquit",
             ]
             size_out = connection.send_config_set(size_cmds, read_timeout=timeout)
@@ -393,17 +410,27 @@ class SshTransport:
 
     @staticmethod
     def _tcl_chunk_escaped(escaped: str, max_chars: int) -> list[str]:
-        """Split *escaped* into chunks of at most *max_chars* without trailing ``\\``."""
+        """Split *escaped* into chunks of at most *max_chars* without unpaired trailing ``\\``.
+
+        B2: pull back only when the run of backslashes ending at ``end-1`` has
+        **odd** length (pair-opening ``\\``). An even run is complete ``\\\\`` pairs
+        and must not be shortened (that would create a bare trailing backslash).
+        """
         chunks: list[str] = []
         i = 0
         n = len(escaped)
         while i < n:
             end = min(i + max_chars, n)
-            # If we would end on a backslash, pull back so the escape pair stays whole.
             if end < n and escaped[end - 1] == "\\":
-                end -= 1
+                run = 0
+                j = end - 1
+                while j >= i and escaped[j] == "\\":
+                    run += 1
+                    j -= 1
+                if run % 2 == 1:
+                    end -= 1
             if end <= i:
-                # Pathological: max_chars == 1 and char is "\\" — take two chars.
+                # Pathological: need at least one full escape pair.
                 end = min(i + 2, n)
             chunks.append(escaped[i:end])
             i = end
@@ -421,14 +448,14 @@ class SshTransport:
             )
 
     def _assert_staged_length(self, size_output: str, expected: int) -> None:
-        """Parse staged-file length from tclsh output; raise on mismatch."""
-        matches = re.findall(r"\b(\d+)\b", size_output)
-        if not matches:
+        """Parse anchored ``NETOPS-LEN=N`` token from tclsh output (B3)."""
+        match = re.search(r"NETOPS-LEN=(\d+)", size_output)
+        if not match:
             raise SshTransportError(
                 f"SSH stage size check failed for {self._params.host}:{self._params.port}: "
-                "could not parse staged file length; configure replace not attempted"
+                "could not parse NETOPS-LEN token; configure replace not attempted"
             )
-        actual = int(matches[-1])
+        actual = int(match.group(1))
         if actual != expected:
             raise SshTransportError(
                 f"SSH stage integrity failed for {self._params.host}:{self._params.port}: "
@@ -528,6 +555,56 @@ class SshTransport:
                 f"credential params host_key_fingerprints[{self._params.host!r}] or "
                 f"investigate host substitution / MITM"
             )
+
+
+class _PinnedHostKeyPolicy:
+    """paramiko MissingHostKeyPolicy: accept only if fingerprint matches the pin.
+
+    Host-key verification runs before password authentication in the SSH
+    handshake, so a pin mismatch never sends the device credential (B5).
+    """
+
+    def __init__(self, expected_fingerprint: str) -> None:
+        self._expected = expected_fingerprint
+
+    def missing_host_key(self, client: Any, hostname: str, key: Any) -> None:
+        presented = _fingerprint_from_paramiko_key(key)
+        if presented is None or not _fingerprints_match(self._expected, presented):
+            raise SSHException(
+                f"Host key pin mismatch for {hostname!r}: expected "
+                f"{self._expected!r}, presented {presented!r}"
+            )
+        # Accept: cache so the remainder of the handshake proceeds.
+        client.get_host_keys().add(hostname, key.get_name(), key)
+
+
+@contextlib.contextmanager
+def _pinned_host_key_policy(fingerprint: str | None) -> Any:
+    """While *fingerprint* is set, force paramiko clients to use the pin policy."""
+    if not fingerprint or paramiko is None:
+        yield
+        return
+    policy = _PinnedHostKeyPolicy(fingerprint)
+    original = paramiko.SSHClient.set_missing_host_key_policy
+
+    def _install(self: Any, _policy: Any = None) -> None:  # noqa: ANN401
+        # Ignore netmiko's Reject/AutoAdd choice; pin policy is authoritative.
+        original(self, policy)
+
+    paramiko.SSHClient.set_missing_host_key_policy = _install
+    try:
+        yield
+    finally:
+        paramiko.SSHClient.set_missing_host_key_policy = original
+
+
+def _fingerprint_from_paramiko_key(key: Any) -> str | None:
+    if key is None:
+        return None
+    raw = key.asbytes() if hasattr(key, "asbytes") else str(key).encode()
+    asbytes = raw if isinstance(raw, (bytes, bytearray)) else bytes(raw)
+    digest = hashlib.sha256(asbytes).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
 
 
 def _connection_host_key_fingerprint(connection: BaseConnection) -> str | None:

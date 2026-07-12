@@ -80,6 +80,7 @@ from app.plugins.transport import (
     SshTransportError,
     make_ssh_transport,
     netmiko_device_type,
+    ssh_params_from,
 )
 from app.services import audit, credentials
 from app.workers.celery_app import celery_app
@@ -238,24 +239,14 @@ def _fetch_running_config(
     if not plugin.supports(Capability.CONFIG_BACKUP):
         raise PluginError(f"vendor {context.vendor_id!r} does not support config backup")
     cred = context.credential
-    settings = get_settings()
-    # Host-keyed pin map (Wave 3 H7 / Q3): never a flat shared fingerprint.
-    pin: str | None = None
-    fps = cred.params.get("host_key_fingerprints")
-    if isinstance(fps, dict):
-        raw_pin = fps.get(context.mgmt_ip) or fps.get(str(context.mgmt_ip))
-        if raw_pin is not None:
-            pin = str(raw_pin)
-    params = SshParams(
+    # Host-key policy + pin (Wave 3 H7 / B4): shared helper for all SSH open sites.
+    params = ssh_params_from(
         host=context.mgmt_ip,
         device_type=netmiko_device_type(context.vendor_id, cred.params),
         username=cred.username or "",
         password=cred.secret,
-        port=int(cred.params.get("port", 22)),
-        commit_confirmed_minutes=settings.junos_commit_confirmed_minutes,
-        ssh_strict=settings.ssh_strict,
-        system_host_keys=settings.ssh_strict,
-        host_key_fingerprint=pin,
+        cred_params=cred.params,
+        settings=get_settings(),
     )
     with _open_ssh(params) as transport:
         impl_cls = plugin.get_capability(Capability.CONFIG_BACKUP)

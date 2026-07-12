@@ -70,12 +70,12 @@ Point fixes, each independently committable; one PR.
 
 | ID | Status |
 |----|--------|
-| **C2** | ✅ JunOS `JunosSshTransport` Option A (`commit confirmed` + confirm after verify); apply-fail vs verify-fail recovery split |
-| **C3** | ✅ Tcl 8.3-safe escaped staging for `replace_config` (chunked, fail closed, integrity length) |
-| **H7** | ✅ Default `ssh_strict` + system known_hosts; lab opt-out; host-keyed pin map on credential params |
+| **C2** | 🔄 JunOS Option A landed; review blockers B1/B6 addressed in follow-up fix (per-step rollback check, exit config after `commit confirmed`) — re-verify at final HEAD |
+| **C3** | 🔄 Escaped staging + fail-closed; B2/B3 addressed (parity-aware chunks, `NETOPS-LEN=` token) — re-verify at final HEAD |
+| **H7** | 🔄 Default strict + pin; B4/B5 + prod gate: shared `ssh_params_from` on all SSH open sites, handshake pin policy, `NETOPS_SSH_STRICT` rejected in production |
 | **AR-W2-T1 / H8** | ✅ `cli_common` base + refits: cisco_ios, cisco_iosxe, eos, cisco_nxos, junos |
 
-Exit: merge when final HEAD re-verification green; `graphify update .` after merge.
+Exit: merge when final HEAD re-verification green; `graphify update .` after merge. Known follow-ups tracked in PR review (F1 live-lab JunOS, F10 EOS/NX-OS staging surface, known_hosts chart mount).
 
 ## Wave 4 — Drift gates (AR-W0 / AR-W1)
 

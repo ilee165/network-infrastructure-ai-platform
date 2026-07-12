@@ -176,7 +176,7 @@ async def _read_live(device_id: str, capability_name: str, method_name: str) -> 
     import app.db as _db
     from app.models import CredentialKind, Device, DeviceCredential
     from app.plugins.registry import get_default_registry
-    from app.plugins.transport import SshParams, netmiko_device_type
+    from app.plugins.transport import netmiko_device_type
     from app.services import credentials as credentials_service
 
     async with _db.get_sessionmaker()() as session:
@@ -230,12 +230,14 @@ async def _read_live(device_id: str, capability_name: str, method_name: str) -> 
             return {"error": f"{type(exc).__name__}: {exc}"}
 
         credential_params = dict(row.params or {})
-        ssh_params = SshParams(
+        from app.plugins.transport import ssh_params_from
+
+        ssh_params = ssh_params_from(
             host=device.mgmt_ip,
             device_type=netmiko_device_type(vendor_id, credential_params),
             username=row.username or "",
             password=secret.plaintext.decode("utf-8"),
-            port=int(credential_params.get("port", 22)),
+            cred_params=credential_params,
         )
         await session.commit()  # decrypt audit rows survive whatever happens next
 

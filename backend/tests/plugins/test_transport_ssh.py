@@ -126,11 +126,14 @@ class FakeConnection:
                 if cmd.startswith("puts $fd "):
                     total += 1  # puts adds trailing newline
             self.staged_plain_len = total
-        if "string length" in joined:
+        if "string length" in joined or "NETOPS-LEN=" in joined:
             if self._force_size_output is not None:
+                # Preserve anchored-token shape when forcing a bad length.
+                if self._force_size_output.isdigit():
+                    return f"NETOPS-LEN={self._force_size_output}"
                 return self._force_size_output
             if self.staged_plain_len is not None:
-                return str(self.staged_plain_len)
+                return f"NETOPS-LEN={self.staged_plain_len}"
         return self.config_set_output
 
     def enable(self) -> str:
@@ -410,16 +413,32 @@ class TestSshConfigWrite:
 
     def test_replace_config_chunk_boundary_does_not_split_escapes(self) -> None:
         """Chunk cuts must not leave a trailing bare backslash before the closing quote."""
-        # Build a line whose escaped form is longer than the chunk size and contains
-        # escapes near a 200-char boundary.
         line = "a" * 198 + "$" + "b" * 50  # escaped: 198 a's + \$ + 50 b's
         chunks = SshTransport._tcl_chunk_escaped(SshTransport._tcl_escape_double_quoted(line), 200)
         for chunk in chunks:
-            assert not chunk.endswith("\\") or chunk.endswith("\\\\")
-        # Reassembly after unescaping one level of Tcl pairs recovers the line.
-        joined = "".join(chunks)
-        assert "\\$" in joined
-        assert not any(c.endswith("\\") and not c.endswith("\\\\") for c in chunks)
+            run = 0
+            for ch in reversed(chunk):
+                if ch == "\\":
+                    run += 1
+                else:
+                    break
+            assert run % 2 == 0, f"unpaired trailing backslash in {chunk!r}"
+        assert "\\$" in "".join(chunks)
+
+    def test_replace_config_chunk_boundary_does_not_split_backslash_pair(self) -> None:
+        """B2: literal backslash near the boundary must not create a bare trailing ``\\``."""
+        line = "a" * 198 + "\\" + "b" * 50  # escaped: 198 a's + \\\\ + 50 b's
+        escaped = SshTransport._tcl_escape_double_quoted(line)
+        chunks = SshTransport._tcl_chunk_escaped(escaped, 200)
+        for chunk in chunks:
+            run = 0
+            for ch in reversed(chunk):
+                if ch == "\\":
+                    run += 1
+                else:
+                    break
+            assert run % 2 == 0, f"unpaired trailing backslash in {chunk!r}"
+        assert "".join(chunks) == escaped
 
     def test_replace_config_before_open_raises(self) -> None:
         transport = SshTransport(make_params())
@@ -491,12 +510,15 @@ class TestJunosSshTransport:
         assert "\x04" in issued  # Ctrl-D ends load … terminal
         assert "commit check" in issued
         assert "commit confirmed 2" in issued
-        # Option A: no confirming commit inside apply
-        assert issued.count("commit") == 0
+        # Option A: no bare confirming commit inside apply
+        assert "commit" not in issued
         conf_idx = issued.index("commit confirmed 2")
         check_idx = issued.index("commit check")
         eof_idx = issued.index("\x04")
         assert eof_idx < check_idx < conf_idx
+        # B6: exit config mode for operational verify-after capture
+        assert "exit" in issued
+        assert issued.index("commit confirmed 2") < issued.index("exit")
 
     def test_replace_config_uses_load_override(self, fake_netmiko: FakeConnectHandler) -> None:
         from app.plugins.transport import JunosSshTransport
@@ -507,7 +529,8 @@ class TestJunosSshTransport:
         issued = [command for command, _timeout in fake_netmiko.connection.commands]
         assert "load override terminal" in issued
         assert "commit confirmed 3" in issued
-        assert issued.count("commit") == 0
+        assert "commit" not in issued
+        assert "exit" in issued
 
     def test_confirm_config_issues_commit(self, fake_netmiko: FakeConnectHandler) -> None:
         from app.plugins.transport import JunosSshTransport
@@ -515,7 +538,9 @@ class TestJunosSshTransport:
         with JunosSshTransport(make_params(device_type="juniper_junos")) as transport:
             transport.confirm_config()
         issued = [command for command, _timeout in fake_netmiko.connection.commands]
-        assert issued == ["commit"]
+        assert issued[0] == "configure"
+        assert issued[1] == "commit"
+        assert "exit" in issued
 
     def test_commit_check_failure_skips_commit_confirmed(
         self, fake_netmiko: FakeConnectHandler
@@ -546,6 +571,47 @@ class TestJunosSshTransport:
         assert issued[2] == "commit"
         # Never bare commit before rollback
         assert issued.index("rollback 1") < issued.index("commit")
+
+    def test_rollback_config_failed_rollback_does_not_commit(
+        self, fake_netmiko: FakeConnectHandler
+    ) -> None:
+        """B1: failed rollback N must not issue confirming bare commit."""
+        from app.plugins.transport import JunosSshTransport
+
+        fake_netmiko.connection.outputs["rollback 1"] = "error: cannot rollback"
+        with (
+            JunosSshTransport(make_params(device_type="juniper_junos")) as transport,
+            pytest.raises(SshTransportError, match="rollback"),
+        ):
+            transport.rollback_config(1)
+        issued = [command for command, _timeout in fake_netmiko.connection.commands]
+        assert "rollback 1" in issued
+        assert "commit" not in issued
+
+
+class TestSshParamsFromHelper:
+    def test_ssh_params_from_applies_strict_and_host_keyed_pin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.core.config import Settings
+        from app.plugins.transport import ssh_params_from
+
+        settings = Settings(
+            env="dev",
+            ssh_strict=True,
+            junos_commit_confirmed_minutes=2,
+        )
+        params = ssh_params_from(
+            host="10.0.0.1",
+            device_type="cisco_ios",
+            username="u",
+            password="p",
+            cred_params={"host_key_fingerprints": {"10.0.0.1": "SHA256:abc"}, "port": 2222},
+            settings=settings,
+        )
+        assert params.ssh_strict is True
+        assert params.host_key_fingerprint == "SHA256:abc"
+        assert params.port == 2222
 
 
 class TestSshErrorWrapping:
