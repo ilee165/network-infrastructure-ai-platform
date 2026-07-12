@@ -714,20 +714,31 @@ async def render_runbook(
 
     facts = _facts_block(red_device, red_interfaces, red_neighbors, red_routes)
 
-    # 2. LLM writes each narrative section from the redacted facts only.
+    # 2. LLM writes narrative sections in parallel (Wave 5 / agents H2).
+    import asyncio
+
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    narratives: dict[str, str] = {}
-    for heading, brief in _RUNBOOK_NARRATIVE_SECTIONS:
+    from app.core.config import get_settings
+
+    timeout = get_settings().llm_call_timeout_seconds or None
+
+    async def _one_section(heading: str, brief: str) -> tuple[str, str]:
         prompt = f"GROUNDING FACTS (redacted):\n{facts}\n\nWrite the '{heading}' section. {brief}"
-        response = await model.ainvoke(
+        coro = model.ainvoke(
             [
                 SystemMessage(content=_RUNBOOK_SYSTEM_PROMPT),
                 HumanMessage(content=prompt),
             ]
         )
+        response = await asyncio.wait_for(coro, timeout=timeout) if timeout else await coro
         content = response.content
-        narratives[heading] = content if isinstance(content, str) else str(content)
+        return heading, content if isinstance(content, str) else str(content)
+
+    pairs = await asyncio.gather(
+        *(_one_section(h, b) for h, b in _RUNBOOK_NARRATIVE_SECTIONS)
+    )
+    narratives: dict[str, str] = dict(pairs)
 
     # 3. Assemble the template with deterministic, verbatim (redacted) tables.
     content = _render_runbook_markdown(
@@ -1014,18 +1025,29 @@ async def render_incident_report(
 
     facts = _session_facts_block(red_session, red_crs)
 
-    # 2. LLM writes each narrative section from the redacted facts only.
-    narratives: dict[str, str] = {}
-    for heading, brief in _INCIDENT_NARRATIVE_SECTIONS:
+    # 2. LLM writes narrative sections in parallel (Wave 5 / agents H2 + M41 timeout).
+    import asyncio
+
+    from app.core.config import get_settings
+
+    timeout = get_settings().llm_call_timeout_seconds or None
+
+    async def _one_section(heading: str, brief: str) -> tuple[str, str]:
         prompt = f"GROUNDING FACTS (redacted):\n{facts}\n\nWrite the '{heading}' section. {brief}"
-        response = await model.ainvoke(
+        coro = model.ainvoke(
             [
                 SystemMessage(content=_INCIDENT_SYSTEM_PROMPT),
                 HumanMessage(content=prompt),
             ]
         )
+        response = await asyncio.wait_for(coro, timeout=timeout) if timeout else await coro
         content = response.content
-        narratives[heading] = content if isinstance(content, str) else str(content)
+        return heading, content if isinstance(content, str) else str(content)
+
+    pairs = await asyncio.gather(
+        *(_one_section(h, b) for h, b in _INCIDENT_NARRATIVE_SECTIONS)
+    )
+    narratives: dict[str, str] = dict(pairs)
 
     # 3. Assemble the template with deterministic, verbatim (redacted) tables.
     content = _render_incident_markdown(
