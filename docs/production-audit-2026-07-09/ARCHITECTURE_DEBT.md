@@ -71,11 +71,66 @@ Production readiness audit, 2026-07-09 (HEAD `5403c3b`). Backend ~3589 unit test
 
 ## 7. Frontend production bundle size
 
-- **Severity:** Low
-- **Location:** `vite build` advisory — main JS ~861 kB minified / ~257 kB gzip
-- **Root cause:** Single chunk; topology/cytoscape weight.
-- **Proposed fix:** Route-level `import()` code-splitting for heavy pages.
-- **Effort:** M | **Risk:** Low
+- **Severity:** Low → **CLOSED (Wave 5 T10)** on `fix/review-wave5`
+- **Location:** was single ~895 kB JS chunk; now entry ~23 kB + vendor ~252 kB + cytoscape ~443 kB + per-route chunks
+- **Fix shipped:** `React.lazy` routes + `manualChunks` + CI `check:chunks` gate
+
+---
+
+## 8. Wave 5 deferred structural ceilings (provenance: WAVE5-PLAN)
+
+Explicitly **not** fixed in Wave 5 point-fix wave — record here so they do not evaporate.
+
+### 8a. Audit chain global lock (#7)
+
+- **Severity:** Medium (throughput ceiling, deliberate design)
+- **Location:** audit write path / ADR-0038 + ADR-0042
+- **Root cause:** Global advisory lock for hash-chain integrity
+- **Proposed fix:** Sharded keys / async outbox only if a real throughput requirement materializes; Wave 7 retention ADR is the venue
+- **Effort:** L | **Risk:** High (correctness)
+
+### 8b. Route-table streaming + BGP bulk path (#8 memory / workers H2)
+
+- **Severity:** Medium (memory triple-hold + fixed read_timeout on large route tables)
+- **Location:** discovery collection / persistence of large BGP tables
+- **Root cause:** Collect-parse-persist holds full tables in memory
+- **Proposed fix:** Streaming design before any BGP-core use case; bulk upsert half shipped as Wave 5 T3
+- **Effort:** L | **Risk:** Medium
+
+### 8c. Anthropic `cache_control` + router intent cache (agents M2/H6)
+
+- **Severity:** Low–Medium (token cost)
+- **Location:** agent prompts / supervisor router
+- **Root cause:** Full prompts re-paid every turn; no provider prompt cache
+- **Proposed fix:** Needs eval re-run to prove no routing regression; agents-focused follow-up
+- **Effort:** M | **Risk:** Medium (routing quality)
+
+### 8d. Wave 5 T4 delta path GC
+
+- **Severity:** Low (deferred GC)
+- **Location:** `project(..., stale_sweep=False)` on discovery-sync delta path
+- **Root cause:** Scoped projection skips estate-wide stale sweep so untouched devices are never wiped; removed interfaces on a *touched* device also wait for full rebuild GC
+- **Proposed fix:** Scoped stale sweep by device keys (Option A) or rely on periodic auto-rebuild / manual rebuild (current)
+- **Effort:** M | **Risk:** Medium
+
+### 8e. Embedding rows carry no model identity — in an unwired pipeline (PR #161 review)
+
+- **Severity:** Low **today**, Medium **the day RAG is wired** (see 8f — nothing calls this pipeline at runtime, so the degradation cannot currently occur)
+- **Location:** `embeddings` table / `app/knowledge/embedding.py` content-hash skip
+- **Root cause:** `Embedding` rows persist only `(document_id, chunk_index, chunk_text, embedding)`; the regenerate skip compares chunk *texts*, so after an embedding-model/profile switch unchanged documents would keep serving old-space vectors — `EMBEDDING_DIM` stays 768 across many models, so nothing errors
+- **Mitigation shipped (PR #161):** query-LRU keyed by (model, base_url); `clear_embedder_caches()` wired into the settings-PATCH invalidation; `embed_document(force=True)` bypass + docstring warning
+- **Blocking condition:** the migration below is a **prerequisite for wiring RAG**, not a follow-up to it — wiring first would start accumulating model-blind vectors
+- **Proposed fix:** migration adding `embeddings.model` (or profile) column, included in the skip condition and the retrieval filter
+- **Effort:** M (migration + backfill decision) | **Risk:** Low
+
+### 8f. The RAG pipeline has no production caller (PR #161 review)
+
+- **Severity:** Medium (dead subsystem carrying live maintenance + review cost; docstring asserts a caller that does not exist)
+- **Location:** `app/knowledge/embedding.py` — `embed_document`, `retrieve`, `OllamaEmbedder`, the query LRU, the content-hash skip
+- **Root cause:** Nothing in `backend/app` calls `embed_document` or `retrieve`. They are exported from `app.knowledge.__init__` and exercised only by unit tests + the M4/RAG eval suites. The Documentation Agent has **no** retrieval tool (`agents/documentation/tools.py` contains no RAG wrapper), contradicting the module docstring's claim that `retrieve` "is the service-layer core the agent-facing typed tool wrapper (shipped with the Documentation Agent) calls" (ADR-0019 §6). The sole runtime import of the module is `clear_embedder_caches()` from the settings-PATCH invalidation path.
+- **Consequences:** (a) ADR-0019's "cite a platform-generated artifact" capability is not actually reachable by any agent; (b) Wave 5's H5 query-LRU optimizes a path that never executes; (c) review effort (two CodeRabbit findings on this PR) is being spent on unreachable code; (d) §8e's corruption scenario is latent, not live.
+- **Proposed fix:** decide the subsystem's fate explicitly — either **wire it** (add the Documentation Agent retrieval tool + an embed-on-generate hook, doing the §8e migration *first*), or **retire it** (drop the module, the `embeddings` table, and the pgvector dependency) — and correct the docstring either way. Do not leave it half-shipped.
+- **Effort:** M (wire) / S (retire) | **Risk:** Low — nothing depends on it today
 
 ---
 
@@ -88,6 +143,7 @@ Production readiness audit, 2026-07-09 (HEAD `5403c3b`). Backend ~3589 unit test
 | Monolithic `auth.py` (~1.5k LOC) | **CLOSED** — package split |
 | Topology unbounded full-graph UI | **CLOSED** — scoped reads + `topology_max_nodes` 413 (Wave 5) |
 | Shared UI primitives missing | **CLOSED** — Wave 4 components |
+| Frontend single ~895 kB chunk | **CLOSED** — Wave 5 T10 lazy + cytoscape split |
 
 ---
 

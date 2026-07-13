@@ -25,7 +25,10 @@ const queryClient = new QueryClient({
     queries: {
       retry: 1,
       refetchOnWindowFocus: false,
-      staleTime: 5_000,
+      // Wave 5 / perf FE quick-win: 5s was aggressive for inventory/topology
+      // lists and caused refetch storms on tab focus + navigation. 30s is a
+      // safe default; live surfaces (chat/stream) do not use Query cache.
+      staleTime: 30_000,
     },
   },
 });

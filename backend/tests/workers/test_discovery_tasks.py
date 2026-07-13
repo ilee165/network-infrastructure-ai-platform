@@ -11,6 +11,7 @@ the key provider are faked through the module seams in
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -489,13 +490,13 @@ def test_status_running_persisted_before_first_wave(
     )
 
     observed: list[DiscoveryRunStatus] = []
-    original = tasks._dispatch_wave
+    original = tasks._enqueue_discovery_wave
 
-    def _spy(run_id_str: str, wave: list[str]) -> list[dict[str, Any]]:
+    def _spy(*args: Any, **kwargs: Any) -> dict[str, Any]:
         observed.append(_fetch_run(db_url, run_id).status)
-        return original(run_id_str, wave)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(tasks, "_dispatch_wave", _spy)
+    monkeypatch.setattr(tasks, "_enqueue_discovery_wave", _spy)
     tasks.run_discovery.apply(args=[str(run_id)]).get()
 
     assert observed == [DiscoveryRunStatus.RUNNING]
@@ -547,9 +548,12 @@ def test_collect_device_gives_up_after_max_retries(
 
     result = tasks.collect_device.apply(args=[str(run_id), "10.0.0.1"])
 
-    assert result.state == "FAILURE"
-    with pytest.raises(SshTransportError):
-        result.get()
+    # Wave 5: after retries exhausted, return ok=False (chord-safe) rather than
+    # FAILURE so a discovery wave chord can still complete with partial results.
+    assert result.state == "SUCCESS"
+    payload = result.get()
+    assert payload["ok"] is False
+    assert "SshTransportError" in payload["error"]
     # initial attempt + max_retries(2) retries
     assert fakes.ssh_attempts["10.0.0.1"] == 3
     assert tasks.collect_device.max_retries == 2
@@ -643,6 +647,91 @@ def test_collect_device_permanent_failure_returns_not_ok_without_retry(
     assert fakes.ssh_attempts["10.0.0.1"] == 1  # no pointless retries
     # The secret never leaks into the reported error.
     assert "hunter2-secret" not in str(payload)
+
+
+# ---------------------------------------------------------------------------
+# Wave 5 / PR 161 Task C: chord BODY safety net — a raising
+# continue_discovery_wave must never strand the run in RUNNING
+# ---------------------------------------------------------------------------
+
+
+def _wave_args(run_id: uuid.UUID) -> list[Any]:
+    """Positional args for one seed-wave ``continue_discovery_wave`` call."""
+    return [
+        [{"ok": True, "target_ip": "10.0.0.1", "neighbors": []}],
+        str(run_id),
+        0,
+        [],
+        {"waves": [], "devices_succeeded": 0, "devices_failed": 0},
+        {"hop_limit": 0, "allowlist": ["10.0.0.0/24"]},
+        ["10.0.0.1"],
+        time.monotonic(),
+    ]
+
+
+async def _boom(*args: Any, **kwargs: Any) -> None:
+    raise RuntimeError("transient DB failure")
+
+
+def test_continue_wave_unexpected_error_finalizes_run_failed(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Body raising mid-flight -> run ends FAILED (not RUNNING), error propagates."""
+    run_id = _seed_run(
+        db_url,
+        seeds=["10.0.0.1"],
+        hop_limit=0,
+        allowlist=["10.0.0.0/24"],
+        credentials=[SSH_CRED],
+    )
+    asyncio.run(tasks._start_run(run_id))  # run row -> RUNNING
+    monkeypatch.setattr(tasks, "_record_stats", _boom)
+
+    with pytest.raises(RuntimeError, match="transient DB failure"):
+        tasks.continue_discovery_wave(*_wave_args(run_id))
+
+    run = _fetch_run(db_url, run_id)
+    assert run.status is DiscoveryRunStatus.FAILED
+    assert run.finished_at is not None
+    assert "RuntimeError" in (run.error or "")
+
+
+def test_continue_wave_guard_preserves_terminal_status(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body failure after the run finished must not clobber the terminal state."""
+    run_id = _seed_run(
+        db_url,
+        seeds=["10.0.0.1"],
+        hop_limit=0,
+        allowlist=["10.0.0.0/24"],
+        credentials=[SSH_CRED],
+    )
+    stats = {"waves": [], "devices_succeeded": 1, "devices_failed": 0}
+    asyncio.run(tasks._finish_run(run_id, DiscoveryRunStatus.SUCCEEDED, stats, None))
+    monkeypatch.setattr(tasks, "_record_stats", _boom)
+
+    with pytest.raises(RuntimeError):
+        tasks.continue_discovery_wave(*_wave_args(run_id))
+
+    run = _fetch_run(db_url, run_id)
+    assert run.status is DiscoveryRunStatus.SUCCEEDED
+    assert run.error is None
+
+
+def test_collect_device_fold_reraises_celery_control_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Celery control-flow exceptions must pass through the ok=False fold."""
+    from celery.exceptions import Reject
+
+    def _reject(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise Reject("broker back-pressure", requeue=False)
+
+    monkeypatch.setattr(tasks, "_collect_device_inner", _reject)
+
+    with pytest.raises(Reject):
+        tasks.collect_device(str(uuid.uuid4()), "10.0.0.1")
 
 
 # ---------------------------------------------------------------------------

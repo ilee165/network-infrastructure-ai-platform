@@ -100,27 +100,50 @@ async def test_in_memory_reset_clears_counter() -> None:
 # ---------------------------------------------------------------------------
 
 
+class _FakePipeline:
+    """Records eval ops and executes them against the parent fake Redis."""
+
+    def __init__(self, redis: _FakeRedis) -> None:
+        self._redis = redis
+        self._ops: list[tuple[str, int, tuple[object, ...]]] = []
+
+    def eval(self, script: str, numkeys: int, *keys_and_args: object) -> _FakePipeline:
+        self._ops.append((script, numkeys, keys_and_args))
+        return self
+
+    async def execute(self) -> list[list[int]]:
+        results: list[list[int]] = []
+        for _script, numkeys, keys_and_args in self._ops:
+            key = str(keys_and_args[0])
+            window = int(keys_and_args[numkeys])
+            results.append(self._redis.apply_hit(key, window))
+        return results
+
+
 class _FakeRedis:
-    """Minimal async stand-in for ``redis.asyncio.Redis`` (INCR/EXPIRE/TTL/GET)."""
+    """Minimal async stand-in for ``redis.asyncio.Redis`` (pipeline EVAL + GET)."""
 
     def __init__(self) -> None:
         self.store: dict[str, int] = {}
         self.ttls: dict[str, int] = {}
-        self.expire_calls = 0
-        self.incr_calls = 0
+        self.eval_calls = 0
+        self.pipeline_calls = 0
 
-    async def incr(self, key: str) -> int:
-        self.incr_calls += 1
+    def apply_hit(self, key: str, window_secs: int) -> list[int]:
+        """Mirror the Lua hit script: INCR + EXPIRE-if-first/missing-TTL."""
+        self.eval_calls += 1
         self.store[key] = self.store.get(key, 0) + 1
-        return self.store[key]
+        count = self.store[key]
+        if count == 1 or key not in self.ttls:
+            self.ttls[key] = window_secs
+            ttl = window_secs
+        else:
+            ttl = self.ttls[key]
+        return [count, ttl]
 
-    async def expire(self, key: str, secs: int) -> bool:
-        self.expire_calls += 1
-        self.ttls[key] = secs
-        return True
-
-    async def ttl(self, key: str) -> int:
-        return self.ttls.get(key, -1)
+    def pipeline(self, transaction: bool = True) -> _FakePipeline:
+        self.pipeline_calls += 1
+        return _FakePipeline(self)
 
     async def get(self, key: str) -> str | None:
         return str(self.store[key]) if key in self.store else None
@@ -136,13 +159,7 @@ class _BrokenRedis:
 
     _LEAK = "redis://user:s3cr3t@redis:6379/0 connection refused"
 
-    async def incr(self, key: str) -> int:
-        raise ConnectionError(self._LEAK)
-
-    async def expire(self, key: str, secs: int) -> bool:
-        raise ConnectionError(self._LEAK)
-
-    async def ttl(self, key: str) -> int:
+    def pipeline(self, transaction: bool = True) -> object:
         raise ConnectionError(self._LEAK)
 
     async def get(self, key: str) -> str | None:
@@ -159,9 +176,9 @@ async def test_redis_limiter_sets_ttl_once_per_window() -> None:
     for _ in range(3):
         await limiter.hit("k", limit=10, window_secs=60)
 
-    # O(1): one INCR per hit, EXPIRE only on the first hit of the window.
-    assert redis.incr_calls == 3
-    assert redis.expire_calls == 1
+    # One Lua EVAL per hit (atomic INCR+EXPIRE/TTL); TTL armed on first hit only.
+    assert redis.eval_calls == 3
+    assert redis.ttls["netops:rl:k"] == 60
 
 
 async def test_redis_limiter_blocks_over_limit_with_retry_after() -> None:
@@ -225,6 +242,19 @@ async def test_redis_limiter_rearms_missing_ttl() -> None:
     await limiter.hit("k", limit=10, window_secs=60)
 
     assert redis.ttls["netops:rl:k"] == 60
+
+
+async def test_redis_hit_many_one_pipeline_for_two_keys() -> None:
+    """Wave 5: principal+token hits share one pipeline RTT."""
+    redis = _FakeRedis()
+    limiter = RedisRateLimiter(redis)  # type: ignore[arg-type]
+
+    results = await limiter.hit_many(["u1", "t1"], limit=10, window_secs=60)
+
+    assert len(results) == 2
+    assert all(r.allowed for r in results)
+    assert redis.pipeline_calls == 1
+    assert redis.eval_calls == 2
 
 
 # ---------------------------------------------------------------------------

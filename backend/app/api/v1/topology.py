@@ -24,10 +24,11 @@ Read endpoints, all ``viewer``-and-above (reads never mutate the graph):
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,7 +45,13 @@ from app.knowledge.schema import (
     LABEL_IPADDRESS,
     LABEL_SUBNET,
 )
-from app.knowledge.topology_read import LAYER_ALL, LAYERS, MAX_NEIGHBORHOOD_DEPTH, fetch_impact
+from app.knowledge.topology_read import (
+    LAYER_ALL,
+    LAYERS,
+    MAX_NEIGHBORHOOD_DEPTH,
+    fetch_graph_projected_at,
+    fetch_impact,
+)
 from app.models import TopologySnapshot, User
 from app.schemas.topology import GraphResponse, ImpactResponse, TopologyDiffResponse
 
@@ -85,10 +92,12 @@ async def get_graph(
     client: KnowledgeClient,
     settings: AppSettings,
     _user: Viewer,
+    request: Request,
+    response: Response,
     site: Annotated[str | None, Query(max_length=255)] = None,
     vrf: Annotated[str | None, Query(max_length=255)] = None,
     layer: Annotated[str, Query(pattern="^(l2|l3|dns|app|all)$")] = LAYER_ALL,
-) -> GraphResponse:
+) -> GraphResponse | Response:
     """Return the projected subgraph as of the latest projection pass.
 
     ``site`` / ``vrf`` scope the subgraph; ``layer`` selects the relationship
@@ -105,10 +114,25 @@ async def get_graph(
     read-committed, not snapshot-isolated, so the graph can legitimately grow
     between the two statements no matter how they are batched.  The
     depth-bounded ``/graph/neighborhood`` endpoint is exempt by construction.
+
+    Wave 5: ``ETag`` is keyed on endpoint+params+``projected_at`` so clients
+    (and caches) can detect unchanged polls without re-diffing the body.  A
+    request carrying ``If-None-Match`` with the current ETag is answered 304
+    from the projection watermark alone (one aggregate read) — the count
+    pre-check and the graph materialization are both skipped.
     """
     # ``layer`` is constrained by the pattern above; this guards the contract.
     if layer not in LAYERS:  # pragma: no cover - pattern enforces the set
         raise NotFoundError(f"unknown topology layer {layer!r}")
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match is not None:
+        watermark = await fetch_graph_projected_at(client, layer=layer, site=site, vrf=vrf)
+        cached_etag = _graph_etag(layer=layer, site=site, vrf=vrf, projected_at=watermark)
+        if cached_etag is not None and if_none_match == cached_etag:
+            return Response(
+                status_code=304,
+                headers={"ETag": cached_etag, "Cache-Control": "private, max-age=5"},
+            )
     max_nodes = settings.topology_max_nodes
     if max_nodes > 0:
         node_count = await count_graph_nodes(client, layer=layer, site=site, vrf=vrf)
@@ -117,7 +141,26 @@ async def get_graph(
     graph = await fetch_graph(client, layer=layer, site=site, vrf=vrf)
     if 0 < max_nodes < len(graph["nodes"]):
         raise _too_large(len(graph["nodes"]), max_nodes)
+    etag = _graph_etag(layer=layer, site=site, vrf=vrf, projected_at=graph.get("projected_at"))
+    if etag is not None:
+        response.headers["ETag"] = etag
+        response.headers["Cache-Control"] = "private, max-age=5"
     return GraphResponse.model_validate(graph)
+
+
+def _graph_etag(
+    *,
+    layer: str,
+    site: str | None,
+    vrf: str | None,
+    projected_at: object,
+) -> str | None:
+    """Build a weak ETag from query params + projection watermark (Wave 5)."""
+    if projected_at is None:
+        return None
+    raw = f"topology-graph:{layer}:{site or ''}:{vrf or ''}:{projected_at}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return f'W/"{digest}"'
 
 
 def _too_large(node_count: int, max_nodes: int) -> GraphTooLargeError:

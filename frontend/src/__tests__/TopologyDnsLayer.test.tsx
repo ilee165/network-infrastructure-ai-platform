@@ -19,11 +19,22 @@ import { TopologyPage } from "../pages/TopologyPage";
 // ── cytoscape mock (same as TopologyPage.test.tsx) ───────────────────────────
 
 vi.mock("cytoscape", () => {
+  // Must cover everything the Wave-5 persistent TopologyCanvas calls
+  // (pan/zoom/batch/elements/add/nodes/getElementById) — a partial mock
+  // makes the canvas effect throw and the whole page render empty.
   const factory = vi.fn(() => ({
     on: vi.fn(),
     destroy: vi.fn(),
     resize: vi.fn(),
     fit: vi.fn(),
+    pan: () => ({ x: 0, y: 0 }),
+    zoom: () => 1,
+    viewport: vi.fn(),
+    batch: (fn: () => void) => fn(),
+    elements: () => ({ remove: vi.fn() }),
+    add: vi.fn(),
+    nodes: () => ({ forEach: vi.fn() }),
+    getElementById: () => ({ nonempty: () => false, position: vi.fn() }),
     layout: () => ({ run: vi.fn() }),
   }));
   return { default: factory };

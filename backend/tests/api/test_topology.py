@@ -106,6 +106,15 @@ class _FakeTx:
                 )
             }
             return _FakeResult([{"node_count": len(identities)}])
+        if "max(n.last_projected_at)" in cypher:
+            # The ETag watermark: same filters, only the max projection stamp.
+            stamps = [
+                stamp
+                for rec in out
+                for props in (rec["a_props"], rec["b_props"])
+                if (stamp := props.get("last_projected_at")) is not None
+            ]
+            return _FakeResult([{"projected_at": max(stamps) if stamps else None}])
         return _FakeResult(out)
 
     def _device_lookup(self, device: str) -> list[dict[str, Any]]:
@@ -350,6 +359,79 @@ class TestGraph:
         assert len(body["edges"]) == 5
         # projected_at is the MOST RECENT stamp across nodes (dev-b is older).
         assert body["projected_at"] == PROJECTED_AT
+
+    async def test_if_none_match_hit_returns_304_with_no_body(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        """A matching ``If-None-Match`` poll is answered 304 from the watermark.
+
+        Wave 5 server-side ETag half: the 304 must carry the same ``ETag`` /
+        ``Cache-Control`` pair as the 200 it validates, with an empty body —
+        the graph itself is never materialized.
+        """
+        first = await graph_client.get("/api/v1/topology/graph", headers=auth_headers("viewer"))
+        assert first.status_code == 200, first.text
+        etag = first.headers["ETag"]
+        assert etag.startswith('W/"')
+        assert first.headers["Cache-Control"] == "private, max-age=5"
+
+        second = await graph_client.get(
+            "/api/v1/topology/graph",
+            headers={**auth_headers("viewer"), "If-None-Match": etag},
+        )
+        assert second.status_code == 304, second.text
+        assert second.headers["ETag"] == etag
+        assert second.headers["Cache-Control"] == "private, max-age=5"
+        assert second.content == b""
+
+    async def test_if_none_match_miss_returns_full_body(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        """A stale validator falls through to the normal 200 + fresh ETag."""
+        response = await graph_client.get(
+            "/api/v1/topology/graph",
+            headers={**auth_headers("viewer"), "If-None-Match": 'W/"deadbeefdeadbeef"'},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["projected_at"] == PROJECTED_AT
+        assert response.headers["ETag"].startswith('W/"')
+
+    async def test_etag_is_scoped_to_query_params(
+        self,
+        graph_client: httpx.AsyncClient,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        """An ETag minted for one param set never 304s a different one."""
+        full = await graph_client.get("/api/v1/topology/graph", headers=auth_headers("viewer"))
+        assert full.status_code == 200, full.text
+        response = await graph_client.get(
+            "/api/v1/topology/graph",
+            params={"layer": "l2"},
+            headers={**auth_headers("viewer"), "If-None-Match": full.headers["ETag"]},
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers["ETag"] != full.headers["ETag"]
+
+    async def test_empty_graph_poll_never_304s_and_has_no_etag(
+        self,
+        app: FastAPI,
+        auth_headers: Callable[[str], dict[str, str]],
+    ) -> None:
+        """An empty subgraph has no watermark: no ETag is minted, never a 304."""
+        app.dependency_overrides[deps.get_knowledge_client] = lambda: FakeKnowledgeClient([])
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as c:
+            response = await c.get(
+                "/api/v1/topology/graph",
+                headers={**auth_headers("viewer"), "If-None-Match": 'W/"deadbeefdeadbeef"'},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["nodes"] == []
+        assert "ETag" not in response.headers
 
     async def test_layer_l2_returns_only_connected_to(
         self,

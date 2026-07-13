@@ -39,6 +39,7 @@ from app.models.inventory import (
     NormalizedInterfaceRow,
     NormalizedNeighborRow,
     NormalizedRouteRow,
+    RawArtifact,
 )
 from app.models.topology import TopologySnapshot
 from app.schemas.normalized import (
@@ -455,6 +456,82 @@ def test_sync_after_run_is_idempotent_one_snapshot_per_run(
     tasks.sync_after_run(str(run_id))
 
     assert len(_fetch_snapshots(db_url)) == 1
+
+
+# ===========================================================================
+# topology.sync_after_run — Wave 5 T4 delta branch (PR #161 review)
+# ===========================================================================
+
+
+def _seed_delta_inputs(db_url: str, run_id: UUID) -> None:
+    """RawArtifact for run+DEV1 only (the touch set) + a DEV2-only route."""
+
+    async def _go() -> None:
+        engine = create_async_engine(db_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            session.add(
+                RawArtifact(
+                    device_id=DEV1,
+                    run_id=run_id,
+                    command="show version",
+                    raw_text="Cisco IOS",
+                )
+            )
+            session.add(make_route(DEV2, "172.16.9.0/24"))
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_go())
+
+
+def _written_node_keys(client: FakeClient, label: str) -> set[Any]:
+    """MERGE keys the projector actually wrote for *label* (write-set probe)."""
+    needle = f"MERGE (n:{label} "
+    keys: set[Any] = set()
+    for cypher, params in client.executed:
+        if needle in cypher:
+            keys.update(row["key"] for row in params["rows"])
+    return keys
+
+
+def test_sync_after_run_delta_scopes_writes_but_snapshots_estate_wide(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delta branch e2e: RawArtifact for DEV1 only -> the persisted snapshot
+    stays ESTATE-WIDE, the Neo4j write set is SCOPED to the touched device,
+    pass-through Subnets are written referenced-only, and no stale sweep runs
+    (Wave 5 T4 / PR #161 review)."""
+    run_id = _seed_inventory(db_url)
+    _seed_delta_inputs(db_url, run_id)
+    client = FakeClient()
+    monkeypatch.setattr(tasks, "_neo4j_client", lambda: client)
+
+    result = tasks.sync_after_run(str(run_id))
+
+    assert result["ok"] is True
+    assert result["delta"] is True
+    assert result["scope_devices"] == 1
+
+    # (a) The snapshot is estate-wide: untouched DEV2 and its route-prefix
+    # Subnet are present (a scope-truncated snapshot would diff as removals).
+    (snap,) = _fetch_snapshots(db_url)
+    assert ["Device", str(DEV2)] in snap.nodes
+    assert ["Subnet", "172.16.9.0/24"] in snap.nodes
+    assert ["ROUTES_TO", str(DEV2), "172.16.9.0/24"] in snap.edges
+
+    # (b) The projector write set is scoped: only the touched device/interface.
+    assert _written_node_keys(client, "Device") == {str(DEV1)}
+    assert _written_node_keys(client, "Interface") == {str(IF1)}
+
+    # (d) Referenced-only pass-through Subnets: the shared interface subnet
+    # (kept IN_SUBNET/L3_ADJACENT) and DEV1's route prefix (kept ROUTES_TO)
+    # are written; DEV2's route prefix must NOT be re-MERGEd by a 1-device
+    # delta pass (finding 1 — O(estate) Subnet write-set re-inflation).
+    assert _written_node_keys(client, "Subnet") == {"10.0.0.0/24", "192.168.5.0/24"}
+
+    # (c) No estate-wide stale sweep on the delta pass (stale_sweep=False).
+    assert not any("last_projected_at IS NULL" in s for s in client.statements)
 
 
 # ===========================================================================

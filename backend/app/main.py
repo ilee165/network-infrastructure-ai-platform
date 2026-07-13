@@ -4,6 +4,10 @@ Run locally with::
 
     uvicorn app.main:app --reload
 
+Deploy entrypoint is the module-level ``app`` singleton (compose Dockerfile and
+Helm both use ``app.main:app``). Do not add ``--factory`` alongside it — that
+would construct the application twice per process.
+
 Per REPO-STRUCTURE §3.2 row 14, this module imports only ``core`` and ``api``
 (plus ``db`` for the engine-disposal shutdown hook, and ``services.rate_limit``
 to bind the shared Redis-backed rate limiter on ``app.state`` at startup so a

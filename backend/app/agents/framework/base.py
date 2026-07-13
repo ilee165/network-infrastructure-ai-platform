@@ -24,16 +24,78 @@ from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from app.agents.framework.tools import NetOpsTool
+from app.core.config import get_settings
 from app.core.errors import NetOpsError
 
 #: Agent ids are snake_case package names (REPO-STRUCTURE §4.1).
 _AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+#: Marker appended when a ToolMessage body is truncated (Wave 5 / perf #11).
+_TOOL_TRUNCATION_MARKER = "\n…[truncated for agent prompt budget]"
+
+
+def _truncate_tool_content(content: object, max_chars: int) -> str:
+    text = content if isinstance(content, str) else str(content)
+    if len(text) <= max_chars:
+        return text
+    keep = max(0, max_chars - len(_TOOL_TRUNCATION_MARKER))
+    return text[:keep] + _TOOL_TRUNCATION_MARKER
+
+
+def bound_react_messages(
+    messages: Sequence[BaseMessage],
+    *,
+    max_tool_chars: int,
+    max_turns: int,
+) -> list[BaseMessage]:
+    """Cap ToolMessage size and keep only the last *max_turns* messages.
+
+    Wave 5 / agents H3+H4: unbounded tool dumps and long ReAct histories
+    inflate every subsequent model call. Truncation is deterministic and
+    leaves a marker so the model can see that data was elided.
+
+    PR #161 review residual: the window is also kept provider-valid — leading
+    orphaned ToolMessages are dropped, and an empty or assistant-first window
+    (both reachable: max_turns floor is 4 while one AI turn can issue 4+
+    parallel tool calls) is re-anchored on the earliest HumanMessage, since
+    Anthropic's Messages API rejects both shapes with a 400.
+    """
+    windowed: list[BaseMessage] = list(messages[-max_turns:]) if max_turns > 0 else list(messages)
+    # Drop leading ToolMessages whose corresponding AIMessage(tool_calls) fell
+    # outside the window — orphaned tool results cause OpenAI/Anthropic 400s.
+    while windowed and isinstance(windowed[0], ToolMessage):
+        windowed = windowed[1:]
+    # Re-anchor an empty or assistant-first window on the user intent (the
+    # earliest HumanMessage). A human-first window is left untouched; with no
+    # HumanMessage anywhere, the orphan-dropped window is the safest output.
+    if not windowed or not isinstance(windowed[0], HumanMessage):
+        intent = next((m for m in messages if isinstance(m, HumanMessage)), None)
+        if intent is not None:
+            windowed.insert(0, intent)
+    out: list[BaseMessage] = []
+    for msg in windowed:
+        if isinstance(msg, ToolMessage):
+            truncated = _truncate_tool_content(msg.content, max_tool_chars)
+            if truncated != msg.content:
+                out.append(
+                    ToolMessage(
+                        content=truncated,
+                        tool_call_id=msg.tool_call_id,
+                        name=getattr(msg, "name", None),
+                        id=getattr(msg, "id", None),
+                    )
+                )
+            else:
+                out.append(msg)
+        else:
+            out.append(msg)
+    return out
 
 
 class AgentDefinitionError(NetOpsError):
@@ -123,7 +185,13 @@ class BaseSpecialistAgent(ABC):
 
         async def call_model(state: MessagesState) -> dict[str, Any]:
             """One model turn over the conversation, system prompt prepended."""
-            response = await model.ainvoke([system_message, *state["messages"]])
+            settings = get_settings()
+            history = bound_react_messages(
+                state["messages"],
+                max_tool_chars=settings.agent_tool_output_max_chars,
+                max_turns=settings.agent_history_max_turns,
+            )
+            response = await model.ainvoke([system_message, *history])
             return {"messages": [response]}
 
         graph: StateGraph[MessagesState, None, MessagesState, MessagesState] = StateGraph(

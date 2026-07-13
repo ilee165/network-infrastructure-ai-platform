@@ -294,12 +294,18 @@ async def test_nightly_backup_double_delivery_yields_one_audit_pair(
     # result that drives the "succeeded" branch.
     capture_wave_calls: list[int] = []
 
-    def _fake_dispatch(run_id: str, device_ids: list[str]) -> list[dict[str, Any]]:
+    def _fake_dispatch(run_id: str, device_ids: list[str]) -> dict[str, Any]:
         capture_wave_calls.append(1)
-        return [
+        # Fake only the capture fan-out; drive the REAL chord body so the
+        # finished-audit + terminal-status path stays part of the proof.
+        # Safe here: _nightly_backup_core calls this via asyncio.to_thread, so
+        # finalize_backup_wave's internal asyncio.run owns a fresh loop, and
+        # pg_engine is NullPool (each session opens its own connection).
+        results = [
             {"ok": True, "device_id": str(did), "content_hash": "abc", "created": True}
             for did in device_ids
         ]
+        return config_tasks.finalize_backup_wave.run(results, run_id, list(device_ids))
 
     monkeypatch.setattr(config_tasks, "_dispatch_captures", _fake_dispatch)
 

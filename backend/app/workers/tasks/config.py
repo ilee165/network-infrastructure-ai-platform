@@ -58,8 +58,9 @@ from typing import Any, Final
 from uuid import UUID
 
 import structlog
-from celery import group
-from sqlalchemy import select
+from celery import chord, group
+from celery.exceptions import Ignore, Reject, Retry
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -85,7 +86,7 @@ from app.plugins.transport import (
 from app.services import audit, credentials
 from app.workers.celery_app import celery_app
 
-__all__ = ["capture_device", "nightly_backup"]
+__all__ = ["capture_device", "finalize_backup_wave", "nightly_backup"]
 
 logger = structlog.get_logger(__name__)
 
@@ -322,21 +323,58 @@ async def _audit_failure(device_id: UUID, error: str, *, source: ConfigSource) -
 
 
 @celery_app.task(
+    bind=True,
     name="config.capture_device",
     autoretry_for=(SshTransportError,),
     max_retries=2,
     retry_backoff=True,
 )
 def capture_device(
-    device_id: str, source: str = ConfigSource.ON_DEMAND.value, capture_run_id: str | None = None
+    self: Any,
+    device_id: str,
+    source: str = ConfigSource.ON_DEMAND.value,
+    capture_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Capture one device's running configuration into ``config_snapshots``.
 
     Returns a JSON-safe summary: ``ok``, ``device_id``, ``content_hash`` and
     ``created`` on success, or ``ok=False`` + ``error`` on a permanent failure
     (the failure is audited). Raises the transport error when the device was
-    never reached so Celery retries it (transient failure).
+    never reached so Celery retries it (transient failure). After retries are
+    exhausted, returns ``ok=False`` so a backup **chord** still completes
+    (Wave 5 / perf #2).
+
+    Any *other* exception is folded into ``ok=False`` as well: a raised
+    header task fails the whole chord and ``finalize_backup_wave`` never
+    runs, stranding the backup run in ``running`` forever.
     """
+    try:
+        return _capture_device_inner(self, device_id, source, capture_run_id)
+    except (SshTransportError, Retry, Ignore, Reject):
+        # Transport: autoretry_for retries these (retries-exhausted folds
+        # inside). Retry/Ignore/Reject: Celery control flow, never folded
+        # (PR 161 Task C).
+        raise
+    except Exception as exc:  # noqa: BLE001 — the chord body must always run
+        logger.exception("config.capture_device_unexpected", device_id=device_id)
+        error = f"{type(exc).__name__}: {exc}"
+        # Mirror the audited permanent-failure paths (config.snapshot_failed)
+        # so a folded failure still leaves an audit trace — best-effort on a
+        # fresh loop, since the broken state may be the DB itself.
+        try:
+            asyncio.run(_audit_failure(uuid.UUID(device_id), error, source=ConfigSource(source)))
+        except Exception:  # noqa: BLE001 — never mask the fold's ok=False result
+            logger.exception("config.capture_failure_audit_error", device_id=device_id)
+        return {"ok": False, "device_id": device_id, "error": error}
+
+
+def _capture_device_inner(
+    self: Any,
+    device_id: str,
+    source: str,
+    capture_run_id: str | None,
+) -> dict[str, Any]:
+    """Body of :func:`capture_device` (wrapped by its chord-safety fold)."""
     device_uuid = uuid.UUID(device_id)
     snapshot_source = ConfigSource(source)
     run_uuid = uuid.UUID(capture_run_id) if capture_run_id is not None else None
@@ -356,6 +394,12 @@ def capture_device(
             device_id=device_id,
             error_type=type(exc).__name__,
         )
+        max_retries = int(getattr(self, "max_retries", 0) or 0)
+        retries = int(getattr(getattr(self, "request", None), "retries", 0) or 0)
+        if retries >= max_retries:
+            error = f"{type(exc).__name__}: {exc}"
+            asyncio.run(_audit_failure(device_uuid, error, source=snapshot_source))
+            return {"ok": False, "device_id": device_id, "error": error}
         raise
     except PluginError as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -477,15 +521,56 @@ async def _claim_backup_run(run_uuid: UUID, scheduled_slot: str) -> str:
 
 async def _finish_backup_run(run_uuid: UUID, status: str) -> None:
     """Mark the ``config_backup_runs`` row as finished (mutable lifecycle column)."""
-    from sqlalchemy import update as sa_update
-
     async with _session() as session:
         await session.execute(
-            sa_update(ConfigBackupRun)
+            update(ConfigBackupRun)
             .where(ConfigBackupRun.run_uuid == run_uuid)
             .values(status=status, finished_at=datetime.now(UTC))
         )
         await session.commit()
+
+
+async def _fail_backup_run_if_not_terminal(run_uuid: UUID, error: str) -> None:
+    """Mark the backup run ``failed`` unless it already reached a terminal status.
+
+    PR 161 Task C: conditional UPDATE so a body failure that happens *after*
+    the run finished (e.g. while building the return payload) cannot clobber
+    the terminal status. The ``backup_run_finished`` audit (carrying the error
+    note — ``config_backup_runs`` has no error column) is emitted only when
+    this attempt actually flipped the row.
+    """
+    async with _session() as session:
+        cursor = await session.execute(
+            update(ConfigBackupRun)
+            .where(
+                ConfigBackupRun.run_uuid == run_uuid,
+                ConfigBackupRun.status.not_in(_TERMINAL_BACKUP_STATUSES),
+            )
+            .values(status="failed", finished_at=datetime.now(UTC))
+        )
+        if cursor.rowcount == 1:  # type: ignore[attr-defined]
+            await audit.record(
+                session,
+                actor=_ACTOR,
+                action=_BACKUP_RUN_FINISHED,
+                target_type="config_backup_run",
+                target_id=str(run_uuid),
+                detail={"status": "failed", "error": error},
+            )
+        await session.commit()
+
+
+def _fail_backup_run_best_effort(run_id: str, error: str) -> None:
+    """Best-effort ``failed`` finalize on a fresh loop + engine (guard support).
+
+    Runs on its own ``asyncio.run`` and engine so the attempt does not depend
+    on whatever broke the body task; a secondary failure is logged and
+    swallowed — the caller re-raises the original exception regardless.
+    """
+    try:
+        asyncio.run(_fail_backup_run_if_not_terminal(uuid.UUID(run_id), error))
+    except Exception:  # noqa: BLE001 — never mask the original body failure
+        logger.exception("config.finalize_failed_error", run_id=run_id)
 
 
 async def _reachable_device_ids() -> list[UUID]:
@@ -511,27 +596,124 @@ async def _audit_run(action: str, run_id: UUID, detail: dict[str, Any]) -> None:
         await session.commit()
 
 
-def _dispatch_captures(run_id: str, device_ids: list[str]) -> list[dict[str, Any]]:
-    """Fan device captures out as a Celery group and gather per-device summaries.
+def _normalize_capture_results(
+    raw_results: list[Any], device_ids: list[str]
+) -> list[dict[str, Any]]:
+    """Fold chord header results into per-device summaries."""
+    results: list[dict[str, Any]] = []
+    padded: list[Any] = list(raw_results) if raw_results is not None else []
+    while len(padded) < len(device_ids):
+        padded.append(None)
+    for device_id, item in zip(device_ids, padded, strict=False):
+        if isinstance(item, dict) and "ok" in item:
+            results.append(item)
+            continue
+        if isinstance(item, BaseException):
+            results.append(
+                {
+                    "ok": False,
+                    "device_id": device_id,
+                    "error": f"{type(item).__name__}: {item}",
+                }
+            )
+            continue
+        results.append(
+            {
+                "ok": False,
+                "device_id": device_id,
+                "error": f"wave_member_failed: {type(item).__name__}: {item!r}",
+            }
+        )
+    return results
 
-    A child task that exhausted its retries surfaces here as an exception; it is
-    folded into an ``ok=False`` summary so one dead device degrades the run to
-    ``partial`` instead of aborting the whole backup.
+
+@celery_app.task(name="config.finalize_backup_wave")
+def finalize_backup_wave(
+    results: list[Any],
+    run_id: str,
+    device_ids: list[str],
+) -> dict[str, Any]:
+    """Chord body: audit finish + terminal status for a nightly backup wave.
+
+    Safety net (PR 161 Task C): with global ``acks_late`` and no ``link_error``
+    a chord body that raises is acked and never redelivered, so the backup run
+    row would strand in ``running`` forever. Any unexpected exception
+    best-effort finalizes the run as ``failed`` (never clobbering an
+    already-terminal status) and then re-raises so Celery still records the
+    task failure.
     """
-    job = group(
+    try:
+        return _finalize_backup_wave_inner(results, run_id, device_ids)
+    except (Retry, Ignore, Reject):
+        raise  # celery control flow, not a body failure
+    except Exception as exc:
+        logger.exception("config.finalize_backup_wave_unexpected", run_id=run_id)
+        _fail_backup_run_best_effort(run_id, f"finalize_backup_wave: {type(exc).__name__}: {exc}")
+        raise
+
+
+def _finalize_backup_wave_inner(
+    results: list[Any],
+    run_id: str,
+    device_ids: list[str],
+) -> dict[str, Any]:
+    """Body of :func:`finalize_backup_wave` (wrapped by its safety net)."""
+    run_uuid = uuid.UUID(run_id)
+    normalized = _normalize_capture_results(results, device_ids)
+    succeeded = [r for r in normalized if r.get("ok")]
+    failed = [r for r in normalized if not r.get("ok")]
+    if not succeeded:
+        status = "failed"
+    elif failed:
+        status = "partial"
+    else:
+        status = "succeeded"
+
+    async def _finish() -> None:
+        await _audit_run(
+            _BACKUP_RUN_FINISHED,
+            run_uuid,
+            {"status": status, "succeeded": len(succeeded), "failed": len(failed)},
+        )
+        await _finish_backup_run(run_uuid, status)
+
+    asyncio.run(_finish())
+    logger.info(
+        "config.backup_finished",
+        run_id=run_id,
+        status=status,
+        succeeded=len(succeeded),
+        failed=len(failed),
+    )
+    return {
+        "run_id": run_id,
+        "status": status,
+        "succeeded": len(succeeded),
+        "failed": len(failed),
+        "devices": normalized,
+    }
+
+
+def _dispatch_captures(run_id: str, device_ids: list[str]) -> dict[str, Any]:
+    """Fan captures as a Celery chord (Wave 5 / perf #2) — no blocking ``.get``.
+
+    Header = per-device ``capture_device``; body = :func:`finalize_backup_wave`.
+    Under eager mode the chord resolves inline and this returns the body result.
+    """
+    header = group(
         capture_device.s(device_id, ConfigSource.SCHEDULED.value, run_id)
         for device_id in device_ids
     )
-    group_result = job.apply_async()
-    results: list[dict[str, Any]] = []
-    for device_id, child in zip(device_ids, group_result.results, strict=True):
-        try:
-            results.append(child.get(disable_sync_subtasks=False))
-        except Exception as exc:  # noqa: BLE001 — retries exhausted; record + continue
-            results.append(
-                {"ok": False, "device_id": device_id, "error": f"{type(exc).__name__}: {exc}"}
-            )
-    return results
+    body = finalize_backup_wave.s(run_id, list(device_ids))
+    async_result = chord(header)(body)
+    if celery_app.conf.task_always_eager:
+        return dict(async_result.get(disable_sync_subtasks=True))
+    return {
+        "run_id": run_id,
+        "status": "running",
+        "dispatched": True,
+        "device_count": len(device_ids),
+    }
 
 
 async def _nightly_backup_core(run_id: str | None = None) -> dict[str, Any]:
@@ -543,16 +725,11 @@ async def _nightly_backup_core(run_id: str | None = None) -> dict[str, Any]:
     core on the running pytest loop (matching the other ``tests/pg`` cases that
     await async helpers directly) instead of calling the sync task from inside a
     running loop — which would raise ``RuntimeError: asyncio.run() cannot be
-    called from a running event loop``. ``_dispatch_captures`` stays a plain sync
-    call: it drives Celery's group result, not the DB, and is owned by whichever
-    loop runs this core.
+    called from a running event loop``.
 
-    Fans one ``config.capture_device`` task out per reachable device, gathers
-    the summaries, and audits the run start and finish. The terminal status is
-    ``succeeded`` (all captured), ``partial`` (some failed), ``empty`` (no
-    reachable devices), ``failed`` (every device failed), or ``skipped`` (a
-    redelivered task whose ``run_id`` already finished — the idempotency guard
-    fired).
+    Fans one ``config.capture_device`` task out per reachable device via a
+    **chord** (Wave 5): the orchestrator does not block on children. Final
+    audit/finish runs in :func:`finalize_backup_wave`.
 
     Idempotency (W2-T4 finding, ADR-0043 §6): ``run_id`` is an optional
     parameter so the beat caller (or a test) can supply a stable UUID. When
@@ -610,42 +787,9 @@ async def _nightly_backup_core(run_id: str | None = None) -> dict[str, Any]:
         logger.info("config.backup_finished", run_id=run_id_str, status="empty")
         return {"run_id": run_id_str, "status": "empty", "succeeded": 0, "failed": 0}
 
-    # Offload the fan-out to a worker thread: ``_dispatch_captures`` drives the
-    # Celery group result, and each child ``capture_device`` task runs its own
-    # ``asyncio.run`` (inline under eager mode). Running it on a SEPARATE thread
-    # keeps it off this core's event loop so a child's ``asyncio.run`` never
-    # nests inside a running loop (the same hazard the core extraction fixed).
-    results = await asyncio.to_thread(_dispatch_captures, run_id_str, device_ids)
-    succeeded = [r for r in results if r.get("ok")]
-    failed = [r for r in results if not r.get("ok")]
-
-    if not succeeded:
-        status = "failed"
-    elif failed:
-        status = "partial"
-    else:
-        status = "succeeded"
-
-    await _audit_run(
-        _BACKUP_RUN_FINISHED,
-        run_uuid,
-        {"status": status, "succeeded": len(succeeded), "failed": len(failed)},
-    )
-    await _finish_backup_run(run_uuid, status)
-    logger.info(
-        "config.backup_finished",
-        run_id=run_id_str,
-        status=status,
-        succeeded=len(succeeded),
-        failed=len(failed),
-    )
-    return {
-        "run_id": run_id_str,
-        "status": status,
-        "succeeded": len(succeeded),
-        "failed": len(failed),
-        "devices": results,
-    }
+    # Chord dispatch is sync Celery (may run children under eager). Offload so
+    # nested asyncio.run inside capture_device never nests on this loop.
+    return await asyncio.to_thread(_dispatch_captures, run_id_str, device_ids)
 
 
 @celery_app.task(name="config.nightly_backup")

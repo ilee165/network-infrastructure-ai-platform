@@ -220,16 +220,23 @@ async def detect_drift(
     if current is None:  # pragma: no cover - baseline implies a snapshot exists
         current = baseline
 
-    diff_lines = difflib.unified_diff(
-        baseline.content.splitlines(),
-        current.content.splitlines(),
-        fromfile=f"baseline:{baseline.content_hash[:12]}",
-        tofile=f"current:{current.content_hash[:12]}",
-        lineterm="",
-    )
-    diff = "\n".join(diff_lines)
-    hunks = _split_hunks(diff)
-    has_drift = bool(hunks)
+    # Hash short-circuit (Wave 5 / perf quick-win): identical content_hash means
+    # byte-identical stored content, so skip O(n) difflib on large configs.
+    if baseline.content_hash == current.content_hash:
+        diff = ""
+        hunks: list[str] = []
+        has_drift = False
+    else:
+        diff_lines = difflib.unified_diff(
+            baseline.content.splitlines(),
+            current.content.splitlines(),
+            fromfile=f"baseline:{baseline.content_hash[:12]}",
+            tofile=f"current:{current.content_hash[:12]}",
+            lineterm="",
+        )
+        diff = "\n".join(diff_lines)
+        hunks = _split_hunks(diff)
+        has_drift = bool(hunks)
 
     await audit.record(
         session,

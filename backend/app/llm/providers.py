@@ -115,6 +115,18 @@ class LoggingLLMAuditSink:
         _logger.info("external_llm_profile_selected", **event.model_dump())
 
 
+#: Process-wide chat-model cache keyed by (profile, model_name, temperature).
+#: Cleared on LLM settings PATCH (Wave 5 / agents H1) so profile switches take
+#: effect without a process restart. Connection reuse to Ollama/Anthropic is
+#: the primary win — LangChain clients keep HTTP pools on the instance.
+_CHAT_MODEL_CACHE: dict[tuple[str, str, float], BaseChatModel] = {}
+
+
+def clear_chat_model_cache() -> None:
+    """Drop cached provider clients (settings change / tests)."""
+    _CHAT_MODEL_CACHE.clear()
+
+
 def get_chat_model(
     profile: str | None = None,
     settings: Settings | None = None,
@@ -182,9 +194,20 @@ def get_chat_model(
     from app.core import metrics
 
     metrics.observe_llm_request(profile=selected, model=model_name)
+    # Cache only the local profile: external clients depend on process env
+    # credentials and must re-validate on each construction path (tests +
+    # settings rotation). Local Ollama is the hot path for connection reuse.
+    cache_key = (selected, model_name, temperature)
+    if selected == "local":
+        cached = _CHAT_MODEL_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
     provider_model = _build_provider_model(selected, model_name, resolved_settings, temperature)
     # A9: central, bypass-proof redaction wraps every model the factory returns.
-    return wrap_with_redaction(provider_model)
+    wrapped = wrap_with_redaction(provider_model)
+    if selected == "local":
+        _CHAT_MODEL_CACHE[cache_key] = wrapped
+    return wrapped
 
 
 def _build_provider_model(
@@ -195,6 +218,7 @@ def _build_provider_model(
 ) -> BaseChatModel:
     """Construct the concrete provider client for *selected* (pre-redaction)."""
     try:
+        timeout = resolved_settings.llm_call_timeout_seconds or None
         if selected == "local":
             from langchain_ollama import ChatOllama
 
@@ -202,6 +226,12 @@ def _build_provider_model(
                 model=model_name,
                 base_url=resolved_settings.ollama_base_url,
                 temperature=temperature,
+                # Wave 5 / perf #11: bound wedged-provider hangs + pin context.
+                # ChatOllama has no `timeout` field (extra="ignore" would drop
+                # it silently) — the bound goes to the underlying httpx client.
+                client_kwargs={"timeout": timeout},
+                num_ctx=resolved_settings.ollama_num_ctx,
+                keep_alive=resolved_settings.ollama_keep_alive,
             )
         if selected == "anthropic":
             import os
@@ -213,18 +243,24 @@ def _build_provider_model(
             # error surfaces at configuration time (ADR-0009 D3 secure-by-default).
             if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
                 raise ValueError("ANTHROPIC_API_KEY is not set; cannot use the 'anthropic' profile")
-            # `model_name` is the field ("model" is its runtime alias);
-            # timeout/stop are required-by-signature with None semantics.
+            # `model_name` is the field ("model" is its runtime alias).
             return ChatAnthropic(
-                model_name=model_name, temperature=temperature, timeout=None, stop=None
+                model_name=model_name,
+                temperature=temperature,
+                timeout=timeout,
+                stop=None,
             )
         if selected == "openai":
             from langchain_openai import ChatOpenAI
 
-            return ChatOpenAI(model=model_name, temperature=temperature)
+            return ChatOpenAI(
+                model=model_name, temperature=temperature, timeout=timeout, max_retries=2
+            )
         from langchain_openai import AzureChatOpenAI
 
-        return AzureChatOpenAI(azure_deployment=model_name, temperature=temperature)
+        return AzureChatOpenAI(
+            azure_deployment=model_name, temperature=temperature, timeout=timeout, max_retries=2
+        )
     except Exception as exc:
         # Provider constructors validate configuration (API keys, endpoints)
         # eagerly; surface those failures as one typed platform error. The

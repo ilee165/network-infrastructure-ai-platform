@@ -30,11 +30,21 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /build
 
-# Dependencies are FROZEN in backend/pyproject.toml (the single source of
-# truth); the app package is required for the hatchling build.
+# Layer-cache strategy (Wave 5 / perf #13): install the hash-pinned lockfile
+# BEFORE copying application source so a source-only change reuses the dep
+# layer (typically 2–5 min saved per rebuild). The lock is the resolved
+# floor for CI + images (docs/security/supply-chain-scanning.md); pyproject
+# remains the human-edited constraint surface.
+#
+#   1. pip install --require-hashes -r requirements.lock.txt  (deps only)
+#   2. COPY app + pyproject
+#   3. pip install --no-deps .  (project package only — hatchling wheel)
+COPY backend/requirements.lock.txt ./requirements.lock.txt
+RUN pip install --require-hashes -r requirements.lock.txt
+
 COPY backend/pyproject.toml ./pyproject.toml
 COPY backend/app ./app
-RUN pip install .
+RUN pip install --no-deps .
 
 # ---- runtime: slim, non-root, venv + migrations only ------------------------
 FROM python:3.12-slim AS runtime
@@ -66,10 +76,15 @@ EXPOSE 8000
 # Liveness probe against the canonical no-dependency endpoint (ADR-0015).
 # python:3.12-slim ships no curl/wget, so probe via the stdlib. The worker
 # container does not serve HTTP and overrides this check in docker-compose.yml.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+# start-interval=2s (Wave 5 / perf #14): poll faster during start-period so
+# compose "healthy" flips sooner after uvicorn binds.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --start-interval=2s --retries=3 \
     CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live', timeout=3).status == 200 else 1)"]
 
-CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+# Single entrypoint shape (Wave 5 / startup M6): module-level ``app`` in
+# ``app.main`` — matches Helm ``app.main:app``. Do NOT use ``--factory`` here:
+# that would call create_app() twice (import-time + factory).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # ---- packet-analysis: runtime + tshark + libseccomp (ADR-0049 blocker 7) --------
 # The UNTRUSTED-pcap dissection tier. This stage extends the slim `runtime` with

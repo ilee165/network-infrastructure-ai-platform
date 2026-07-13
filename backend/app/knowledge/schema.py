@@ -122,12 +122,18 @@ _CONSTRAINT_STATEMENTS: tuple[str, ...] = tuple(
     _create_constraint_cypher(label, prop) for label, prop in NODE_KEY_PROPERTY.items()
 )
 
+#: Wave 5 / perf #18: site-scoped graph reads seed from ``(:Device {site})``.
+_SITE_INDEX_STATEMENTS: tuple[str, ...] = (
+    "CREATE INDEX netops_device_site IF NOT EXISTS FOR (n:Device) ON (n.site)",
+)
+
 
 async def ensure_constraints(client: Any) -> None:
     """Create all node uniqueness constraints idempotently.
 
     Uses ``CREATE CONSTRAINT … IF NOT EXISTS`` so it is safe to call on every
-    projection pass — Neo4j 5 skips constraints that already exist.
+    projection pass — Neo4j 5 skips constraints that already exist. Also
+    ensures the Device.site index for scoped topology reads (Wave 5).
 
     Parameters
     ----------
@@ -139,4 +145,6 @@ async def ensure_constraints(client: Any) -> None:
     """
     async with client.session() as session:
         for cypher in _CONSTRAINT_STATEMENTS:
+            await session.run(cypher)
+        for cypher in _SITE_INDEX_STATEMENTS:
             await session.run(cypher)

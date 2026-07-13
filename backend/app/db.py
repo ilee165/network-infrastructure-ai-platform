@@ -113,6 +113,23 @@ def build_ssl_connect_args(settings: Settings) -> dict[str, Any]:
     return {"ssl": context}
 
 
+def _pool_kwargs(settings: Settings, url: str) -> dict[str, int]:
+    """Pool sizing for QueuePool backends (Wave 5 T15).
+
+    In-memory SQLite (aiosqlite) engines resolve to ``StaticPool``, which
+    rejects ``pool_size``/``max_overflow`` with a TypeError — so the knobs
+    apply only to non-SQLite URLs (the unit suite runs on SQLite; prod is
+    Postgres). File-backed SQLite would accept them, but sizing a dev/test
+    SQLite pool is meaningless, so the guard covers the whole dialect.
+    """
+    if url.startswith("sqlite"):
+        return {}
+    return {
+        "pool_size": settings.db_pool_size,
+        "max_overflow": settings.db_max_overflow,
+    }
+
+
 def create_engine(settings: Settings) -> AsyncEngine:
     """Build a new async engine from *settings* (does not connect).
 
@@ -120,7 +137,12 @@ def create_engine(settings: Settings) -> AsyncEngine:
     asyncpg driver when SSL is configured; a plaintext deployment is unchanged.
     """
     connect_args = build_ssl_connect_args(settings)
-    return create_async_engine(settings.database_url, pool_pre_ping=True, connect_args=connect_args)
+    return create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        connect_args=connect_args,
+        **_pool_kwargs(settings, settings.database_url),
+    )
 
 
 def create_reader_engine(settings: Settings) -> AsyncEngine:
@@ -138,7 +160,12 @@ def create_reader_engine(settings: Settings) -> AsyncEngine:
     """
     connect_args = build_ssl_connect_args(settings)
     reader_url = settings.database_reader_url or settings.database_url
-    return create_async_engine(reader_url, pool_pre_ping=True, connect_args=connect_args)
+    return create_async_engine(
+        reader_url,
+        pool_pre_ping=True,
+        connect_args=connect_args,
+        **_pool_kwargs(settings, reader_url),
+    )
 
 
 def create_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

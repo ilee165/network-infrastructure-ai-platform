@@ -285,9 +285,30 @@ function NodeDetail({ node }: { node: TopologyNode }) {
 // ── Canvas ────────────────────────────────────────────────────────────────────
 
 /**
- * Renders the topology graph into a Cytoscape instance and reports node
- * selection up via ``onSelect``. The instance is rebuilt whenever the element
- * set changes and destroyed on unmount (no canvas leaks across re-renders).
+ * Structural identity of a cytoscape element set (ids + edge endpoints).
+ * Used to decide whether a re-layout is required after a refetch (Wave 5).
+ */
+function structuralSignature(elements: CytoscapeElement[]): string {
+  return elements
+    .map((el) => {
+      // CytoscapeElement has no `group` field — edges carry source/target.
+      const isEdge =
+        el.data.source !== undefined && el.data.target !== undefined;
+      if (!isEdge) {
+        return `n:${el.data.id}`;
+      }
+      return `e:${el.data.id}:${el.data.source ?? ""}>${el.data.target ?? ""}`;
+    })
+    .sort()
+    .join("|");
+}
+
+/**
+ * Renders the topology graph into a persistent Cytoscape instance and reports
+ * node selection up via ``onSelect``. Wave 5 / perf #16: the cy instance is
+ * created once, element diffs are applied in place, and layout only re-runs
+ * when the structural signature changes — viewport is preserved across
+ * refetch / diff-overlay toggles that do not add/remove nodes or edges.
  */
 function TopologyCanvas({
   elements,
@@ -297,29 +318,74 @@ function TopologyCanvas({
   onSelect: (key: string | null) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const cyRef = useRef<cytoscape.Core | null>(null);
+  const onSelectRef = useRef(onSelect);
+  const signatureRef = useRef<string>("");
+  onSelectRef.current = onSelect;
 
+  // Create once; destroy on unmount only.
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) {
+    if (!container || cyRef.current) {
       return;
     }
     const cy = cytoscape({
       container,
-      elements,
+      elements: [],
       style: buildStylesheet(),
-      layout: { name: "cose", animate: false },
+      layout: { name: "preset" },
     });
-    cy.on("tap", "node", (evt) => onSelect(evt.target.id()));
+    cy.on("tap", "node", (evt) => onSelectRef.current(evt.target.id()));
     cy.on("tap", (evt) => {
-      // Tap on empty background clears the selection.
       if (evt.target === cy) {
-        onSelect(null);
+        onSelectRef.current(null);
       }
     });
+    cyRef.current = cy;
     return () => {
       cy.destroy();
+      cyRef.current = null;
+      signatureRef.current = "";
     };
-  }, [elements, onSelect]);
+  }, []);
+
+  // Diff elements into the persistent instance.
+  useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy) {
+      return;
+    }
+    const nextSig = structuralSignature(elements);
+    const needsLayout = nextSig !== signatureRef.current;
+    // Preserve pan/zoom and node positions across non-structural updates
+    // (class-only diffs / refetch of the same graph).
+    const pan = cy.pan();
+    const zoom = cy.zoom();
+    const positions = new Map<string, { x: number; y: number }>();
+    if (!needsLayout) {
+      cy.nodes().forEach((node) => {
+        positions.set(node.id(), { ...node.position() });
+      });
+    }
+    cy.batch(() => {
+      cy.elements().remove();
+      cy.add(elements);
+      if (!needsLayout) {
+        for (const [id, pos] of positions) {
+          const node = cy.getElementById(id);
+          if (node.nonempty()) {
+            node.position(pos);
+          }
+        }
+      }
+    });
+    if (needsLayout) {
+      cy.layout({ name: "cose", animate: false }).run();
+      signatureRef.current = nextSig;
+    } else {
+      cy.viewport({ pan, zoom });
+    }
+  }, [elements]);
 
   return (
     <div

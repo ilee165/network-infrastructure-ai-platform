@@ -69,9 +69,11 @@ ORM preload + per-row setattr/add: 10k routes ≈ 10–40 s + 50–100 MB.
 sync pays an O(full graph) MERGE/SET + 18 sweep scans regardless of delta;
 snapshot-diff engine (`engines/topology/diff.py`) exists but is unused for
 projection.
-- Fix: project the snapshot diff — scope the load to run-touched devices,
-  skip unchanged SET; full projection remains the manual-rebuild path.
-  Consolidate the duplicated loader while there.
+- Fix: scope the Neo4j WRITE set to run-touched devices (plus the shared
+  nodes their kept edges reference); the load, derivation, and run snapshot
+  stay estate-wide — a scoped load loses cross-scope L2/L3 joins and
+  truncates the snapshot diff (PR #161 review). Full projection remains the
+  manual-rebuild / GC path. Consolidate the duplicated loader while there.
 - Guard: Wave 2's watermark gate (T10) changed the trigger; this changes the
   payload — keep the two behaviors separately testable.
 - Measure: 1-device sync on a seeded 500-device estate — elements written

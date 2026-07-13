@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from contextvars import ContextVar, Token
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -143,6 +144,49 @@ class TraceRecorder(Protocol):
     async def complete(self, trace_id: str) -> ReasoningTrace:
         """Mark the trace finished and return it."""
         ...
+
+
+#: Per-task active recorder so a process-cached supervisor graph can still
+#: write traces for the current agent session (Wave 5 / agents H1).
+_active_trace_recorder: ContextVar[TraceRecorder | None] = ContextVar(
+    "netops_active_trace_recorder", default=None
+)
+
+
+def bind_trace_recorder(recorder: TraceRecorder) -> Token[TraceRecorder | None]:
+    """Bind *recorder* for the current asyncio task (supervisor cache path)."""
+    return _active_trace_recorder.set(recorder)
+
+
+def reset_trace_recorder(token: Token[TraceRecorder | None]) -> None:
+    """Restore the previous active recorder after a request finishes."""
+    _active_trace_recorder.reset(token)
+
+
+class ContextVarTraceRecorder:
+    """Delegates every call to the task-local recorder set via :func:`bind_trace_recorder`.
+
+    A single instance is safe to close over in a process-cached supervisor graph:
+    each request binds its real :class:`PostgresTraceRecorder` (or test double)
+    before invoke, so traces still land on the correct session.
+    """
+
+    def _inner(self) -> TraceRecorder:
+        recorder = _active_trace_recorder.get()
+        if recorder is None:
+            raise RuntimeError(
+                "no active TraceRecorder bound; call bind_trace_recorder() before invoke"
+            )
+        return recorder
+
+    async def start(self, agent_name: str) -> ReasoningTrace:
+        return await self._inner().start(agent_name)
+
+    async def record_step(self, trace_id: str, step: TraceStep) -> ReasoningTrace:
+        return await self._inner().record_step(trace_id, step)
+
+    async def complete(self, trace_id: str) -> ReasoningTrace:
+        return await self._inner().complete(trace_id)
 
 
 class InMemoryTraceRecorder:

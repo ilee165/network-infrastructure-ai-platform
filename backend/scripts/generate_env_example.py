@@ -209,7 +209,12 @@ def _render_scalar(value: Any) -> str:
         return str(value)
     if isinstance(value, (list, dict)):
         return json.dumps(value, separators=(",", ":"))
-    return str(value)  # str / Path
+    # Path defaults are POSIX container paths (e.g. /data/pcaps). Never use
+    # str(Path(...)) on Windows — that yields backslashes and breaks the
+    # documented mount path (Wave 5 PR review).
+    if isinstance(value, Path):
+        return value.as_posix()
+    return str(value)
 
 
 def env_value(field_name: str, *, is_secretstr: bool) -> str:

@@ -23,6 +23,20 @@ export default defineConfig({
   build: {
     outDir: "dist",
     sourcemap: true,
+    rollupOptions: {
+      output: {
+        // Wave 5 / perf #5: isolate cytoscape from the entry chunk so /login
+        // does not download the topology visualizer (~440 KB).
+        manualChunks(id) {
+          if (id.includes("node_modules/cytoscape")) {
+            return "cytoscape";
+          }
+          if (id.includes("node_modules")) {
+            return "vendor";
+          }
+        },
+      },
+    },
   },
   test: {
     environment: "jsdom",

@@ -61,8 +61,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # Lifespan does not touch Neo4j at boot (Wave 5 / perf #14) — wait only
+      # for the container to start, not for Neo4j's multi-second healthy probe.
       neo4j:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
     # Healthcheck (GET /api/v1/health/live) is baked into the image.
 
@@ -88,7 +90,13 @@ services:
       dockerfile: deploy/docker/backend.Dockerfile
     image: netops-backend:dev
     pull_policy: build
-    command: celery -A app.workers.celery_app worker -Q discovery,config,docs,system
+    # Concurrency from NETOPS_CELERY_WORKER_CONCURRENCY (Settings default 2;
+    # Wave 5 / startup H2). Keep workers × (pool_size+max_overflow) under
+    # Postgres max_connections when sharing the instance with the API pool.
+    command:
+      - /bin/sh
+      - -c
+      - celery -A app.workers.celery_app worker -Q discovery,config,docs,system -c $${NETOPS_CELERY_WORKER_CONCURRENCY:-2}
     env_file: ../../.env
     depends_on:
       postgres:
@@ -96,7 +104,7 @@ services:
       redis:
         condition: service_healthy
       neo4j:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
     # The image HEALTHCHECK targets uvicorn on :8000, which the worker does
     # not serve - override with a Celery broker round-trip ping.

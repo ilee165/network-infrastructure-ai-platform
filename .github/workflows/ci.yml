@@ -190,6 +190,11 @@ jobs:
       - name: Build (vite)
         run: npm run build
 
+      # Wave 5 / perf #5: prove route-level code-splitting still emits ≥2 JS
+      # chunks (bite: a single-bundle regression fails this step).
+      - name: Assert multi-chunk JS split
+        run: npm run check:chunks
+
   # Secret-scanning gate (P1 W6-T4, ADR-0011 §6 no-secret posture, PRODUCTION.md
   # §5). gitleaks scans the WORKING TREE *and the full git HISTORY* — a secret
   # committed earlier and later removed is still exposed in history (G-SEC

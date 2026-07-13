@@ -39,8 +39,10 @@ test/dev fallback, the pgvector index is the production path.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
@@ -60,6 +62,7 @@ __all__ = [
     "OllamaEmbedder",
     "RetrievedChunk",
     "chunk_document",
+    "clear_embedder_caches",
     "embed_document",
     "get_default_embedder",
     "retrieve",
@@ -71,6 +74,39 @@ logger = structlog.get_logger(__name__)
 #: ADR-0004 §3): ``nomic-embed-text`` produces :data:`EMBEDDING_DIM`-wide
 #: vectors, which is why ``embeddings.embedding`` is fixed at that width.
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
+
+#: Process-wide OllamaEmbeddings clients keyed by (model, base_url).
+_OLLAMA_CLIENTS: dict[tuple[str, str], Any] = {}
+
+#: LRU of query-text hash → embedding vector (Wave 5 / agents H5).
+_QUERY_EMBED_LRU: OrderedDict[str, list[float]] = OrderedDict()
+_QUERY_EMBED_LRU_MAX = 256
+
+#: Process-default embedder singleton.
+_DEFAULT_EMBEDDER: Embedder | None = None
+
+
+def clear_embedder_caches() -> None:
+    """Drop client/query/default caches (tests + settings invalidation)."""
+    global _DEFAULT_EMBEDDER
+    _OLLAMA_CLIENTS.clear()
+    _QUERY_EMBED_LRU.clear()
+    _DEFAULT_EMBEDDER = None
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _chunks_content_hash(chunks: Sequence[Chunk]) -> str:
+    """Stable hash of chunk bodies (order + text) for regenerate skip."""
+    h = hashlib.sha256()
+    for chunk in chunks:
+        h.update(str(chunk.index).encode("utf-8"))
+        h.update(b"\0")
+        h.update(chunk.text.encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
 
 
 @runtime_checkable
@@ -105,26 +141,61 @@ class OllamaEmbedder:
         self._model = model
         self._base_url = base_url
 
+    def _resolved_base_url(self) -> str:
+        """This embedder's effective Ollama endpoint (explicit or settings)."""
+        from app.core.config import get_settings
+
+        return self._base_url if self._base_url is not None else get_settings().ollama_base_url
+
+    def _client(self) -> Any:
+        """Return a process-cached ``OllamaEmbeddings`` for this model/url."""
+        from langchain_ollama import OllamaEmbeddings
+
+        base_url = self._resolved_base_url()
+        cache_key = (self._model, base_url)
+        client = _OLLAMA_CLIENTS.get(cache_key)
+        if client is None:
+            client = OllamaEmbeddings(model=self._model, base_url=base_url)
+            _OLLAMA_CLIENTS[cache_key] = client
+        return client
+
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed *texts* via Ollama after A9 redaction of each string.
 
         Uses ``aembed_documents`` (the async Ollama client method) so the
         HTTP round-trip is never blocking on the event loop — fixing the
         sync-in-async stall that would occur with ``embed_documents``.
+
+        Single-text query embeds are LRU-cached by text hash (Wave 5 H5) so
+        repeated ``retrieve`` of the same query does not re-pay the provider.
+        Multi-text document embeds always hit the provider (batch path).
         """
-        from langchain_ollama import OllamaEmbeddings
-
-        from app.core.config import get_settings
-
-        base_url = self._base_url if self._base_url is not None else get_settings().ollama_base_url
-        client = OllamaEmbeddings(model=self._model, base_url=base_url)
         redacted = [redact_prompt(t) for t in texts]
-        return await client.aembed_documents(list(redacted))
+        if len(redacted) == 1:
+            # The cache key carries the embedder identity (model + endpoint):
+            # two configs in one process — or a settings switch mid-flight —
+            # must never serve each other's vectors.
+            key = _text_hash(f"{self._model}\x00{self._resolved_base_url()}\x00{redacted[0]}")
+            cached = _QUERY_EMBED_LRU.get(key)
+            if cached is not None:
+                _QUERY_EMBED_LRU.move_to_end(key)
+                return [list(cached)]
+            vectors = await self._client().aembed_documents(list(redacted))
+            if vectors:
+                _QUERY_EMBED_LRU[key] = list(vectors[0])
+                _QUERY_EMBED_LRU.move_to_end(key)
+                while len(_QUERY_EMBED_LRU) > _QUERY_EMBED_LRU_MAX:
+                    _QUERY_EMBED_LRU.popitem(last=False)
+            return vectors
+        return await self._client().aembed_documents(list(redacted))
 
 
 def get_default_embedder() -> Embedder:
     """Return the process default embedder (the redacted D9 Ollama profile)."""
-    return OllamaEmbedder()
+    global _DEFAULT_EMBEDDER
+    if _DEFAULT_EMBEDDER is None:
+        _DEFAULT_EMBEDDER = OllamaEmbedder()
+    return _DEFAULT_EMBEDDER
 
 
 @dataclass(frozen=True)
@@ -303,6 +374,7 @@ async def embed_document(
     document: Document,
     *,
     embedder: Embedder | None = None,
+    force: bool = False,
 ) -> list[Embedding]:
     """Chunk, embed, and persist *document*, superseding any prior chunks.
 
@@ -313,16 +385,22 @@ async def embed_document(
     replaces its vectors atomically and leaves no orphans (ADR-0019 §5). The
     caller owns the transaction boundary; this function only flushes.
 
+    .. warning:: The content-hash skip compares chunk *texts* only —
+       ``Embedding`` rows carry no model identity — so after an
+       embedding-model/profile switch, unchanged documents would keep serving
+       vectors from the old model (same width, silently mixed spaces). Pass
+       ``force=True`` to bypass the skip and re-embed unconditionally after
+       any embedding-model change. A persisted model column is tracked as
+       deferred debt (production-audit ARCHITECTURE_DEBT §8e).
+
     Returns the freshly persisted embedding rows (empty if the document has no
     embeddable content).
     """
     used_embedder = embedder if embedder is not None else get_default_embedder()
     chunks = chunk_document(document)
 
-    # Supersede prior chunks deterministically (no upsert race, no orphans).
-    await session.execute(delete(Embedding).where(Embedding.document_id == document.id))
-
     if not chunks:
+        await session.execute(delete(Embedding).where(Embedding.document_id == document.id))
         await session.flush()
         logger.info(
             "knowledge.document_embedded",
@@ -331,6 +409,33 @@ async def embed_document(
             chunks=0,
         )
         return []
+
+    # Content-hash skip (Wave 5 / agents H5): if stored chunk texts match the
+    # new chunk set, keep existing vectors — regenerate of unchanged docs is free.
+    existing = list(
+        (
+            await session.execute(
+                select(Embedding)
+                .where(Embedding.document_id == document.id)
+                .order_by(Embedding.chunk_index)
+            )
+        ).scalars()
+    )
+    new_hash = _chunks_content_hash(chunks)
+    if not force and existing and len(existing) == len(chunks):
+        existing_chunks = [Chunk(index=row.chunk_index, text=row.chunk_text) for row in existing]
+        if _chunks_content_hash(existing_chunks) == new_hash:
+            logger.info(
+                "knowledge.document_embed_skipped",
+                document_id=str(document.id),
+                kind=document.kind.value,
+                chunks=len(existing),
+                reason="content_hash_unchanged",
+            )
+            return existing
+
+    # Supersede prior chunks deterministically (no upsert race, no orphans).
+    await session.execute(delete(Embedding).where(Embedding.document_id == document.id))
 
     vectors = await used_embedder.embed([chunk.text for chunk in chunks])
     if len(vectors) != len(chunks):

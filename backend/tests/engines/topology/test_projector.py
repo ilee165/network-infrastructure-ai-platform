@@ -731,8 +731,10 @@ async def test_full_rebuild_wipe_is_scoped_to_projected_labels_only() -> None:
         client, DerivedNodes(), DerivedEdges(), PROJECTED_AT, applications=EMPTY_APPS
     )
     wipes = [c for c in client.statements if "DETACH DELETE" in c and "WHERE" not in c]
+    # Wave 5: batched CALL {} IN TRANSACTIONS wipe (perf #18 / M5).
     assert sorted(wipes) == sorted(
-        f"MATCH (n:{label}) DETACH DELETE n" for label in PROJECTED_NODE_LABELS
+        f"MATCH (n:{label}) CALL {{ WITH n DETACH DELETE n }} IN TRANSACTIONS OF 1000 ROWS"
+        for label in PROJECTED_NODE_LABELS
     )
 
 
