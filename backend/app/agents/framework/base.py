@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -59,12 +59,25 @@ def bound_react_messages(
     Wave 5 / agents H3+H4: unbounded tool dumps and long ReAct histories
     inflate every subsequent model call. Truncation is deterministic and
     leaves a marker so the model can see that data was elided.
+
+    PR #161 review residual: the window is also kept provider-valid — leading
+    orphaned ToolMessages are dropped, and an empty or assistant-first window
+    (both reachable: max_turns floor is 4 while one AI turn can issue 4+
+    parallel tool calls) is re-anchored on the earliest HumanMessage, since
+    Anthropic's Messages API rejects both shapes with a 400.
     """
     windowed: list[BaseMessage] = list(messages[-max_turns:]) if max_turns > 0 else list(messages)
     # Drop leading ToolMessages whose corresponding AIMessage(tool_calls) fell
     # outside the window — orphaned tool results cause OpenAI/Anthropic 400s.
     while windowed and isinstance(windowed[0], ToolMessage):
         windowed = windowed[1:]
+    # Re-anchor an empty or assistant-first window on the user intent (the
+    # earliest HumanMessage). A human-first window is left untouched; with no
+    # HumanMessage anywhere, the orphan-dropped window is the safest output.
+    if not windowed or not isinstance(windowed[0], HumanMessage):
+        intent = next((m for m in messages if isinstance(m, HumanMessage)), None)
+        if intent is not None:
+            windowed.insert(0, intent)
     out: list[BaseMessage] = []
     for msg in windowed:
         if isinstance(msg, ToolMessage):
