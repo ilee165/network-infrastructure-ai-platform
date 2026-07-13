@@ -117,11 +117,9 @@ async def _session() -> AsyncIterator[AsyncSession]:
 # ---------------------------------------------------------------------------
 
 
-async def _load_inventory(
-    session: AsyncSession, *, device_ids: frozenset[UUID] | None = None
-) -> InventoryBundle:
-    """Load inventory; optional *device_ids* scopes interface/route/neighbor rows."""
-    return await load_inventory(session, device_ids=device_ids)
+async def _load_inventory(session: AsyncSession) -> InventoryBundle:
+    """Load the full inventory (write-set scoping happens post-derivation)."""
+    return await load_inventory(session)
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +205,9 @@ async def _project_run(run_id: UUID) -> dict[str, Any]:
 
     Wave 5 / perf #9: when the discovery run touched a subset of devices
     (``raw_artifacts`` for *run_id*), **Neo4j writes** are filtered to that
-    touch-set (``stale_sweep=False`` so untouched estate nodes are not
-    deleted). Full rebuild remains the GC path.
+    touch-set — shared Subnet/Vlan/VRF/Site nodes referenced-only, PR #161
+    review — with ``stale_sweep=False`` so untouched estate nodes are not
+    deleted. Full rebuild remains the GC path.
 
     Derivation and the run snapshot always use the FULL inventory: a scoped
     derivation cannot see cross-scope subnet/neighbor joins (missing
@@ -255,6 +254,7 @@ async def _project_run(run_id: UUID) -> dict[str, Any]:
                     applications=derived.applications,
                     scope_device_ids=scope,
                     scope_interface_ids=iface_ids,
+                    interfaces=inventory.interfaces,
                 )
                 delta = True
 

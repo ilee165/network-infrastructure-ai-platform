@@ -126,7 +126,7 @@ async def _load_inventory(
     """
     from app.engines.topology.inventory_load import load_inventory
 
-    bundle = await load_inventory(session, device_ids=None)
+    bundle = await load_inventory(session)
     return (
         bundle.devices,
         bundle.interfaces,

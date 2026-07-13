@@ -1,9 +1,9 @@
 """Shared inventory loader for topology projection / rebuild (Wave 5 T4).
 
 Both the discovery-sync worker path and the manual full-rebuild CLI load the
-same Postgres inventory shape. A optional *device_ids* filter scopes
-interface/route/neighbor rows to run-touched devices while always loading the
-full application layer (ADR-0052 §5 — both tables or neither).
+same Postgres inventory shape — always estate-wide, application layer
+included (ADR-0052 §5 — both tables or neither). Delta passes scope only the
+Neo4j WRITE set via :func:`filter_derived_for_scope`, never the load.
 """
 
 from __future__ import annotations
@@ -42,8 +42,6 @@ class InventoryBundle:
     neighbors: list[NormalizedNeighborRow]
     applications: list[Application]
     application_dependencies: list[ApplicationDependency]
-    #: When set, Neo4j writes should be limited to this device set (Wave 5 T4).
-    scope_device_ids: frozenset[UUID] | None = None
 
 
 async def run_touched_device_ids(session: AsyncSession, run_id: UUID) -> frozenset[UUID]:
@@ -56,68 +54,20 @@ async def run_touched_device_ids(session: AsyncSession, run_id: UUID) -> frozens
     return frozenset(row[0] for row in rows if row[0] is not None)
 
 
-async def load_inventory(
-    session: AsyncSession,
-    *,
-    device_ids: Collection[UUID] | None = None,
-) -> InventoryBundle:
-    """Load inventory (+ application layer) for a projection pass.
+async def load_inventory(session: AsyncSession) -> InventoryBundle:
+    """Load the full inventory (+ application layer) for a projection pass.
 
-    Parameters
-    ----------
-    device_ids:
-        When provided, only load interfaces/routes/neighbors for those devices.
-        **All** devices are still loaded so L2 neighbor resolution can match
-        peer hostnames/mgmt_ips outside the touch set. Applications are always
-        loaded fully (ADR-0052 §5).
-
-        .. warning:: A scoped load produces a scoped DERIVATION — cross-scope
-           subnet/neighbor joins are invisible (missing ``L3_ADJACENT`` edges,
-           device-level ``CONNECTED_TO`` fallbacks) and ``snapshot_lists`` over
-           it is estate-incomplete. The projection worker therefore loads the
-           full inventory and scopes only its Neo4j write set via
-           :func:`filter_derived_for_scope`. Scope the *load* only when the
-           caller never derives cross-device edges or persists snapshots.
+    Always estate-wide: derivation needs cross-device joins and the run
+    snapshot must be estate-complete (see the warning on
+    :func:`filter_derived_for_scope`). The former scoped-load branch had no
+    live caller and was removed (PR #161 review).
     """
     devices = list((await session.execute(select(Device))).scalars())
     applications = list((await session.execute(select(Application))).scalars())
     dependencies = list((await session.execute(select(ApplicationDependency))).scalars())
-
-    if device_ids is None:
-        interfaces = list((await session.execute(select(NormalizedInterfaceRow))).scalars())
-        routes = list((await session.execute(select(NormalizedRouteRow))).scalars())
-        neighbors = list((await session.execute(select(NormalizedNeighborRow))).scalars())
-        scope: frozenset[UUID] | None = None
-    else:
-        scope = frozenset(device_ids)
-        if not scope:
-            interfaces, routes, neighbors = [], [], []
-        else:
-            interfaces = list(
-                (
-                    await session.execute(
-                        select(NormalizedInterfaceRow).where(
-                            NormalizedInterfaceRow.device_id.in_(scope)
-                        )
-                    )
-                ).scalars()
-            )
-            routes = list(
-                (
-                    await session.execute(
-                        select(NormalizedRouteRow).where(NormalizedRouteRow.device_id.in_(scope))
-                    )
-                ).scalars()
-            )
-            neighbors = list(
-                (
-                    await session.execute(
-                        select(NormalizedNeighborRow).where(
-                            NormalizedNeighborRow.device_id.in_(scope)
-                        )
-                    )
-                ).scalars()
-            )
+    interfaces = list((await session.execute(select(NormalizedInterfaceRow))).scalars())
+    routes = list((await session.execute(select(NormalizedRouteRow))).scalars())
+    neighbors = list((await session.execute(select(NormalizedNeighborRow))).scalars())
 
     return InventoryBundle(
         devices=devices,
@@ -126,7 +76,6 @@ async def load_inventory(
         neighbors=neighbors,
         applications=applications,
         application_dependencies=dependencies,
-        scope_device_ids=scope,
     )
 
 
@@ -145,14 +94,28 @@ def filter_derived_for_scope(
     applications: Any,
     scope_device_ids: Collection[UUID],
     scope_interface_ids: Collection[UUID],
+    interfaces: Sequence[NormalizedInterfaceRow],
 ) -> tuple[Any, Any, Any]:
     """Keep derived elements owned by the discovery touch-set (Wave 5 T4).
 
     - Device / Interface / IPAddress nodes filtered by scope ids.
-    - Shared Subnet/Vlan/Vrf/Site nodes retained (cheap MERGEs; required as
-      endpoints of scoped edges).
     - Edges kept when either endpoint key is a scoped device or interface.
+    - Pass-through families are written REFERENCED-ONLY (PR #161 review — the
+      wholesale pass-through re-MERGEd O(estate) route-prefix Subnets on every
+      1-device delta): a Subnet iff its cidr rides a kept ``IN_SUBNET``/
+      ``ROUTES_TO`` edge or a kept ``L3_ADJACENT`` edge's ``cidrs``; a Vlan iff
+      a scoped *interfaces* row carries its ``vlan_id``; a VRF iff a kept
+      ``ROUTES_TO`` edge names it; a Site iff a kept Device node sits in it.
+      Every kept edge's Subnet endpoint stays writable — the projector MATCHes
+      endpoints and silently drops the edge otherwise — while endpoints on
+      untouched devices are NOT written (they exist from prior estate passes).
     - Applications pass through unchanged (ADR-0052 §5).
+
+    .. warning:: Scope only the WRITE set, never the load/derivation: a scoped
+       derivation cannot see cross-scope subnet/neighbor joins (missing
+       ``L3_ADJACENT`` edges, device-level ``CONNECTED_TO`` fallbacks) and a
+       scope-truncated ``snapshot_lists`` makes the run-to-run diff report
+       every untouched device as removed.
     """
     from app.engines.topology.nodes import DerivedNodes
     from app.engines.topology.projector import DerivedEdges
@@ -177,20 +140,36 @@ def filter_derived_for_scope(
                 return True
         return False
 
-    scoped_nodes = DerivedNodes(
-        devices=tuple(n for n in nodes.devices if str(n.pg_id) in device_keys),
-        interfaces=tuple(n for n in nodes.interfaces if str(n.pg_id) in iface_keys),
-        ip_addresses=tuple(n for n in nodes.ip_addresses if str(n.pg_id) in iface_keys),
-        subnets=nodes.subnets,
-        vlans=nodes.vlans,
-        vrfs=nodes.vrfs,
-        sites=nodes.sites,
-    )
     scoped_edges = DerivedEdges(
         connected_to=tuple(e for e in edges.connected_to if _edge_in_scope(e)),
         has_interface=tuple(e for e in edges.has_interface if _edge_in_scope(e)),
         in_subnet=tuple(e for e in edges.in_subnet if _edge_in_scope(e)),
         l3_adjacent=tuple(e for e in edges.l3_adjacent if _edge_in_scope(e)),
         routes_to=tuple(e for e in edges.routes_to if _edge_in_scope(e)),
+    )
+
+    # Reference rules mirror how the derivation produces each family (see
+    # nodes.derive_nodes): kept-edge cidrs -> Subnet, scoped interface-row
+    # vlan_id -> Vlan, kept routes_to vrf -> VRF, kept device site -> Site.
+    referenced_cidrs = (
+        {e.cidr for e in scoped_edges.in_subnet}
+        | {e.cidr for e in scoped_edges.routes_to}
+        | {cidr for e in scoped_edges.l3_adjacent for cidr in e.cidrs}
+    )
+    referenced_vlans = {
+        row.vlan_id for row in interfaces if row.vlan_id is not None and str(row.id) in iface_keys
+    }
+    referenced_vrfs = {e.vrf.strip() for e in scoped_edges.routes_to if e.vrf.strip()}
+    scoped_devices = tuple(n for n in nodes.devices if str(n.pg_id) in device_keys)
+    referenced_sites = {n.site for n in scoped_devices if n.site}
+
+    scoped_nodes = DerivedNodes(
+        devices=scoped_devices,
+        interfaces=tuple(n for n in nodes.interfaces if str(n.pg_id) in iface_keys),
+        ip_addresses=tuple(n for n in nodes.ip_addresses if str(n.pg_id) in iface_keys),
+        subnets=tuple(n for n in nodes.subnets if n.cidr in referenced_cidrs),
+        vlans=tuple(n for n in nodes.vlans if n.vlan_id in referenced_vlans),
+        vrfs=tuple(n for n in nodes.vrfs if n.name in referenced_vrfs),
+        sites=tuple(n for n in nodes.sites if n.name in referenced_sites),
     )
     return scoped_nodes, scoped_edges, applications
