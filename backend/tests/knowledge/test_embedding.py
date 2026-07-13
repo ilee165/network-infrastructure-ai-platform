@@ -26,6 +26,7 @@ from app.knowledge.embedding import (
     Chunk,
     OllamaEmbedder,
     chunk_document,
+    clear_embedder_caches,
     embed_document,
     retrieve,
 )
@@ -208,6 +209,65 @@ async def test_embed_document_supersedes_prior_chunks_no_orphans(session: AsyncS
     assert remaining[0].chunk_index == 0
 
 
+async def test_embed_document_skips_unchanged_content(session: AsyncSession) -> None:
+    """Content-hash skip (Wave 5 H5): an identical regenerate never re-embeds.
+
+    The second call must return the existing rows without invoking the
+    embedder again — the provider round-trip for an unchanged document is free.
+    """
+    document = await _make_document(
+        session,
+        kind=DocumentKind.INVENTORY,
+        fmt=DocumentFormat.CSV,
+        content="host,vendor\ncore-01,cisco_ios\nedge-02,eos\n",
+    )
+    embedder = FakeEmbedder()
+    first = await embed_document(session, document, embedder=embedder)
+    seen_after_first = len(embedder.seen)
+
+    second = await embed_document(session, document, embedder=embedder)
+
+    assert len(embedder.seen) == seen_after_first  # embedder NOT invoked again
+    assert [(r.chunk_index, r.chunk_text) for r in second] == [
+        (r.chunk_index, r.chunk_text) for r in first
+    ]
+    # The same persisted rows are kept, not rewritten.
+    assert [r.id for r in second] == [r.id for r in first]
+
+
+async def test_embed_document_force_bypasses_content_hash_skip(session: AsyncSession) -> None:
+    """``force=True`` re-embeds unconditionally (PR #161 supersede-path fix).
+
+    After an embedding-model switch the content hash still matches, so the
+    skip would keep stale vectors; force must supersede them with fresh rows —
+    same chunk count, new rows, no orphans.
+    """
+    document = await _make_document(
+        session,
+        kind=DocumentKind.INVENTORY,
+        fmt=DocumentFormat.CSV,
+        content="host,vendor\ncore-01,cisco_ios\nedge-02,eos\n",
+    )
+    embedder = FakeEmbedder()
+    first = await embed_document(session, document, embedder=embedder)
+    first_ids = {r.id for r in first}
+    await embed_document(session, document, embedder=embedder)  # skip path
+    seen_before_force = len(embedder.seen)
+
+    forced = await embed_document(session, document, embedder=embedder, force=True)
+
+    assert len(embedder.seen) == seen_before_force + len(forced)  # embedder re-invoked
+    assert len(forced) == len(first)
+    assert {r.id for r in forced}.isdisjoint(first_ids)  # fresh rows, not the old ones
+    persisted = (
+        (await session.execute(select(Embedding).where(Embedding.document_id == document.id)))
+        .scalars()
+        .all()
+    )
+    assert {r.id for r in persisted} == {r.id for r in forced}  # no orphans
+    assert {r.chunk_index for r in persisted} == {r.chunk_index for r in first}
+
+
 async def test_embed_empty_document_writes_nothing(session: AsyncSession) -> None:
     document = await _make_document(
         session, kind=DocumentKind.INVENTORY, fmt=DocumentFormat.CSV, content=""
@@ -306,6 +366,51 @@ async def test_default_embedder_redacts_before_provider_call(monkeypatch: Any) -
     assert "texts" in captured
     sent = captured["texts"][0]
     assert "Sup3rSecret!" not in sent
+
+
+# --- single-text query LRU keyed by embedder identity (PR #161 fix) -------------
+
+
+async def test_query_lru_is_keyed_by_embedder_identity(monkeypatch: Any) -> None:
+    """The query LRU key carries (model, base_url): no cross-embedder leak.
+
+    A repeat single-text embed on the SAME embedder is an LRU hit (one provider
+    call total), but a different model on the same endpoint must hit the
+    provider again and get its own vector — two embedders must never serve each
+    other's cached vectors (PR #161 review fix).
+    """
+    clear_embedder_caches()
+    calls: dict[tuple[str, str], int] = {}
+
+    class _StubOllamaEmbeddings:
+        def __init__(self, *, model: str, base_url: str, **_: Any) -> None:
+            self._identity = (model, base_url)
+
+        async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+            calls[self._identity] = calls.get(self._identity, 0) + 1
+            # Model-dependent constant vector so a cross-model cache leak is
+            # observable in the returned values, not just the call counts.
+            seed = float(sum(map(ord, self._identity[0])) % 97) / 100.0
+            return [[seed] * EMBEDDING_DIM for _ in texts]
+
+    import langchain_ollama
+
+    monkeypatch.setattr(langchain_ollama, "OllamaEmbeddings", _StubOllamaEmbeddings)
+    base_url = "http://localhost:11434"
+    try:
+        embedder_a = OllamaEmbedder(model="m-a", base_url=base_url)
+        first = await embedder_a.embed(["same text"])
+        second = await embedder_a.embed(["same text"])
+        assert calls == {("m-a", base_url): 1}  # second embed served from the LRU
+        assert second == first
+
+        embedder_b = OllamaEmbedder(model="m-b", base_url=base_url)
+        third = await embedder_b.embed(["same text"])
+        assert calls[("m-b", base_url)] == 1  # provider hit AGAIN: no cross-model leak
+        assert calls[("m-a", base_url)] == 1
+        assert third != first  # m-b got its own vector, not m-a's cached one
+    finally:
+        clear_embedder_caches()
 
 
 def test_chunk_dataclass_is_ordered() -> None:

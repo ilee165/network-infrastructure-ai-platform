@@ -113,6 +113,15 @@ Explicitly **not** fixed in Wave 5 point-fix wave — record here so they do not
 - **Proposed fix:** Scoped stale sweep by device keys (Option A) or rely on periodic auto-rebuild / manual rebuild (current)
 - **Effort:** M | **Risk:** Medium
 
+### 8e. Embedding rows carry no model identity (PR #161 review)
+
+- **Severity:** Medium (silent retrieval-quality degradation after a model switch)
+- **Location:** `embeddings` table / `app/knowledge/embedding.py` content-hash skip
+- **Root cause:** `Embedding` rows persist only `(document_id, chunk_index, chunk_text, embedding)`; the regenerate skip compares chunk *texts*, so after an embedding-model/profile switch unchanged documents keep serving old-space vectors — `EMBEDDING_DIM` stays 768 across many models, so nothing errors
+- **Mitigation shipped (PR #161):** query-LRU keyed by (model, base_url); `clear_embedder_caches()` wired into the settings-PATCH invalidation; `embed_document(force=True)` bypass + docstring warning
+- **Proposed fix:** migration adding `embeddings.model` (or profile) column, included in the skip condition and the retrieval filter
+- **Effort:** M (migration + backfill decision) | **Risk:** Low
+
 ---
 
 ## Closed since 2026-07-01

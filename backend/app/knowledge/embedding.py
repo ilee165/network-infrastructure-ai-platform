@@ -141,13 +141,17 @@ class OllamaEmbedder:
         self._model = model
         self._base_url = base_url
 
+    def _resolved_base_url(self) -> str:
+        """This embedder's effective Ollama endpoint (explicit or settings)."""
+        from app.core.config import get_settings
+
+        return self._base_url if self._base_url is not None else get_settings().ollama_base_url
+
     def _client(self) -> Any:
         """Return a process-cached ``OllamaEmbeddings`` for this model/url."""
         from langchain_ollama import OllamaEmbeddings
 
-        from app.core.config import get_settings
-
-        base_url = self._base_url if self._base_url is not None else get_settings().ollama_base_url
+        base_url = self._resolved_base_url()
         cache_key = (self._model, base_url)
         client = _OLLAMA_CLIENTS.get(cache_key)
         if client is None:
@@ -168,7 +172,10 @@ class OllamaEmbedder:
         """
         redacted = [redact_prompt(t) for t in texts]
         if len(redacted) == 1:
-            key = _text_hash(redacted[0])
+            # The cache key carries the embedder identity (model + endpoint):
+            # two configs in one process — or a settings switch mid-flight —
+            # must never serve each other's vectors.
+            key = _text_hash(f"{self._model}\x00{self._resolved_base_url()}\x00{redacted[0]}")
             cached = _QUERY_EMBED_LRU.get(key)
             if cached is not None:
                 _QUERY_EMBED_LRU.move_to_end(key)
@@ -367,6 +374,7 @@ async def embed_document(
     document: Document,
     *,
     embedder: Embedder | None = None,
+    force: bool = False,
 ) -> list[Embedding]:
     """Chunk, embed, and persist *document*, superseding any prior chunks.
 
@@ -376,6 +384,14 @@ async def embed_document(
     **deleted first in the same transaction**, so regenerating an artifact
     replaces its vectors atomically and leaves no orphans (ADR-0019 §5). The
     caller owns the transaction boundary; this function only flushes.
+
+    .. warning:: The content-hash skip compares chunk *texts* only —
+       ``Embedding`` rows carry no model identity — so after an
+       embedding-model/profile switch, unchanged documents would keep serving
+       vectors from the old model (same width, silently mixed spaces). Pass
+       ``force=True`` to bypass the skip and re-embed unconditionally after
+       any embedding-model change. A persisted model column is tracked as
+       deferred debt (production-audit ARCHITECTURE_DEBT §8e).
 
     Returns the freshly persisted embedding rows (empty if the document has no
     embeddable content).
@@ -406,7 +422,7 @@ async def embed_document(
         ).scalars()
     )
     new_hash = _chunks_content_hash(chunks)
-    if existing and len(existing) == len(chunks):
+    if not force and existing and len(existing) == len(chunks):
         existing_chunks = [Chunk(index=row.chunk_index, text=row.chunk_text) for row in existing]
         if _chunks_content_hash(existing_chunks) == new_hash:
             logger.info(
