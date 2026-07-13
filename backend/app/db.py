@@ -116,9 +116,11 @@ def build_ssl_connect_args(settings: Settings) -> dict[str, Any]:
 def _pool_kwargs(settings: Settings, url: str) -> dict[str, int]:
     """Pool sizing for QueuePool backends (Wave 5 T15).
 
-    SQLite (aiosqlite) engines resolve to StaticPool/NullPool, which reject
-    ``pool_size``/``max_overflow`` with a TypeError — so the knobs apply only
-    to non-SQLite URLs (the unit suite runs on SQLite; prod is Postgres).
+    In-memory SQLite (aiosqlite) engines resolve to ``StaticPool``, which
+    rejects ``pool_size``/``max_overflow`` with a TypeError — so the knobs
+    apply only to non-SQLite URLs (the unit suite runs on SQLite; prod is
+    Postgres). File-backed SQLite would accept them, but sizing a dev/test
+    SQLite pool is meaningless, so the guard covers the whole dialect.
     """
     if url.startswith("sqlite"):
         return {}
@@ -161,9 +163,8 @@ def create_reader_engine(settings: Settings) -> AsyncEngine:
     return create_async_engine(
         reader_url,
         pool_pre_ping=True,
-        pool_size=settings.db_pool_size,
-        max_overflow=settings.db_max_overflow,
         connect_args=connect_args,
+        **_pool_kwargs(settings, reader_url),
     )
 
 

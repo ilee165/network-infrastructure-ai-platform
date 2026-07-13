@@ -287,6 +287,43 @@ describe("ChatPage — streaming + trace viewer", () => {
     );
   });
 
+  it("retains a step buffered just before the end frame (rAF flush after end)", async () => {
+    // Deterministic rAF: capture the flush callback instead of letting jsdom
+    // fire it on its own timer, so the step is still buffered when `end`
+    // lands — the exact flush-vs-terminal-update race under test.
+    const rafQueue: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback): number => {
+      rafQueue.push(cb);
+      return rafQueue.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    renderPage();
+    await startConversation();
+    const socket = latestSocket();
+
+    act(() => {
+      socket.emit(CONCLUSION_STEP);
+      socket.emit(END_FRAME);
+    });
+
+    // The answer is final but the step batch has not flushed yet.
+    expect(await screen.findByTestId("agent-answer")).toHaveTextContent(
+      "interface to it is admin-down",
+    );
+    expect(screen.queryAllByTestId("trace-step")).toHaveLength(0);
+
+    // Drive the captured flush: the buffered step must be retained alongside
+    // the already-final answer, not dropped.
+    act(() => {
+      for (const cb of rafQueue.splice(0)) cb(performance.now());
+    });
+    const steps = await screen.findAllByTestId("trace-step");
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toHaveTextContent(CONCLUSION_STEP.summary);
+    expect(screen.getByTestId("agent-answer")).toHaveTextContent("admin-down");
+  });
+
   it("closes the socket once the end frame arrives", async () => {
     renderPage();
     await startConversation();
