@@ -342,7 +342,31 @@ def capture_device(
     never reached so Celery retries it (transient failure). After retries are
     exhausted, returns ``ok=False`` so a backup **chord** still completes
     (Wave 5 / perf #2).
+
+    Any *other* exception is folded into ``ok=False`` as well: a raised
+    header task fails the whole chord and ``finalize_backup_wave`` never
+    runs, stranding the backup run in ``running`` forever.
     """
+    try:
+        return _capture_device_inner(self, device_id, source, capture_run_id)
+    except SshTransportError:
+        raise  # autoretry_for retries these; retries-exhausted folds inside
+    except Exception as exc:  # noqa: BLE001 — the chord body must always run
+        logger.exception("config.capture_device_unexpected", device_id=device_id)
+        return {
+            "ok": False,
+            "device_id": device_id,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _capture_device_inner(
+    self: Any,
+    device_id: str,
+    source: str,
+    capture_run_id: str | None,
+) -> dict[str, Any]:
+    """Body of :func:`capture_device` (wrapped by its chord-safety fold)."""
     device_uuid = uuid.UUID(device_id)
     snapshot_source = ConfigSource(source)
     run_uuid = uuid.UUID(capture_run_id) if capture_run_id is not None else None

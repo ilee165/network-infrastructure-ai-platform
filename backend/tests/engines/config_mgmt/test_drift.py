@@ -183,6 +183,7 @@ async def test_identical_content_hash_skips_difflib(
     result = await detect_drift(session, device_id=device_id, actor="engineer-1")
     assert result.has_drift is False
     assert result.diff == ""
+    assert result.hunks == []
 
 
 async def test_out_of_band_change_flags_exactly_that_hunk(session: AsyncSession) -> None:

@@ -143,19 +143,25 @@ class FakeClient:
 
 
 async def test_ensure_constraints_issues_one_statement_per_label() -> None:
-    """Exactly one CREATE CONSTRAINT statement per projected node label."""
+    """One CREATE CONSTRAINT per projected node label, plus the site index."""
     client = FakeClient()
     await ensure_constraints(client)
-    assert len(client.all_executed) == len(NODE_KEY_PROPERTY)
+    constraints = [s for s in client.all_executed if "CREATE CONSTRAINT" in s.upper()]
+    indexes = [s for s in client.all_executed if "CREATE INDEX" in s.upper()]
+    assert len(constraints) == len(NODE_KEY_PROPERTY)
+    # Wave 5 / perf #18: the Device.site read index rides the same pass.
+    assert indexes == ["CREATE INDEX netops_device_site IF NOT EXISTS FOR (n:Device) ON (n.site)"]
 
 
 async def test_ensure_constraints_uses_create_constraint_if_not_exists() -> None:
-    """Every statement must be idempotent: CREATE CONSTRAINT IF NOT EXISTS."""
+    """Every statement must be idempotent: CREATE ... IF NOT EXISTS."""
     client = FakeClient()
     await ensure_constraints(client)
     for stmt in client.all_executed:
         upper = stmt.upper()
-        assert "CREATE CONSTRAINT" in upper, f"Not a CREATE CONSTRAINT: {stmt!r}"
+        assert "CREATE CONSTRAINT" in upper or "CREATE INDEX" in upper, (
+            f"Not a CREATE CONSTRAINT/INDEX: {stmt!r}"
+        )
         assert "IF NOT EXISTS" in upper, f"Missing IF NOT EXISTS: {stmt!r}"
 
 
@@ -189,7 +195,10 @@ async def test_ensure_constraints_statements_are_uniqueness_constraints() -> Non
     client = FakeClient()
     await ensure_constraints(client)
     for stmt in client.all_executed:
-        assert "UNIQUENESS" in stmt.upper() or "IS UNIQUE" in stmt.upper(), (
+        upper = stmt.upper()
+        if "CREATE INDEX" in upper:
+            continue  # Wave 5: the Device.site read index is not a constraint
+        assert "UNIQUENESS" in upper or "IS UNIQUE" in upper, (
             f"Statement does not declare uniqueness: {stmt!r}"
         )
 
@@ -209,7 +218,8 @@ async def test_ensure_constraints_is_idempotent_called_twice() -> None:
     await ensure_constraints(client)
     second_pass = client.all_executed[len(first_pass) :]
 
-    assert len(first_pass) == len(NODE_KEY_PROPERTY)
-    assert len(second_pass) == len(NODE_KEY_PROPERTY)
+    # One constraint per label + the Wave 5 Device.site index, each pass.
+    assert len(first_pass) == len(NODE_KEY_PROPERTY) + 1
+    assert len(second_pass) == len(NODE_KEY_PROPERTY) + 1
     # same set of statements in both passes
     assert sorted(first_pass) == sorted(second_pass)

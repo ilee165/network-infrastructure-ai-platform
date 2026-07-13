@@ -60,7 +60,13 @@ const cyInstances: MockCyInstance[] = [];
 
 vi.mock("cytoscape", () => {
   const factory = vi.fn((options: unknown): MockCyInstance => {
-    const remove = vi.fn();
+    // Cytoscape destroys removed elements INCLUDING their layout positions;
+    // re-added nodes start at default coordinates unless the app restores
+    // them. The mock mirrors that so position-loss regressions are testable.
+    const remove = vi.fn(() => {
+      instance.currentElements = [];
+      instance.nodePositions = {};
+    });
     const instance: MockCyInstance = {
       options,
       handlers: [],
@@ -91,15 +97,14 @@ vi.mock("cytoscape", () => {
         return { remove };
       },
       nodes() {
-        const self = this;
         return {
           forEach(cb: (n: { id: () => string; position: () => { x: number; y: number } }) => void) {
-            for (const el of self.currentElements) {
+            for (const el of instance.currentElements) {
               if (el.data.source === undefined) {
                 const id = el.data.id;
                 cb({
                   id: () => id,
-                  position: () => self.nodePositions[id] ?? { x: 10, y: 20 },
+                  position: () => instance.nodePositions[id] ?? { x: 10, y: 20 },
                 });
               }
             }
@@ -107,14 +112,13 @@ vi.mock("cytoscape", () => {
         };
       },
       getElementById(id: string) {
-        const self = this;
         return {
-          nonempty: () => self.currentElements.some((e) => e.data.id === id),
+          nonempty: () => instance.currentElements.some((e) => e.data.id === id),
           position(pos?: { x: number; y: number }) {
             if (pos) {
-              self.nodePositions[id] = pos;
+              instance.nodePositions[id] = pos;
             }
-            return self.nodePositions[id] ?? { x: 0, y: 0 };
+            return instance.nodePositions[id] ?? { x: 0, y: 0 };
           },
         };
       },
@@ -925,6 +929,33 @@ describe("TopologyPage — run-to-run diff view", () => {
       expect(edge).toBeDefined();
       expect(edge!.classes).toContain(DIFF_REMOVED_CLASS);
     });
+  });
+
+  it("preserves node positions across a class-only diff overlay (no re-layout)", async () => {
+    vi.stubGlobal("fetch", routingFetch());
+    renderPage();
+
+    // Initial load: canvas populated and laid out once.
+    await waitFor(() => expect(lastElements().length).toBeGreaterThan(0));
+    const cy = lastCy();
+    const layoutRunsBefore = cy.layoutRuns;
+    // Simulate the cose layout having placed the device node somewhere real.
+    cy.nodePositions[DEVICE_KEY] = { x: 111, y: 222 };
+
+    // The DIFF only adds the diff-removed class to an edge that is already in
+    // the graph — same node/edge ids, so this is a non-structural update.
+    await selectRunsAndCompare();
+    await waitFor(() => {
+      const edge = lastElements().find(
+        (e) => e.data.id === `${DEVICE_KEY}:${IFACE_KEY}:HAS_INTERFACE`,
+      );
+      expect(edge?.classes).toContain(DIFF_REMOVED_CLASS);
+    });
+
+    // No re-layout ran, and the node position survived the remove/re-add
+    // (the mock's remove() wipes positions, mirroring cytoscape).
+    expect(cy.layoutRuns).toBe(layoutRunsBefore);
+    expect(cy.nodePositions[DEVICE_KEY]).toEqual({ x: 111, y: 222 });
   });
 
   it("clears the diff and restores the selection panel on Clear diff", async () => {

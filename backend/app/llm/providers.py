@@ -227,7 +227,9 @@ def _build_provider_model(
                 base_url=resolved_settings.ollama_base_url,
                 temperature=temperature,
                 # Wave 5 / perf #11: bound wedged-provider hangs + pin context.
-                timeout=timeout,
+                # ChatOllama has no `timeout` field (extra="ignore" would drop
+                # it silently) — the bound goes to the underlying httpx client.
+                client_kwargs={"timeout": timeout},
                 num_ctx=resolved_settings.ollama_num_ctx,
                 keep_alive=resolved_settings.ollama_keep_alive,
             )

@@ -735,9 +735,7 @@ async def render_runbook(
         content = response.content
         return heading, content if isinstance(content, str) else str(content)
 
-    pairs = await asyncio.gather(
-        *(_one_section(h, b) for h, b in _RUNBOOK_NARRATIVE_SECTIONS)
-    )
+    pairs = await asyncio.gather(*(_one_section(h, b) for h, b in _RUNBOOK_NARRATIVE_SECTIONS))
     narratives: dict[str, str] = dict(pairs)
 
     # 3. Assemble the template with deterministic, verbatim (redacted) tables.
@@ -1044,9 +1042,7 @@ async def render_incident_report(
         content = response.content
         return heading, content if isinstance(content, str) else str(content)
 
-    pairs = await asyncio.gather(
-        *(_one_section(h, b) for h, b in _INCIDENT_NARRATIVE_SECTIONS)
-    )
+    pairs = await asyncio.gather(*(_one_section(h, b) for h, b in _INCIDENT_NARRATIVE_SECTIONS))
     narratives: dict[str, str] = dict(pairs)
 
     # 3. Assemble the template with deterministic, verbatim (redacted) tables.

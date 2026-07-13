@@ -70,6 +70,14 @@ async def load_inventory(
         **All** devices are still loaded so L2 neighbor resolution can match
         peer hostnames/mgmt_ips outside the touch set. Applications are always
         loaded fully (ADR-0052 §5).
+
+        .. warning:: A scoped load produces a scoped DERIVATION — cross-scope
+           subnet/neighbor joins are invisible (missing ``L3_ADJACENT`` edges,
+           device-level ``CONNECTED_TO`` fallbacks) and ``snapshot_lists`` over
+           it is estate-incomplete. The projection worker therefore loads the
+           full inventory and scopes only its Neo4j write set via
+           :func:`filter_derived_for_scope`. Scope the *load* only when the
+           caller never derives cross-device edges or persists snapshots.
     """
     devices = list((await session.execute(select(Device))).scalars())
     applications = list((await session.execute(select(Application))).scalars())

@@ -213,9 +213,7 @@ async def enforce_api_rate_limit(
         if callable(hit_many):
             results = await hit_many(keys, limit=limit, window_secs=window)
         else:
-            results = [
-                await limiter.hit(key, limit=limit, window_secs=window) for key in keys
-            ]
+            results = [await limiter.hit(key, limit=limit, window_secs=window) for key in keys]
         for result in results:
             if result.allowed:
                 continue

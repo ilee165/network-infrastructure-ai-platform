@@ -311,11 +311,13 @@ def clear_supervisor_cache() -> None:
 
 
 def invalidate_llm_runtime_caches() -> None:
-    """Clear supervisor + chat-model caches after an LLM settings mutation."""
+    """Clear supervisor + chat-model + embedder caches after an LLM settings mutation."""
+    from app.knowledge.embedding import clear_embedder_caches
     from app.llm.providers import clear_chat_model_cache
 
     clear_supervisor_cache()
     clear_chat_model_cache()
+    clear_embedder_caches()
 
 
 async def build_supervisor_for_role(
@@ -346,20 +348,21 @@ async def build_supervisor_for_role(
     async with db.get_sessionmaker()() as session:
         profile = await effective_profile_for_role(session, "reasoning", settings)
     llm: BaseChatModel = get_chat_model(profile, settings, _role="reasoning")
-    # Cache key: resolved profile + the model name the factory selected.
-    if profile == "local" or (profile is None and settings.llm_profile == "local"):
+    # Cache key: resolved profile + the model name the factory selected
+    # (effective_profile_for_role always returns a concrete profile string).
+    if profile == "local":
         model_name = settings.llm_local_model
     else:
         from app.llm.providers import DEFAULT_MODELS
 
-        selected = profile if profile is not None else settings.llm_profile
-        model_name = DEFAULT_MODELS.get(selected, settings.llm_local_model)
-    cache_key = (profile or settings.llm_profile, model_name)
+        model_name = DEFAULT_MODELS.get(profile, settings.llm_local_model)
+    cache_key = (profile, model_name)
 
     graph = _SUPERVISOR_GRAPH_CACHE.get(cache_key)
     if graph is None:
         graph = build_default_supervisor(
-            llm, trace_recorder=ContextVarTraceRecorder()  # type: ignore[arg-type]
+            llm,
+            trace_recorder=ContextVarTraceRecorder(),
         )
         _SUPERVISOR_GRAPH_CACHE[cache_key] = graph
 

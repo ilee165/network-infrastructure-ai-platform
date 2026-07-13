@@ -75,8 +75,6 @@ from app.models.applications import Application, ApplicationDependency
 from app.models.inventory import (
     Device,
     NormalizedInterfaceRow,
-    NormalizedNeighborRow,
-    NormalizedRouteRow,
 )
 from app.models.mixins import utcnow
 from app.models.virtualization import NormalizedHypervisorHostRow, NormalizedVirtualMachineRow
@@ -208,11 +206,15 @@ async def _project_run(run_id: UUID) -> dict[str, Any]:
     """Derive, project (delta when possible), and snapshot.
 
     Wave 5 / perf #9: when the discovery run touched a subset of devices
-    (``raw_artifacts`` for *run_id*), interface/route/neighbor rows are loaded
-    only for that touch-set and Neo4j writes are filtered to those devices
-    (``stale_sweep=False`` so untouched estate nodes are not deleted). Full
-    rebuild remains the GC path. Snapshots still record the derived multiset
-    for this pass (diff foundation).
+    (``raw_artifacts`` for *run_id*), **Neo4j writes** are filtered to that
+    touch-set (``stale_sweep=False`` so untouched estate nodes are not
+    deleted). Full rebuild remains the GC path.
+
+    Derivation and the run snapshot always use the FULL inventory: a scoped
+    derivation cannot see cross-scope subnet/neighbor joins (missing
+    ``L3_ADJACENT`` edges, device-level ``CONNECTED_TO`` fallbacks), and a
+    scope-truncated snapshot makes the run-to-run diff report every untouched
+    device as removed. The delta win is the write path, not the row load.
 
     Returns a JSON-safe stats block describing what was projected. Raised
     exceptions propagate to :func:`sync_after_run`, which isolates them from
@@ -224,10 +226,11 @@ async def _project_run(run_id: UUID) -> dict[str, Any]:
     try:
         async with _session() as session:
             touched = await run_touched_device_ids(session, run_id)
-            # Scope normalized-row load when we have a non-empty touch set;
-            # empty touch set (no artifacts) falls back to full inventory.
+            # Non-empty touch set scopes the Neo4j WRITE set below; the load
+            # and the snapshot stay estate-wide (correct diffs + cross-scope
+            # edges). Empty touch set (no artifacts) means a full pass.
             scope = touched if touched else None
-            inventory = await _load_inventory(session, device_ids=scope)
+            inventory = await _load_inventory(session)
             derived = derive_topology(
                 inventory.devices,
                 inventory.interfaces,

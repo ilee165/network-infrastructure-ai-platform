@@ -170,10 +170,7 @@ def _wipe_label_cypher(label: str) -> str:
     Neo4j 5+ commits every 1000 rows so a full rebuild does not hold one
     giant transaction against the whole projected subgraph.
     """
-    return (
-        f"MATCH (n:{label}) "
-        f"CALL {{ WITH n DETACH DELETE n }} IN TRANSACTIONS OF 1000 ROWS"
-    )
+    return f"MATCH (n:{label}) CALL {{ WITH n DETACH DELETE n }} IN TRANSACTIONS OF 1000 ROWS"
 
 
 # ---------------------------------------------------------------------------

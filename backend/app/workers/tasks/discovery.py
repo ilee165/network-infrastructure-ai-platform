@@ -311,7 +311,9 @@ def _ssh_vendor_candidates(
     vendor driver (each wrong ConnectHandler costs seconds).
     """
     candidates = [
-        vid for vid in registry.vendor_ids() if registry.get_plugin(vid).supports(Capability.DISCOVERY_SSH)
+        vid
+        for vid in registry.vendor_ids()
+        if registry.get_plugin(vid).supports(Capability.DISCOVERY_SSH)
     ]
     if preferred_vendor and preferred_vendor in candidates:
         rest = [v for v in candidates if v != preferred_vendor]
@@ -484,11 +486,34 @@ def collect_device(
     reached so Celery retries it (transient failure). After retries are
     exhausted, returns ``ok=False`` instead of raising so a wave **chord**
     still completes with partial results (Wave 5 / perf #2).
+
+    Any *other* exception is folded into ``ok=False`` as well: a raised
+    header task fails the whole chord and the ``continue_discovery_wave``
+    body never runs, stranding the run in ``running`` forever.
     """
+    try:
+        return _collect_device_inner(self, run_id, target_ip, credential_name)
+    except (SshTransportError, SnmpTransportError):
+        raise  # autoretry_for retries these; retries-exhausted folds above
+    except Exception as exc:  # noqa: BLE001 — the chord body must always run
+        logger.exception("discovery.collect_device_unexpected", run_id=run_id, target_ip=target_ip)
+        return {
+            "ok": False,
+            "target_ip": target_ip,
+            "error": f"{type(exc).__name__}: {exc}",
+            "neighbors": [],
+        }
+
+
+def _collect_device_inner(
+    self: Any,
+    run_id: str,
+    target_ip: str,
+    credential_name: str | None,
+) -> dict[str, Any]:
+    """Body of :func:`collect_device` (wrapped by its chord-safety fold)."""
     run_uuid = uuid.UUID(run_id)
-    creds, device_id, preferred_vendor = asyncio.run(
-        _prepare(run_uuid, target_ip, credential_name)
-    )
+    creds, device_id, preferred_vendor = asyncio.run(_prepare(run_uuid, target_ip, credential_name))
     registry = _registry()
     ssh_creds = [c for c in creds if c.kind is CredentialKind.SSH]
     snmp_creds = [c for c in creds if c.kind in (CredentialKind.SNMP_V2C, CredentialKind.SNMP_V3)]
@@ -618,9 +643,7 @@ async def _finish_run(
         await session.commit()
 
 
-def _normalize_wave_results(
-    raw_results: list[Any], wave: list[str]
-) -> list[dict[str, Any]]:
+def _normalize_wave_results(raw_results: list[Any], wave: list[str]) -> list[dict[str, Any]]:
     """Fold chord/group header results into per-device summaries.
 
     Children that still raise (or return ExceptionInfo) become ``ok=False`` so
