@@ -49,3 +49,9 @@ graphify-out/
 deploy/kubernetes/netops/dashboards/
 
 debug.log
+
+# Codex harness: machine-local MCP wiring (absolute vault path, local venv
+# interpreter). The shared role/hook definitions in .codex/agents/ and
+# .codex/hooks.json ARE tracked; this file is the per-machine analog of
+# .claude/settings.local.json.
+.codex/config.toml
