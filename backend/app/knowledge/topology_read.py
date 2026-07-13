@@ -421,6 +421,58 @@ async def count_graph_nodes(
     return int(count)
 
 
+async def _graph_projected_at(
+    tx: AsyncManagedTransaction,
+    *,
+    rel_types: tuple[str, ...],
+    site: str | None,
+    vrf: str | None,
+) -> Any:
+    """Max ``last_projected_at`` over the nodes :func:`_read_graph` would return.
+
+    Same MATCH/WHERE as the full read (lockstep, like the count pre-check) so
+    the watermark answers for exactly the subgraph the ETag covers — but only
+    one timestamp crosses the wire.
+    """
+    rel_pattern = "|".join(rel_types)
+    siteless_rel_types = list(_SITELESS_REL_TYPES)
+    cypher = (
+        f"MATCH (a)-[r:{rel_pattern}]->(b) "
+        "WHERE ($site IS NULL OR a.site = $site OR b.site = $site "
+        "       OR type(r) IN $siteless_rel_types) "
+        "  AND ($vrf IS NULL OR r.vrf = $vrf OR NOT type(r) = 'ROUTES_TO') "
+        "UNWIND [a, b] AS n "
+        f"RETURN max(n.{_PROJECTED_AT_PROP}) AS projected_at"
+    )
+    result = await tx.run(cypher, site=site, vrf=vrf, siteless_rel_types=siteless_rel_types)
+    async for record in result:
+        return record["projected_at"]
+    return None
+
+
+async def fetch_graph_projected_at(
+    client: Neo4jClient,
+    *,
+    layer: str,
+    site: str | None = None,
+    vrf: str | None = None,
+) -> str | None:
+    """Projection watermark of the subgraph :func:`fetch_graph` would return.
+
+    The server-side half of the Wave 5 ``ETag`` optimization: lets the API
+    answer an ``If-None-Match`` poll with 304 *before* counting or
+    materializing the graph. Returns the same ISO-8601 string
+    :func:`fetch_graph` reports as ``projected_at`` (``None`` when the
+    filtered subgraph is empty), so an ETag built from either source compares
+    equal for the same projection state.
+    """
+    rel_types = rel_types_for_layer(layer)
+    stamp = await client.execute_read(_graph_projected_at, rel_types=rel_types, site=site, vrf=vrf)
+    if stamp is None:
+        return None
+    return str(_coerce(stamp))
+
+
 async def fetch_neighborhood(
     client: Neo4jClient,
     *,

@@ -1634,6 +1634,12 @@ export interface paths {
          *     read-committed, not snapshot-isolated, so the graph can legitimately grow
          *     between the two statements no matter how they are batched.  The
          *     depth-bounded ``/graph/neighborhood`` endpoint is exempt by construction.
+         *
+         *     Wave 5: ``ETag`` is keyed on endpoint+params+``projected_at`` so clients
+         *     (and caches) can detect unchanged polls without re-diffing the body.  A
+         *     request carrying ``If-None-Match`` with the current ETag is answered 304
+         *     from the projection watermark alone (one aggregate read) — the count
+         *     pre-check and the graph materialization are both skipped.
          */
         get: operations["get_graph_api_v1_topology_graph_get"];
         put?: never;
