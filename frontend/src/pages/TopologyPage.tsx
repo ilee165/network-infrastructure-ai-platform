@@ -291,7 +291,10 @@ function NodeDetail({ node }: { node: TopologyNode }) {
 function structuralSignature(elements: CytoscapeElement[]): string {
   return elements
     .map((el) => {
-      if (el.group === "nodes") {
+      // CytoscapeElement has no `group` field — edges carry source/target.
+      const isEdge =
+        el.data.source !== undefined && el.data.target !== undefined;
+      if (!isEdge) {
         return `n:${el.data.id}`;
       }
       return `e:${el.data.id}:${el.data.source ?? ""}>${el.data.target ?? ""}`;
@@ -354,12 +357,27 @@ function TopologyCanvas({
     }
     const nextSig = structuralSignature(elements);
     const needsLayout = nextSig !== signatureRef.current;
-    // Preserve pan/zoom across non-structural updates (class-only diffs).
+    // Preserve pan/zoom and node positions across non-structural updates
+    // (class-only diffs / refetch of the same graph).
     const pan = cy.pan();
     const zoom = cy.zoom();
+    const positions = new Map<string, { x: number; y: number }>();
+    if (!needsLayout) {
+      cy.nodes().forEach((node) => {
+        positions.set(node.id(), { ...node.position() });
+      });
+    }
     cy.batch(() => {
       cy.elements().remove();
       cy.add(elements);
+      if (!needsLayout) {
+        for (const [id, pos] of positions) {
+          const node = cy.getElementById(id);
+          if (node.nonempty()) {
+            node.position(pos);
+          }
+        }
+      }
     });
     if (needsLayout) {
       cy.layout({ name: "cose", animate: false }).run();

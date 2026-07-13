@@ -29,6 +29,7 @@ interface MockCyInstance {
   handlers: TapHandler[];
   currentElements: ReturnType<typeof toCytoscapeElements>;
   layoutRuns: number;
+  nodePositions: Record<string, { x: number; y: number }>;
   on: (
     event: string,
     selectorOrHandler: string | TapHandler["handler"],
@@ -42,6 +43,15 @@ interface MockCyInstance {
   viewport: ReturnType<typeof vi.fn>;
   batch: (fn: () => void) => void;
   elements: () => { remove: ReturnType<typeof vi.fn> };
+  nodes: () => {
+    forEach: (
+      cb: (n: { id: () => string; position: () => { x: number; y: number } }) => void,
+    ) => void;
+  };
+  getElementById: (id: string) => {
+    nonempty: () => boolean;
+    position: (pos?: { x: number; y: number }) => { x: number; y: number };
+  };
   add: (els: ReturnType<typeof toCytoscapeElements>) => void;
   layout: (opts?: unknown) => { run: () => void };
 }
@@ -73,14 +83,48 @@ vi.mock("cytoscape", () => {
       pan: () => ({ x: 0, y: 0 }),
       zoom: () => 1,
       viewport: vi.fn(),
+      nodePositions: {} as Record<string, { x: number; y: number }>,
       batch(fn) {
         fn();
       },
       elements() {
         return { remove };
       },
+      nodes() {
+        const self = this;
+        return {
+          forEach(cb: (n: { id: () => string; position: () => { x: number; y: number } }) => void) {
+            for (const el of self.currentElements) {
+              if (el.data.source === undefined) {
+                const id = el.data.id;
+                cb({
+                  id: () => id,
+                  position: () => self.nodePositions[id] ?? { x: 10, y: 20 },
+                });
+              }
+            }
+          },
+        };
+      },
+      getElementById(id: string) {
+        const self = this;
+        return {
+          nonempty: () => self.currentElements.some((e) => e.data.id === id),
+          position(pos?: { x: number; y: number }) {
+            if (pos) {
+              self.nodePositions[id] = pos;
+            }
+            return self.nodePositions[id] ?? { x: 0, y: 0 };
+          },
+        };
+      },
       add(els) {
         this.currentElements = els;
+        for (const el of els) {
+          if (el.data.source === undefined && this.nodePositions[el.data.id] === undefined) {
+            this.nodePositions[el.data.id] = { x: 10, y: 20 };
+          }
+        }
       },
       layout() {
         return {

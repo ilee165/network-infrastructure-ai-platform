@@ -61,6 +61,10 @@ def bound_react_messages(
     leaves a marker so the model can see that data was elided.
     """
     windowed: list[BaseMessage] = list(messages[-max_turns:]) if max_turns > 0 else list(messages)
+    # Drop leading ToolMessages whose corresponding AIMessage(tool_calls) fell
+    # outside the window — orphaned tool results cause OpenAI/Anthropic 400s.
+    while windowed and isinstance(windowed[0], ToolMessage):
+        windowed = windowed[1:]
     out: list[BaseMessage] = []
     for msg in windowed:
         if isinstance(msg, ToolMessage):
