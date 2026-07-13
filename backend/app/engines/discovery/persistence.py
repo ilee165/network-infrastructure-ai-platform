@@ -28,7 +28,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -189,9 +189,24 @@ async def _upsert_rows(
     for start in range(0, len(payload), _UPSERT_BATCH_SIZE):
         batch = payload[start : start + _UPSERT_BATCH_SIZE]
         stmt = insert_fn(orm_cls).values(batch)
+        # ON CONFLICT DO UPDATE bypasses the ORM, so the TimestampMixin
+        # ``onupdate`` never fires: bump ``updated_at`` explicitly, and only
+        # touch rows whose data actually changed (IS DISTINCT FROM compares
+        # NULLs correctly; SQLite compiles it as IS NOT). Provenance columns
+        # participate on purpose — a new artifact must refresh the row,
+        # matching pre-Wave5 ORM dirty semantics (PR 161 review, Wave5 T3).
         stmt = stmt.on_conflict_do_update(
             index_elements=conflict_cols,
-            set_={col: stmt.excluded[col] for col in value_columns},
+            set_={
+                **{col: stmt.excluded[col] for col in value_columns},
+                "updated_at": utcnow(),
+            },
+            where=or_(
+                *(
+                    getattr(orm_cls, col).is_distinct_from(stmt.excluded[col])
+                    for col in value_columns
+                )
+            ),
         )
         await session.execute(stmt)
     await session.flush()
