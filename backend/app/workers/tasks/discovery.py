@@ -50,11 +50,12 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import Any, Final, cast
 from uuid import UUID
 
 import structlog
 from celery import chord, group
+from celery.exceptions import Ignore, Reject, Retry
 from pydantic import ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -493,8 +494,11 @@ def collect_device(
     """
     try:
         return _collect_device_inner(self, run_id, target_ip, credential_name)
-    except (SshTransportError, SnmpTransportError):
-        raise  # autoretry_for retries these; retries-exhausted folds above
+    except (SshTransportError, SnmpTransportError, Retry, Ignore, Reject):
+        # Transport: autoretry_for retries these (retries-exhausted folds
+        # inside). Retry/Ignore/Reject: Celery control flow, never folded
+        # (PR 161 Task C).
+        raise
     except Exception as exc:  # noqa: BLE001 — the chord body must always run
         logger.exception("discovery.collect_device_unexpected", run_id=run_id, target_ip=target_ip)
         return {
@@ -643,6 +647,43 @@ async def _finish_run(
         await session.commit()
 
 
+#: Terminal run statuses the body-failure safety net must never overwrite.
+_TERMINAL_RUN_STATUSES: Final[frozenset[DiscoveryRunStatus]] = frozenset(
+    {DiscoveryRunStatus.SUCCEEDED, DiscoveryRunStatus.PARTIAL, DiscoveryRunStatus.FAILED}
+)
+
+
+async def _fail_run_if_not_terminal(run_id: UUID, error: str) -> None:
+    """Mark the run ``failed`` unless it already reached a terminal status.
+
+    PR 161 Task C: the chord-body safety net finalizes a run whose body task
+    raised. A run that already finished keeps its terminal status — the body
+    failure then happened *after* finalize (e.g. dispatching the next wave or
+    building the return payload) and must not regress the recorded outcome.
+    """
+    async with _session() as session:
+        run = await session.get(DiscoveryRun, run_id)
+        if run is None or run.status in _TERMINAL_RUN_STATUSES:
+            return
+        run.status = DiscoveryRunStatus.FAILED
+        run.error = error
+        run.finished_at = utcnow()
+        await session.commit()
+
+
+def _fail_run_best_effort(run_id: str, error: str) -> None:
+    """Best-effort ``failed`` finalize on a fresh loop + engine (guard support).
+
+    Runs on its own ``asyncio.run`` and engine so the attempt does not depend
+    on whatever broke the body task; a secondary failure is logged and
+    swallowed — the caller re-raises the original exception regardless.
+    """
+    try:
+        asyncio.run(_fail_run_if_not_terminal(uuid.UUID(run_id), error))
+    except Exception:  # noqa: BLE001 — never mask the original body failure
+        logger.exception("discovery.finalize_failed_error", run_id=run_id)
+
+
 def _normalize_wave_results(raw_results: list[Any], wave: list[str]) -> list[dict[str, Any]]:
     """Fold chord/group header results into per-device summaries.
 
@@ -767,7 +808,36 @@ def continue_discovery_wave(
 
     Signature is Celery-chord style: the header results list is the first
     positional argument, then the bound continuation state.
+
+    Safety net (PR 161 Task C): with global ``acks_late`` and no ``link_error``
+    a chord body that raises is acked and never redelivered, so the run row
+    would strand in ``running`` forever. Any unexpected exception best-effort
+    finalizes the run as ``failed`` (never clobbering an already-terminal
+    status) and then re-raises so Celery still records the task failure.
     """
+    try:
+        return _continue_discovery_wave_inner(
+            results, run_id, hop, visited, stats, plan, wave, started_monotonic
+        )
+    except (Retry, Ignore, Reject):
+        raise  # celery control flow, not a body failure
+    except Exception as exc:
+        logger.exception("discovery.continue_wave_unexpected", run_id=run_id, hop=hop)
+        _fail_run_best_effort(run_id, f"continue_discovery_wave: {type(exc).__name__}: {exc}")
+        raise
+
+
+def _continue_discovery_wave_inner(
+    results: list[Any],
+    run_id: str,
+    hop: int,
+    visited: list[str],
+    stats: dict[str, Any],
+    plan: dict[str, Any],
+    wave: list[str],
+    started_monotonic: float,
+) -> dict[str, Any]:
+    """Body of :func:`continue_discovery_wave` (wrapped by its safety net)."""
     run_uuid = uuid.UUID(run_id)
     hop_limit = int(plan["hop_limit"])
     allowlist = list(plan["allowlist"])

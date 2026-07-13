@@ -17,6 +17,7 @@ plaintext ever reaches a result, log, or audit row.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Iterator
 from typing import Any, ClassVar
 from uuid import UUID
@@ -36,6 +37,7 @@ from app.models import (
     Device,
     DeviceStatus,
 )
+from app.models.config_mgmt import ConfigBackupRun
 from app.plugins.base import Capability, ConfigBackupCapability, VendorPlugin
 from app.plugins.registry import PluginRegistry
 from app.plugins.transport import SshTransportError
@@ -434,6 +436,86 @@ def test_nightly_backup_double_delivery_with_stable_run_id_is_idempotent(
     finished = [r for r in all_audit if r.action == "config.backup_run_finished"]
     assert len(started) == 1, f"expected 1 backup_run_started audit row, got {len(started)}"
     assert len(finished) == 1, f"expected 1 backup_run_finished audit row, got {len(finished)}"
+
+
+# ---------------------------------------------------------------------------
+# Wave 5 / PR 161 Task C: chord BODY safety net — a raising
+# finalize_backup_wave must never strand the backup run in "running"
+# ---------------------------------------------------------------------------
+
+
+async def _boom(*args: Any, **kwargs: Any) -> None:
+    raise RuntimeError("audit DB down")
+
+
+def test_finalize_backup_wave_unexpected_error_marks_run_failed(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Body raising mid-flight -> run row ends failed, error lands in the audit."""
+    run_uuid = uuid.uuid4()
+    assert asyncio.run(tasks._claim_backup_run(run_uuid, "2026-07-13")) == "claimed"
+    monkeypatch.setattr(tasks, "_audit_run", _boom)
+
+    with pytest.raises(RuntimeError, match="audit DB down"):
+        tasks.finalize_backup_wave([{"ok": True, "device_id": "d1"}], str(run_uuid), ["d1"])
+
+    runs = _fetch_all(db_url, ConfigBackupRun)
+    assert len(runs) == 1
+    assert runs[0].status == "failed"
+    assert runs[0].finished_at is not None
+    finished = [r for r in _fetch_all(db_url, AuditLog) if r.action == "config.backup_run_finished"]
+    assert len(finished) == 1
+    assert finished[0].detail["status"] == "failed"
+    assert "RuntimeError" in finished[0].detail["error"]
+
+
+def test_finalize_backup_wave_guard_preserves_terminal_status(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body failure after the run finished must not clobber the terminal state."""
+    run_uuid = uuid.uuid4()
+    asyncio.run(tasks._claim_backup_run(run_uuid, "2026-07-13"))
+    asyncio.run(tasks._finish_backup_run(run_uuid, "succeeded"))
+    monkeypatch.setattr(tasks, "_audit_run", _boom)
+
+    with pytest.raises(RuntimeError):
+        tasks.finalize_backup_wave([{"ok": True, "device_id": "d1"}], str(run_uuid), ["d1"])
+
+    runs = _fetch_all(db_url, ConfigBackupRun)
+    assert runs[0].status == "succeeded"
+    finished = [r for r in _fetch_all(db_url, AuditLog) if r.action == "config.backup_run_finished"]
+    assert all(r.detail.get("status") != "failed" for r in finished)
+
+
+def test_capture_device_fold_reraises_celery_control_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Celery control-flow exceptions must pass through the ok=False fold."""
+    from celery.exceptions import Retry
+
+    def _retry(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise Retry("try later")
+
+    monkeypatch.setattr(tasks, "_capture_device_inner", _retry)
+
+    with pytest.raises(Retry):
+        tasks.capture_device(str(uuid.uuid4()))
+
+
+def test_capture_device_unexpected_error_folds_and_audits(
+    db_url: str, wired: dict[str, FakeSshTransport], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The broad fold mirrors the audited permanent-failure path (snapshot_failed)."""
+    device_id = _seed_device(db_url, mgmt_ip="10.0.0.1")
+    monkeypatch.setattr(tasks, "_load_context", _boom)
+
+    result = tasks.capture_device(str(device_id))
+
+    assert result["ok"] is False
+    assert "RuntimeError" in result["error"]
+    failed = [r for r in _fetch_all(db_url, AuditLog) if r.action == "config.snapshot_failed"]
+    assert len(failed) == 1
+    assert "RuntimeError" in failed[0].detail["error"]
 
 
 # ---------------------------------------------------------------------------

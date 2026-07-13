@@ -59,7 +59,8 @@ from uuid import UUID
 
 import structlog
 from celery import chord, group
-from sqlalchemy import select
+from celery.exceptions import Ignore, Reject, Retry
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -349,15 +350,22 @@ def capture_device(
     """
     try:
         return _capture_device_inner(self, device_id, source, capture_run_id)
-    except SshTransportError:
-        raise  # autoretry_for retries these; retries-exhausted folds inside
+    except (SshTransportError, Retry, Ignore, Reject):
+        # Transport: autoretry_for retries these (retries-exhausted folds
+        # inside). Retry/Ignore/Reject: Celery control flow, never folded
+        # (PR 161 Task C).
+        raise
     except Exception as exc:  # noqa: BLE001 — the chord body must always run
         logger.exception("config.capture_device_unexpected", device_id=device_id)
-        return {
-            "ok": False,
-            "device_id": device_id,
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+        error = f"{type(exc).__name__}: {exc}"
+        # Mirror the audited permanent-failure paths (config.snapshot_failed)
+        # so a folded failure still leaves an audit trace — best-effort on a
+        # fresh loop, since the broken state may be the DB itself.
+        try:
+            asyncio.run(_audit_failure(uuid.UUID(device_id), error, source=ConfigSource(source)))
+        except Exception:  # noqa: BLE001 — never mask the fold's ok=False result
+            logger.exception("config.capture_failure_audit_error", device_id=device_id)
+        return {"ok": False, "device_id": device_id, "error": error}
 
 
 def _capture_device_inner(
@@ -513,15 +521,56 @@ async def _claim_backup_run(run_uuid: UUID, scheduled_slot: str) -> str:
 
 async def _finish_backup_run(run_uuid: UUID, status: str) -> None:
     """Mark the ``config_backup_runs`` row as finished (mutable lifecycle column)."""
-    from sqlalchemy import update as sa_update
-
     async with _session() as session:
         await session.execute(
-            sa_update(ConfigBackupRun)
+            update(ConfigBackupRun)
             .where(ConfigBackupRun.run_uuid == run_uuid)
             .values(status=status, finished_at=datetime.now(UTC))
         )
         await session.commit()
+
+
+async def _fail_backup_run_if_not_terminal(run_uuid: UUID, error: str) -> None:
+    """Mark the backup run ``failed`` unless it already reached a terminal status.
+
+    PR 161 Task C: conditional UPDATE so a body failure that happens *after*
+    the run finished (e.g. while building the return payload) cannot clobber
+    the terminal status. The ``backup_run_finished`` audit (carrying the error
+    note — ``config_backup_runs`` has no error column) is emitted only when
+    this attempt actually flipped the row.
+    """
+    async with _session() as session:
+        cursor = await session.execute(
+            update(ConfigBackupRun)
+            .where(
+                ConfigBackupRun.run_uuid == run_uuid,
+                ConfigBackupRun.status.not_in(_TERMINAL_BACKUP_STATUSES),
+            )
+            .values(status="failed", finished_at=datetime.now(UTC))
+        )
+        if cursor.rowcount == 1:  # type: ignore[attr-defined]
+            await audit.record(
+                session,
+                actor=_ACTOR,
+                action=_BACKUP_RUN_FINISHED,
+                target_type="config_backup_run",
+                target_id=str(run_uuid),
+                detail={"status": "failed", "error": error},
+            )
+        await session.commit()
+
+
+def _fail_backup_run_best_effort(run_id: str, error: str) -> None:
+    """Best-effort ``failed`` finalize on a fresh loop + engine (guard support).
+
+    Runs on its own ``asyncio.run`` and engine so the attempt does not depend
+    on whatever broke the body task; a secondary failure is logged and
+    swallowed — the caller re-raises the original exception regardless.
+    """
+    try:
+        asyncio.run(_fail_backup_run_if_not_terminal(uuid.UUID(run_id), error))
+    except Exception:  # noqa: BLE001 — never mask the original body failure
+        logger.exception("config.finalize_failed_error", run_id=run_id)
 
 
 async def _reachable_device_ids() -> list[UUID]:
@@ -584,7 +633,31 @@ def finalize_backup_wave(
     run_id: str,
     device_ids: list[str],
 ) -> dict[str, Any]:
-    """Chord body: audit finish + terminal status for a nightly backup wave."""
+    """Chord body: audit finish + terminal status for a nightly backup wave.
+
+    Safety net (PR 161 Task C): with global ``acks_late`` and no ``link_error``
+    a chord body that raises is acked and never redelivered, so the backup run
+    row would strand in ``running`` forever. Any unexpected exception
+    best-effort finalizes the run as ``failed`` (never clobbering an
+    already-terminal status) and then re-raises so Celery still records the
+    task failure.
+    """
+    try:
+        return _finalize_backup_wave_inner(results, run_id, device_ids)
+    except (Retry, Ignore, Reject):
+        raise  # celery control flow, not a body failure
+    except Exception as exc:
+        logger.exception("config.finalize_backup_wave_unexpected", run_id=run_id)
+        _fail_backup_run_best_effort(run_id, f"finalize_backup_wave: {type(exc).__name__}: {exc}")
+        raise
+
+
+def _finalize_backup_wave_inner(
+    results: list[Any],
+    run_id: str,
+    device_ids: list[str],
+) -> dict[str, Any]:
+    """Body of :func:`finalize_backup_wave` (wrapped by its safety net)."""
     run_uuid = uuid.UUID(run_id)
     normalized = _normalize_capture_results(results, device_ids)
     succeeded = [r for r in normalized if r.get("ok")]
