@@ -10,9 +10,15 @@ documents in this directory:
 
 Finding IDs below refer to those documents. This track is **separate from P4**
 (W3–W5 pending); it does not replace or reorder P4. Discipline follows
-AR1 §0: one PR per wave, atomic commit per task, every new CI gate must prove
-it bites (plant violation → RED → revert → GREEN, run URLs in PR body),
-lockfiles regenerated in the same commit as any dependency addition.
+AR1 §0: atomic commit per task, every new CI gate must prove it bites (plant
+violation → RED → revert → GREEN, run URLs in PR body), lockfiles regenerated
+in the same commit as any dependency addition.
+
+**One PR per wave is the default, not a rule.** A wave splits when its halves
+touch disjoint trees and can land independently — Wave 6 ships as two
+(PR-A backend read-facade, PR-B frontend platform kit), per
+[`WAVE6-PLAN.md`](WAVE6-PLAN.md). The invariant is the atomic commit per task,
+not the PR count.
 
 Resolved conflicts / standing decisions from the planning session:
 
@@ -64,18 +70,18 @@ Point fixes, each independently committable; one PR.
 - **F2** — frontend coverage measurement (coverage-v8 + CI threshold).
 - **F6** — `pytest-timeout` + de-sleep the two real-clock `sleep(5)` tests.
 
-## Wave 3 — Config-write transport (secret/change-safety surface — STRONG model) 🔄 IN PR
+## Wave 3 — Config-write transport (secret/change-safety surface — STRONG model) ✅ DONE
 
-**PR #158** (`fix/review-wave3`). Decisions: [`WAVE3-DECISIONS.md`](WAVE3-DECISIONS.md). Plan: [`WAVE3-PLAN.md`](WAVE3-PLAN.md).
+**PR #158, merged to main** (`fix/review-wave3`). Decisions: [`WAVE3-DECISIONS.md`](WAVE3-DECISIONS.md). Plan: [`WAVE3-PLAN.md`](WAVE3-PLAN.md).
 
 | ID | Status |
 |----|--------|
-| **C2** | 🔄 JunOS Option A + B1/B6 review fixes (per-step rollback check, exit after `commit confirmed`) — re-verify at final HEAD |
-| **C3** | 🔄 Escaped staging + B2/B3/F3 (parity-aware chunks, `NETOPS-LEN=` without body echo, stage marker scan skips `puts` echoes) — re-verify at final HEAD |
-| **H7** | 🔄 Default strict + pin; B4/B5 + prod gate; pin-policy connect window serialized — re-verify at final HEAD |
+| **C2** | ✅ JunOS Option A + B1/B6 review fixes (per-step rollback check, exit after `commit confirmed`) |
+| **C3** | ✅ Escaped staging + B2/B3/F3 (parity-aware chunks, `NETOPS-LEN=` without body echo, stage marker scan skips `puts` echoes) |
+| **H7** | ✅ Default strict + pin; B4/B5 + prod gate; pin-policy connect window serialized |
 | **AR-W2-T1 / H8** | ✅ `cli_common` base + refits: cisco_ios, cisco_iosxe, eos, cisco_nxos, junos |
 
-Exit: merge when final HEAD re-verification green; `graphify update .` after merge.
+Lessons folded to `docs/roadmap/LESSONS.md` **L-XPORT-1**.
 
 **Named follow-ups (do not evaporate):** F1 live-lab JunOS `load … terminal` via channel expect; F2 control-byte (`0x03`) escape in Tcl stage; F5 `textfsm_helpers` refit or descope; F6 import-linter `app.plugins` boundary contract; F7 document confirm-hook / detail-string divergences; F8 timer-expiry races on verify+confirm; F9 opt-out `caplog` + RejectPolicy fake tests; F10 EOS/NX-OS non-`tclsh` restore surface; chart/compose `known_hosts` mount + first-connect capture.
 
@@ -101,12 +107,21 @@ From `PERF-REVIEW-2026-07-10.md` ranked list (excluding items shipped in W2):
 
 ## Wave 6 — FE platform kit + read-facade
 
-Coordinate scheduling with P4-W3 (compliance reporting UI) to avoid churn.
+Full plan: [`WAVE6-PLAN.md`](WAVE6-PLAN.md). **Two PRs** — PR-A backend, PR-B
+frontend. Serializes against P4-W3 (compliance reporting UI); pre-flight
+collision check at branch creation *and* every rebase.
 
-- FE shared primitives + React Query hook layer (AR-W3 scope).
-- **F5** — shared frontend mock factory + QueryClient test wrapper — structurally ends the L-FE-1 class.
-- Route-level lazy loading if not landed in Wave 5.
-- Router ORM-write extraction, worst 3 routers (partial AR risk R1) — read-facade so agents/routers stop holding raw DB sessions directly.
+- **PR-A** — agent read-facade in `agents/framework/read_facade.py` (AR-W2-T2):
+  specialists lose their direct `app.db` / `app.models` / `app.services` /
+  `app.knowledge` edges; **plus** a table-scoped runtime write-guard proving no
+  READ_ONLY tool mutates domain state (the import contract cannot prove this —
+  two claims, two proofs). Then inline-ORM extraction to services, worst 3
+  routers (partial AR risk R1).
+- **PR-B** — FE shared primitives + React Query hook layer (AR-W3 scope).
+- **F5** — shared frontend mock factory + QueryClient test wrapper — structurally ends the L-FE-1 class for all 13 `vi.mock('../api/*')` sites.
+- ~~Route-level lazy loading if not landed in Wave 5.~~ **Landed in Wave 5**
+  (perf #5: `React.lazy` per route + `manualChunks` + chunk-count build gate).
+  Wave 6 only keeps that gate green through the refactor.
 
 ## Wave 7 — Retention ADR + integration CI + CI decomposition
 

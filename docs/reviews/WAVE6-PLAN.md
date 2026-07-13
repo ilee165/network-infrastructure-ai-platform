@@ -30,6 +30,21 @@ gh pr list --state open --json number,headRefName,files \
 # non-empty intersection -> ABORT, wait for P4-W3 to merge
 ```
 
+**`gh` is not guaranteed on the executing host** (it is absent from the Codex
+harness). The gate is the *check*, not the tool — a git-only fallback is
+equally binding and needs no auth beyond `origin`:
+
+```bash
+git fetch origin --prune
+for b in $(git ls-remote --heads origin 'refs/heads/*p4*' | awk '{print $2}'); do
+  git diff --name-only "origin/main...${b#refs/heads/}"
+done | sort -u
+# same intersection, same ABORT rule
+```
+
+If neither form is runnable on the host, the check escalates to the operator —
+it is never skipped silently.
+
 Current call: P4-W2 is merged and P4-W3 (compliance reporting) is **not yet
 open** — so Wave 6 runs **first**, ahead of P4-W3.
 
@@ -47,48 +62,109 @@ branch.
 ### T1 — AR-W2-T2: agent read-facade
 `wf-implementer`, strong.
 
-Read-only repository/service functions (extend the
-`knowledge/topology_read.py` pattern) replace raw `app.db` use in
-`agents/discovery/tools.py` + `agents/troubleshooting/tools.py`.
-- Shrink the Wave 4 import-linter allowlist to `framework/traces.py` only;
-  tighten the forbidden contract. Outcome, stated exactly: **no specialist
-  has a direct `app.db` / `app.models` / `app.services` edge — agents reach
-  persistence only through the framework's tool wrappers and the read
-  facade.**
-- **This is NOT the write-safety claim.** Contract 2 in
-  `backend/pyproject.toml` runs with `allow_indirect_imports = true` and
-  excludes `app.agents.framework` from `source_modules`; import-linter is
-  module-granular and cannot distinguish a read function from a write
-  function inside a permitted module. `framework/tools.py` already imports
-  `app.models.change_requests` (`tools.py:59`) and is the sanctioned seam —
-  shrinking the allowlist does not, and cannot, prove an agent tool is
-  unable to reach a write-capable path. The write boundary is proven by T1b,
-  not by the contract.
+Read-only repository functions — mirroring the `knowledge/topology_read.py`
+*pattern* — replace raw `app.db` / `app.models` / `app.services` /
+`app.knowledge` use in the specialist tool wrappers.
+
+**Facade home: `app/agents/framework/read_facade.py`.** Not `app.services`
+(specialists are forbidden to reach services — putting it there would
+self-contradict the contract this task tightens) and not `app.knowledge`
+(also forbidden). `app.agents.framework` is the sanctioned seam: it is
+excluded from contract 2's `source_modules` (`pyproject.toml:287-298`), it
+already imports `app.models.change_requests` (`framework/tools.py:59`), and
+row 10 of REPO-STRUCTURE §3.2 designates it as the bridge.
+
+**Exit scope, stated exactly — persistence edges only, not every exception.**
+The Wave 4 allowlist carries three distinct *classes* of edge and this task
+burns down one of them:
+
+| Class | Edges | T1 |
+|---|---|---|
+| **Persistence reach** — `app.db`, `app.models*`, `app.services*`, `app.knowledge*` | 9 entries (discovery/troubleshooting/automation/ddi/security) | **→ zero.** This is AR-W2-T2. |
+| **Type/value imports** — `app.engines.*` (`DiscoveryPlan`, packet + firewall types), `app.plugins.*` (`base`, `registry`, `transport`) | 9 entries | **Residual, enumerated.** Not persistence; a different finding and a different wave. Keep each entry with a one-line justification naming the type it imports and its burn-down owner. Silent survivors = review-reject. |
+
+The earlier draft's "shrink the allowlist to `framework/traces.py` only" was
+incoherent and is retracted: `app.agents.framework` is not in contract 2's
+`source_modules`, so it never had — and cannot have — an allowlist entry.
+
+- **This is NOT the write-safety claim.** Contract 2 runs with
+  `allow_indirect_imports = true`; import-linter is module-granular and cannot
+  distinguish a read function from a write function inside a permitted module.
+  Removing the direct edges does not, and cannot, prove an agent tool is unable
+  to reach a write-capable path. The write boundary is proven by T1b, not by
+  the contract.
 - Tool outputs byte-identical for identical data (agent evals + tool tests
   are the harness); READ_ONLY tool semantics unchanged.
-- Sweep the automation/ddi/security tools' model imports listed in the
-  allowlist: migrate the trivial ones, leave a burn-down note per survivor.
+- The facade is *read*-shaped, but it is not write-free: `trigger_discovery_run`
+  legitimately inserts its `discovery_runs` row and the credential path
+  legitimately appends `audit_log` rows (see T1b). Those keep working; the
+  facade exposes them as explicit, named write functions, not as incidental
+  session access.
 
 ### T1b — Agent write-boundary negative test (NEW)
-`wf-implementer`, strong. Makes the R1 claim machine-enforced for real. Two
-layers, both gating:
+`wf-implementer`, strong. Makes the R1 claim machine-enforced for real.
+
+**What READ_ONLY actually means — pinned before the guard is written.** Per
+ADR-0003/0014 (`framework/tools.py:205-218`), the classification tier governs
+**device/configuration mutation and the ChangeRequest approval gate**, not SQL.
+`STATE_CHANGING` is the tier that requires an approved CR (`tools.py:504-508`);
+`READ_ONLY` executes directly. A READ_ONLY tool therefore *may* write
+platform-operational rows, and three do so today, all correctly:
+
+| Write | Site | Why it is legitimate |
+|---|---|---|
+| INSERT + UPDATE `discovery_runs` | `discovery/tools.py:38`, incl. the broker-failure FAILED salvage at `:111-116` | READ_ONLY job-launch: queues work, mutates no device |
+| INSERT `audit_log` | `troubleshooting/tools.py:182,242` | Every credential decryption leaves an audit row, incl. the fail-closed refusal row |
+| INSERT `reasoning_traces` / `reasoning_trace_steps` | `framework/traces.py:282,330` | Fires on **every** agent step, under every tool |
+
+So a **zero-SQL-write guard cannot pass and must not be written.** The guard is
+a **deny-by-default table policy**, and the claim it proves is *"no READ_ONLY
+tool mutates domain state"* — not *"no READ_ONLY tool touches the DB"*.
 
 - **Runtime write-guard (primary — covers the indirect case).** A SQLAlchemy
-  `before_execute` / `do_execute` event listener bound to the test session
-  fixture that raises on any INSERT / UPDATE / DELETE. Drive **every tool in
-  the agent registry carrying READ_ONLY semantics** through it and assert
-  zero write statements are emitted — regardless of how many modules deep the
-  call goes. Exactly one path is whitelisted: the
-  `services/change_requests` create path, which gets its own positive test
-  asserting it *does* write (a guard that never fires on anything is not a
-  guard).
-- **Static facade check (secondary — fast feedback).** AST test over the read-
-  facade module: no `session.add` / `.delete` / `.commit` / `.flush`, no
-  `insert()` / `update()` / `delete()` constructs.
+  `before_execute` event listener bound to the test session fixture that
+  inspects the target table of every INSERT / UPDATE / DELETE and raises unless
+  the table is on the allowlist. Drive **every tool in the agent registry
+  carrying READ_ONLY semantics** through it — regardless of how many modules
+  deep the call goes.
 
-Bite evidence for T1b: a planted `session.add(...)` in a READ_ONLY tool's call
-path → RED. (The planted-`app.db`-import → RED bite stays as T1's evidence;
-the two prove different properties and both are required.)
+  ```
+  ALLOWED (write permitted under a READ_ONLY drive) — each entry justified:
+    discovery_runs         operational job row; the READ_ONLY job-launch semantic
+    audit_log              append-only; credential-access + tool audit (fail-closed)
+    reasoning_traces       framework trace persistence, every agent step
+    reasoning_trace_steps  "
+    agent_sessions         "
+  DENIED (deny-by-default) — everything else, and these by name:
+    change_requests, approvals, devices, device_credentials, users,
+    config_snapshots / config_archives / compliance_policies, applications,
+    normalized_*, topology_snapshots, ...
+  ```
+
+  **`change_requests` is DENIED, not whitelisted.** CR creation belongs to the
+  *approval gate* on `STATE_CHANGING` tools (`tools.py:504-508`) — a READ_ONLY
+  tool reaching it is precisely the bug this guard exists to catch. An earlier
+  draft whitelisted it; that was wrong and is retracted.
+
+  New allowlist entries need a justification line of the same shape
+  (operational job row / append-only audit / trace). Anything that is domain
+  state = review-reject.
+
+- **Guard-bites positive test** (a guard that never fires is not a guard):
+  drive a **STATE_CHANGING** tool's gate path under the same listener and
+  assert it **raises** on the `change_requests` write. This proves the guard
+  fires on exactly the class it must catch, instead of blessing it.
+
+- **Static facade check (secondary — fast feedback).** AST test over
+  `framework/read_facade.py`: the read functions contain no `session.add` /
+  `.delete` / `.commit` / `.flush` and no `insert()` / `update()` / `delete()`
+  construct. The facade's few *named* write functions (discovery-run row, audit
+  append) are enumerated in the test and exempt by name — the check is "no
+  incidental writes", not "no writes".
+
+Bite evidence for T1b: a planted `session.add(Device(...))` in a READ_ONLY
+tool's call path → RED. (The planted-`app.db`-import → RED bite stays as T1's
+evidence; the two prove different properties and both are required.)
 
 ### T2 — AR-W3-T1: inline-ORM extraction to services, worst 3 routers
 One commit per router; endpoint contracts unchanged (route-gate tests are
@@ -136,10 +212,15 @@ Built + adopted opportunistically, **not** burned down:
   sites stay.
 - The 8 hand-rolled error alerts (M31) — migrated where touched.
 
-**Count ratchet (gating, replaces "full migration").** Record the baseline for
-each tail in the PR body (table shells / empty-state blocks / error alerts) and
-add a CI script asserting each count `<=` baseline. Migration is non-gating;
-*regression* is gating. New code may not re-roll a primitive that now exists.
+**Count ratchet (gating, replaces "full migration").** A CI script asserts each
+tail count `<=` baseline. Migration is non-gating; *regression* is gating. New
+code may not re-roll a primitive that now exists.
+
+**The baseline is the POST-migration count, measured at the last T3/T4 commit —
+not the branch-point count.** A pre-migration baseline would let the
+opportunistic adoptions be silently un-done later and still pass the gate.
+Record both numbers in the PR body (branch-point → post-migration) so the
+in-wave reduction is visible and the ratchet is pinned to the lower one.
 
 ### T4 — Query layer (AR-W3-T3)
 `wf-implementer`. `src/hooks/` per-domain query hooks + central `queryKeys`
@@ -173,11 +254,25 @@ scope and a review-reject:
 
 ### T5 — Central mocks / test-utils (AR-W3-T4 + F5)
 `wf-implementer-light`. Closes the L-FE-1 class **for modules the shared
-factories cover**:
-- One shared test-utils module: auth-api mock factory (single source for the
-  7 sibling files partially mocking `../api/auth`) + shared QueryClient
-  render wrapper (replaces the 101 inline `new QueryClient` across 22
-  files).
+factories cover** — and the covered set is *all of them*, because the surface
+turned out to be small enough to finish in-wave.
+
+**Full census (measured, not estimated): 13 bare `vi.mock('../api/*')` calls,
+8 files, 4 modules.** The earlier "migrate the 7 auth files, stragglers
+opportunistic" split was written before anyone counted; a 6-call tail across 3
+modules is not a tail. **All 13 migrate in T5**, so the lint ships global with
+**no allowlist and no ratchet**.
+
+| Module | Calls | Files |
+|---|---|---|
+| `../api/auth` | 7 | ChangePasswordPage, Layout, LoginPage, ProfilePage, SettingsPage, SettingsRoute, UsersPage |
+| `../api/changes` | 2 | axe-core-pages, ChangesPage |
+| `../api/credentials` | 2 | SettingsPage, SettingsRoute |
+| `../api/integrations` | 2 | SettingsPage, SettingsRoute |
+
+- One shared test-utils module: a mock factory per module above (auth first —
+  highest blast radius) + shared QueryClient render wrapper (replaces the 101
+  inline `new QueryClient` across 22 files).
 - Mock factories use `vi.importActual` spreads so new exports are absorbed
   automatically. **Scope of that guarantee, stated exactly:** it eliminates
   *one* failure mode — a factory mock omitting a newly added export ("No X
@@ -188,11 +283,13 @@ factories cover**:
 - **L-FE-1 discipline stays alive** for every module outside the factories:
   a new export → sweep sibling `vi.mock`s, as before.
 - Teeth for the coverage claim: a lint/test that fails on a bare
-  `vi.mock('../api/*')` not routed through a factory — otherwise "covered"
-  silently decays.
-- Migrate the 7 hand-mocked auth files first (highest blast radius), then
-  the 19 fetch-stub files incrementally; migration of stragglers is
-  opportunistic, the shared module is the gate.
+  `vi.mock('../api/*')` not routed through a factory. It ships **hard — zero
+  allowlist, zero ratchet** — because all 13 call sites migrate in this task.
+  If a 14th surfaces mid-wave (a P4 branch adds one), migrate it too; the lint
+  does not gain an exception.
+- The **19 global-`fetch`-stub files are a separate surface** and stay
+  opportunistic — the lint targets `vi.mock` of an `api/*` module, not fetch
+  stubbing.
 - Keep at least one suite exercising the real `api/client.ts` fetch →
   problem+json mapping (the F5 structural blind spot) — do not
   module-boundary-mock it away.
@@ -255,17 +352,28 @@ Quality + spec review per task; escalate STRONG on T1b + T2c review.
   except where a task explicitly migrates scaffolding — mock migration is
   scaffolding, assertions are not).
 - Pre-flight P4-W3 collision check clean at branch creation and at each
-  rebase.
-- `graphify update .` after each PR merge.
+  rebase (`gh` form or the git-only fallback — see the top of this doc; `gh`
+  is not guaranteed on the executing host).
+- `graphify update .` after each PR merge. **This is an operator step on the
+  Claude Code host, not a CI gate and not a workflow-runner step** — `graphify`
+  is not installed on every harness (it is absent from Codex). It never blocks
+  a task.
 
 ## Exit criteria (AR-W2/W3 exits combined)
 
-- **Boundary (two claims, two proofs):** agents↛db import allowlist =
-  `framework/traces.py` only, contract proven to bite (T1); **and** every
-  READ_ONLY agent tool emits zero INSERT/UPDATE/DELETE under the runtime
-  write-guard, with `services/change_requests` the sole whitelisted write
-  path and its positive test green (T1b). Neither claim substitutes for the
-  other.
+- **Boundary (two claims, two proofs):**
+  - **T1 (no direct persistence edge):** zero `app.db` / `app.models*` /
+    `app.services*` / `app.knowledge*` entries remain in the contract-2
+    allowlist; the surviving `app.engines` / `app.plugins` type-import entries
+    are enumerated with a per-entry justification and burn-down owner. Contract
+    proven to bite.
+  - **T1b (no indirect domain-state write):** every READ_ONLY agent tool writes
+    only allowlisted operational/audit tables (`discovery_runs`, `audit_log`,
+    `reasoning_traces`, `reasoning_trace_steps`, `agent_sessions`) under the
+    runtime table-scoped write-guard; `change_requests` is **denied**, and the
+    guard-bites positive test — a STATE_CHANGING gate path raising on the
+    `change_requests` write — is green.
+  - Neither claim substitutes for the other.
 - 3 routers ORM-free (services own the writes) with route-gate tests green.
 - **FE — enumerated duplicates gone** (the drifted ConfirmDialog pair + 6
   modal shells, VirtualizationPage `EmptyState` shadow, 5 `PILL_BASE`
@@ -275,7 +383,9 @@ Quality + spec review per task; escalate STRONG on T1b + T2c review.
 - 4 pages on react-query **per the T4 state taxonomy** (server reads/writes
   only; WS state in `useAgentStream`, local UI state untouched).
 - Central mock module + QueryClient wrapper in use with importActual
-  factories; bare `vi.mock('../api/*')` lint in place; full FE suite green.
+  factories; **all 13 bare `vi.mock('../api/*')` call sites migrated (auth ×7,
+  changes ×2, credentials ×2, integrations ×2)**; the lint is in place with no
+  allowlist; full FE suite green.
 - SettingsPage decision recorded **with its measured values** (sections
   touched, shared-state yes/no, net LOC delta), split executed or deferral
   re-affirmed.
