@@ -1,14 +1,21 @@
 # Wave 6 Implementation Plan — FE Platform Kit + Read-Facade
 
-Parent plan: [`REVIEW-WAVES-PLAN.md`](REVIEW-WAVES-PLAN.md). Source:
-[`AR1-REMEDIATION-PLAN.md`](AR1-REMEDIATION-PLAN.md) AR-W2-T2 + AR-W3,
+Parent plan: [`REVIEW-WAVES-PLAN.md`](REVIEW-WAVES-PLAN.md). Historical source
+input: [`AR1-REMEDIATION-PLAN.md`](AR1-REMEDIATION-PLAN.md) AR-W2-T2 + AR-W3,
 [`2026-07-10-repo-review.md`](2026-07-10-repo-review.md) M26–M33, M35, M37–M41,
 [`2026-07-10-testing-strategy-review.md`](2026-07-10-testing-strategy-review.md) F5.
 
-**Theme:** structural refactor wave — agents and routers stop touching the DB
-directly (backend), and the frontend gets the shared platform kit that ends
-the copy-paste/mock-fragility classes. Zero endpoint-contract or visual
-behavior change; existing suites are the regression harness.
+This document, not the historical AR1 draft, is the execution authority for
+Wave 6.
+
+**Theme:** structural refactor wave — discovery/troubleshooting specialist
+tools stop owning persistence reads and operational SQL directly, the three
+target routers stop owning ORM work, and the frontend gets the shared platform
+kit that ends the enumerated copy-paste/mock-fragility classes. The Automation
+Agent's deterministic ChangeRequest write path remains an explicit residual;
+extracting that safety-critical port is deferred to its own STRONG-reviewed
+task. Zero endpoint-contract or visual behavior change; existing suites are the
+regression harness.
 
 **Shape:** two PRs. PR-A backend (`refactor/review-wave6-backend`), PR-B
 frontend (`refactor/review-wave6-frontend`). Atomic commit per task.
@@ -23,30 +30,27 @@ That rule is a **pre-flight gate, not a note** — run it at branch creation
 *and* again at every rebase (P4-W3 can open mid-wave):
 
 ```bash
-gh pr list --state open --json number,headRefName,files \
-  | jq -r '.[] | select(.headRefName|test("p4")) | .files[].path'
-# intersect against  backend/app/api/v1/*, backend/app/services/*      (PR-A)
-#                    frontend/src/pages/*, frontend/src/components/*   (PR-B)
+gh pr list --state open --json number,title,headRefName,files \
+  | jq -r '.[]
+      | select((.headRefName + " " + .title)
+          | test("p4[-_/ ]?w3|compliance"; "i"))
+      | .files[].path'
+# intersect against  backend/app/api/** or backend/app/services/**     (PR-A)
+#                    frontend/src/**                                   (PR-B)
 # non-empty intersection -> ABORT, wait for P4-W3 to merge
 ```
 
 **`gh` is not guaranteed on the executing host** (it is absent from the Codex
-harness). The gate is the *check*, not the tool — a git-only fallback is
-equally binding and needs no auth beyond `origin`:
+harness). If `gh` is unavailable or unauthenticated, perform the same
+open-PR-and-files query through the authenticated GitHub REST/GraphQL API. A
+remote-branch scan is **not** an equivalent fallback: it cannot identify open
+PR state, misses fork heads, and includes stale branches. If neither `gh` nor
+authenticated API access is available, obtain operator attestation covering
+all open P4-W3/compliance PRs and their changed files. Record the command/API
+result or attestation in both PR bodies; the check is never skipped silently.
 
-```bash
-git fetch origin --prune
-for b in $(git ls-remote --heads origin 'refs/heads/*p4*' | awk '{print $2}'); do
-  git diff --name-only "origin/main...${b#refs/heads/}"
-done | sort -u
-# same intersection, same ABORT rule
-```
-
-If neither form is runnable on the host, the check escalates to the operator —
-it is never skipped silently.
-
-Current call: P4-W2 is merged and P4-W3 (compliance reporting) is **not yet
-open** — so Wave 6 runs **first**, ahead of P4-W3.
+Planning snapshot (2026-07-13): P4-W2 is merged and P4-W3 (compliance
+reporting) is **not yet open** — so Wave 6 runs **first**, ahead of P4-W3.
 
 **Prerequisites:** Wave 4 merged (PR #159 / #160) — import-linter contracts +
 generated types, the burn-down target and the type source both exist. Wave 5
@@ -60,28 +64,49 @@ branch.
 ## PR-A — Backend: read-facade + router extraction
 
 ### T1 — AR-W2-T2: agent read-facade
-`wf-implementer`, strong.
+
+`wf-implementer`, **STRONG pinned** — audited credential-access seam.
 
 Read-only repository functions — mirroring the `knowledge/topology_read.py`
-*pattern* — replace raw `app.db` / `app.models` / `app.services` /
-`app.knowledge` use in the specialist tool wrappers.
+*pattern* — replace raw persistence/knowledge reads in discovery and
+troubleshooting specialist wrappers. Operational writes and audited secret
+access use separate, explicitly named seams; they are not hidden inside a
+module called "read".
 
-**Facade home: `app/agents/framework/read_facade.py`.** Not `app.services`
-(specialists are forbidden to reach services — putting it there would
-self-contradict the contract this task tightens) and not `app.knowledge`
-(also forbidden). `app.agents.framework` is the sanctioned seam: it is
-excluded from contract 2's `source_modules` (`pyproject.toml:287-298`), it
-already imports `app.models.change_requests` (`framework/tools.py:59`), and
-row 10 of REPO-STRUCTURE §3.2 designates it as the bridge.
+**Framework homes (binding):**
 
-**Exit scope, stated exactly — persistence edges only, not every exception.**
-The Wave 4 allowlist carries three distinct *classes* of edge and this task
-burns down one of them:
+- `app/agents/framework/read_facade.py` — inventory, normalized-route, and
+  topology/application-impact reads. This module is genuinely read-only: no
+  write-function exemptions.
+- `app/agents/framework/discovery_jobs.py` — only the sanctioned
+  `discovery_runs` create/failure lifecycle used by `trigger_discovery_run`.
+  Celery dispatch stays at the existing seam; this module does not introduce a
+  new `framework -> workers` edge.
+- `app/agents/framework/credential_access.py` — audited credential acquisition
+  for troubleshooting live reads. It owns the service/DB access needed for the
+  append-only `audit_log` side effect; plugin/transport type edges are not
+  disguised as repository reads.
 
-| Class | Edges | T1 |
-|---|---|---|
-| **Persistence reach** — `app.db`, `app.models*`, `app.services*`, `app.knowledge*` | 9 entries (discovery/troubleshooting/automation/ddi/security) | **→ zero.** This is AR-W2-T2. |
-| **Type/value imports** — `app.engines.*` (`DiscoveryPlan`, packet + firewall types), `app.plugins.*` (`base`, `registry`, `transport`) | 9 entries | **Residual, enumerated.** Not persistence; a different finding and a different wave. Keep each entry with a one-line justification naming the type it imports and its burn-down owner. Silent survivors = review-reject. |
+These live under `app.agents.framework`, not `app.services` or `app.knowledge`,
+because specialists may import only the framework seam. Framework is excluded
+from contract 2's `source_modules` (`pyproject.toml:287-298`), and row 10 of
+REPO-STRUCTURE §3.2 designates it as the bridge.
+
+**Current contract-2 census and T1 exit, stated exactly.** The allowlist has
+**23 entries**, grouped as follows; calling all of them "persistence" was
+incorrect:
+
+| Group | Current entries | T1 disposition |
+|---|---:|---|
+| Discovery/troubleshooting read + operational access — `db/models` ×4, credential service ×1, knowledge ×3 | 8 | **→ zero.** Move behind the three framework seams above. |
+| Automation deterministic write path — CR model ×2, audit service ×1, CR service ×1 | 4 | **Residual.** Keep explicit with one-line safety justification; owner = a separate future **STRONG-reviewed automation-port extraction**, deliberately deferred from Wave 6. |
+| DDI/security `ChangeRequestKind` decorator metadata | 2 | **Residual.** Type/value coupling, not a read-facade concern; owner = future framework/schema metadata seam. |
+| Engine/plugin type + capability imports — engines ×4, plugins ×5 | 9 | **Residual.** Keep each entry with a one-line imported-symbol justification and follow-on owner. |
+
+The separate `app.agents.discovery.tools -> app.workers.celery_app` layers
+exception is **not** one of those 23 contract-2 entries and is not a fifth
+class. T1 documents it with its own burn-down owner but does not move it into
+`read_facade.py` or create a new framework-to-worker exception.
 
 The earlier draft's "shrink the allowlist to `framework/traces.py` only" was
 incoherent and is retracted: `app.agents.framework` is not in contract 2's
@@ -95,46 +120,60 @@ incoherent and is retracted: `app.agents.framework` is not in contract 2's
   the contract.
 - Tool outputs byte-identical for identical data (agent evals + tool tests
   are the harness); READ_ONLY tool semantics unchanged.
-- The facade is *read*-shaped, but it is not write-free: `trigger_discovery_run`
-  legitimately inserts its `discovery_runs` row and the credential path
-  legitimately appends `audit_log` rows (see T1b). Those keep working; the
-  facade exposes them as explicit, named write functions, not as incidental
-  session access.
+- `read_facade.py` is write-free. `discovery_jobs.py` owns the named
+  `discovery_runs` mutations, and `credential_access.py` owns the audited
+  credential path. Automation's CR lifecycle/audit imports do not pass through
+  any of these files and remain unchanged in this wave.
 
 ### T1b — Agent write-boundary negative test (NEW)
-`wf-implementer`, strong. Makes the R1 claim machine-enforced for real.
+
+`wf-implementer`, **STRONG pinned**. Makes the R1 claim machine-enforced for real.
 
 **What READ_ONLY actually means — pinned before the guard is written.** Per
 ADR-0003/0014 (`framework/tools.py:205-218`), the classification tier governs
 **device/configuration mutation and the ChangeRequest approval gate**, not SQL.
 `STATE_CHANGING` is the tier that requires an approved CR (`tools.py:504-508`);
-`READ_ONLY` executes directly. A READ_ONLY tool therefore *may* write
-platform-operational rows, and three do so today, all correctly:
+`READ_ONLY` executes directly. Under a **direct tool invocation** (the harness
+defined below), the current legitimate PostgreSQL writes are exactly:
 
 | Write | Site | Why it is legitimate |
 |---|---|---|
 | INSERT + UPDATE `discovery_runs` | `discovery/tools.py:38`, incl. the broker-failure FAILED salvage at `:111-116` | READ_ONLY job-launch: queues work, mutates no device |
 | INSERT `audit_log` | `troubleshooting/tools.py:182,242` | Every credential decryption leaves an audit row, incl. the fail-closed refusal row |
-| INSERT `reasoning_traces` / `reasoning_trace_steps` | `framework/traces.py:282,330` | Fires on **every** agent step, under every tool |
 
-So a **zero-SQL-write guard cannot pass and must not be written.** The guard is
-a **deny-by-default table policy**, and the claim it proves is *"no READ_ONLY
-tool mutates domain state"* — not *"no READ_ONLY tool touches the DB"*.
+`reasoning_traces`, `reasoning_trace_steps`, and `agent_sessions` belong to the
+agent-graph/session lifecycle, not direct tool invocation. Their existing
+lifecycle suites remain the proof for those writes; they are not pre-allowed in
+this guard.
 
-- **Runtime write-guard (primary — covers the indirect case).** A SQLAlchemy
-  `before_execute` event listener bound to the test session fixture that
-  inspects the target table of every INSERT / UPDATE / DELETE and raises unless
-  the table is on the allowlist. Drive **every tool in the agent registry
-  carrying READ_ONLY semantics** through it — regardless of how many modules
-  deep the call goes.
+So a **zero-SQL-write guard cannot pass and must not be written.** The exact
+claim is: **every registered READ_ONLY tool, when directly invoked, may write
+only the explicitly permitted operational/audit PostgreSQL tables
+`discovery_runs` and `audit_log`, and may not write any other relational
+table.** This does not prove the absence of Neo4j, Redis, Celery, filesystem,
+cloud, or device side effects. Those dependencies are faked here for
+hermeticity; device/configuration safety remains covered by the approval-gate
+and transport suites.
+
+- **Runtime write-guard (primary — covers the indirect relational case).** A
+  SQLAlchemy `before_execute` event listener bound to the test engine used by
+  the patched application sessionmaker inspects the target table of every
+  INSERT / UPDATE / DELETE and raises unless the table is on the allowlist.
+  Drive **every tool in the default agent registry carrying READ_ONLY
+  semantics** through it — regardless of how many modules deep the SQL call
+  goes.
+
+  The harness is a `tool.name -> invocation fixture` map. Build the registry at
+  test runtime and assert exact keyset equality between that map and the
+  registry's READ_ONLY census; a newly registered tool without a fixture fails
+  before execution. Fixtures provide valid minimal arguments and fake SSH,
+  Celery, Neo4j, LLM, credential-provider, filesystem, and cloud boundaries so
+  no external side effect is mistaken for SQL proof.
 
   ```
   ALLOWED (write permitted under a READ_ONLY drive) — each entry justified:
-    discovery_runs         operational job row; the READ_ONLY job-launch semantic
-    audit_log              append-only; credential-access + tool audit (fail-closed)
-    reasoning_traces       framework trace persistence, every agent step
-    reasoning_trace_steps  "
-    agent_sessions         "
+    discovery_runs  operational job row; the READ_ONLY job-launch semantic
+    audit_log       append-only credential-access/tool audit (fail-closed)
   DENIED (deny-by-default) — everything else, and these by name:
     change_requests, approvals, devices, device_credentials, users,
     config_snapshots / config_archives / compliance_policies, applications,
@@ -143,30 +182,32 @@ tool mutates domain state"* — not *"no READ_ONLY tool touches the DB"*.
 
   **`change_requests` is DENIED, not whitelisted.** CR creation belongs to the
   *approval gate* on `STATE_CHANGING` tools (`tools.py:504-508`) — a READ_ONLY
-  tool reaching it is precisely the bug this guard exists to catch. An earlier
-  draft whitelisted it; that was wrong and is retracted.
+  tool reaching it is precisely the bug this guard exists to catch.
 
-  New allowlist entries need a justification line of the same shape
-  (operational job row / append-only audit / trace). Anything that is domain
-  state = review-reject.
+  New allowlist entries need a justification of the same shape (operational job
+  row / append-only audit), a dedicated positive test that exercises the write,
+  and STRONG review. Anything that is relational domain state = review-reject.
 
-- **Guard-bites positive test** (a guard that never fires is not a guard):
-  drive a **STATE_CHANGING** tool's gate path under the same listener and
-  assert it **raises** on the `change_requests` write. This proves the guard
-  fires on exactly the class it must catch, instead of blessing it.
+- **Guard-bites positive test** (a guard that never fires is not a guard): a
+  permanent synthetic **READ_ONLY** test tool executes
+  `session.add(Device(...))`; assert the listener raises on `devices`. This
+  proves the READ_ONLY policy itself bites without treating a legitimate
+  STATE_CHANGING ChangeRequest write as erroneous behavior.
 
 - **Static facade check (secondary — fast feedback).** AST test over
-  `framework/read_facade.py`: the read functions contain no `session.add` /
+  `framework/read_facade.py`: the entire module contains no `session.add` /
   `.delete` / `.commit` / `.flush` and no `insert()` / `update()` / `delete()`
-  construct. The facade's few *named* write functions (discovery-run row, audit
-  append) are enumerated in the test and exempt by name — the check is "no
-  incidental writes", not "no writes".
+  construct. There are no exemptions. Separate focused tests pin
+  `discovery_jobs.py` to `discovery_runs`; credential-audit behavior remains
+  covered by the credential service tests plus the runtime table guard.
 
-Bite evidence for T1b: a planted `session.add(Device(...))` in a READ_ONLY
-tool's call path → RED. (The planted-`app.db`-import → RED bite stays as T1's
-evidence; the two prove different properties and both are required.)
+Bite evidence for T1b: the permanent synthetic READ_ONLY
+`session.add(Device(...))` case → RED. (The planted-`app.db`-import → RED bite
+stays as T1's evidence; the two prove different properties and both are
+required.)
 
 ### T2 — AR-W3-T1: inline-ORM extraction to services, worst 3 routers
+
 One commit per router; endpoint contracts unchanged (route-gate tests are
 the harness). Services own sessions/writes + audit; routers keep
 validation/response shaping (per the Wave 4 services-vs-engines charter).
@@ -195,8 +236,9 @@ target this wave; full burn-down is a mechanical follow-on. What this wave
 guarantees for the tails is **no regression**, via a count ratchet.
 
 Gating — these go to zero:
-- `Modal`/`ConfirmDialog` — dedupe the verbatim-drifted pair
-  (ApplicationsPage vs UsersPage, M27) and the 6 hand-rolled modal shells.
+- `Modal`/`ConfirmDialog` — replace the **6 hand-rolled modal shells total**.
+  Two of those six are the verbatim-drifted ConfirmDialog pair
+  (ApplicationsPage vs UsersPage, M27); the target is six, not the pair plus six.
 - `EmptyState` — rename the VirtualizationPage local shadow, extend the
   shared one to the common case (M33).
 - `StatusPill` — the 5 re-rolled `PILL_BASE` badges (M30).
@@ -271,8 +313,14 @@ modules is not a tail. **All 13 migrate in T5**, so the lint ships global with
 | `../api/integrations` | 2 | SettingsPage, SettingsRoute |
 
 - One shared test-utils module: a mock factory per module above (auth first —
-  highest blast radius) + shared QueryClient render wrapper (replaces the 101
-  inline `new QueryClient` across 22 files).
+  highest blast radius) + shared QueryClient render wrapper. The measured
+  test-only census is **24 `new QueryClient` constructions across 22 files**;
+  all 24 migrate. The production construction in `src/main.tsx` remains.
+- The render helper returns both the Testing Library render result **and** the
+  created `QueryClient`, so tests that inspect, clear, refetch, or seed cache
+  state do not create a private client. A lint/test forbids `new QueryClient`
+  under `src/__tests__/` outside the shared helper; `src/main.tsx` is the only
+  production exemption.
 - Mock factories use `vi.importActual` spreads so new exports are absorbed
   automatically. **Scope of that guarantee, stated exactly:** it eliminates
   *one* failure mode — a factory mock omitting a newly added export ("No X
@@ -296,12 +344,12 @@ modules is not a tail. **All 13 migrate in T5**, so the lint ships global with
 
 ### T6 — SettingsPage split (M35) — **conditional**
 Standing decision: deferred to "first time the settings hub is touched
-again" (`docs/features/settings-hub` plan folder exists). T3/T4 touch
+again" (`docs/features/settings-hub` plan folder exists). T3/T5 touch
 SettingsPage (modal shell, errorMessage, mock migration). "Non-trivial" is
 **measured, not judged** — execute the split (`pages/settings/*.tsx` thin
 shell, own commit in this wave) if **any** of:
 
-1. the T3/T4 diff touches **more than one settings section** region; **or**
+1. the combined T3/T5 diff touches **more than one settings section** region; **or**
 2. it changes **shared state or prop threading** — any state var read by 2+
    sections, or a new prop plumbed through the hub; **or**
 3. **net LOC delta in `SettingsPage.tsx` > 50**.
@@ -326,19 +374,20 @@ PR-B: T3 → T4 → T5 (→ T6)          (primitives before hooks before mock mi
 - Two distinct bite proofs for PR-A, both required — they prove different
   properties:
   - **T1** (no direct edge): planted `app.db` import in an agent tool → RED.
-  - **T1b** (no indirect write): planted `session.add(...)` in a READ_ONLY
-    tool's call path → RED.
+  - **T1b** (no prohibited indirect relational write): the permanent
+    synthetic READ_ONLY `session.add(Device(...))` case → RED.
 
 ## Model & review policy
 
 | Task | Implementer | Notes |
 |------|-------------|-------|
-| T1, T2a, T2b, T4 | strong | boundary/refactor correctness |
+| T1 | **STRONG pinned** | persistence boundary + credential-access secret surface |
 | T1b | **STRONG pinned** | the R1 safety boundary is only as good as this test |
+| T2a, T2b, T4 | strong | boundary/refactor correctness |
 | T2c | **STRONG pinned** | auth surface |
 | T3, T5 | light | mechanical dedupe/migration |
 
-Quality + spec review per task; escalate STRONG on T1b + T2c review.
+Quality + spec review per task; T1, T1b, and T2c reviews are STRONG-pinned.
 
 ## Gates (per task and PR exit)
 
@@ -351,9 +400,9 @@ Quality + spec review per task; escalate STRONG on T1b + T2c review.
 - No visual regression on migrated pages (existing page tests unmodified
   except where a task explicitly migrates scaffolding — mock migration is
   scaffolding, assertions are not).
-- Pre-flight P4-W3 collision check clean at branch creation and at each
-  rebase (`gh` form or the git-only fallback — see the top of this doc; `gh`
-  is not guaranteed on the executing host).
+- Pre-flight P4-W3 collision check clean at branch creation and at each rebase
+  (`gh`, authenticated GitHub API, or recorded operator attestation — see the
+  top of this doc; remote-branch scans are not accepted as PR-state evidence).
 - `graphify update .` after each PR merge. **This is an operator step on the
   Claude Code host, not a CI gate and not a workflow-runner step** — `graphify`
   is not installed on every harness (it is absent from Codex). It never blocks
@@ -362,30 +411,35 @@ Quality + spec review per task; escalate STRONG on T1b + T2c review.
 ## Exit criteria (AR-W2/W3 exits combined)
 
 - **Boundary (two claims, two proofs):**
-  - **T1 (no direct persistence edge):** zero `app.db` / `app.models*` /
-    `app.services*` / `app.knowledge*` entries remain in the contract-2
-    allowlist; the surviving `app.engines` / `app.plugins` type-import entries
-    are enumerated with a per-entry justification and burn-down owner. Contract
-    proven to bite.
-  - **T1b (no indirect domain-state write):** every READ_ONLY agent tool writes
-    only allowlisted operational/audit tables (`discovery_runs`, `audit_log`,
-    `reasoning_traces`, `reasoning_trace_steps`, `agent_sessions`) under the
-    runtime table-scoped write-guard; `change_requests` is **denied**, and the
-    guard-bites positive test — a STATE_CHANGING gate path raising on the
-    `change_requests` write — is green.
+  - **T1 (no direct read/operational persistence edge in scope):** zero
+    `app.db` / `app.models*` / `app.services*` / `app.knowledge*` entries
+    remain for discovery and troubleshooting (8 current entries → zero). The 4
+    automation write-path, 2 CR-kind metadata, and 9 engine/plugin entries
+    remain explicitly enumerated with per-entry justification and burn-down
+    owner; automation-port extraction is deferred to a separate STRONG-reviewed
+    task. Contract proven to bite.
+  - **T1b (no indirect relational-domain write under direct tool invocation):**
+    the fixture map exactly matches the registry's READ_ONLY census, and every
+    driven tool writes only `discovery_runs` / `audit_log` under the runtime
+    table guard. Everything else — explicitly including `change_requests` and
+    `devices` — is denied; the synthetic READ_ONLY `Device` insert proves the
+    guard bites. Agent-session/trace persistence remains covered separately.
   - Neither claim substitutes for the other.
 - 3 routers ORM-free (services own the writes) with route-gate tests green.
-- **FE — enumerated duplicates gone** (the drifted ConfirmDialog pair + 6
-  modal shells, VirtualizationPage `EmptyState` shadow, 5 `PILL_BASE`
-  badges, 4 `errorMessage()` copies). `DataTable` primitive exists and is
-  adopted where touched; the 31/17/8 tails are **not** required to be zero —
+- **FE — enumerated duplicates gone** (all 6 modal shells total, including the
+  drifted ConfirmDialog pair; VirtualizationPage `EmptyState` shadow,
+  5 `PILL_BASE` badges, 4 `errorMessage()` copies). `DataTable` primitive
+  exists and is adopted where touched; the 31/17/8 tails are **not** required to be zero —
   the count ratchet holds them at ≤ baseline.
-- 4 pages on react-query **per the T4 state taxonomy** (server reads/writes
-  only; WS state in `useAgentStream`, local UI state untouched).
+- Four primary pages (Adc, Chat, Devices, Topology) migrate their server
+  state per the T4 taxonomy; Packet capture start and Audit export also migrate
+  to `useMutation`. Streaming stays in `useAgentStream`, and local UI state
+  stays untouched.
 - Central mock module + QueryClient wrapper in use with importActual
   factories; **all 13 bare `vi.mock('../api/*')` call sites migrated (auth ×7,
   changes ×2, credentials ×2, integrations ×2)**; the lint is in place with no
-  allowlist; full FE suite green.
+  allowlist; all **24 test-only QueryClient constructions across 22 files** use
+  the shared helper and its lint bites; full FE suite green.
 - SettingsPage decision recorded **with its measured values** (sections
   touched, shared-state yes/no, net LOC delta), split executed or deferral
   re-affirmed.

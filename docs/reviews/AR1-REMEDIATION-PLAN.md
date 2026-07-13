@@ -1,8 +1,17 @@
 # AR1 Build Plan — Architecture Remediation
 
-**Status:** Proposed (not started) | **Date:** 2026-07-10 | **Source:** staff-architect repository review at `main` HEAD `477b51e` (3 parallel code surveys + knowledge-graph analysis, 18,370 nodes / 53,975 edges)
+> **Historical source plan — superseded for execution.** Use
+> [`REVIEW-WAVES-PLAN.md`](REVIEW-WAVES-PLAN.md) for current sequencing/status
+> and the linked per-wave plans (including
+> [`WAVE6-PLAN.md`](WAVE6-PLAN.md)) for binding scope, censuses, PR shape, and
+> gates. The details below preserve the 2026-07-10 proposal and must not be used
+> as current execution instructions.
 
-Standalone remediation track derived from the review's prioritized action list. It does **not** replace or reorder P4 (W3–W5 pending); interleave points are in §4. One PR per wave, atomic commit per task.
+**Status:** Historical / superseded | **Date:** 2026-07-10 | **Source:** staff-architect repository review at `main` HEAD `477b51e` (3 parallel code surveys + knowledge-graph analysis, 18,370 nodes / 53,975 edges)
+
+Original standalone remediation track derived from the review's prioritized
+action list. It is retained as source history; later consolidated/per-wave
+plans resolve its stale status, scope, and one-PR-per-wave assumptions.
 
 ## Source findings (condensed)
 
