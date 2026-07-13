@@ -113,14 +113,24 @@ Explicitly **not** fixed in Wave 5 point-fix wave — record here so they do not
 - **Proposed fix:** Scoped stale sweep by device keys (Option A) or rely on periodic auto-rebuild / manual rebuild (current)
 - **Effort:** M | **Risk:** Medium
 
-### 8e. Embedding rows carry no model identity (PR #161 review)
+### 8e. Embedding rows carry no model identity — in an unwired pipeline (PR #161 review)
 
-- **Severity:** Medium (silent retrieval-quality degradation after a model switch)
+- **Severity:** Low **today**, Medium **the day RAG is wired** (see 8f — nothing calls this pipeline at runtime, so the degradation cannot currently occur)
 - **Location:** `embeddings` table / `app/knowledge/embedding.py` content-hash skip
-- **Root cause:** `Embedding` rows persist only `(document_id, chunk_index, chunk_text, embedding)`; the regenerate skip compares chunk *texts*, so after an embedding-model/profile switch unchanged documents keep serving old-space vectors — `EMBEDDING_DIM` stays 768 across many models, so nothing errors
+- **Root cause:** `Embedding` rows persist only `(document_id, chunk_index, chunk_text, embedding)`; the regenerate skip compares chunk *texts*, so after an embedding-model/profile switch unchanged documents would keep serving old-space vectors — `EMBEDDING_DIM` stays 768 across many models, so nothing errors
 - **Mitigation shipped (PR #161):** query-LRU keyed by (model, base_url); `clear_embedder_caches()` wired into the settings-PATCH invalidation; `embed_document(force=True)` bypass + docstring warning
+- **Blocking condition:** the migration below is a **prerequisite for wiring RAG**, not a follow-up to it — wiring first would start accumulating model-blind vectors
 - **Proposed fix:** migration adding `embeddings.model` (or profile) column, included in the skip condition and the retrieval filter
 - **Effort:** M (migration + backfill decision) | **Risk:** Low
+
+### 8f. The RAG pipeline has no production caller (PR #161 review)
+
+- **Severity:** Medium (dead subsystem carrying live maintenance + review cost; docstring asserts a caller that does not exist)
+- **Location:** `app/knowledge/embedding.py` — `embed_document`, `retrieve`, `OllamaEmbedder`, the query LRU, the content-hash skip
+- **Root cause:** Nothing in `backend/app` calls `embed_document` or `retrieve`. They are exported from `app.knowledge.__init__` and exercised only by unit tests + the M4/RAG eval suites. The Documentation Agent has **no** retrieval tool (`agents/documentation/tools.py` contains no RAG wrapper), contradicting the module docstring's claim that `retrieve` "is the service-layer core the agent-facing typed tool wrapper (shipped with the Documentation Agent) calls" (ADR-0019 §6). The sole runtime import of the module is `clear_embedder_caches()` from the settings-PATCH invalidation path.
+- **Consequences:** (a) ADR-0019's "cite a platform-generated artifact" capability is not actually reachable by any agent; (b) Wave 5's H5 query-LRU optimizes a path that never executes; (c) review effort (two CodeRabbit findings on this PR) is being spent on unreachable code; (d) §8e's corruption scenario is latent, not live.
+- **Proposed fix:** decide the subsystem's fate explicitly — either **wire it** (add the Documentation Agent retrieval tool + an embed-on-generate hook, doing the §8e migration *first*), or **retire it** (drop the module, the `embeddings` table, and the pgvector dependency) — and correct the docstring either way. Do not leave it half-shipped.
+- **Effort:** M (wire) / S (retire) | **Risk:** Low — nothing depends on it today
 
 ---
 
