@@ -47,6 +47,38 @@ used under nested routes or shell queries.
 **Evidence:** PR #125 CI run (frontend fail); fix commit
 `cf54ac5` (`SettingsRoute.test.tsx` mocks).
 
+### L-FE-2 — Refactor proofs must exercise the final consumer boundary and bite
+
+**Bit us:** Review of PR #162 found several green proofs that stopped one
+boundary too early: stream state changed inside `startTransition`, but
+`ChatPage` projected it into the visible turn from a later passive effect;
+an abort test proved that *a* timeout signal existed, not that the caller's
+signal propagated; shared API mocks preserved unoverridden real functions;
+and a regex ratchet planted only the exact syntax its regex already matched.
+
+**Why:** A local implementation detail is not the user-visible contract, and
+a detector self-test that repeats the detector's assumptions can validate its
+own blind spot. Permissive test doubles compound the problem by turning an
+omitted stub into an accidental network call.
+
+**Rule:**
+
+1. Assert asynchronous behavior at the final consumer boundary. Add a
+   negative or mutation proof that fails when the critical callback, signal,
+   retry policy, or state projection is removed.
+2. Shared API mock factories make every unoverridden function throw an
+   `unstubbed API call` error; tests opt in to each callable endpoint.
+3. Structural ratchets use AST semantics and permanent fixtures with reordered
+   attributes/classes and expression-based class composition.
+4. A guard is incomplete until the default `lint` command invokes it and the
+   test runner's include glob matches the directory the guard scans.
+
+**Hits next:** Streaming UI, React Query hooks, shared test scaffolding, and
+all source-count or architecture ratchets.
+
+**Evidence:** PR #162 review remediation and the red-to-green regression,
+mutation, and syntax-variant proofs added alongside it.
+
 ---
 
 ## Images / supply chain

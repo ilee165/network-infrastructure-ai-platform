@@ -232,6 +232,23 @@ describe("PacketPage — capture launch", () => {
     await waitFor(() => {
       expect(screen.getByTestId("capture-launch-error")).toBeInTheDocument();
     });
+    expect(screen.getByTestId("capture-launch-error")).toHaveTextContent(
+      "Launch failed: Unprocessable Entity: BPF filter invalid",
+    );
+  });
+
+  it("shows a fallback alert when capture launch rejects a non-Error value", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue("transport closed"));
+    renderPage();
+
+    fireEvent.change(screen.getByTestId("capture-interface"), {
+      target: { value: "eth0" },
+    });
+    fireEvent.click(screen.getByTestId("capture-launch-btn"));
+
+    expect(await screen.findByTestId("capture-launch-error")).toHaveTextContent(
+      "Launch failed",
+    );
   });
 });
 

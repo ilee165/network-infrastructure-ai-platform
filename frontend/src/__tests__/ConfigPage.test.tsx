@@ -339,7 +339,7 @@ describe("ConfigPage — Snapshots tab", () => {
     renderPage();
     await selectDevice();
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Snapshots load failed: device has no snapshots",
+      "Snapshots load failed: Not Found: device has no snapshots",
     );
   });
 });
@@ -424,7 +424,7 @@ describe("ConfigPage — Drift tab", () => {
     renderPage();
     await goToDrift();
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Drift check failed: no approved baseline",
+      "Drift check failed: Not Found: no approved baseline",
     );
   });
 });
@@ -527,7 +527,7 @@ describe("ConfigPage — Compliance tab", () => {
     renderPage();
     await goToCompliance();
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Compliance check failed: no config snapshots to evaluate",
+      "Compliance check failed: Not Found: no config snapshots to evaluate",
     );
   });
 });

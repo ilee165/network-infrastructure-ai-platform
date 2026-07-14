@@ -6,9 +6,8 @@ export function useDevices(params: ListDevicesParams) {
   return useQuery({ queryKey: queryKeys.devices.list(params), queryFn: ({ signal }) => listDevices(params, signal) });
 }
 export function useTopologyInventory(pageSize: number, max: number) {
-  const params = { limit: pageSize, purpose: "topology-scope" } as const;
   return useQuery({
-    queryKey: queryKeys.devices.list(params),
+    queryKey: queryKeys.devices.topologyInventory(pageSize, max),
     queryFn: async ({ signal }) => {
       const first = await listDevices({ limit: pageSize }, signal);
       const items = [...first.items];

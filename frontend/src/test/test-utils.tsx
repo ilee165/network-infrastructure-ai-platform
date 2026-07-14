@@ -11,16 +11,26 @@ import {
   type RenderOptions,
   type RenderResult,
 } from "@testing-library/react";
-import type { ReactElement, ReactNode } from "react";
+import type { JSXElementConstructor, ReactElement, ReactNode } from "react";
 import { vi } from "vitest";
 
 type MockOverrides = () => Record<string, unknown>;
 
 function actualSpreadFactory<T extends object>(modulePath: string, overrides: MockOverrides) {
-  return async (): Promise<T> => ({
-    ...(await vi.importActual<T>(modulePath)),
-    ...overrides(),
-  });
+  return async (): Promise<T> => {
+    const actual = await vi.importActual<T>(modulePath);
+    const loudDefaults = Object.fromEntries(
+      Object.entries(actual).map(([name, value]) => [
+        name,
+        typeof value === "function"
+          ? vi.fn(() => {
+              throw new Error(`unstubbed API call: ${modulePath}.${name}`);
+            })
+          : value,
+      ]),
+    );
+    return { ...loudDefaults, ...overrides() } as T;
+  };
 }
 
 export function mockAuthApi(overrides: MockOverrides = () => ({})) {
@@ -50,13 +60,34 @@ const DEFAULT_QUERY_CLIENT_CONFIG: QueryClientConfig = {
   },
 };
 
-function createQueryClient(config: QueryClientConfig = DEFAULT_QUERY_CLIENT_CONFIG): QueryClient {
-  return new QueryClient(config);
+function createQueryClient(config: QueryClientConfig = {}): QueryClient {
+  return new QueryClient({
+    ...DEFAULT_QUERY_CLIENT_CONFIG,
+    ...config,
+    defaultOptions: {
+      ...DEFAULT_QUERY_CLIENT_CONFIG.defaultOptions,
+      ...config.defaultOptions,
+      queries: {
+        ...DEFAULT_QUERY_CLIENT_CONFIG.defaultOptions?.queries,
+        ...config.defaultOptions?.queries,
+      },
+      mutations: {
+        ...DEFAULT_QUERY_CLIENT_CONFIG.defaultOptions?.mutations,
+        ...config.defaultOptions?.mutations,
+      },
+    },
+  });
 }
 
-function queryClientWrapper(queryClient: QueryClient) {
+type WrapperComponent = JSXElementConstructor<{ children: ReactNode }>;
+
+function queryClientWrapper(queryClient: QueryClient, OuterWrapper?: WrapperComponent) {
   return function QueryClientWrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+    return (
+      <QueryClientProvider client={queryClient}>
+        {OuterWrapper ? <OuterWrapper>{children}</OuterWrapper> : children}
+      </QueryClientProvider>
+    );
   };
 }
 
@@ -64,11 +95,11 @@ export function renderWithQueryClient(
   ui: ReactElement,
   options: RenderOptions & { queryClientConfig?: QueryClientConfig } = {},
 ): RenderResult & { queryClient: QueryClient } {
-  const { queryClientConfig, ...renderOptions } = options;
+  const { queryClientConfig, wrapper, ...renderOptions } = options;
   const queryClient = createQueryClient(queryClientConfig);
   const result = render(ui, {
-    wrapper: queryClientWrapper(queryClient),
     ...renderOptions,
+    wrapper: queryClientWrapper(queryClient, wrapper),
   });
   return { ...result, queryClient };
 }
@@ -77,11 +108,11 @@ export function renderHookWithQueryClient<Result, Props>(
   callback: (initialProps: Props) => Result,
   options: RenderHookOptions<Props> & { queryClientConfig?: QueryClientConfig } = {},
 ): RenderHookResult<Result, Props> & { queryClient: QueryClient } {
-  const { queryClientConfig, ...renderOptions } = options;
+  const { queryClientConfig, wrapper, ...renderOptions } = options;
   const queryClient = createQueryClient(queryClientConfig);
   const result = renderHook(callback, {
-    wrapper: queryClientWrapper(queryClient),
     ...renderOptions,
+    wrapper: queryClientWrapper(queryClient, wrapper),
   });
   return { ...result, queryClient };
 }

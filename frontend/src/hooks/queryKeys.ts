@@ -16,6 +16,8 @@ export const queryKeys = {
   devices: {
     all: ["devices"] as const,
     list: (params: ListDevicesParams) => ["devices", "list", params] as const,
+    topologyInventory: (pageSize: number, max: number) =>
+      ["devices", "topology-inventory", { pageSize, max }] as const,
     interfaces: (id: string) => ["devices", id, "interfaces"] as const,
     neighbors: (id: string) => ["devices", id, "neighbors"] as const,
   },
@@ -36,6 +38,4 @@ export const queryKeys = {
     history: (id: string) => ["chat", "sessions", id, "history"] as const,
     trace: (id: string) => ["chat", "sessions", id, "trace"] as const,
   },
-  packet: { all: ["packet"] as const, captures: ["packet", "captures"] as const },
-  auth: { me: ["auth", "me"] as const },
 } as const;

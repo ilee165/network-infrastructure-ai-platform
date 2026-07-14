@@ -18,7 +18,7 @@ import {
   type PacketFindings,
 } from "../api/packet";
 import { PageHeader } from "../components/PageHeader";
-import { ErrorBanner } from "../components/ErrorBanner";
+import { ErrorBanner, messageFor } from "../components/ErrorBanner";
 import { useCaptureLaunch } from "../hooks/usePacketQueries";
 
 // ── Tab types ─────────────────────────────────────────────────────────────────
@@ -38,7 +38,13 @@ function CaptureLaunchForm() {
   const [duration, setDuration] = useState("");
   const mutation = useCaptureLaunch();
   const result: CaptureLaunchResponse | null = mutation.data ?? null;
-  const error = mutation.error instanceof Error ? mutation.error.message : null;
+  const error = mutation.error
+    ? messageFor(mutation.error, {
+        includeProblemTitle: true,
+        exposeErrorMessage: true,
+        fallback: "Launch failed",
+      })
+    : null;
 
   async function handleLaunch(e: React.FormEvent): Promise<void> {
     e.preventDefault();
@@ -150,7 +156,10 @@ function CaptureLaunchForm() {
 
       {/* Error */}
       {error !== null && (
-        <ErrorBanner error={new Error(`Launch failed: ${error}`)} data-testid="capture-launch-error" />
+        <ErrorBanner
+          error={new Error(error === "Launch failed" ? error : `Launch failed: ${error}`)}
+          data-testid="capture-launch-error"
+        />
       )}
     </section>
   );

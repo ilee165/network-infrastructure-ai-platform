@@ -184,6 +184,24 @@ describe("UsersPage — user table", () => {
     renderPage();
     expect(screen.getByRole("status")).toBeInTheDocument();
   });
+
+  it("shows the query failure instead of a header-only table", async () => {
+    vi.mocked(listUsers).mockRejectedValue(
+      new ApiError({
+        type: "urn:netops:error:forbidden",
+        title: "Forbidden",
+        status: 403,
+        detail: "User inventory is unavailable.",
+      }),
+    );
+
+    renderPage();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "User inventory is unavailable.",
+    );
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
 });
 
 // ── Create user modal ─────────────────────────────────────────────────────────

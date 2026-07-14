@@ -94,7 +94,7 @@ describe("ChangePasswordPage — successful change", () => {
     vi.mocked(changePassword).mockResolvedValue({ changed: true });
     vi.mocked(getMe).mockResolvedValue({ ...FLAGGED_USER, must_change_password: false });
 
-    renderPage();
+    const { queryClient } = renderPage();
     fireEvent.change(screen.getByLabelText(/current password/i), {
       target: { value: "old-pass-1" },
     });
@@ -110,6 +110,7 @@ describe("ChangePasswordPage — successful change", () => {
     expect(changePassword).toHaveBeenCalledWith("old-pass-1", "new-pass-12");
     expect(getMe).toHaveBeenCalled();
     expect(useAuthStore.getState().user?.must_change_password).toBe(false);
+    expect(queryClient.getQueryData(["auth", "me"])).toBeUndefined();
   });
 
   it("does not present a failed post-success getMe() as a change failure", async () => {

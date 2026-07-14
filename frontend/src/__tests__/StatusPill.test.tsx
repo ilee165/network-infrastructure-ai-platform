@@ -16,7 +16,7 @@ describe("StatusPill", () => {
     );
     const pill = screen.getByTestId("pill");
     expect(pill).toHaveClass("border-status-ok/40", "bg-status-ok/10", "text-status-ok");
-    expect(pill).toHaveTextContent("active");
+    expect(pill.textContent).toBe("active");
   });
 
   it("renders the warn variant with the warn token classes", () => {
@@ -61,36 +61,37 @@ describe("StatusPill", () => {
         active
       </StatusPill>,
     );
-    const glyphFor = () => screen.getByTestId("pill").querySelector("[aria-hidden='true']");
-    const okGlyph = glyphFor()?.textContent;
+    const glyphFor = () =>
+      screen.getByTestId("pill").querySelector("[aria-hidden='true']")?.getAttribute("data-glyph");
+    const okGlyph = glyphFor();
 
     rerender(
       <StatusPill variant="warn" data-testid="pill">
         pending
       </StatusPill>,
     );
-    const warnGlyph = glyphFor()?.textContent;
+    const warnGlyph = glyphFor();
 
     rerender(
       <StatusPill variant="error" data-testid="pill">
         failed
       </StatusPill>,
     );
-    const errorGlyph = glyphFor()?.textContent;
+    const errorGlyph = glyphFor();
 
     rerender(
       <StatusPill variant="neutral" data-testid="pill">
         draft
       </StatusPill>,
     );
-    const neutralGlyph = glyphFor()?.textContent;
+    const neutralGlyph = glyphFor();
 
     rerender(
       <StatusPill variant="info" data-testid="pill">
         running
       </StatusPill>,
     );
-    const infoGlyph = glyphFor()?.textContent;
+    const infoGlyph = glyphFor();
 
     expect(okGlyph).toBeTruthy();
     const glyphs = new Set([okGlyph, warnGlyph, errorGlyph, neutralGlyph, infoGlyph]);

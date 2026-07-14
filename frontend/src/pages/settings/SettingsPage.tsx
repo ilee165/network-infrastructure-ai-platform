@@ -12,6 +12,10 @@ interface SectionLink {
   minRole?: Role;
 }
 
+/**
+ * ADR-0009 security boundary: provider API keys are never displayed, entered,
+ * or persisted by this settings shell. Secret material remains backend-only.
+ */
 const SECTION_LINKS: SectionLink[] = [
   { to: "/settings", label: "Appearance", end: true },
   { to: "/settings/agents", label: "Agents & Chat" },

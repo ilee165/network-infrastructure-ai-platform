@@ -32,7 +32,7 @@ import {
 import type { UserSummary } from "../api/auth";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DataTable } from "../components/DataTable";
-import { messageFor } from "../components/ErrorBanner";
+import { ErrorBanner, messageFor } from "../components/ErrorBanner";
 import { Modal } from "../components/Modal";
 import { PageHeader } from "../components/PageHeader";
 import type { Role } from "../stores/roles";
@@ -335,7 +335,7 @@ export function UsersPage() {
   const [confirmPending, setConfirmPending] = useState(false);
   const [tempPassword, setTempPassword] = useState<string | null>(null);
 
-  const { data: users, isPending: loading } = useQuery({
+  const { data: users, isPending: loading, error: usersError } = useQuery({
     queryKey: ["users"],
     queryFn: listUsers,
   });
@@ -428,14 +428,19 @@ export function UsersPage() {
       <section aria-label="User accounts" className="flex flex-col gap-3">
         <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">Accounts</h3>
 
-        <DataTable
-          headers={["Username", "Email", "Display name", "Role", "Active", "Must change password", "Actions"]}
-          loading={loading}
-          loadingLabel="Loading users…"
-          empty={!loading && users?.length === 0 ? <p className="text-xs text-zinc-500">No users found.</p> : undefined}
-        >
-          {users?.map((user) => <UserRow key={user.id} user={user} onAction={handleAction} />)}
-        </DataTable>
+        {usersError ? (
+          <ErrorBanner error={usersError} />
+        ) : (
+          <DataTable
+            headers={["Username", "Email", "Display name", "Role", "Active", "Must change password", "Actions"]}
+            loading={loading}
+            loadingLabel="Loading users…"
+            isEmpty={!loading && users?.length === 0}
+            empty={<p className="text-xs text-zinc-500">No users found.</p>}
+          >
+            {users?.map((user) => <UserRow key={user.id} user={user} onAction={handleAction} />)}
+          </DataTable>
+        )}
       </section>
 
       {/* Create-user modal */}

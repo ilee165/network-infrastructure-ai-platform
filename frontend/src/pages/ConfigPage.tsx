@@ -110,7 +110,7 @@ function SnapshotsPanel({ deviceId }: { deviceId: string }) {
   }
   if (error) {
     return (
-      <ErrorBanner error={new Error(`Snapshots load failed: ${messageFor(error)}`)} />
+      <ErrorBanner error={new Error(`Snapshots load failed: ${messageFor(error, { includeProblemTitle: true, exposeErrorMessage: true })}`)} />
     );
   }
 
@@ -220,7 +220,7 @@ function DriftPanel({ deviceId }: { deviceId: string }) {
   }
   if (error) {
     return (
-      <ErrorBanner error={new Error(`Drift check failed: ${messageFor(error)}`)} data-testid="drift-error" />
+      <ErrorBanner error={new Error(`Drift check failed: ${messageFor(error, { includeProblemTitle: true, exposeErrorMessage: true })}`)} data-testid="drift-error" />
     );
   }
 
@@ -375,7 +375,7 @@ function CompliancePanel({ deviceId }: { deviceId: string }) {
   }
   if (error) {
     return (
-      <ErrorBanner error={new Error(`Compliance check failed: ${messageFor(error)}`)} data-testid="compliance-error" />
+      <ErrorBanner error={new Error(`Compliance check failed: ${messageFor(error, { includeProblemTitle: true, exposeErrorMessage: true })}`)} data-testid="compliance-error" />
     );
   }
 

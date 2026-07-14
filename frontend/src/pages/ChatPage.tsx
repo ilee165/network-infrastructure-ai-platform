@@ -12,8 +12,8 @@
  * references — so "explain all AI decisions" holds for the operator reading it.
  */
 
-import { memo, useEffect, useState } from "react";
-import { type AgentTraceStep } from "../api/agents";
+import { memo, useCallback, useState } from "react";
+import { type AgentStreamEnd, type AgentTraceStep } from "../api/agents";
 import { PageHeader } from "../components/PageHeader";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { useAgentStream } from "../hooks/useAgentStream";
@@ -151,19 +151,39 @@ const AgentBubble = memo(function AgentBubble({ turn }: { turn: AgentTurn }) {
 export function ChatPage() {
   const [intent, setIntent] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
-  const stream = useAgentStream();
-  const busy = stream.streaming;
-  const error = stream.error;
-
-  useEffect(() => {
-    if (stream.revision === 0) return;
+  const appendSteps = useCallback((steps: AgentTraceStep[]) => {
     setTurns((prev) => {
       const next = [...prev];
       const last = next[next.length - 1];
-      if (last?.role === "agent") next[next.length - 1] = { ...last, steps: stream.steps, answer: stream.answer, streaming: stream.streaming };
+      if (last?.role === "agent") {
+        next[next.length - 1] = { ...last, steps: [...last.steps, ...steps] };
+      }
       return next;
     });
-  }, [stream.answer, stream.revision, stream.steps, stream.streaming]);
+  }, []);
+  const finishStream = useCallback((end: AgentStreamEnd) => {
+    setTurns((prev) => {
+      const next = [...prev];
+      const last = next[next.length - 1];
+      if (last?.role === "agent") {
+        next[next.length - 1] = { ...last, answer: end.answer, streaming: false };
+      }
+      return next;
+    });
+  }, []);
+  const stopStreaming = useCallback(() => {
+    setTurns((prev) => {
+      const next = [...prev];
+      const last = next[next.length - 1];
+      if (last?.role === "agent") {
+        next[next.length - 1] = { ...last, streaming: false };
+      }
+      return next;
+    });
+  }, []);
+  const stream = useAgentStream({ onSteps: appendSteps, onEnd: finishStream, onError: stopStreaming });
+  const busy = stream.streaming;
+  const error = stream.error;
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();

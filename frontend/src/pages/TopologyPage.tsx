@@ -414,22 +414,16 @@ function DiffControls({
 }) {
   const [fromRun, setFromRun] = useState("");
   const [toRun, setToRun] = useState("");
-  const [pair, setPair] = useState<{ from: string; to: string } | null>(null);
 
   const { data: runsData } = useDiscoveryRuns("topology-diff", { limit: 50 });
-  const diffQuery = useTopologyDiff(pair?.from ?? "", pair?.to ?? "", pair !== null);
+  const diffQuery = useTopologyDiff(fromRun, toRun, false);
   const runs = runsData?.items ?? [];
 
   async function handleCompare() {
     if (!fromRun || !toRun) return;
-    if (pair?.from === fromRun && pair.to === toRun) {
-      const result = await diffQuery.refetch();
-      if (result.isSuccess && result.data) onDiff(result.data.diff);
-      return;
-    }
-    setPair({ from: fromRun, to: toRun });
+    const result = await diffQuery.refetch();
+    if (result.isSuccess && result.data) onDiff(result.data.diff);
   }
-  useEffect(() => { if (diffQuery.data) onDiff(diffQuery.data.diff); }, [diffQuery.data, onDiff]);
 
   const runOption = (run: (typeof runs)[number]) => (
     <option key={run.id} value={run.id}>

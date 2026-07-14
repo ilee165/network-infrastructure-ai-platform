@@ -105,6 +105,31 @@ describe("useAgentStream ownership", () => {
     expect(view.result.current.steps.map((step) => step.summary)).toEqual(["peer is active", "peer recovered"]);
   });
 
+  it("projects each animation-frame batch through the consumer callback", async () => {
+    const frames: FrameRequestCallback[] = [];
+    const onSteps = vi.fn();
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    const view = renderHookWithQueryClient(() => useAgentStream({ onSteps }));
+    await start(view.result);
+
+    act(() => {
+      handlers.onStep(STEP);
+      handlers.onStep({ ...STEP, summary: "peer recovered" });
+    });
+    expect(onSteps).not.toHaveBeenCalled();
+
+    act(() => frames.shift()?.(0));
+
+    expect(onSteps).toHaveBeenCalledOnce();
+    expect(onSteps).toHaveBeenCalledWith([
+      STEP,
+      { ...STEP, summary: "peer recovered" },
+    ]);
+  });
+
   it.each(["end", "error"] as const)("invalidates persisted session queries on terminal %s", async (terminal) => {
     const view = renderHookWithQueryClient(() => useAgentStream());
     const { queryClient } = view;

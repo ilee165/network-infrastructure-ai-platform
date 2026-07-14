@@ -323,7 +323,7 @@ export function DocumentsPage() {
 
         {/* Error */}
         {error && (
-          <ErrorBanner error={new Error(`Documents load failed: ${messageFor(error)}`)} />
+          <ErrorBanner error={new Error(`Documents load failed: ${messageFor(error, { includeProblemTitle: true, exposeErrorMessage: true })}`)} />
         )}
 
         {/* Download error */}

@@ -4,7 +4,8 @@
  * and a mocked cytoscape module (jsdom cannot render a canvas).
  */
 
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { onlineManager } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithQueryClient } from "../test/test-utils";
 import type { DeviceListResponse, DeviceRead } from "../api/devices";
@@ -312,6 +313,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  onlineManager.setOnline(true);
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -953,6 +955,46 @@ describe("TopologyPage — run-to-run diff view", () => {
       expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(2),
     );
     expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+  });
+
+  it("does not reapply a cleared diff when connectivity returns", async () => {
+    const mock = routingFetch();
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await selectRunsAndCompare();
+    expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("diff-clear-btn"));
+    await waitFor(() => expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument());
+
+    await act(async () => {
+      onlineManager.setOnline(false);
+      onlineManager.setOnline(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(1);
+    expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument();
+  });
+
+  it("does not retry a deterministic diff failure", async () => {
+    const mock = routingFetch(DIFF, 1);
+    vi.stubGlobal("fetch", mock);
+    renderWithQueryClient(<TopologyPage />, {
+      queryClientConfig: {
+        defaultOptions: {
+          queries: { retry: 1, retryDelay: 0 },
+        },
+      },
+    });
+
+    await selectRunsAndCompare();
+
+    expect(await screen.findByTestId("diff-error")).toHaveTextContent(
+      "Diff retry unavailable",
+    );
+    expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(1);
+    expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument();
   });
 
   it("keeps a cleared same-pair diff absent when the retry fails", async () => {

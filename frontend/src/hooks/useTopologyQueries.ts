@@ -9,7 +9,7 @@ export function useTopologyNeighborhood(params: TopologyNeighborhoodParams, enab
   return useQuery({ queryKey: queryKeys.topology.neighborhood(params), queryFn: ({ signal }) => getTopologyNeighborhood(params, signal), enabled });
 }
 export function useTopologyDiff(from: string, to: string, enabled = true) {
-  return useQuery({ queryKey: queryKeys.topology.diff(from, to), queryFn: ({ signal }) => getTopologyDiff(from, to, signal), enabled });
+  return useQuery({ queryKey: queryKeys.topology.diff(from, to), queryFn: ({ signal }) => getTopologyDiff(from, to, signal), enabled, retry: false });
 }
 export type { TopologyScope } from "./queryKeys";
 
