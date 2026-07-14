@@ -4,19 +4,15 @@ All tools are classified READ_ONLY — launching a discovery run is a
 read-only job-launch that queues asynchronous work but changes no device
 state (DECISIONS-BRIEF §5, MVP.md §5 M3 in-scope note).
 
-Module boundary: these wrappers are the *only* point where the discovery
-agent touches engine/service functions.  No code outside this module may
-import ``app.engines.discovery`` or ``app.models`` directly from within
-the ``agents.discovery`` package — the NetOpsTool wrappers are the typed
-bridge that the import-linter contract enforces (REPO-STRUCTURE §3.2
-row 11).
+Module boundary: these wrappers use the framework read/job seams for
+persistence. The discovery planner and established Celery dispatch signature
+remain explicit direct operational edges with named burn-down owners.
 
 Each tool accepts a plain-data payload (primitives or simple dicts
 suitable for JSON serialisation over the LangGraph tool protocol) and
 returns a JSON-serialisable string so the model can consume it directly.
-Engine and model imports are deferred inside each coroutine body to keep
-module-level imports clean and to allow the tools to be unit-tested
-without those layers being loaded (or faked where needed).
+Operational imports are deferred inside the job-launch coroutine so tools can
+be unit-tested without those layers being loaded.
 """
 
 from __future__ import annotations
@@ -28,6 +24,19 @@ from uuid import UUID
 
 from pydantic import Field
 
+from app.agents.framework.discovery_jobs import (
+    create_discovery_run,
+    mark_discovery_run_failed,
+)
+from app.agents.framework.read_facade import (
+    get_device as read_device,
+)
+from app.agents.framework.read_facade import (
+    list_devices as read_devices,
+)
+from app.agents.framework.read_facade import (
+    list_neighbors as read_neighbors,
+)
 from app.agents.framework.tools import ToolClassification, netops_tool
 
 # ---------------------------------------------------------------------------
@@ -70,9 +79,7 @@ async def trigger_discovery_run(
     """
     # Deferred imports keep the module boundary visible and allow lightweight
     # unit tests that do not need a running DB or Celery.
-    import app.db as _db
     from app.engines.discovery.planner import DiscoveryPlan
-    from app.models import DiscoveryRun
     from app.workers.celery_app import QUEUE_DISCOVERY, celery_app
 
     plan = DiscoveryPlan(
@@ -81,18 +88,12 @@ async def trigger_discovery_run(
         allowlist=allowlist,
         credential_names=credential_names or [],
     )
-    async with _db.get_sessionmaker()() as session:
-        run = DiscoveryRun(
-            seeds=list(plan.seeds),
-            hop_limit=plan.hop_limit,
-            allowlist=list(plan.allowlist),
-            credential_names=list(plan.credential_names),
-        )
-        session.add(run)
-        await session.commit()
-        await session.refresh(run)
-        run_id = str(run.id)
-        status = run.status.value
+    run_id, status = await create_discovery_run(
+        seeds=plan.seeds,
+        hop_limit=plan.hop_limit,
+        allowlist=plan.allowlist,
+        credential_names=plan.credential_names,
+    )
 
     # Celery's send_task performs synchronous broker I/O (TCP round-trip).
     # Wrapping it in run_in_executor keeps the asyncio event loop unblocked
@@ -106,14 +107,7 @@ async def trigger_discovery_run(
     except Exception as exc:
         # Broker unreachable / serialization error: mark the already-committed
         # run row as FAILED so the UI never shows a permanently-pending orphan.
-        from app.models import DiscoveryRunStatus
-
-        async with _db.get_sessionmaker()() as _fail_session:
-            fail_run = await _fail_session.get(DiscoveryRun, run_id)
-            if fail_run is not None:
-                fail_run.status = DiscoveryRunStatus.FAILED
-                fail_run.error = str(exc)
-                await _fail_session.commit()
+        await mark_discovery_run_failed(run_id, str(exc))
         raise
 
     return json.dumps({"run_id": run_id, "status": status})
@@ -162,36 +156,15 @@ async def list_devices(
     ``items`` list where each entry contains id, hostname, mgmt_ip,
     vendor_id, status, and last_discovered_at.
     """
-    from sqlalchemy import Select, func, select
-
-    import app.db as _db
-    from app.models import Device, DeviceStatus
-
-    async with _db.get_sessionmaker()() as session:
-        query: Select[tuple[Device]] = select(Device)
-        if status_filter is not None:
-            try:
-                ds = DeviceStatus(status_filter)
-            except ValueError:
-                valid = [s.value for s in DeviceStatus]
-                return json.dumps(
-                    {"error": f"unknown status {status_filter!r}; valid values: {valid}"}
-                )
-            query = query.where(Device.status == ds)
-        if vendor_id is not None:
-            query = query.where(Device.vendor_id == vendor_id)
-
-        total_q = select(func.count()).select_from(query.subquery())
-        total: int = (await session.execute(total_q)).scalar_one()
-        rows = (
-            (
-                await session.execute(
-                    query.order_by(Device.hostname, Device.id).limit(limit).offset(offset)
-                )
-            )
-            .scalars()
-            .all()
-        )
+    result = await read_devices(
+        status_filter=status_filter,
+        vendor_id=vendor_id,
+        limit=limit,
+        offset=offset,
+    )
+    if isinstance(result, list):
+        return json.dumps({"error": f"unknown status {status_filter!r}; valid values: {result}"})
+    total, rows = result
 
     items = [
         {
@@ -226,37 +199,32 @@ async def get_device(
     Returns a JSON object with all scalar device fields, or a JSON error
     object when the device does not exist.
     """
-    import app.db as _db
-    from app.models import Device
-
     try:
         uid = UUID(device_id)
     except ValueError:
         return json.dumps({"error": f"invalid UUID: {device_id!r}"})
 
-    async with _db.get_sessionmaker()() as session:
-        device = await session.get(Device, uid)
-        if device is None:
-            return json.dumps({"error": f"device {device_id} not found"})
-
-        return json.dumps(
-            {
-                "id": str(device.id),
-                "hostname": device.hostname,
-                "mgmt_ip": device.mgmt_ip,
-                "vendor_id": device.vendor_id,
-                "model": device.model,
-                "os_version": device.os_version,
-                "serial": device.serial,
-                "status": device.status.value,
-                "site": device.site,
-                "last_discovered_at": (
-                    device.last_discovered_at.isoformat() if device.last_discovered_at else None
-                ),
-                "created_at": device.created_at.isoformat(),
-                "updated_at": device.updated_at.isoformat(),
-            }
-        )
+    device = await read_device(uid)
+    if device is None:
+        return json.dumps({"error": f"device {device_id} not found"})
+    return json.dumps(
+        {
+            "id": str(device.id),
+            "hostname": device.hostname,
+            "mgmt_ip": device.mgmt_ip,
+            "vendor_id": device.vendor_id,
+            "model": device.model,
+            "os_version": device.os_version,
+            "serial": device.serial,
+            "status": device.status.value,
+            "site": device.site,
+            "last_discovered_at": (
+                device.last_discovered_at.isoformat() if device.last_discovered_at else None
+            ),
+            "created_at": device.created_at.isoformat(),
+            "updated_at": device.updated_at.isoformat(),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -278,35 +246,14 @@ async def query_neighbors(
     neighbor_interface, neighbor_platform, neighbor_address, and
     neighbor_capabilities.
     """
-    from sqlalchemy import select
-
-    import app.db as _db
-    from app.models import Device, NormalizedNeighborRow
-
     try:
         uid = UUID(device_id)
     except ValueError:
         return json.dumps({"error": f"invalid UUID: {device_id!r}"})
 
-    async with _db.get_sessionmaker()() as session:
-        device = await session.get(Device, uid)
-        if device is None:
-            return json.dumps({"error": f"device {device_id} not found"})
-
-        rows = (
-            (
-                await session.execute(
-                    select(NormalizedNeighborRow)
-                    .where(NormalizedNeighborRow.device_id == uid)
-                    .order_by(
-                        NormalizedNeighborRow.local_interface,
-                        NormalizedNeighborRow.neighbor_name,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
+    device, rows = await read_neighbors(uid)
+    if device is None:
+        return json.dumps({"error": f"device {device_id} not found"})
 
     neighbors = [
         {

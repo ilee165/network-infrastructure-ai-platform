@@ -19,13 +19,9 @@ Two evidence sources, both surfaced through ``NetOpsTool`` wrappers:
   :func:`asyncio.to_thread` to keep the FastAPI event loop unblocked
   (D2: async-first backend).
 
-Module boundary: these wrappers are the *only* point where the troubleshooting
-agent touches model / plugin / engine functions. No code in the
-``agents.troubleshooting`` package may import ``app.models``, ``app.plugins``,
-or ``app.engines`` outside this module — the NetOpsTool wrappers are the typed
-bridge the import-linter contract enforces (REPO-STRUCTURE §3.2 row 11). Engine
-and model imports are therefore deferred inside each coroutine body so the
-tools can be unit-tested without those layers loaded (or faked where needed).
+Module boundary: persistence, graph reads, and audited credential acquisition
+cross framework seams. Plugin capability/transport imports remain explicit
+live-read mechanics with a named future framework-port owner.
 
 Each tool returns a JSON-serialisable string the model (and the agent's
 diagnosis flow) can consume directly. Live-read failures (unknown device,
@@ -43,11 +39,21 @@ from uuid import UUID
 
 from pydantic import Field
 
+from app.agents.framework.credential_access import (
+    CredentialUnavailable,
+    acquire_troubleshooting_ssh,
+)
+from app.agents.framework.read_facade import (
+    APPLICATION_IMPACT_KINDS,
+    application_impact,
+    get_live_read_target,
+    knowledge_client,
+    list_routes,
+)
 from app.agents.framework.tools import ToolClassification, netops_tool
 
 if TYPE_CHECKING:
     from app.core.crypto import KeyProvider
-    from app.knowledge import Neo4jClient
     from app.plugins.transport import SshParams, SshTransport
 
 #: Audit actor recorded for every credential decryption by the live-read tools.
@@ -91,21 +97,12 @@ async def get_device_routes(
     it" without touching the device. Reads the persisted ``NormalizedRouteRow``
     projection only — no live device access.
     """
-    from sqlalchemy import select
-
-    import app.db as _db
-    from app.models import NormalizedRouteRow
-
     try:
         uid = UUID(device_id)
     except ValueError:
         return json.dumps({"error": f"invalid UUID: {device_id!r}"})
 
-    async with _db.get_sessionmaker()() as session:
-        query = select(NormalizedRouteRow).where(NormalizedRouteRow.device_id == uid)
-        if prefix is not None:
-            query = query.where(NormalizedRouteRow.prefix == prefix)
-        rows = (await session.execute(query.order_by(NormalizedRouteRow.prefix))).scalars().all()
+    rows = await list_routes(uid, prefix=prefix)
 
     routes = [
         {
@@ -173,73 +170,46 @@ async def _read_live(device_id: str, capability_name: str, method_name: str) -> 
     except ValueError:
         return {"error": f"invalid UUID: {device_id!r}"}
 
-    import app.db as _db
-    from app.models import CredentialKind, Device, DeviceCredential
     from app.plugins.registry import get_default_registry
     from app.plugins.transport import netmiko_device_type
-    from app.services import credentials as credentials_service
 
-    async with _db.get_sessionmaker()() as session:
-        device = await session.get(Device, uid)
-        if device is None:
-            return {"error": f"device {device_id} not found"}
-        vendor_id = device.vendor_id
-        if vendor_id is None:
-            return {
-                "error": f"device {device_id} has no identified vendor; cannot resolve a plugin"
-            }
+    target = await get_live_read_target(uid)
+    if target is None:
+        return {"error": f"device {device_id} not found"}
+    vendor_id = target.vendor_id
+    if vendor_id is None:
+        return {"error": f"device {device_id} has no identified vendor; cannot resolve a plugin"}
 
-        capability = Capability(capability_name)
-        try:
-            impl_cls = get_default_registry().resolve(vendor_id, capability)
-        except NetOpsError as exc:
-            return {"error": f"{type(exc).__name__}: {exc}"}
+    capability = Capability(capability_name)
+    try:
+        impl_cls = get_default_registry().resolve(vendor_id, capability)
+    except NetOpsError as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
-        if device.credential_id is None:
-            return {
-                "error": (
-                    f"device {device_id} has no bound credential; "
-                    "a live read opens an SSH session and needs one"
-                )
-            }
-        row = await session.get(DeviceCredential, device.credential_id)
-        if row is None or row.kind is not CredentialKind.SSH:
-            return {
-                "error": (
-                    f"device {device_id} has no usable SSH credential; "
-                    "a live read opens a CLI session"
-                )
-            }
-
-        try:
-            secret = await credentials_service.decrypt(
-                session,
-                _key_provider(),
-                row,
-                actor=_ACTOR,
-                reason="troubleshooting_live_read",
-                # ADR-0040 §2: enforce the credential's scope against THIS
-                # device at session open — a scoped credential cannot open a
-                # session on a device outside its site/role/group.
-                target=device,
-                sessionmaker=credentials_service.autonomous_sessionmaker(session),
-            )
-        except NetOpsError as exc:
-            # Scope refusal / provider unavailable: the fail-closed audit row is
-            # already durable on its own session (autonomous_sessionmaker).
-            return {"error": f"{type(exc).__name__}: {exc}"}
-
-        credential_params = dict(row.params or {})
-        from app.plugins.transport import ssh_params_from
-
-        ssh_params = ssh_params_from(
-            host=device.mgmt_ip,
-            device_type=netmiko_device_type(vendor_id, credential_params),
-            username=row.username or "",
-            password=secret.plaintext.decode("utf-8"),
-            cred_params=credential_params,
+    try:
+        credential = await acquire_troubleshooting_ssh(
+            uid,
+            _key_provider(),
+            expected_host=target.host,
+            expected_vendor_id=vendor_id,
+            expected_credential_id=target.credential_id,
+            actor=_ACTOR,
+            reason="troubleshooting_live_read",
         )
-        await session.commit()  # decrypt audit rows survive whatever happens next
+    except CredentialUnavailable as exc:
+        return {"error": str(exc)}
+    except NetOpsError as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+    from app.plugins.transport import ssh_params_from
+
+    ssh_params = ssh_params_from(
+        host=credential.host,
+        device_type=netmiko_device_type(vendor_id, credential.params),
+        username=credential.username,
+        password=credential.password,
+        cred_params=credential.params,
+    )
 
     def _connect_and_read() -> list[Any]:
         with _open_ssh(ssh_params) as transport:
@@ -341,11 +311,9 @@ async def read_live_acls(
 # ---------------------------------------------------------------------------
 
 
-def _knowledge_client() -> Neo4jClient:
+def _knowledge_client() -> Any:
     """The process-wide Neo4j read client used by the impact tool (test seam)."""
-    from app.knowledge import get_client
-
-    return get_client()
+    return knowledge_client()
 
 
 @netops_tool(classification=ToolClassification.READ_ONLY)
@@ -377,41 +345,25 @@ async def get_application_impact(
     """
     from neo4j.exceptions import DriverError, Neo4jError
 
-    from app.knowledge.schema import (
-        LABEL_APPLICATION,
-        LABEL_DEVICE,
-        LABEL_INTERFACE,
-        LABEL_IPADDRESS,
-        LABEL_SUBNET,
-    )
-    from app.knowledge.topology_read import fetch_impact
-
-    kind_to_label = {
-        "device": LABEL_DEVICE,
-        "ip_address": LABEL_IPADDRESS,
-        "interface": LABEL_INTERFACE,
-        "subnet": LABEL_SUBNET,
-        "application": LABEL_APPLICATION,
-    }
     kind, separator, ref = target.partition(":")
     kind = kind.strip().lower()
     ref = ref.strip()
-    if not separator or kind not in kind_to_label or not ref:
+    if not separator or kind not in APPLICATION_IMPACT_KINDS or not ref:
         return json.dumps(
             {
                 "error": (
                     f"unresolvable target {target!r}; expected '<kind>:<ref>' where kind is "
-                    f"one of {sorted(kind_to_label)} and ref is the node pg_id "
+                    f"one of {sorted(APPLICATION_IMPACT_KINDS)} and ref is the node pg_id "
                     "(or a CIDR for a subnet)"
                 )
             }
         )
 
     try:
-        result = await fetch_impact(
+        result = await application_impact(
             _knowledge_client(),
-            target_label=kind_to_label[kind],
-            target_key=ref,
+            kind=kind,
+            ref=ref,
             depth=_IMPACT_DEPTH,
         )
     except (Neo4jError, DriverError, OSError) as exc:
