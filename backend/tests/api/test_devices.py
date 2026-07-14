@@ -19,6 +19,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import AuditLog, NormalizedInterfaceRow, NormalizedNeighborRow
 
 
+class _PostgresDiagnostic:
+    def __init__(self, constraint_name: str) -> None:
+        self.constraint_name = constraint_name
+
+
+class _PostgresUniqueViolation(Exception):
+    pgcode = "23505"
+
+    def __init__(self, constraint_name: str) -> None:
+        super().__init__(f'duplicate key value violates unique constraint "{constraint_name}"')
+        self.diag = _PostgresDiagnostic(constraint_name)
+
+
 def _payload(**overrides: Any) -> dict[str, Any]:
     body: dict[str, Any] = {
         "hostname": "core-sw-01",
@@ -101,9 +114,9 @@ class TestDeviceCreate:
 
         from sqlalchemy.exc import IntegrityError
 
-        from app.api.v1.devices import create_device
         from app.core.errors import ConflictError
         from app.schemas.devices import DeviceCreate
+        from app.services.devices import DeviceService
 
         body = DeviceCreate(hostname="race-sw", mgmt_ip="192.0.2.50")
         user = MagicMock()
@@ -112,16 +125,21 @@ class TestDeviceCreate:
         session = AsyncMock()
         session.add = MagicMock()
         session.flush = AsyncMock(
-            side_effect=IntegrityError("INSERT", {}, Exception("uq_devices_mgmt_ip"))
+            side_effect=IntegrityError(
+                "INSERT INTO devices (hostname, mgmt_ip) VALUES (?, ?)",
+                ("race-sw", "192.0.2.50"),
+                Exception("UNIQUE constraint failed: devices.mgmt_ip"),
+            )
         )
         session.rollback = AsyncMock()
 
         async def _free(*_a: object, **_k: object) -> None:
             return None
 
-        monkeypatch.setattr("app.api.v1.devices._ensure_mgmt_ip_free", _free)
+        monkeypatch.setattr(DeviceService, "_ensure_mgmt_ip_free", _free)
+        service = DeviceService(session)
         with pytest.raises(ConflictError, match="mgmt_ip"):
-            await create_device(body, session, user)
+            await service.create(body, user)
         session.rollback.assert_awaited()
 
     async def test_unknown_credential_is_404(
@@ -347,10 +365,10 @@ class TestDeviceUpdate:
 
         from sqlalchemy.exc import IntegrityError
 
-        from app.api.v1.devices import update_device
         from app.core.errors import ConflictError
         from app.models import Device, DeviceStatus
         from app.schemas.devices import DeviceUpdate
+        from app.services.devices import DeviceService
 
         device = Device(
             id=uuid4(),
@@ -364,20 +382,25 @@ class TestDeviceUpdate:
         user.username = "engineer"
         session = AsyncMock()
         session.flush = AsyncMock(
-            side_effect=IntegrityError("UPDATE", {}, Exception("uq_devices_mgmt_ip"))
+            side_effect=IntegrityError(
+                "UPDATE devices SET mgmt_ip=%s WHERE devices.id=%s",
+                ("192.0.2.2", str(device.id)),
+                _PostgresUniqueViolation("uq_devices_mgmt_ip"),
+            )
         )
         session.rollback = AsyncMock()
 
-        async def _get(_session: object, _device_id: object) -> Device:
+        async def _get(_service: object, _device_id: object) -> Device:
             return device
 
         async def _free(*_a: object, **_k: object) -> None:
             return None
 
-        monkeypatch.setattr("app.api.v1.devices._get_device_or_404", _get)
-        monkeypatch.setattr("app.api.v1.devices._ensure_mgmt_ip_free", _free)
+        monkeypatch.setattr(DeviceService, "_get", _get)
+        monkeypatch.setattr(DeviceService, "_ensure_mgmt_ip_free", _free)
+        service = DeviceService(session)
         with pytest.raises(ConflictError, match="mgmt_ip"):
-            await update_device(device.id, body, session, user)
+            await service.update(device.id, body.model_dump(exclude_unset=True), user)
         session.rollback.assert_awaited()
 
     async def test_patch_non_ip_integrity_error_uses_prior_mgmt_ip(
@@ -389,10 +412,10 @@ class TestDeviceUpdate:
 
         from sqlalchemy.exc import IntegrityError
 
-        from app.api.v1.devices import update_device
         from app.core.errors import ConflictError
         from app.models import Device, DeviceStatus
         from app.schemas.devices import DeviceUpdate
+        from app.services.devices import DeviceService
 
         device = Device(
             id=uuid4(),
@@ -407,16 +430,21 @@ class TestDeviceUpdate:
         user.username = "engineer"
         session = AsyncMock()
         session.flush = AsyncMock(
-            side_effect=IntegrityError("UPDATE", {}, Exception("uq_devices_mgmt_ip"))
+            side_effect=IntegrityError(
+                "UPDATE devices SET hostname=%s WHERE devices.id=%s",
+                (body.hostname, str(device.id)),
+                _PostgresUniqueViolation("uq_devices_mgmt_ip"),
+            )
         )
         session.rollback = AsyncMock()
 
-        async def _get(_session: object, _device_id: object) -> Device:
+        async def _get(_service: object, _device_id: object) -> Device:
             return device
 
-        monkeypatch.setattr("app.api.v1.devices._get_device_or_404", _get)
+        monkeypatch.setattr(DeviceService, "_get", _get)
+        service = DeviceService(session)
         with pytest.raises(ConflictError, match="192.0.2.1"):
-            await update_device(device.id, body, session, user)
+            await service.update(device.id, body.model_dump(exclude_unset=True), user)
         session.rollback.assert_awaited()
 
     async def test_create_fk_integrity_error_is_not_mapped_to_mgmt_ip_409(
@@ -428,8 +456,8 @@ class TestDeviceUpdate:
 
         from sqlalchemy.exc import IntegrityError
 
-        from app.api.v1.devices import create_device
         from app.schemas.devices import DeviceCreate
+        from app.services.devices import DeviceService
 
         body = DeviceCreate(
             hostname="edge-1",
@@ -442,7 +470,11 @@ class TestDeviceUpdate:
         session = AsyncMock()
         session.add = MagicMock()
         session.flush = AsyncMock(
-            side_effect=IntegrityError("INSERT", {}, Exception("FOREIGN KEY constraint failed"))
+            side_effect=IntegrityError(
+                "INSERT INTO devices (hostname, mgmt_ip, credential_id) VALUES (?, ?, ?)",
+                (body.hostname, body.mgmt_ip, str(body.credential_id)),
+                Exception("FOREIGN KEY constraint failed"),
+            )
         )
         session.rollback = AsyncMock()
 
@@ -452,10 +484,11 @@ class TestDeviceUpdate:
         async def _cred(*_a: object, **_k: object) -> None:
             return None
 
-        monkeypatch.setattr("app.api.v1.devices._ensure_mgmt_ip_free", _free)
-        monkeypatch.setattr("app.api.v1.devices._ensure_credential_exists", _cred)
+        monkeypatch.setattr(DeviceService, "_ensure_mgmt_ip_free", _free)
+        monkeypatch.setattr(DeviceService, "_ensure_credential_exists", _cred)
+        service = DeviceService(session)
         with pytest.raises(IntegrityError):
-            await create_device(body, session, user)
+            await service.create(body, user)
 
     async def test_patch_fk_integrity_error_is_not_mapped_to_mgmt_ip_409(
         self, monkeypatch: pytest.MonkeyPatch
@@ -466,9 +499,9 @@ class TestDeviceUpdate:
 
         from sqlalchemy.exc import IntegrityError
 
-        from app.api.v1.devices import update_device
         from app.models import Device, DeviceStatus
         from app.schemas.devices import DeviceUpdate
+        from app.services.devices import DeviceService
 
         device = Device(
             id=uuid4(),
@@ -482,20 +515,25 @@ class TestDeviceUpdate:
         user.username = "engineer"
         session = AsyncMock()
         session.flush = AsyncMock(
-            side_effect=IntegrityError("UPDATE", {}, Exception("FOREIGN KEY constraint failed"))
+            side_effect=IntegrityError(
+                "UPDATE devices SET mgmt_ip=?, credential_id=? WHERE devices.id=?",
+                (device.mgmt_ip, str(body.credential_id), str(device.id)),
+                Exception("FOREIGN KEY constraint failed"),
+            )
         )
         session.rollback = AsyncMock()
 
-        async def _get(_session: object, _device_id: object) -> Device:
+        async def _get(_service: object, _device_id: object) -> Device:
             return device
 
         async def _cred(*_a: object, **_k: object) -> None:
             return None
 
-        monkeypatch.setattr("app.api.v1.devices._get_device_or_404", _get)
-        monkeypatch.setattr("app.api.v1.devices._ensure_credential_exists", _cred)
+        monkeypatch.setattr(DeviceService, "_get", _get)
+        monkeypatch.setattr(DeviceService, "_ensure_credential_exists", _cred)
+        service = DeviceService(session)
         with pytest.raises(IntegrityError):
-            await update_device(device.id, body, session, user)
+            await service.update(device.id, body.model_dump(exclude_unset=True), user)
         session.rollback.assert_awaited()
 
 
