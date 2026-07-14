@@ -14,11 +14,12 @@
 import { useState } from "react";
 import {
   getCaptureAnalysis,
-  launchCapture,
   type CaptureLaunchResponse,
   type PacketFindings,
 } from "../api/packet";
 import { PageHeader } from "../components/PageHeader";
+import { ErrorBanner } from "../components/ErrorBanner";
+import { useCaptureLaunch } from "../hooks/usePacketQueries";
 
 // ── Tab types ─────────────────────────────────────────────────────────────────
 
@@ -35,28 +36,18 @@ function CaptureLaunchForm() {
   const [iface, setIface] = useState("");
   const [filter, setFilter] = useState("");
   const [duration, setDuration] = useState("");
-  const [pending, setPending] = useState(false);
-  const [result, setResult] = useState<CaptureLaunchResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const mutation = useCaptureLaunch();
+  const result: CaptureLaunchResponse | null = mutation.data ?? null;
+  const error = mutation.error instanceof Error ? mutation.error.message : null;
 
   async function handleLaunch(e: React.FormEvent): Promise<void> {
     e.preventDefault();
     if (!iface.trim()) return;
-    setPending(true);
-    setError(null);
-    setResult(null);
-    try {
-      const resp = await launchCapture({
+    mutation.mutate({
         interface: iface.trim(),
         capture_filter: filter.trim() || null,
         duration_seconds: duration ? Number(duration) : null,
       });
-      setResult(resp);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Launch failed");
-    } finally {
-      setPending(false);
-    }
   }
 
   return (
@@ -125,10 +116,10 @@ function CaptureLaunchForm() {
           <button
             type="submit"
             data-testid="capture-launch-btn"
-            disabled={pending || !iface.trim()}
+            disabled={mutation.isPending || !iface.trim()}
             className="btn"
           >
-            {pending ? "Launching…" : "Launch capture"}
+            {mutation.isPending ? "Launching…" : "Launch capture"}
           </button>
         </div>
       </form>
@@ -159,13 +150,7 @@ function CaptureLaunchForm() {
 
       {/* Error */}
       {error !== null && (
-        <div
-          data-testid="capture-launch-error"
-          role="alert"
-          className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-        >
-          Launch failed: {error}
-        </div>
+        <ErrorBanner error={new Error(`Launch failed: ${error}`)} data-testid="capture-launch-error" />
       )}
     </section>
   );

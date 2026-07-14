@@ -25,15 +25,13 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { changePassword, getMe } from "../api/auth";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { FormField } from "../components/FormField";
 import { Spinner } from "../components/Skeleton";
-import { useAuthStore } from "../stores/auth";
 import { useUiStore } from "../stores/ui";
+import { useChangePassword, validatePasswordChange } from "../hooks/useChangePassword";
 
 /** Minimum length the backend enforces for a new password (mirrored client-side). */
-const MIN_PASSWORD_LENGTH = 8;
 
 interface FieldErrors {
   next?: string;
@@ -41,7 +39,6 @@ interface FieldErrors {
 }
 
 export function ChangePasswordPage() {
-  const setUser = useAuthStore((state) => state.setUser);
   const pushToast = useUiStore((state) => state.pushToast);
   const navigate = useNavigate();
 
@@ -50,7 +47,7 @@ export function ChangePasswordPage() {
   const [confirm, setConfirm] = useState("");
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [apiError, setApiError] = useState<unknown>(null);
-  const [pending, setPending] = useState(false);
+  const mutation = useChangePassword({ bestEffortRefresh: true });
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -59,41 +56,13 @@ export function ChangePasswordPage() {
 
     // Client-side guards run before any network call (defense-in-depth over the
     // backend's own min-length + the fact it has no confirm field).
-    if (next.length < MIN_PASSWORD_LENGTH) {
-      setFieldErrors({ next: `New password must be at least ${MIN_PASSWORD_LENGTH} characters.` });
-      return;
-    }
-    if (next !== confirm) {
-      setFieldErrors({ confirm: "New password and confirmation do not match." });
-      return;
-    }
-
-    setPending(true);
+    const validation = validatePasswordChange(next, confirm);
+    if (Object.keys(validation).length) { setFieldErrors(validation); return; }
     try {
-      await changePassword(current, next);
+      await mutation.mutateAsync({ current, next });
     } catch (err) {
       setApiError(err);
-      setPending(false);
       return;
-    }
-
-    // The change is committed server-side from here on: a failure in the
-    // post-success refresh must not surface through ErrorBanner as a change
-    // failure — the user would retry with a current password that is no
-    // longer valid.
-    try {
-      // Refetch /me so must_change_password flips false and the forced gate
-      // (if any) releases; cache it before navigating into the app.
-      const user = await getMe();
-      setUser(user);
-    } catch {
-      // Best-effort refresh: the backend just confirmed the change, so the
-      // flag is certainly false server-side. Clear it on the cached user so
-      // ProtectedRoute doesn't bounce the user back to this page.
-      const cached = useAuthStore.getState().user;
-      if (cached) {
-        setUser({ ...cached, must_change_password: false });
-      }
     }
     pushToast("success", "Password changed.");
     navigate("/", { replace: true });
@@ -158,11 +127,11 @@ export function ChangePasswordPage() {
 
           <button
             type="submit"
-            disabled={pending}
+            disabled={mutation.isPending}
             className="mt-2 flex items-center justify-center gap-2 rounded bg-accent px-3 py-2 text-sm font-medium text-carbon-950 transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {pending && <Spinner aria-label="Changing password" />}
-            {pending ? "Changing…" : "Change password"}
+            {mutation.isPending && <Spinner aria-label="Changing password" />}
+            {mutation.isPending ? "Changing…" : "Change password"}
           </button>
         </form>
       </section>

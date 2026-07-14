@@ -107,8 +107,8 @@ export function startSession(body: StartSessionRequest): Promise<StartSessionRes
 }
 
 /** ``GET /api/v1/agents/{id}`` — reload one persisted session and its full traces. */
-export function getSession(sessionId: string): Promise<StartSessionResponse> {
-  return apiFetch<StartSessionResponse>(`/agents/${sessionId}`);
+export function getSession(sessionId: string, signal?: AbortSignal): Promise<StartSessionResponse> {
+  return apiFetch<StartSessionResponse>(`/agents/${sessionId}`, { signal });
 }
 
 // ── WebSocket streaming ───────────────────────────────────────────────────────

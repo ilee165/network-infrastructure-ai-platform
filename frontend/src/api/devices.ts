@@ -45,22 +45,22 @@ export interface ListDevicesParams {
 // ── API functions ─────────────────────────────────────────────────────────────
 
 /** ``GET /api/v1/devices`` — paginated, filterable device list. */
-export function listDevices(params: ListDevicesParams = {}): Promise<DeviceListResponse> {
+export function listDevices(params: ListDevicesParams = {}, signal?: AbortSignal): Promise<DeviceListResponse> {
   const qs = new URLSearchParams();
   if (params.status !== undefined) qs.set("status", params.status);
   if (params.vendor_id !== undefined) qs.set("vendor_id", params.vendor_id);
   if (params.limit !== undefined) qs.set("limit", String(params.limit));
   if (params.offset !== undefined) qs.set("offset", String(params.offset));
   const query = qs.toString();
-  return apiFetch<DeviceListResponse>(`/devices${query ? `?${query}` : ""}`);
+  return apiFetch<DeviceListResponse>(`/devices${query ? `?${query}` : ""}`, { signal });
 }
 
 /** ``GET /api/v1/devices/{id}/interfaces`` — normalized interfaces for one device. */
-export function listDeviceInterfaces(deviceId: string): Promise<DeviceInterfaceRead[]> {
-  return apiFetch<DeviceInterfaceRead[]>(`/devices/${deviceId}/interfaces`);
+export function listDeviceInterfaces(deviceId: string, signal?: AbortSignal): Promise<DeviceInterfaceRead[]> {
+  return apiFetch<DeviceInterfaceRead[]>(`/devices/${deviceId}/interfaces`, { signal });
 }
 
 /** ``GET /api/v1/devices/{id}/neighbors`` — normalized LLDP/CDP neighbors for one device. */
-export function listDeviceNeighbors(deviceId: string): Promise<DeviceNeighborRead[]> {
-  return apiFetch<DeviceNeighborRead[]>(`/devices/${deviceId}/neighbors`);
+export function listDeviceNeighbors(deviceId: string, signal?: AbortSignal): Promise<DeviceNeighborRead[]> {
+  return apiFetch<DeviceNeighborRead[]>(`/devices/${deviceId}/neighbors`, { signal });
 }

@@ -12,15 +12,11 @@
  * references — so "explain all AI decisions" holds for the operator reading it.
  */
 
-import { memo, useCallback, useEffect, useRef, useState, useTransition } from "react";
-import {
-  openSessionStream,
-  startSession,
-  type AgentStreamEnd,
-  type AgentTraceStep,
-} from "../api/agents";
-import { ApiError } from "../api/client";
+import { memo, useEffect, useState } from "react";
+import { type AgentTraceStep } from "../api/agents";
 import { PageHeader } from "../components/PageHeader";
+import { ErrorBanner } from "../components/ErrorBanner";
+import { useAgentStream } from "../hooks/useAgentStream";
 
 // ── Step presentation ─────────────────────────────────────────────────────────
 
@@ -155,89 +151,19 @@ const AgentBubble = memo(function AgentBubble({ turn }: { turn: AgentTurn }) {
 export function ChatPage() {
   const [intent, setIntent] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [, startTransition] = useTransition();
-  const socketRef = useRef<WebSocket | null>(null);
-  /** True while this page instance is mounted; guards post-await socket assign. */
-  const mountedRef = useRef(true);
-  /** rAF-batched step buffer (Wave 5 / perf #15) — flush once per frame. */
-  const pendingStepsRef = useRef<AgentTraceStep[]>([]);
-  const rafRef = useRef<number | null>(null);
+  const stream = useAgentStream();
+  const busy = stream.streaming;
+  const error = stream.error;
 
-  // Close any open socket on unmount so a streaming run never leaks — including
-  // a socket that resolves *after* cleanup already ran (M24).
   useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      socketRef.current?.close();
-      socketRef.current = null;
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
-      pendingStepsRef.current = [];
-    };
-  }, []);
-
-  const flushSteps = useCallback(() => {
-    rafRef.current = null;
-    const batch = pendingStepsRef.current;
-    if (batch.length === 0) {
-      return;
-    }
-    pendingStepsRef.current = [];
-    startTransition(() => {
-      setTurns((prev) => {
-        const next = [...prev];
-        const last = next[next.length - 1];
-        if (last && last.role === "agent") {
-          next[next.length - 1] = { ...last, steps: [...last.steps, ...batch] };
-        }
-        return next;
-      });
-    });
-  }, [startTransition]);
-
-  const appendStep = useCallback(
-    (step: AgentTraceStep) => {
-      pendingStepsRef.current.push(step);
-      if (rafRef.current === null) {
-        rafRef.current = requestAnimationFrame(flushSteps);
-      }
-    },
-    [flushSteps],
-  );
-
-  const finishStream = useCallback((end: AgentStreamEnd) => {
+    if (stream.revision === 0) return;
     setTurns((prev) => {
       const next = [...prev];
       const last = next[next.length - 1];
-      if (last && last.role === "agent") {
-        next[next.length - 1] = { ...last, answer: end.answer, streaming: false };
-      }
+      if (last?.role === "agent") next[next.length - 1] = { ...last, steps: stream.steps, answer: stream.answer, streaming: stream.streaming };
       return next;
     });
-    setBusy(false);
-    socketRef.current?.close();
-    socketRef.current = null;
-  }, []);
-
-  const failStream = useCallback((message: string) => {
-    setError(message);
-    setBusy(false);
-    setTurns((prev) => {
-      const next = [...prev];
-      const last = next[next.length - 1];
-      if (last && last.role === "agent") {
-        next[next.length - 1] = { ...last, streaming: false };
-      }
-      return next;
-    });
-    socketRef.current?.close();
-    socketRef.current = null;
-  }, []);
+  }, [stream.answer, stream.revision, stream.steps, stream.streaming]);
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -245,8 +171,6 @@ export function ChatPage() {
     if (trimmed === "" || busy) {
       return;
     }
-    setError(null);
-    setBusy(true);
     setIntent("");
     setTurns((prev) => [
       ...prev,
@@ -254,27 +178,7 @@ export function ChatPage() {
       { role: "agent", steps: [], answer: "", streaming: true },
     ]);
 
-    try {
-      const response = await startSession({ intent: trimmed });
-      const socket = await openSessionStream(response.session.id, {
-        onStep: appendStep,
-        onEnd: finishStream,
-        onError: failStream,
-      });
-      if (!mountedRef.current) {
-        // Effect cleanup already ran while we awaited — close immediately.
-        socket.close();
-        return;
-      }
-      socketRef.current = socket;
-    } catch (err) {
-      if (!mountedRef.current) {
-        return;
-      }
-      const message =
-        err instanceof ApiError ? err.problem.detail : "Failed to start the agent session.";
-      failStream(message);
-    }
+    stream.start(trimmed);
   }
 
   return (
@@ -307,14 +211,7 @@ export function ChatPage() {
         )}
       </div>
 
-      {error ? (
-        <div
-          role="alert"
-          className="panel border-status-error/40 px-4 py-2 text-xs text-status-error"
-        >
-          {error}
-        </div>
-      ) : null}
+      {error ? <ErrorBanner error={new Error(error)} /> : null}
 
       <form aria-label="Chat composer" className="flex gap-2" onSubmit={handleSubmit}>
         <input

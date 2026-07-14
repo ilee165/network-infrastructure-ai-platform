@@ -89,6 +89,7 @@ export interface ListPoolsParams {
 /** ``GET /api/v1/adc/virtual-servers`` — paginated, filterable virtual-server list. */
 export function listVirtualServers(
   params: ListVirtualServersParams = {},
+  signal?: AbortSignal,
 ): Promise<VirtualServerListResponse> {
   const qs = new URLSearchParams();
   if (params.device_id !== undefined) qs.set("device_id", params.device_id);
@@ -96,7 +97,7 @@ export function listVirtualServers(
   if (params.limit !== undefined) qs.set("limit", String(params.limit));
   if (params.offset !== undefined) qs.set("offset", String(params.offset));
   const query = qs.toString();
-  return apiFetch<VirtualServerListResponse>(`/adc/virtual-servers${query ? `?${query}` : ""}`);
+  return apiFetch<VirtualServerListResponse>(`/adc/virtual-servers${query ? `?${query}` : ""}`, { signal });
 }
 
 /** ``GET /api/v1/adc/virtual-servers/{id}`` — one virtual server by id. */
@@ -105,14 +106,14 @@ export function getVirtualServer(id: string): Promise<VirtualServerRead> {
 }
 
 /** ``GET /api/v1/adc/pools`` — paginated, filterable pool list (nested members). */
-export function listPools(params: ListPoolsParams = {}): Promise<PoolListResponse> {
+export function listPools(params: ListPoolsParams = {}, signal?: AbortSignal): Promise<PoolListResponse> {
   const qs = new URLSearchParams();
   if (params.device_id !== undefined) qs.set("device_id", params.device_id);
   if (params.availability !== undefined) qs.set("availability", params.availability);
   if (params.limit !== undefined) qs.set("limit", String(params.limit));
   if (params.offset !== undefined) qs.set("offset", String(params.offset));
   const query = qs.toString();
-  return apiFetch<PoolListResponse>(`/adc/pools${query ? `?${query}` : ""}`);
+  return apiFetch<PoolListResponse>(`/adc/pools${query ? `?${query}` : ""}`, { signal });
 }
 
 /** ``GET /api/v1/adc/pools/{id}`` — one pool with nested members by id. */

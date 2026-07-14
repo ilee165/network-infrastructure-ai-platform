@@ -18,16 +18,10 @@
  * back to the scoped modes.
  */
 
-import { useQuery } from "@tanstack/react-query";
 import cytoscape from "cytoscape";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "../api/client";
-import { listDevices } from "../api/devices";
-import { listRuns } from "../api/discovery";
 import {
-  getTopologyDiff,
-  getTopologyGraph,
-  getTopologyNeighborhood,
   MAX_NEIGHBORHOOD_DEPTH,
   type TopologyDiff,
   type TopologyEdge,
@@ -35,7 +29,11 @@ import {
   type TopologyGraphParams,
   type TopologyNode,
 } from "../api/topology";
+import { useTopologyInventory } from "../hooks/useDeviceQueries";
+import { useDiscoveryRuns } from "../hooks/useDiscoveryQueries";
+import { useScopedTopology, useTopologyDiff } from "../hooks/useTopologyQueries";
 import { PageHeader } from "../components/PageHeader";
+import { ErrorBanner } from "../components/ErrorBanner";
 import {
   DEFAULT_NODE_COLOR,
   DIFF_ADDED_CLASS,
@@ -416,28 +414,17 @@ function DiffControls({
 }) {
   const [fromRun, setFromRun] = useState("");
   const [toRun, setToRun] = useState("");
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [pair, setPair] = useState<{ from: string; to: string } | null>(null);
 
-  const { data: runsData } = useQuery({
-    queryKey: ["discovery-runs", "topology-diff"],
-    queryFn: () => listRuns({ limit: 50 }),
-  });
+  const { data: runsData } = useDiscoveryRuns("topology-diff", { limit: 50 });
+  const diffQuery = useTopologyDiff(pair?.from ?? "", pair?.to ?? "", pair !== null);
   const runs = runsData?.items ?? [];
 
-  async function handleCompare() {
+  function handleCompare() {
     if (!fromRun || !toRun) return;
-    setPending(true);
-    setError(null);
-    try {
-      const response = await getTopologyDiff(fromRun, toRun);
-      onDiff(response.diff);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "diff failed");
-    } finally {
-      setPending(false);
-    }
+    setPair({ from: fromRun, to: toRun });
   }
+  useEffect(() => { if (diffQuery.data) onDiff(diffQuery.data.diff); }, [diffQuery.data, onDiff]);
 
   const runOption = (run: (typeof runs)[number]) => (
     <option key={run.id} value={run.id}>
@@ -484,11 +471,11 @@ function DiffControls({
       <button
         type="button"
         data-testid="diff-compare-btn"
-        onClick={() => void handleCompare()}
-        disabled={pending || !fromRun || !toRun}
+        onClick={handleCompare}
+        disabled={diffQuery.isFetching || !fromRun || !toRun}
         className="btn"
       >
-        {pending ? "Comparing…" : "Compare"}
+        {diffQuery.isFetching ? "Comparing…" : "Compare"}
       </button>
       {active ? (
         <button
@@ -500,9 +487,9 @@ function DiffControls({
           Clear diff
         </button>
       ) : null}
-      {error ? (
+      {diffQuery.error ? (
         <p data-testid="diff-error" role="alert" className="w-full text-xs text-status-error">
-          Diff failed: {error}
+          Diff failed: {diffQuery.error.message}
         </p>
       ) : null}
     </section>
@@ -570,19 +557,7 @@ export function TopologyPage() {
   const [depth, setDepth] = useState(2);
 
   // The inventory powers both scope pickers (distinct sites + device list).
-  const { data: devicesData, error: devicesError } = useQuery({
-    queryKey: ["devices", "topology-scope"],
-    queryFn: async () => {
-      const first = await listDevices({ limit: INVENTORY_PAGE });
-      const items = [...first.items];
-      while (items.length < first.total && items.length < INVENTORY_MAX) {
-        const page = await listDevices({ limit: INVENTORY_PAGE, offset: items.length });
-        if (page.items.length === 0) break;
-        items.push(...page.items);
-      }
-      return { ...first, items };
-    },
-  });
+  const { data: devicesData, error: devicesError } = useTopologyInventory(INVENTORY_PAGE, INVENTORY_MAX);
   const inventory = useMemo(() => devicesData?.items ?? [], [devicesData]);
   const sites = useMemo(
     () =>
@@ -598,22 +573,12 @@ export function TopologyPage() {
     scopeMode === "full" ||
     (scopeMode === "site" ? activeSite !== null : selectedDevice !== "");
 
-  const { data, error, isLoading } = useQuery({
-    queryKey: ["topology-graph", scopeMode, activeSite, selectedDevice, depth, layer],
-    enabled: scopeReady,
-    // A 413 is deterministic (the graph is over the cap) and scoped reads are
-    // cheap to re-trigger by picking a scope — never retry automatically.
-    retry: false,
-    queryFn: () => {
-      if (scopeMode === "device") {
-        return getTopologyNeighborhood({ device: selectedDevice, depth, layer });
-      }
-      if (scopeMode === "site" && activeSite !== null) {
-        return getTopologyGraph({ layer, site: activeSite });
-      }
-      return getTopologyGraph({ layer });
-    },
-  });
+  const topologyScope = scopeMode === "device"
+    ? { mode: "device" as const, device: selectedDevice, depth, layer }
+    : scopeMode === "site"
+      ? { mode: "site" as const, site: activeSite, layer }
+      : { mode: "full" as const, layer };
+  const { data, error, isLoading } = useScopedTopology(topologyScope, scopeReady);
 
   const capError = error instanceof ApiError && error.status === 413 ? error : null;
 
@@ -751,14 +716,7 @@ export function TopologyPage() {
 
       {/* Scope hints: nothing is fetched until the scope is actionable. */}
       {devicesError ? (
-        <div
-          data-testid="topology-inventory-error"
-          role="alert"
-          className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-        >
-          Device inventory failed to load: {devicesError.message}. Site and device scoping
-          are unavailable — you can still explicitly load the full graph.
-        </div>
+        <ErrorBanner error={new Error(`Device inventory failed to load: ${devicesError.message}. Site and device scoping are unavailable — you can still explicitly load the full graph.`)} data-testid="topology-inventory-error" />
       ) : null}
       {scopeMode === "site" && devicesData && sites.length === 0 ? (
         <div
@@ -805,12 +763,7 @@ export function TopologyPage() {
         </div>
       ) : null}
       {error && !capError ? (
-        <div
-          role="alert"
-          className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-        >
-          Topology load failed: {error.message}
-        </div>
+        <ErrorBanner error={error} />
       ) : null}
       {scopeReady && !isLoading && !error && data && !hasNodes ? (
         <div

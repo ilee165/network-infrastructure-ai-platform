@@ -10,17 +10,15 @@
  * §4.4) — never collapsed into one status pill.
  */
 
-import { useQuery } from "@tanstack/react-query";
 import { Fragment, useEffect, useState } from "react";
 import type { KeyboardEvent } from "react";
 import {
-  listPools,
-  listVirtualServers,
   type AdcAvailability,
   type PoolMemberRead,
   type PoolRead,
   type VirtualServerRead,
 } from "../api/adc";
+import { usePools, useVirtualServers } from "../hooks/useAdcQueries";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
 import { Pagination } from "../components/Pagination";
@@ -88,10 +86,7 @@ function VirtualServerTable({ items }: { items: VirtualServerRead[] }) {
 
 function VirtualServersSection() {
   const [offset, setOffset] = useState(0);
-  const { data, error, isPending } = useQuery({
-    queryKey: ["adc-virtual-servers", offset],
-    queryFn: () => listVirtualServers({ limit: PAGE_SIZE, offset }),
-  });
+  const { data, error, isPending } = useVirtualServers({ limit: PAGE_SIZE, offset });
 
   const items = data?.items ?? [];
 
@@ -252,10 +247,7 @@ function PoolTable({ pools }: { pools: PoolRead[] }) {
 
 function PoolsSection() {
   const [offset, setOffset] = useState(0);
-  const { data, error, isPending } = useQuery({
-    queryKey: ["adc-pools", offset],
-    queryFn: () => listPools({ limit: PAGE_SIZE, offset }),
-  });
+  const { data, error, isPending } = usePools({ limit: PAGE_SIZE, offset });
 
   const pools = data?.items ?? [];
 

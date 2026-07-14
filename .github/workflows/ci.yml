@@ -181,6 +181,9 @@ jobs:
       - name: Lint (eslint)
         run: npm run lint
 
+      - name: Shared platform-pattern count ratchet (bite self-test)
+        run: npm run check:patterns
+
       - name: Typecheck (tsc --noEmit)
         run: npm run typecheck
 

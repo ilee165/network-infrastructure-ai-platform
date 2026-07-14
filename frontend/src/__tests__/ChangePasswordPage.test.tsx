@@ -19,6 +19,7 @@
  */
 
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
@@ -79,14 +80,15 @@ function LocationProbe() {
 }
 
 function renderPage() {
+  const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
   return render(
-    <MemoryRouter initialEntries={["/change-password"]}>
+    <QueryClientProvider client={client}><MemoryRouter initialEntries={["/change-password"]}>
       <Routes>
         <Route path="/change-password" element={<ChangePasswordPage />} />
         <Route path="/" element={<div data-testid="home" />} />
       </Routes>
       <LocationProbe />
-    </MemoryRouter>,
+    </MemoryRouter></QueryClientProvider>,
   );
 }
 

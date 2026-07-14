@@ -328,13 +328,7 @@ export function DocumentsPage() {
 
         {/* Download error */}
         {downloadError !== null && (
-          <div
-            role="alert"
-            data-testid="docs-download-error"
-            className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-          >
-            Download failed: {downloadError}
-          </div>
+          <ErrorBanner error={new Error(`Download failed: ${downloadError}`)} data-testid="docs-download-error" />
         )}
 
         {/* Empty state */}

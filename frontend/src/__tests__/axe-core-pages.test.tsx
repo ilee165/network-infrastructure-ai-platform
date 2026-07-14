@@ -200,9 +200,9 @@ describe("axe — core pages (audit UI_UX #5)", () => {
     });
 
     const { container } = render(
-      <MemoryRouter initialEntries={["/change-password"]}>
+      <QueryClientProvider client={makeQueryClient()}><MemoryRouter initialEntries={["/change-password"]}>
         <ChangePasswordPage />
-      </MemoryRouter>,
+      </MemoryRouter></QueryClientProvider>,
     );
     await screen.findByTestId("change-password-page");
 
