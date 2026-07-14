@@ -156,4 +156,5 @@ collision check at branch creation *and* every rebase.
 | 3 | ✅ Merged (PR #158) |
 | 4 | ✅ Merged (PR #159 / #160) |
 | 5 | ✅ Merged (PR #161, `255f159`) — T1–T15 + review fold (chord fan-out + delta projection included) |
-| 6–7 | Pending — user calls each wave |
+| 6 | 🚧 Draft PRs open (PR-A #163 / PR-B #162) |
+| 7 | Pending — user calls wave |
