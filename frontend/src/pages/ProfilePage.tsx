@@ -25,22 +25,13 @@ import {
   updateMe,
 } from "../api/auth";
 import type { SessionInfo } from "../api/auth";
-import { ApiError } from "../api/client";
+import { messageFor } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
 import { useAuthStore } from "../stores/auth";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const MIN_PASSWORD_LENGTH = 8;
-const GENERIC_ERROR = "Something went wrong. Please try again.";
-
-function errorMessage(err: unknown): string {
-  if (err instanceof ApiError) {
-    return err.problem.detail;
-  }
-  return GENERIC_ERROR;
-}
-
 // ── Profile edit form ─────────────────────────────────────────────────────────
 
 function ProfileEditSection() {
@@ -60,7 +51,7 @@ function ProfileEditSection() {
       setSaveError(null);
     },
     onError: (err) => {
-      setSaveError(errorMessage(err));
+      setSaveError(messageFor(err));
       setSaveSuccess(false);
     },
   });
@@ -163,7 +154,7 @@ function ChangePasswordSection() {
       setConfirm("");
       setSuccess(true);
     } catch (err) {
-      setError(errorMessage(err));
+      setError(messageFor(err));
     } finally {
       setPending(false);
     }
@@ -316,7 +307,7 @@ function SessionsSection() {
         <p role="status" className="text-xs text-zinc-500">Loading sessions…</p>
       )}
       {error && (
-        <p role="alert" className="text-xs text-status-error">{errorMessage(error)}</p>
+        <p role="alert" className="text-xs text-status-error">{messageFor(error)}</p>
       )}
 
       {sessions && sessions.length > 0 && (

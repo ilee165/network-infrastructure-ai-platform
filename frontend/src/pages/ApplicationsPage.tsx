@@ -33,7 +33,9 @@ import {
   type DependencyTargetKind,
 } from "../api/applications";
 import { ApiError } from "../api/client";
-import { ErrorBanner } from "../components/ErrorBanner";
+import { ErrorBanner, messageFor } from "../components/ErrorBanner";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { Modal } from "../components/Modal";
 import { PageHeader } from "../components/PageHeader";
 import { Pagination } from "../components/Pagination";
 import { SkeletonRows } from "../components/Skeleton";
@@ -46,8 +48,6 @@ const PAGE_SIZE = 100;
 /** Target kinds a manual tag may point at (ADR-0052 §2.3 rebuild-safe kinds). */
 const TARGET_KINDS: DependencyTargetKind[] = ["device", "ip_address"];
 
-const GENERIC_ERROR = "Something went wrong. Please try again.";
-
 /** Problem ``type`` the backend uses for an optimistic-concurrency (N1) conflict. */
 const STALE_PRECONDITION_TYPE = "urn:netops:error:stale-precondition";
 
@@ -55,10 +55,6 @@ const STALE_PRECONDITION_TYPE = "urn:netops:error:stale-precondition";
 const STALE_MESSAGE =
   "This application was changed by someone else since you opened it. Reload to load " +
   "the latest values, then re-apply your change.";
-
-function errorMessage(err: unknown): string {
-  return err instanceof ApiError ? err.problem.detail : GENERIC_ERROR;
-}
 
 /**
  * True only for the lost-update 409 (``stale-precondition``) — NOT the sibling
@@ -102,59 +98,6 @@ function SourceBadge({ id, source }: { id: string; source: DependencySource }) {
     >
       {source}
     </span>
-  );
-}
-
-// ── Confirmation dialog (destructive actions) ──────────────────────────────────
-
-function ConfirmDialog({
-  message,
-  onConfirm,
-  onCancel,
-  isPending,
-  error,
-}: {
-  message: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-  isPending?: boolean;
-  error?: string | null;
-}) {
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Confirm action"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-    >
-      <div className="w-full max-w-sm rounded border border-carbon-700 bg-carbon-900 p-6 shadow-xl">
-        <p className="text-sm text-zinc-200">{message}</p>
-        {error ? (
-          <p role="alert" className="mt-3 text-xs text-status-error">
-            {error}
-          </p>
-        ) : null}
-        <div className="mt-5 flex justify-end gap-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={isPending}
-            className="rounded border border-carbon-700 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:border-carbon-600 hover:text-zinc-100 disabled:opacity-60"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            data-testid="confirm-action"
-            onClick={onConfirm}
-            disabled={isPending}
-            className="rounded bg-status-error px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
-          >
-            {isPending ? "Working…" : "Confirm"}
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -211,7 +154,7 @@ function ApplicationFormModal({
       } else {
         // Any other error (including a name-collision 409) is fixable in place.
         setStale(false);
-        setFormError(errorMessage(err));
+        setFormError(messageFor(err));
       }
     },
   });
@@ -229,13 +172,7 @@ function ApplicationFormModal({
   }
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={editing ? "Edit application" : "Create application"}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-    >
-      <div className="w-full max-w-sm rounded border border-carbon-700 bg-carbon-900 p-6 shadow-xl">
+    <Modal aria-label={editing ? "Edit application" : "Create application"}>
         <h3 className="text-sm font-semibold text-zinc-100">
           {editing ? "Edit application" : "Create application"}
         </h3>
@@ -319,8 +256,7 @@ function ApplicationFormModal({
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -344,7 +280,7 @@ function DependencyAddForm({ appId, onClose }: { appId: string; onClose: () => v
       pushToast("success", "Dependency tagged.");
       onClose();
     },
-    onError: (err) => setFormError(errorMessage(err)),
+    onError: (err) => setFormError(messageFor(err)),
   });
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
@@ -436,7 +372,7 @@ function DependencyRow({
       pushToast("success", "Dependency removed.");
       setConfirming(false);
     },
-    onError: (err) => setConfirmError(errorMessage(err)),
+    onError: (err) => setConfirmError(messageFor(err)),
   });
 
   // Only manual rows are user-removable — a derivation-owned edge retracts when
@@ -466,6 +402,7 @@ function DependencyRow({
         ) : null}
         {confirming ? (
           <ConfirmDialog
+            confirmTestId="confirm-action"
             message={`Remove the manual dependency on ${dep.target_kind} ${dep.target_ref}?`}
             onConfirm={() => mutation.mutate()}
             onCancel={() => setConfirming(false)}
@@ -585,7 +522,7 @@ function ApplicationsTable({
         setConfirmError(STALE_MESSAGE);
         void queryClient.invalidateQueries({ queryKey: ["applications"] });
       } else {
-        setConfirmError(errorMessage(err));
+        setConfirmError(messageFor(err));
       }
     },
   });
@@ -674,6 +611,7 @@ function ApplicationsTable({
 
       {pendingDelete !== null ? (
         <ConfirmDialog
+            confirmTestId="confirm-action"
           message={`Delete the manual application "${pendingDelete.name}"? Its manual dependency rows are removed with it.`}
           onConfirm={() => deleteMutation.mutate(pendingDelete)}
           onCancel={() => setPendingDelete(null)}

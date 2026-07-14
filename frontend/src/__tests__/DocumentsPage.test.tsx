@@ -192,7 +192,9 @@ describe("DocumentsPage — initial state", () => {
     );
     vi.stubGlobal("fetch", mock);
     renderPage();
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Documents load failed/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Documents load failed: unexpected failure",
+    );
   });
 });
 

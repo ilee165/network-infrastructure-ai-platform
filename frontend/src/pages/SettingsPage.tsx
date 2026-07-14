@@ -40,8 +40,9 @@ import {
   type CredentialRead,
 } from "../api/credentials";
 import { listIntegrations } from "../api/integrations";
-import { ApiError } from "../api/client";
+import { messageFor } from "../components/ErrorBanner";
 import { FormField } from "../components/FormField";
+import { Modal } from "../components/Modal";
 import { PageHeader } from "../components/PageHeader";
 import { Pagination } from "../components/Pagination";
 import { Spinner } from "../components/Skeleton";
@@ -67,15 +68,6 @@ const CREDENTIAL_KINDS: { value: CredentialKind; label: string }[] = [
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-const GENERIC_ERROR = "Something went wrong. Please try again.";
-
-function errorMessage(err: unknown): string {
-  if (err instanceof ApiError) {
-    return err.problem.detail;
-  }
-  return GENERIC_ERROR;
-}
 
 // ── Section navigation ────────────────────────────────────────────────────────
 
@@ -416,7 +408,7 @@ export function SettingsAccessSection() {
         )}
         {oidcError && (
           <p role="alert" className="text-xs text-status-error">
-            {errorMessage(oidcError)}
+            {messageFor(oidcError)}
           </p>
         )}
         {oidc && (
@@ -536,7 +528,7 @@ export function SettingsCredentialsSection() {
       void queryClient.invalidateQueries({ queryKey: ["credentials"] });
     },
     onError: (err) => {
-      setFormError(errorMessage(err));
+      setFormError(messageFor(err));
       setFormSuccess(null);
     },
   });
@@ -556,7 +548,7 @@ export function SettingsCredentialsSection() {
       void queryClient.invalidateQueries({ queryKey: ["credentials"] });
     },
     onError: (err) => {
-      setRotateError(errorMessage(err));
+      setRotateError(messageFor(err));
       setRotateSuccess(null);
     },
   });
@@ -578,7 +570,7 @@ export function SettingsCredentialsSection() {
       void queryClient.invalidateQueries({ queryKey: ["credentials"] });
     },
     onError: (err) => {
-      setDisableError(errorMessage(err));
+      setDisableError(messageFor(err));
       setDisableSuccess(null);
     },
   });
@@ -642,7 +634,7 @@ export function SettingsCredentialsSection() {
           )}
           {rotationError && (
             <p role="alert" className="text-xs text-status-error">
-              {errorMessage(rotationError)}
+              {messageFor(rotationError)}
             </p>
           )}
           {rotation && (
@@ -679,7 +671,7 @@ export function SettingsCredentialsSection() {
       )}
       {loadError && (
         <p role="alert" className="text-xs text-status-error">
-          {errorMessage(loadError)}
+          {messageFor(loadError)}
         </p>
       )}
 
@@ -819,14 +811,7 @@ export function SettingsCredentialsSection() {
       )}
 
       {canWrite && disableTarget && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Confirm disable credential"
-          data-testid="credential-disable-dialog"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-        >
-          <div className="w-full max-w-sm rounded border border-carbon-700 bg-carbon-900 p-6 shadow-xl">
+        <Modal aria-label="Confirm disable credential" data-testid="credential-disable-dialog">
             <p className="text-sm text-zinc-200">
               Disable credential “{disableTarget.name}”? It will disappear from
               this list, the name can be reused, and discovery/tools can no longer
@@ -856,8 +841,7 @@ export function SettingsCredentialsSection() {
                 {disableMutation.isPending ? "Disabling…" : "Confirm disable"}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {disableSuccess && (
@@ -1026,7 +1010,7 @@ export function SettingsLlmSection() {
       void queryClient.invalidateQueries({ queryKey: ["llm-readiness"] });
     },
     onError: (err) => {
-      setSaveError(errorMessage(err));
+      setSaveError(messageFor(err));
       setSaveSuccess(false);
     },
   });
@@ -1040,7 +1024,7 @@ export function SettingsLlmSection() {
       void queryClient.invalidateQueries({ queryKey: ["llm-readiness"] });
     },
     onError: (err) => {
-      setProbeError(errorMessage(err));
+      setProbeError(messageFor(err));
       setProbeResult(null);
       setProbeTarget(null);
     },
@@ -1107,7 +1091,7 @@ export function SettingsLlmSection() {
         )}
         {readinessError && (
           <p role="alert" className="text-xs text-status-error">
-            {errorMessage(readinessError)}
+            {messageFor(readinessError)}
           </p>
         )}
         {readiness && (
@@ -1223,7 +1207,7 @@ export function SettingsLlmSection() {
       )}
       {loadError && (
         <p role="alert" className="text-xs text-status-error">
-          {errorMessage(loadError)}
+          {messageFor(loadError)}
         </p>
       )}
 
@@ -1333,7 +1317,7 @@ export function SettingsIntegrationsSection() {
       )}
       {loadError && (
         <p role="alert" className="text-xs text-status-error">
-          {errorMessage(loadError)}
+          {messageFor(loadError)}
         </p>
       )}
 
@@ -1475,7 +1459,7 @@ export function SettingsPlatformSection() {
         )}
         {healthError && (
           <p role="alert" className="text-xs text-status-error">
-            {errorMessage(healthError)}
+            {messageFor(healthError)}
           </p>
         )}
         {health && (
@@ -1527,7 +1511,7 @@ export function SettingsPlatformSection() {
         )}
         {configError && (
           <p role="alert" className="text-xs text-status-error">
-            {errorMessage(configError)}
+            {messageFor(configError)}
           </p>
         )}
         {config && (

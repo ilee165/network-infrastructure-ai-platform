@@ -257,6 +257,33 @@ describe("UsersPage — create user", () => {
     expect(screen.queryByText("TempPass-abc123XYZ")).not.toBeInTheDocument();
   });
 
+  it("surfaces clipboard copy failures", async () => {
+    vi.mocked(createUser).mockResolvedValue({ user: { ...VIEWER_USER, id: "copy-user", username: "copy-user" }, temp_password: "Temp-copy" });
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    renderPage();
+    await screen.findByText("viewer1");
+    fireEvent.click(screen.getByRole("button", { name: /create user/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: /username/i }), { target: { value: "copy-user" } });
+    fireEvent.click(screen.getByRole("button", { name: /^create$/i }));
+    await screen.findByText("Temp-copy");
+    fireEvent.click(screen.getByRole("button", { name: /copy/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not copy the password");
+  });
+
+  it("surfaces copy failure when the clipboard API is unavailable", async () => {
+    vi.mocked(createUser).mockResolvedValue({ user: { ...VIEWER_USER, id: "copy-user", username: "copy-user" }, temp_password: "Temp-copy" });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    renderPage();
+    await screen.findByText("viewer1");
+    fireEvent.click(screen.getByRole("button", { name: /create user/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: /username/i }), { target: { value: "copy-user" } });
+    fireEvent.click(screen.getByRole("button", { name: /^create$/i }));
+    await screen.findByText("Temp-copy");
+    fireEvent.click(screen.getByRole("button", { name: /copy/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not copy the password");
+  });
+
   it("calls POST /auth/users with the correct payload", async () => {
     const newUser: UserSummary = {
       id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",

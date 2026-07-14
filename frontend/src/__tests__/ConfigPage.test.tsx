@@ -343,7 +343,9 @@ describe("ConfigPage — Snapshots tab", () => {
     vi.stubGlobal("fetch", mock);
     renderPage();
     await selectDevice();
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Snapshots load failed/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Snapshots load failed: device has no snapshots",
+    );
   });
 });
 
@@ -426,7 +428,9 @@ describe("ConfigPage — Drift tab", () => {
     vi.stubGlobal("fetch", mock);
     renderPage();
     await goToDrift();
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Drift check failed/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Drift check failed: no approved baseline",
+    );
   });
 });
 
@@ -527,6 +531,8 @@ describe("ConfigPage — Compliance tab", () => {
     vi.stubGlobal("fetch", mock);
     renderPage();
     await goToCompliance();
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Compliance check failed/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Compliance check failed: no config snapshots to evaluate",
+    );
   });
 });

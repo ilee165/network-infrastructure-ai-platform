@@ -19,7 +19,8 @@ interface ErrorBannerProps {
 const GENERIC_MESSAGE = "Something went wrong.";
 
 /** Resolve the best available message for an unknown thrown/caught value. */
-function messageFor(error: unknown): string {
+// eslint-disable-next-line react-refresh/only-export-components -- requirement: ErrorBanner.messageFor is the shared page formatter.
+export function messageFor(error: unknown): string {
   if (error instanceof ApiError) {
     return error.problem.detail || GENERIC_MESSAGE;
   }

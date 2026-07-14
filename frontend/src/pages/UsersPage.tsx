@@ -30,70 +30,16 @@ import {
   updateUser,
 } from "../api/auth";
 import type { UserSummary } from "../api/auth";
-import { ApiError } from "../api/client";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { DataTable } from "../components/DataTable";
+import { messageFor } from "../components/ErrorBanner";
+import { Modal } from "../components/Modal";
 import { PageHeader } from "../components/PageHeader";
 import type { Role } from "../stores/roles";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const ROLES: Role[] = ["viewer", "operator", "engineer", "admin"];
-
-const GENERIC_ERROR = "Something went wrong. Please try again.";
-
-function errorMessage(err: unknown): string {
-  if (err instanceof ApiError) {
-    return err.problem.detail;
-  }
-  return GENERIC_ERROR;
-}
-
-// ── Confirmation dialog ───────────────────────────────────────────────────────
-
-interface ConfirmDialogProps {
-  message: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-  isPending?: boolean;
-  error?: string | null;
-}
-
-function ConfirmDialog({ message, onConfirm, onCancel, isPending, error }: ConfirmDialogProps) {
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Confirm action"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-    >
-      <div className="w-full max-w-sm rounded border border-carbon-700 bg-carbon-900 p-6 shadow-xl">
-        <p className="text-sm text-zinc-200">{message}</p>
-        {error && (
-          <p role="alert" className="mt-3 text-xs text-status-error">
-            {error}
-          </p>
-        )}
-        <div className="mt-5 flex justify-end gap-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={isPending}
-            className="rounded border border-carbon-700 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:border-carbon-600 hover:text-zinc-100 disabled:opacity-60"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={isPending}
-            className="rounded bg-status-error px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
-          >
-            {isPending ? "Working…" : "Confirm"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ── Temp-password reveal dialog ───────────────────────────────────────────────
 
@@ -104,21 +50,23 @@ interface TempPasswordDialogProps {
 
 function TempPasswordDialog({ tempPassword, onClose }: TempPasswordDialogProps) {
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
 
-  function handleCopy() {
-    void navigator.clipboard.writeText(tempPassword).then(() => {
+  async function handleCopy() {
+    setCopyError(false);
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(tempPassword);
       setCopied(true);
-    });
+    } catch {
+      setCopyError(true);
+    }
   }
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Temporary password"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-    >
-      <div className="w-full max-w-sm rounded border border-carbon-700 bg-carbon-900 p-6 shadow-xl">
+    <Modal aria-label="Temporary password">
         <h3 className="text-sm font-semibold text-zinc-100">Temporary password</h3>
         <p className="mt-2 text-xs text-status-warn">
           This password will not be shown again. Copy it now and share it securely with the user.
@@ -134,6 +82,7 @@ function TempPasswordDialog({ tempPassword, onClose }: TempPasswordDialogProps) 
             {copied ? "Copied" : "Copy"}
           </button>
         </div>
+{copyError ? <p role="alert" className="mt-3 text-xs text-status-error">Could not copy the password. Copy it manually.</p> : null}
         <div className="mt-5 flex justify-end">
           <button
             type="button"
@@ -143,8 +92,7 @@ function TempPasswordDialog({ tempPassword, onClose }: TempPasswordDialogProps) 
             Done
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -176,7 +124,7 @@ function CreateUserModal({ onClose, onCreated }: CreateUserModalProps) {
       onCreated();
     },
     onError: (err) => {
-      setFormError(errorMessage(err));
+      setFormError(messageFor(err));
     },
   });
 
@@ -192,13 +140,7 @@ function CreateUserModal({ onClose, onCreated }: CreateUserModalProps) {
   }
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Create user"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-    >
-      <div className="w-full max-w-sm rounded border border-carbon-700 bg-carbon-900 p-6 shadow-xl">
+    <Modal aria-label="Create user">
         <h3 className="text-sm font-semibold text-zinc-100">Create user</h3>
         <p className="mt-1 text-xs text-zinc-500">
           A temporary password will be generated. The user must change it on first login.
@@ -278,8 +220,7 @@ function CreateUserModal({ onClose, onCreated }: CreateUserModalProps) {
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -437,7 +378,7 @@ export function UsersPage() {
         setPending(null);
       }
     } catch (err) {
-      setConfirmError(errorMessage(err));
+      setConfirmError(messageFor(err));
     } finally {
       setConfirmPending(false);
     }
@@ -484,38 +425,14 @@ export function UsersPage() {
       <section aria-label="User accounts" className="flex flex-col gap-3">
         <h3 className="font-mono text-xs uppercase tracking-widest text-zinc-500">Accounts</h3>
 
-        {loading ? (
-          <p role="status" className="text-xs text-zinc-500">
-            Loading users…
-          </p>
-        ) : null}
-
-        {!loading && users && users.length > 0 ? (
-          <div className="panel overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-carbon-700 text-left text-zinc-500">
-                  <th className="px-4 py-2 font-medium">Username</th>
-                  <th className="px-4 py-2 font-medium">Email</th>
-                  <th className="px-4 py-2 font-medium">Display name</th>
-                  <th className="px-4 py-2 font-medium">Role</th>
-                  <th className="px-4 py-2 font-medium">Active</th>
-                  <th className="px-4 py-2 font-medium">Must change password</th>
-                  <th className="px-4 py-2 font-medium">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((user) => (
-                  <UserRow key={user.id} user={user} onAction={handleAction} />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : null}
-
-        {!loading && users && users.length === 0 ? (
-          <p className="text-xs text-zinc-500">No users found.</p>
-        ) : null}
+        <DataTable
+          headers={["Username", "Email", "Display name", "Role", "Active", "Must change password", "Actions"]}
+          loading={loading}
+          loadingLabel="Loading users…"
+          empty={!loading && users?.length === 0 ? <p className="text-xs text-zinc-500">No users found.</p> : undefined}
+        >
+          {users?.map((user) => <UserRow key={user.id} user={user} onAction={handleAction} />)}
+        </DataTable>
       </section>
 
       {/* Create-user modal */}

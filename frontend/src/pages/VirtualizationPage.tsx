@@ -23,6 +23,7 @@ import {
   type VirtualMachineRead,
   type VmPowerState,
 } from "../api/virtualization";
+import { EmptyState } from "../components/EmptyState";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
 import { Pagination } from "../components/Pagination";
@@ -51,18 +52,6 @@ const CONNECTION_STATE_VARIANT: Record<HostConnectionState, StatusPillVariant> =
 };
 
 /** Generic empty state, matching ``DevicesPage``'s ``devices-empty-state`` idiom. */
-function EmptyState({ testId, title, body }: { testId: string; title: string; body: string }) {
-  return (
-    <div
-      data-testid={testId}
-      className="flex flex-col items-center justify-center gap-2 rounded-md border border-dashed border-carbon-600 bg-carbon-900/50 px-6 py-16 text-center"
-    >
-      <p className="text-sm font-medium text-zinc-200">{title}</p>
-      <p className="max-w-md text-xs leading-relaxed text-zinc-500">{body}</p>
-    </div>
-  );
-}
-
 // ── Virtual machines ──────────────────────────────────────────────────────────
 
 function VirtualMachineTable({ items }: { items: VirtualMachineRead[] }) {
@@ -127,9 +116,9 @@ function VirtualMachinesSection() {
       {error ? <ErrorBanner error={error} data-testid="vms-error" /> : null}
       {!isPending && !error && items.length === 0 ? (
         <EmptyState
-          testId="vms-empty-state"
+          data-testid="vms-empty-state"
           title="No virtual machines recorded yet"
-          body="VMs appear here once a vCenter device is inventoried. Tools-less VMs still appear, with empty guest IP/hostname fields."
+          description="VMs appear here once a vCenter device is inventoried. Tools-less VMs still appear, with empty guest IP/hostname fields."
         />
       ) : null}
       {items.length > 0 ? <VirtualMachineTable items={items} /> : null}
@@ -208,9 +197,9 @@ function HypervisorHostsSection() {
       {error ? <ErrorBanner error={error} data-testid="hosts-error" /> : null}
       {!isPending && !error && items.length === 0 ? (
         <EmptyState
-          testId="hosts-empty-state"
+          data-testid="hosts-empty-state"
           title="No hosts recorded yet"
-          body="Hosts appear here once a vCenter device is inventoried. Standalone hosts still appear, with no cluster."
+          description="Hosts appear here once a vCenter device is inventoried. Standalone hosts still appear, with no cluster."
         />
       ) : null}
       {items.length > 0 ? <HypervisorHostTable items={items} /> : null}
@@ -285,9 +274,9 @@ function ComputeClustersSection() {
       {error ? <ErrorBanner error={error} data-testid="clusters-error" /> : null}
       {!isPending && !error && items.length === 0 ? (
         <EmptyState
-          testId="clusters-empty-state"
+          data-testid="clusters-empty-state"
           title="No clusters recorded yet"
-          body="Clusters appear here once a vCenter device is inventoried."
+          description="Clusters appear here once a vCenter device is inventoried."
         />
       ) : null}
       {items.length > 0 ? <ComputeClusterTable items={items} /> : null}
@@ -358,9 +347,9 @@ function PortGroupsSection() {
       {error ? <ErrorBanner error={error} data-testid="port-groups-error" /> : null}
       {!isPending && !error && items.length === 0 ? (
         <EmptyState
-          testId="port-groups-empty-state"
+          data-testid="port-groups-empty-state"
           title="No port groups recorded yet"
-          body="Port groups appear here once a vCenter device is inventoried."
+          description="Port groups appear here once a vCenter device is inventoried."
         />
       ) : null}
       {items.length > 0 ? <PortGroupTable items={items} /> : null}
