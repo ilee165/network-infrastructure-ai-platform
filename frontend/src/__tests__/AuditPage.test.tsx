@@ -173,6 +173,8 @@ describe("AuditPage — agent tool-audit view", () => {
     renderPage();
     loadSession("00000000-0000-0000-0000-000000000000");
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/does not exist/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Session load failed: Not Found: agent session does not exist",
+    );
   });
 });

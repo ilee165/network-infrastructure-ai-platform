@@ -62,7 +62,7 @@ function ToolAuditResults({ sessionId }: { sessionId: string }) {
     );
   }
   if (error) {
-    return <ErrorBanner error={error} />;
+    return <ErrorBanner error={new Error(`Session load failed: ${error.message}`)} />;
   }
 
   const events: ToolEvent[] = data.traces.flatMap((trace) =>

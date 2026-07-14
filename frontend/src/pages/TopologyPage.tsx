@@ -420,8 +420,13 @@ function DiffControls({
   const diffQuery = useTopologyDiff(pair?.from ?? "", pair?.to ?? "", pair !== null);
   const runs = runsData?.items ?? [];
 
-  function handleCompare() {
+  async function handleCompare() {
     if (!fromRun || !toRun) return;
+    if (pair?.from === fromRun && pair.to === toRun) {
+      const result = await diffQuery.refetch();
+      if (result.data) onDiff(result.data.diff);
+      return;
+    }
     setPair({ from: fromRun, to: toRun });
   }
   useEffect(() => { if (diffQuery.data) onDiff(diffQuery.data.diff); }, [diffQuery.data, onDiff]);
@@ -471,7 +476,7 @@ function DiffControls({
       <button
         type="button"
         data-testid="diff-compare-btn"
-        onClick={handleCompare}
+        onClick={() => { void handleCompare(); }}
         disabled={diffQuery.isFetching || !fromRun || !toRun}
         className="btn"
       >
@@ -763,7 +768,7 @@ export function TopologyPage() {
         </div>
       ) : null}
       {error && !capError ? (
-        <ErrorBanner error={error} />
+        <ErrorBanner error={new Error(`Topology load failed: ${error.message}`)} />
       ) : null}
       {scopeReady && !isLoading && !error && data && !hasNodes ? (
         <div

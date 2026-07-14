@@ -395,7 +395,9 @@ describe("TopologyPage — render and elements", () => {
     );
     renderPage();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Failed to fetch/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Topology load failed: Failed to fetch",
+    );
   });
 
   it("requests the canonical topology graph path", async () => {
@@ -895,6 +897,43 @@ describe("TopologyPage — run-to-run diff view", () => {
       expect(String(diffCall![0])).toContain(`from_run=${RUN_FROM}`);
       expect(String(diffCall![0])).toContain(`to_run=${RUN_TO}`);
     });
+  });
+
+  it("refetches and reapplies the diff when Compare repeats the same run pair", async () => {
+    const mock = routingFetch();
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await selectRunsAndCompare();
+    expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(1),
+    );
+
+    fireEvent.click(screen.getByTestId("diff-compare-btn"));
+
+    await waitFor(() =>
+      expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(2),
+    );
+    expect(screen.getByTestId("topology-diff-panel")).toBeInTheDocument();
+  });
+
+  it("refetches and reapplies the same run pair after Clear diff", async () => {
+    const mock = routingFetch();
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await selectRunsAndCompare();
+    expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("diff-clear-btn"));
+    await waitFor(() => expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("diff-compare-btn"));
+
+    await waitFor(() =>
+      expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(2),
+    );
+    expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
   });
 
   it("shows the changed elements in the diff list panel", async () => {
