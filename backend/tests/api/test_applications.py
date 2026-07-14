@@ -608,6 +608,31 @@ class TestApplicationDelete:
         assert await session.get(Application, uuid.UUID(created["id"])) is not None
         assert await _audit_rows(session, audit.APPLICATION_DELETE) == []
 
+    async def test_malformed_if_match_on_unknown_id_preserves_404_precedence(
+        self, client: httpx.AsyncClient, auth_headers: Headers
+    ) -> None:
+        """A malformed optional precondition cannot mask target non-existence."""
+        response = await client.delete(
+            f"{BASE}/{uuid.uuid4()}",
+            headers={**auth_headers("engineer"), "If-Match": "not-a-timestamp"},
+        )
+        assert response.status_code == 404, response.text
+        assert response.json()["type"] == "urn:netops:error:not-found"
+
+    async def test_malformed_if_match_on_derived_row_preserves_409_precedence(
+        self, client: httpx.AsyncClient, auth_headers: Headers, session: AsyncSession
+    ) -> None:
+        """Derived lifecycle ownership is classified before optional header syntax."""
+        derived = await _seed_derived_application(session, name="vs-malformed")
+        response = await client.delete(
+            f"{BASE}/{derived.id}",
+            headers={**auth_headers("engineer"), "If-Match": "not-a-timestamp"},
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["type"] == "urn:netops:error:conflict"
+        assert await session.get(Application, derived.id) is not None
+        assert await _audit_rows(session, audit.APPLICATION_DELETE) == []
+
     @pytest.mark.parametrize("role", ["viewer", "operator"])
     async def test_below_engineer_is_403(
         self, client: httpx.AsyncClient, auth_headers: Headers, role: str

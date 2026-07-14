@@ -214,15 +214,19 @@ class ApplicationService:
         await self._session.commit()
         return row
 
-    async def delete(
-        self, application_id: uuid.UUID, user: User, expected: datetime | None
-    ) -> None:
+    async def prepare_delete(self, application_id: uuid.UUID) -> Application:
+        """Load, lock, and classify a delete target before HTTP header parsing."""
         row = await self._get(application_id, for_update=True)
         if ApplicationOrigin(row.origin) is ApplicationOrigin.DERIVED:
             raise ConflictError(
                 f"application {application_id} is derived and lifecycle-owned by derivation; "
                 "it disappears when its source object disappears, not by user delete"
             )
+        return row
+
+    async def apply_delete(self, row: Application, user: User, expected: datetime | None) -> None:
+        """Apply an optional precondition, delete, audit, and commit a prepared row."""
+        application_id = row.id
         if expected is not None and row.updated_at != expected:
             raise StalePreconditionError(
                 f"application {application_id} was modified by another writer since you "

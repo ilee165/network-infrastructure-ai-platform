@@ -165,8 +165,9 @@ async def delete_application(
     a view the user edited elsewhere cannot destroy a row that changed under
     them. The row is locked ``FOR UPDATE`` for the read.
     """
+    row = await service.prepare_delete(application_id)
     expected = _parse_if_match(if_match) if if_match is not None else None
-    await service.delete(application_id, user, expected)
+    await service.apply_delete(row, user, expected)
     return Response(status_code=204)
 
 

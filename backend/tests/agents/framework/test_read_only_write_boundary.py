@@ -26,6 +26,7 @@ from app.agents import build_default_registry
 from app.agents.framework.credential_access import acquire_troubleshooting_ssh
 from app.agents.framework.discovery_jobs import create_discovery_run, mark_discovery_run_failed
 from app.agents.framework.tools import ToolClassification, netops_tool
+from app.core.crypto import FakeKmsKeyProvider, KeyProviderUnavailable, envelope_encrypt
 from app.models import (
     AuditLog,
     CredentialKind,
@@ -121,7 +122,13 @@ class ReadOnlyWriteViolation(AssertionError):
 
 
 @pytest.fixture()
-async def engine() -> AsyncIterator[AsyncEngine]:
+def key_provider() -> FakeKmsKeyProvider:
+    """In-memory stand-in for the only external KMS boundary."""
+    return FakeKmsKeyProvider()
+
+
+@pytest.fixture()
+async def engine(key_provider: FakeKmsKeyProvider) -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine("sqlite+aiosqlite://")
     async with engine.begin() as conn:
         tables = cast(
@@ -138,6 +145,9 @@ async def engine() -> AsyncIterator[AsyncEngine]:
         await conn.run_sync(lambda sync_conn: Device.metadata.create_all(sync_conn, tables=tables))
     seed_maker = async_sessionmaker(engine, expire_on_commit=False)
     credential_id = uuid4()
+    envelope = envelope_encrypt(
+        uuid4().hex.encode("ascii"), str(credential_id).encode("ascii"), key_provider
+    )
     async with seed_maker() as session:
         session.add(
             DeviceCredential(
@@ -145,11 +155,11 @@ async def engine() -> AsyncIterator[AsyncEngine]:
                 name="read-boundary-ssh",
                 kind=CredentialKind.SSH,
                 username="fixture",
-                ciphertext=b"ciphertext",
-                nonce=b"nonce",
-                wrapped_dek=b"wrapped-dek",
-                dek_nonce=b"dek-nonce",
-                kek_version="fixture",
+                ciphertext=envelope.ciphertext,
+                nonce=envelope.nonce,
+                wrapped_dek=envelope.wrapped_dek,
+                dek_nonce=envelope.dek_nonce,
+                kek_version=envelope.kek_version,
                 params={},
             )
         )
@@ -361,6 +371,43 @@ async def test_real_credential_access_chain_catches_planted_domain_write(
         )
 
 
+@pytest.mark.asyncio
+async def test_real_credential_access_chain_fails_closed_with_durable_audit_only(
+    guarded_engine: AsyncEngine,
+    maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider refusal persists only its autonomous fail-closed audit row."""
+    monkeypatch.setattr(db, "get_sessionmaker", lambda: maker)
+    async with maker() as session:
+        device = await session.get(Device, UUID(_UNKNOWN_DEVICE_ID))
+        assert device is not None and device.credential_id is not None
+        credential_id = device.credential_id
+
+    with pytest.raises(KeyProviderUnavailable):
+        await acquire_troubleshooting_ssh(
+            UUID(_UNKNOWN_DEVICE_ID),
+            FakeKmsKeyProvider(available=False),
+            expected_host="192.0.2.1",
+            expected_vendor_id="cisco_ios",
+            expected_credential_id=credential_id,
+            actor="agent:troubleshooting",
+            reason="troubleshooting_live_read",
+        )
+
+    async with maker() as session:
+        rows = list((await session.scalars(select(AuditLog))).all())
+        assert len(rows) == 1
+        assert rows[0].action == audit.KEK_PROVIDER_UNAVAILABLE
+        assert rows[0].target_id == str(credential_id)
+        assert rows[0].detail == {"reason_class": "ConnectionError"}
+        assert await session.scalar(select(func.count()).select_from(Device)) == 1
+        assert await session.scalar(select(func.count()).select_from(DeviceCredential)) == 1
+        assert await session.scalar(select(func.count()).select_from(DiscoveryRun)) == 0
+        assert await session.scalar(select(func.count()).select_from(NormalizedNeighborRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(NormalizedRouteRow)) == 0
+
+
 def _invocation_fixtures() -> dict[str, dict[str, Any]]:
     """Valid minimal direct-call arguments for the complete default census."""
     empty_findings = {
@@ -441,6 +488,7 @@ def _invocation_fixtures() -> dict[str, dict[str, Any]]:
 async def test_every_default_read_only_tool_obeys_relational_write_boundary(
     guarded_engine: AsyncEngine,
     maker: async_sessionmaker[AsyncSession],
+    key_provider: FakeKmsKeyProvider,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Drive the registry census under the deny-by-default SQLAlchemy guard."""
@@ -465,30 +513,8 @@ async def test_every_default_read_only_tool_obeys_relational_write_boundary(
     monkeypatch.setattr(troubleshooting_tools, "application_impact", empty_impact)
     monkeypatch.setattr(troubleshooting_tools, "_knowledge_client", lambda: object())
 
-    # Hermetic decryption/provider and SSH boundaries. Credential row/device
-    # validation and transaction ownership stay in the real credential seam.
-    from app.services import credentials
-    from app.services.credentials import DecryptedSecret
-
-    async def decrypt_boundary(
-        session: AsyncSession,
-        _key_provider: Any,
-        row: DeviceCredential,
-        *,
-        actor: str,
-        reason: str,
-        **_kwargs: Any,
-    ) -> DecryptedSecret:
-        await audit.record(
-            session,
-            actor=actor,
-            action=audit.CREDENTIAL_DECRYPTED,
-            target_type="credential",
-            target_id=str(row.id),
-            detail={"reason": reason},
-        )
-        return DecryptedSecret(b"fixture-secret")
-
+    # Hermetic KMS and SSH boundaries. Device validation, envelope decryption,
+    # credential audits, and transaction ownership remain production-real.
     class EmptyCapability:
         def __init__(self, *_args: Any) -> None:
             pass
@@ -508,8 +534,7 @@ async def test_every_default_read_only_tool_obeys_relational_write_boundary(
 
     import app.plugins.registry as plugin_registry
 
-    monkeypatch.setattr(credentials, "decrypt", decrypt_boundary)
-    monkeypatch.setattr(troubleshooting_tools, "_key_provider", lambda: object())
+    monkeypatch.setattr(troubleshooting_tools, "_key_provider", lambda: key_provider)
     monkeypatch.setattr(troubleshooting_tools, "_open_ssh", lambda _params: nullcontext(object()))
     monkeypatch.setattr(plugin_registry, "get_default_registry", lambda: EmptyPluginRegistry())
 
@@ -539,7 +564,10 @@ async def test_every_default_read_only_tool_obeys_relational_write_boundary(
 
     async with maker() as session:
         assert await session.scalar(select(func.count()).select_from(DiscoveryRun)) == 1
-        assert await session.scalar(select(func.count()).select_from(AuditLog)) == 3
+        actions = list((await session.scalars(select(AuditLog.action))).all())
+        assert len(actions) == 6
+        assert actions.count(audit.KEK_UNWRAP) == 3
+        assert actions.count(audit.CREDENTIAL_DECRYPTED) == 3
 
 
 @pytest.mark.asyncio
