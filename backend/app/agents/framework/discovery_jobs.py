@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from uuid import UUID
 
 
 async def create_discovery_run(
@@ -35,7 +36,7 @@ async def mark_discovery_run_failed(run_id: str, error: str) -> None:
     from app.models import DiscoveryRun, DiscoveryRunStatus
 
     async with db.get_sessionmaker()() as session:
-        run = await session.get(DiscoveryRun, run_id)
+        run = await session.get(DiscoveryRun, UUID(run_id))
         if run is not None:
             run.status = DiscoveryRunStatus.FAILED
             run.error = error
