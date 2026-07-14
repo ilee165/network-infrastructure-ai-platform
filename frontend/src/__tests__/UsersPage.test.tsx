@@ -12,7 +12,7 @@
  * ``../api/auth`` is mocked; no network is touched.
  */
 
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithQueryClient } from "../test/test-utils";
@@ -260,6 +260,77 @@ describe("UsersPage — create user", () => {
     await screen.findByText("Temp-copy");
     fireEvent.click(screen.getByRole("button", { name: /copy/i }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not copy the password");
+  });
+
+  it("clears copied success state when a later clipboard attempt fails", async () => {
+    vi.mocked(createUser).mockResolvedValue({
+      user: { ...VIEWER_USER, id: "copy-user", username: "copy-user" },
+      temp_password: "Temp-copy",
+    });
+    const writeText = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("denied"));
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    renderPage();
+    await screen.findByText("viewer1");
+    fireEvent.click(screen.getByRole("button", { name: /create user/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: /username/i }), {
+      target: { value: "copy-user" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^create$/i }));
+    await screen.findByText("Temp-copy");
+
+    const copyButton = screen.getByRole("button", { name: /copy/i });
+    fireEvent.click(copyButton);
+    await waitFor(() => expect(copyButton).toHaveTextContent(/^Copied$/));
+    fireEvent.click(copyButton);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not copy the password");
+    expect(copyButton).toHaveTextContent(/^Copy$/);
+  });
+
+  it("ignores a stale success after a newer clipboard attempt fails", async () => {
+    vi.mocked(createUser).mockResolvedValue({
+      user: { ...VIEWER_USER, id: "copy-user", username: "copy-user" },
+      temp_password: "Temp-copy",
+    });
+    let resolveFirstWrite!: () => void;
+    const firstWrite = new Promise<void>((resolve) => {
+      resolveFirstWrite = resolve;
+    });
+    const writeText = vi
+      .fn()
+      .mockReturnValueOnce(firstWrite)
+      .mockRejectedValueOnce(new Error("denied"));
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    renderPage();
+    await screen.findByText("viewer1");
+    fireEvent.click(screen.getByRole("button", { name: /create user/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: /username/i }), {
+      target: { value: "copy-user" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^create$/i }));
+    await screen.findByText("Temp-copy");
+
+    const copyButton = screen.getByRole("button", { name: /copy/i });
+    fireEvent.click(copyButton);
+    fireEvent.click(copyButton);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not copy the password");
+
+    await act(async () => {
+      resolveFirstWrite();
+      await firstWrite;
+    });
+
+    expect(copyButton).toHaveTextContent(/^Copy$/);
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not copy the password");
   });
 
   it("surfaces copy failure when the clipboard API is unavailable", async () => {

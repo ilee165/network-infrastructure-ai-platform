@@ -1,8 +1,10 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import ts from "typescript";
 
 const testsRoot = join(process.cwd(), "src/__tests__");
+const apiRoot = join(process.cwd(), "src/api");
+const testUtilsModule = join(process.cwd(), "src/test/test-utils");
 const sharedFactories = new Map([
   ["auth", "mockAuthApi"],
   ["changes", "mockChangesApi"],
@@ -33,18 +35,18 @@ function unwrap(expression) {
   return expression;
 }
 
-function importsTestUtils(expression) {
+function importsTestUtils(expression, fileName) {
   expression = unwrap(expression);
   return (
     ts.isCallExpression(expression) &&
     expression.expression.kind === ts.SyntaxKind.ImportKeyword &&
     expression.arguments.length === 1 &&
     ts.isStringLiteralLike(expression.arguments[0]) &&
-    expression.arguments[0].text === "../test/test-utils"
+    resolve(dirname(fileName), expression.arguments[0].text) === testUtilsModule
   );
 }
 
-function callbackUsesFactory(callback, expectedFactory) {
+function callbackUsesFactory(callback, expectedFactory, fileName) {
   if (!ts.isArrowFunction(callback) || ts.isBlock(callback.body)) return false;
 
   const body = unwrap(callback.body);
@@ -58,11 +60,30 @@ function callbackUsesFactory(callback, expectedFactory) {
     factoryCall !== undefined &&
     ts.isPropertyAccessExpression(factoryCall.expression) &&
     factoryCall.expression.name.text === expectedFactory &&
-    importsTestUtils(factoryCall.expression.expression)
+    importsTestUtils(factoryCall.expression.expression, fileName)
   );
 }
 
-function apiMockViolations(source, fileName = "fixture.tsx") {
+function apiModuleName(specifier, fileName) {
+  if (!specifier.startsWith(".")) return undefined;
+
+  const modulePath = relative(apiRoot, resolve(dirname(fileName), specifier));
+  if (
+    !modulePath ||
+    modulePath === ".." ||
+    modulePath.startsWith(`..${sep}`) ||
+    isAbsolute(modulePath)
+  ) {
+    return undefined;
+  }
+  return modulePath;
+}
+
+function apiMockViolations(
+  source,
+  fileName = join(testsRoot, "fixture.tsx"),
+  recordApiMock = () => {},
+) {
   const sourceFile = ts.createSourceFile(
     fileName,
     source,
@@ -82,11 +103,16 @@ function apiMockViolations(source, fileName = "fixture.tsx") {
       node.arguments.length >= 1 &&
       ts.isStringLiteralLike(node.arguments[0])
     ) {
-      const match = /^\.\.\/api\/([^/]+)$/.exec(node.arguments[0].text);
-      if (match) {
-        const expectedFactory = sharedFactories.get(match[1]);
+      const moduleName = apiModuleName(node.arguments[0].text, fileName);
+      if (moduleName) {
+        recordApiMock();
+        const expectedFactory = sharedFactories.get(moduleName);
         const callback = node.arguments[1];
-        if (!expectedFactory || !callback || !callbackUsesFactory(callback, expectedFactory)) {
+        if (
+          !expectedFactory ||
+          !callback ||
+          !callbackUsesFactory(callback, expectedFactory, fileName)
+        ) {
           violations.push(sourceFile.getLineAndCharacterOfPosition(node.getStart()).line + 1);
         }
       }
@@ -101,8 +127,9 @@ const violations = [];
 let routedMocks = 0;
 for (const file of sourceFiles(testsRoot)) {
   const source = readFileSync(file, "utf8");
-  const apiViolations = apiMockViolations(source, file);
-  routedMocks += (source.match(/vi\.mock\(\s*["']\.\.\/api\//g) ?? []).length;
+  const apiViolations = apiMockViolations(source, file, () => {
+    routedMocks += 1;
+  });
   for (const line of apiViolations) {
     violations.push(`${relative(process.cwd(), file)}:${line}: bare API module mock`);
   }
@@ -118,8 +145,47 @@ const nearbyBypass = readFileSync(
   join(process.cwd(), "scripts/__fixtures__/test-scaffolding-nearby-bypass.tsx"),
   "utf8",
 );
+const nestedApiBypass = readFileSync(
+  join(process.cwd(), "scripts/__fixtures__/test-scaffolding-nested-api-bypass.tsx"),
+  "utf8",
+);
+const nestedApiDescendantBypass = readFileSync(
+  join(
+    process.cwd(),
+    "scripts/__fixtures__/test-scaffolding-nested-api-descendant-bypass.tsx",
+  ),
+  "utf8",
+);
+const nestedApiFactory = readFileSync(
+  join(process.cwd(), "scripts/__fixtures__/test-scaffolding-nested-api-factory.tsx"),
+  "utf8",
+);
 if (apiMockViolations(nearbyBypass).length !== 1) {
   throw new Error("API mock detector accepted unrelated nearby factory text");
+}
+if (
+  apiMockViolations(
+    nestedApiBypass,
+    join(testsRoot, "routes/test-scaffolding-nested-api-bypass.test.tsx"),
+  ).length !== 1
+) {
+  throw new Error("API mock detector accepted a nested relative API mock");
+}
+if (
+  apiMockViolations(
+    nestedApiDescendantBypass,
+    join(testsRoot, "routes/test-scaffolding-nested-api-descendant-bypass.test.tsx"),
+  ).length !== 1
+) {
+  throw new Error("API mock detector accepted an API descendant mock");
+}
+if (
+  apiMockViolations(
+    nestedApiFactory,
+    join(testsRoot, "routes/test-scaffolding-nested-api-factory.test.tsx"),
+  ).length
+) {
+  throw new Error("API mock detector rejected a nested matching shared factory");
 }
 if (apiMockViolations(`vi.mock("../api/auth", () => ({}))`).length !== 1) {
   throw new Error("API mock detector self-test did not bite");

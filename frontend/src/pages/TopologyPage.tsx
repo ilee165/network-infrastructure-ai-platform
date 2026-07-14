@@ -424,7 +424,7 @@ function DiffControls({
     if (!fromRun || !toRun) return;
     if (pair?.from === fromRun && pair.to === toRun) {
       const result = await diffQuery.refetch();
-      if (result.data) onDiff(result.data.diff);
+      if (result.isSuccess && result.data) onDiff(result.data.diff);
       return;
     }
     setPair({ from: fromRun, to: toRun });

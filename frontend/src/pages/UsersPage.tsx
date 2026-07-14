@@ -20,7 +20,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   createUser,
@@ -51,17 +51,20 @@ interface TempPasswordDialogProps {
 function TempPasswordDialog({ tempPassword, onClose }: TempPasswordDialogProps) {
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
+  const copyAttempt = useRef(0);
 
   async function handleCopy() {
+    const attempt = ++copyAttempt.current;
+    setCopied(false);
     setCopyError(false);
     try {
       if (!navigator.clipboard?.writeText) {
         throw new Error("Clipboard API unavailable");
       }
       await navigator.clipboard.writeText(tempPassword);
-      setCopied(true);
+      if (attempt === copyAttempt.current) setCopied(true);
     } catch {
-      setCopyError(true);
+      if (attempt === copyAttempt.current) setCopyError(true);
     }
   }
 

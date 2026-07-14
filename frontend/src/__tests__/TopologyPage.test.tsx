@@ -840,14 +840,33 @@ const DIFF: TopologyDiffResponse = {
  * diff endpoint each return their own body. Records the requested diff URL so a
  * test can assert the run ids were passed through.
  */
-function routingFetch(diff: TopologyDiffResponse = DIFF) {
+function routingFetch(diff: TopologyDiffResponse = DIFF, failedDiffAttempt?: number) {
+  let diffAttempts = 0;
   return vi.fn((input: RequestInfo | URL): Promise<Response> => {
     const url = String(input);
     let body: unknown = GRAPH;
     if (url.includes("/discovery/runs")) body = RUNS;
     else if (url.includes("/devices")) body = DEVICES;
-    else if (url.includes("/topology/diff")) body = diff;
-    else if (url.includes("/topology/graph")) body = GRAPH;
+    else if (url.includes("/topology/diff")) {
+      diffAttempts += 1;
+      if (diffAttempts === failedDiffAttempt) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              type: "urn:netops:error:service-unavailable",
+              title: "Service Unavailable",
+              status: 503,
+              detail: "Diff retry unavailable.",
+            }),
+            {
+              status: 503,
+              headers: { "Content-Type": "application/problem+json" },
+            },
+          ),
+        );
+      }
+      body = diff;
+    } else if (url.includes("/topology/graph")) body = GRAPH;
     return Promise.resolve(
       new Response(JSON.stringify(body), {
         status: 200,
@@ -934,6 +953,28 @@ describe("TopologyPage — run-to-run diff view", () => {
       expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(2),
     );
     expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+  });
+
+  it("keeps a cleared same-pair diff absent when the retry fails", async () => {
+    const mock = routingFetch(DIFF, 2);
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await selectRunsAndCompare();
+    expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("diff-clear-btn"));
+    await waitFor(() => expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("diff-compare-btn"));
+
+    expect(await screen.findByTestId("diff-error")).toHaveTextContent("Diff retry unavailable");
+    expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument();
+    await waitFor(() => {
+      const edge = lastElements().find(
+        (element) => element.data.id === `${DEVICE_KEY}:${IFACE_KEY}:HAS_INTERFACE`,
+      );
+      expect(edge?.classes).not.toContain(DIFF_REMOVED_CLASS);
+    });
   });
 
   it("shows the changed elements in the diff list panel", async () => {
