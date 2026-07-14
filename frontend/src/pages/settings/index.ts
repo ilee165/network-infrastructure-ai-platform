@@ -1,0 +1,9 @@
+export { SettingsPage } from "./SettingsPage";
+export { SettingsAppearanceSection } from "./Appearance";
+export { SettingsAgentsSection } from "./Agents";
+export { SettingsAccountSection } from "./Account";
+export { SettingsCredentialsSection } from "./Credentials";
+export { SettingsLlmSection } from "./Llm";
+export { SettingsAccessSection } from "./Access";
+export { SettingsIntegrationsSection } from "./Integrations";
+export { SettingsPlatformSection } from "./Platform";
