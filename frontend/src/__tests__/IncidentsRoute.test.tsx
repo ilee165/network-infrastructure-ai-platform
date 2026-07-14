@@ -11,10 +11,10 @@
  * SettingsRoute.test.tsx isolated-subtree pattern.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import { RoleRoute } from "../components/RoleRoute";
 import { IncidentReportsPage } from "../pages/IncidentReportsPage";
 import type { UserMe } from "../stores/auth";
@@ -50,18 +50,10 @@ function resetStore(): void {
 beforeEach(resetStore);
 afterEach(resetStore);
 
-function makeQueryClient() {
-  return new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
-}
-
 /** Mount the /incidents subtree exactly as App wires it. */
 function renderIncidentsRoute(role: string) {
   useAuthStore.setState({ status: "authed", accessToken: "tok", user: userWithRole(role) });
-  const qc = makeQueryClient();
-  return render(
-    <QueryClientProvider client={qc}>
+return renderWithQueryClient(
       <MemoryRouter initialEntries={["/incidents"]}>
         <Routes>
           <Route element={<RoleRoute minimum="viewer" />}>
@@ -69,8 +61,7 @@ function renderIncidentsRoute(role: string) {
           </Route>
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
-  );
+    );
 }
 
 describe("/incidents route — viewer+ RoleRoute guard", () => {

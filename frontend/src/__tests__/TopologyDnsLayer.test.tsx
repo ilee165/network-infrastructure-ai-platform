@@ -10,9 +10,9 @@
  * (jsdom has no canvas) + mocked global fetch.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type { TopologyGraph } from "../api/topology";
 import { TopologyPage } from "../pages/TopologyPage";
 
@@ -113,14 +113,9 @@ function makeFetch(body: unknown = GRAPH_WITH_DNS) {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <TopologyPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 afterEach(() => {

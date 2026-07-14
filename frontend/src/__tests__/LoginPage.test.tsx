@@ -25,10 +25,10 @@ import { LoginPage } from "../pages/LoginPage";
 import type { UserMe } from "../stores/auth";
 import { useAuthStore } from "../stores/auth";
 
-vi.mock("../api/auth", () => ({
+vi.mock("../api/auth", async () => (await import("../test/test-utils")).mockAuthApi(() => ({
   login: vi.fn(),
   getMe: vi.fn(),
-}));
+}))());
 
 import { getMe, login } from "../api/auth";
 

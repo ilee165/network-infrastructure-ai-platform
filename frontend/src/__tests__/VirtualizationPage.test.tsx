@@ -5,9 +5,9 @@
  * dimensions — mocked global fetch, no backend required.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type {
   ComputeClusterListResponse,
   HypervisorHostListResponse,
@@ -166,12 +166,9 @@ function fetchRouted(bodies: {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <VirtualizationPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 afterEach(() => {

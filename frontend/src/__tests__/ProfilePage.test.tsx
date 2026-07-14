@@ -11,10 +11,10 @@
  * ``../api/auth`` is mocked; no network is touched.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import { ApiError } from "../api/client";
 import { ProfilePage } from "../pages/ProfilePage";
 import type { SessionInfo } from "../api/auth";
@@ -23,14 +23,14 @@ import { useAuthStore } from "../stores/auth";
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-vi.mock("../api/auth", () => ({
+vi.mock("../api/auth", async () => (await import("../test/test-utils")).mockAuthApi(() => ({
   getMe: vi.fn(),
   updateMe: vi.fn(),
   changePassword: vi.fn(),
   listSessions: vi.fn(),
   revokeSession: vi.fn(),
   revokeAllSessions: vi.fn(),
-}));
+}))());
 
 import { changePassword, getMe, updateMe, listSessions, revokeSession, revokeAllSessions } from "../api/auth";
 
@@ -68,25 +68,16 @@ const SESSION_OTHER: SessionInfo = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function makeQueryClient() {
-  return new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
-}
-
 function resetStore(): void {
   useAuthStore.setState({ accessToken: "tok", user: BASE_USER, status: "authed" });
 }
 
 function renderPage() {
-  const qc = makeQueryClient();
-  return render(
-    <QueryClientProvider client={qc}>
+return renderWithQueryClient(
       <MemoryRouter>
         <ProfilePage />
       </MemoryRouter>
-    </QueryClientProvider>,
-  );
+    );
 }
 
 beforeEach(() => {

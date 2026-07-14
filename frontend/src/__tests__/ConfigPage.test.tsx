@@ -6,9 +6,9 @@
  * QueryClientProvider wrapping, afterEach unstubAll.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type {
   ComplianceRunResponse,
   ConfigSnapshotListResponse,
@@ -213,14 +213,9 @@ function fetchRouted(opts: {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <ConfigPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 /** Select a device in the dropdown and return after device is chosen. */

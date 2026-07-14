@@ -3,9 +3,9 @@
  * and run status — mocked global fetch, no backend required.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type { DeviceListResponse } from "../api/devices";
 import type { RunListResponse, RunStatus } from "../api/discovery";
 import { DevicesPage } from "../pages/DevicesPage";
@@ -119,14 +119,9 @@ function fetchRouted(deviceBody: unknown, runsBody: unknown) {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <DevicesPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 afterEach(() => {

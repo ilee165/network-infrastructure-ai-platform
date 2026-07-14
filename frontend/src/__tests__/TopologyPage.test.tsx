@@ -4,9 +4,9 @@
  * and a mocked cytoscape module (jsdom cannot render a canvas).
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type { DeviceListResponse, DeviceRead } from "../api/devices";
 import type { RunListResponse } from "../api/discovery";
 import type { TopologyDiffResponse, TopologyGraph } from "../api/topology";
@@ -302,14 +302,9 @@ function topologyCalls(mock: ReturnType<typeof vi.fn>): string[] {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <TopologyPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 beforeEach(() => {

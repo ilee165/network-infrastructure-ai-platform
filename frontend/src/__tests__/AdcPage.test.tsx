@@ -3,9 +3,9 @@
  * empty states, error banners — mocked global fetch, no backend required.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type { PoolListResponse, VirtualServerListResponse } from "../api/adc";
 import { AdcPage } from "../pages/AdcPage";
 
@@ -102,12 +102,9 @@ function fetchRouted(vsBody: unknown, poolBody: unknown) {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <AdcPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 afterEach(() => {

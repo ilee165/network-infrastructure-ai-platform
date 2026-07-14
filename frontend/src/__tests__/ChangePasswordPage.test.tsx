@@ -18,20 +18,20 @@
  * ``../api/auth`` is mocked; navigation is asserted with a location probe.
  */
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import { ApiError } from "../api/client";
 import { ChangePasswordPage } from "../pages/ChangePasswordPage";
 import type { UserMe } from "../stores/auth";
 import { useAuthStore } from "../stores/auth";
 import { useUiStore } from "../stores/ui";
 
-vi.mock("../api/auth", () => ({
+vi.mock("../api/auth", async () => (await import("../test/test-utils")).mockAuthApi(() => ({
   changePassword: vi.fn(),
   getMe: vi.fn(),
-}));
+}))());
 
 import { changePassword, getMe } from "../api/auth";
 
@@ -80,16 +80,13 @@ function LocationProbe() {
 }
 
 function renderPage() {
-  const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
-  return render(
-    <QueryClientProvider client={client}><MemoryRouter initialEntries={["/change-password"]}>
+  return renderWithQueryClient(<MemoryRouter initialEntries={["/change-password"]}>
       <Routes>
         <Route path="/change-password" element={<ChangePasswordPage />} />
         <Route path="/" element={<div data-testid="home" />} />
       </Routes>
       <LocationProbe />
-    </MemoryRouter></QueryClientProvider>,
-  );
+    </MemoryRouter>);
 }
 
 describe("ChangePasswordPage — successful change", () => {

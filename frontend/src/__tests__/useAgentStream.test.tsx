@@ -1,7 +1,6 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, renderHook, waitFor } from "@testing-library/react";
-import type { PropsWithChildren } from "react";
+import { act, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderHookWithQueryClient } from "../test/test-utils";
 import type { AgentStreamEnd, AgentTraceStep, StartSessionResponse, StreamHandlers } from "../api/agents";
 import { queryKeys } from "../hooks/queryKeys";
 import { useAgentStream } from "../hooks/useAgentStream";
@@ -11,11 +10,10 @@ const { startSession, openSessionStream } = vi.hoisted(() => ({
   openSessionStream: vi.fn(),
 }));
 
-vi.mock("../api/agents", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../api/agents")>()),
+vi.mock("../api/agents", async () => (await import("../test/test-utils")).mockAgentsApi(() => ({
   startSession,
   openSessionStream,
-}));
+}))());
 
 const SESSION_ID = "55555555-5555-5555-5555-555555555555";
 const START_RESPONSE: StartSessionResponse = {
@@ -47,25 +45,17 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function harness(client: QueryClient) {
-  return function Wrapper({ children }: PropsWithChildren) {
-    return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
-  };
-}
-
 async function start(result: { current: ReturnType<typeof useAgentStream> }) {
   act(() => result.current.start("inspect bgp"));
   await waitFor(() => expect(openSessionStream).toHaveBeenCalled());
 }
 
 describe("useAgentStream ownership", () => {
-  let client: QueryClient;
   let handlers: StreamHandlers;
   let socket: Pick<WebSocket, "close">;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     socket = { close: vi.fn() };
     startSession.mockResolvedValue(START_RESPONSE);
     openSessionStream.mockImplementation(async (_id: string, next: StreamHandlers) => {
@@ -77,7 +67,6 @@ describe("useAgentStream ownership", () => {
   });
 
   afterEach(() => {
-    client.clear();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -88,8 +77,7 @@ describe("useAgentStream ownership", () => {
       handlers = next;
       return lateSocket.promise;
     });
-    const view = renderHook(() => useAgentStream(), {
-      wrapper: harness(client),
+    const view = renderHookWithQueryClient(() => useAgentStream(), {
       reactStrictMode: true,
     });
 
@@ -107,7 +95,7 @@ describe("useAgentStream ownership", () => {
       frames.push(callback);
       return frames.length;
     }));
-    const view = renderHook(() => useAgentStream(), { wrapper: harness(client) });
+    const view = renderHookWithQueryClient(() => useAgentStream());
     await start(view.result);
 
     act(() => { handlers.onStep(STEP); handlers.onStep({ ...STEP, summary: "peer recovered" }); });
@@ -118,9 +106,10 @@ describe("useAgentStream ownership", () => {
   });
 
   it.each(["end", "error"] as const)("invalidates persisted session queries on terminal %s", async (terminal) => {
-    const invalidate = vi.spyOn(client, "invalidateQueries");
-    const setData = vi.spyOn(client, "setQueryData");
-    const view = renderHook(() => useAgentStream(), { wrapper: harness(client) });
+    const view = renderHookWithQueryClient(() => useAgentStream());
+    const { queryClient } = view;
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const setData = vi.spyOn(queryClient, "setQueryData");
     await start(view.result);
 
     act(() => terminal === "end" ? handlers.onEnd(END) : handlers.onError("stream failed"));
@@ -129,7 +118,7 @@ describe("useAgentStream ownership", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.chat.history(SESSION_ID) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.chat.trace(SESSION_ID) });
     expect(setData).not.toHaveBeenCalled();
-    expect(client.getQueryCache().getAll()).toEqual([]);
+    expect(queryClient.getQueryCache().getAll()).toEqual([]);
     expect(socket.close).toHaveBeenCalledOnce();
   });
 
@@ -139,7 +128,7 @@ describe("useAgentStream ownership", () => {
       handlers = next;
       return lateSocket.promise;
     });
-    const view = renderHook(() => useAgentStream(), { wrapper: harness(client) });
+    const view = renderHookWithQueryClient(() => useAgentStream());
     await start(view.result);
     act(() => handlers.onStep(STEP));
     view.unmount();

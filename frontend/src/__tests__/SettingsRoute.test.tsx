@@ -6,10 +6,10 @@
  * LLM + access: RoleRoute("admin").
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import { RoleRoute } from "../components/RoleRoute";
 import {
   SettingsAccessSection,
@@ -25,7 +25,7 @@ import {
 import type { UserMe } from "../stores/auth";
 import { useAuthStore } from "../stores/auth";
 
-vi.mock("../api/auth", () => ({
+vi.mock("../api/auth", async () => (await import("../test/test-utils")).mockAuthApi(() => ({
   getSettings: vi.fn().mockResolvedValue({
     llm_profile: "local",
     llm_role_reasoning: null,
@@ -64,9 +64,9 @@ vi.mock("../api/auth", () => ({
     audit_export_format: null,
     audit_export_configured: false,
   }),
-}));
+}))());
 
-vi.mock("../api/credentials", () => ({
+vi.mock("../api/credentials", async () => (await import("../test/test-utils")).mockCredentialsApi(() => ({
   listCredentials: vi.fn().mockResolvedValue({
     items: [],
     total: 0,
@@ -81,11 +81,11 @@ vi.mock("../api/credentials", () => ({
     to_version: "test-v1",
     rows_pending: 0,
   }),
-}));
+}))());
 
-vi.mock("../api/integrations", () => ({
+vi.mock("../api/integrations", async () => (await import("../test/test-utils")).mockIntegrationsApi(() => ({
   listIntegrations: vi.fn().mockResolvedValue({ vendors: [] }),
-}));
+}))());
 
 function userWithRole(role: string): UserMe {
   return {
@@ -106,18 +106,10 @@ function resetStore(): void {
 beforeEach(resetStore);
 afterEach(resetStore);
 
-function makeQueryClient() {
-  return new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
-}
-
 /** Mount the /settings subtree exactly as App wires it. */
 function renderSettings(path: string, role: string) {
   useAuthStore.setState({ status: "authed", accessToken: "tok", user: userWithRole(role) });
-  const qc = makeQueryClient();
-  return render(
-    <QueryClientProvider client={qc}>
+return renderWithQueryClient(
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/settings" element={<SettingsPage />}>
@@ -136,8 +128,7 @@ function renderSettings(path: string, role: string) {
           </Route>
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
-  );
+    );
 }
 
 describe("/settings LLM section — admin gate", () => {

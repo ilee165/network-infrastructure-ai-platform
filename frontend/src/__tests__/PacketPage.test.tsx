@@ -5,9 +5,9 @@
  * Mirrors the DocumentsPage / ConfigPage test pattern.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type { CaptureLaunchResponse, PacketFindings } from "../api/packet";
 import { PacketPage } from "../pages/PacketPage";
 
@@ -91,14 +91,9 @@ function makeFetch(opts: {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <PacketPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 afterEach(() => {

@@ -12,10 +12,10 @@
  * ``../api/auth`` is mocked; no network is touched.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import { ApiError } from "../api/client";
 import { UsersPage } from "../pages/UsersPage";
 import type { UserSummary } from "../api/auth";
@@ -23,7 +23,7 @@ import { useAuthStore } from "../stores/auth";
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-vi.mock("../api/auth", () => ({
+vi.mock("../api/auth", async () => (await import("../test/test-utils")).mockAuthApi(() => ({
   listUsers: vi.fn(),
   createUser: vi.fn(),
   updateUser: vi.fn(),
@@ -43,7 +43,7 @@ vi.mock("../api/auth", () => ({
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
   initAuth: vi.fn(),
-}));
+}))());
 
 import {
   listUsers,
@@ -87,12 +87,6 @@ const INACTIVE_USER: UserSummary = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function makeQueryClient() {
-  return new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
-}
-
 function resetStore(): void {
   useAuthStore.setState({
     accessToken: "tok",
@@ -110,14 +104,11 @@ function resetStore(): void {
 }
 
 function renderPage() {
-  const qc = makeQueryClient();
-  return render(
-    <QueryClientProvider client={qc}>
+return renderWithQueryClient(
       <MemoryRouter>
         <UsersPage />
       </MemoryRouter>
-    </QueryClientProvider>,
-  );
+    );
 }
 
 beforeEach(() => {

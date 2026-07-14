@@ -1,16 +1,9 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
-import type { PropsWithChildren } from "react";
+import { waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { listDevices } from "../api/devices";
 import { queryKeys } from "../hooks/queryKeys";
 import { useCaptureLaunch } from "../hooks/usePacketQueries";
-
-function wrapper(client: QueryClient) {
-  return function QueryWrapper({ children }: PropsWithChildren) {
-    return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
-  };
-}
+import { renderHookWithQueryClient } from "../test/test-utils";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -58,8 +51,7 @@ describe("central query layer", () => {
         ),
       ),
     );
-    const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
-    const { result } = renderHook(() => useCaptureLaunch(), { wrapper: wrapper(client) });
+    const { result } = renderHookWithQueryClient(() => useCaptureLaunch());
 
     result.current.mutate({ interface: "eth0" });
 
