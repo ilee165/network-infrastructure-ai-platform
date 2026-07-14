@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-
 ROUTER = Path(__file__).parents[2] / "app" / "api" / "v1" / "applications.py"
 
 

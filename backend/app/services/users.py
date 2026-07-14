@@ -86,9 +86,7 @@ class UserService:
 
     async def list(self) -> list[User]:
         return list(
-            (
-                await self._session.execute(select(User).order_by(User.username))
-            ).scalars().all()
+            (await self._session.execute(select(User).order_by(User.username))).scalars().all()
         )
 
     async def get(self, user_id: uuid.UUID) -> User:
@@ -140,9 +138,7 @@ class UserService:
         await self._session.refresh(user)
         return CreatedUser(user=user, temp_password=plaintext)
 
-    async def update(
-        self, user_id: uuid.UUID, update: UserUpdate, *, actor_username: str
-    ) -> User:
+    async def update(self, user_id: uuid.UUID, update: UserUpdate, *, actor_username: str) -> User:
         user = await self._get(user_id)
         role_changed = False
         if update.role is not None and update.role != user.role.name:

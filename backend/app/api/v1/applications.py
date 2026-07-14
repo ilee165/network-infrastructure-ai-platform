@@ -66,7 +66,7 @@ async def list_applications(
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> ApplicationListResponse:
-    page = await service.list(origin=origin, q=q, limit=limit, offset=offset)
+    page = await service.list_applications(origin=origin, q=q, limit=limit, offset=offset)
     return ApplicationListResponse(
         items=[ApplicationRead.model_validate(row) for row in page.items],
         total=page.total,

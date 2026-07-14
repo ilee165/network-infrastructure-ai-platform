@@ -12,7 +12,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError, StalePreconditionError
-from app.models import Application, ApplicationDependency, Device, NormalizedInterfaceRow, User
+from app.models import (
+    Application,
+    ApplicationDependency,
+    Device,
+    NormalizedInterfaceRow,
+    User,
+)
 from app.models.applications import ApplicationOrigin, DependencySource, DependencyTargetKind
 from app.models.mixins import utcnow
 from app.schemas.applications import (
@@ -71,9 +77,7 @@ class ApplicationService:
             raise NotFoundError(f"application {application_id} does not exist")
         return row
 
-    async def _ensure_name_free(
-        self, name: str, *, exclude_id: uuid.UUID | None = None
-    ) -> None:
+    async def _ensure_name_free(self, name: str, *, exclude_id: uuid.UUID | None = None) -> None:
         query = select(Application.id).where(func.lower(Application.name) == name.lower())
         if exclude_id is not None:
             query = query.where(Application.id != exclude_id)
@@ -93,7 +97,7 @@ class ApplicationService:
         if interface is None or not interface.ip_address:
             raise NotFoundError(f"no IP address endpoint exists at interface row {target_ref}")
 
-    async def list(
+    async def list_applications(
         self, *, origin: ApplicationOrigin | None, q: str | None, limit: int, offset: int
     ) -> ApplicationPage:
         query = select(Application)
@@ -243,6 +247,7 @@ class ApplicationService:
             detail=detail,
         )
         await self._session.commit()
+
     async def create_dependency(
         self, application_id: uuid.UUID, body: ApplicationDependencyCreate, user: User
     ) -> ApplicationDependency:
