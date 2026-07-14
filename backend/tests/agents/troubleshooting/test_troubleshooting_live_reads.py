@@ -278,16 +278,18 @@ async def test_live_read_opens_credentialed_transport_and_returns_records(
 
 
 def test_credential_material_string_forms_redact_password() -> None:
-    sentinel = "wave6-sentinel-password"
+    password_sentinel = "wave6-sentinel-password"
+    params_sentinel = "wave6-sentinel-enable-password"
     material = SshCredentialMaterial(
         host="192.0.2.10",
         username="netops",
-        password=sentinel,
-        params={"port": 2222},
+        password=password_sentinel,
+        params={"port": 2222, "enable_password": params_sentinel},
     )
 
-    assert sentinel not in repr(material)
-    assert sentinel not in str(material)
+    for rendered in (repr(material), str(material)):
+        assert password_sentinel not in rendered
+        assert params_sentinel not in rendered
 
 
 # ---------------------------------------------------------------------------

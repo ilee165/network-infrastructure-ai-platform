@@ -147,18 +147,18 @@ lifecycle suites remain the proof for those writes; they are not pre-allowed in
 this guard.
 
 So a **zero-SQL-write guard cannot pass and must not be written.** The exact
-claim is: **every registered READ_ONLY tool, when directly invoked, may write
-only the explicitly permitted operational/audit PostgreSQL tables
-`discovery_runs` and `audit_log`, and may not write any other relational
-table.** This does not prove the absence of Neo4j, Redis, Celery, filesystem,
-cloud, or device side effects. Those dependencies are faked here for
+claim is: **every registered READ_ONLY tool, when directly invoked, may
+INSERT/UPDATE `discovery_runs`, may INSERT `audit_log`, and may not perform any
+other relational operation.** In particular, append-only audit evidence may
+not be updated or deleted. This does not prove the absence of Neo4j, Redis,
+Celery, filesystem, cloud, or device side effects. Those dependencies are faked here for
 hermeticity; device/configuration safety remains covered by the approval-gate
 and transport suites.
 
 - **Runtime write-guard (primary — covers the indirect relational case).** A
   SQLAlchemy `before_execute` event listener bound to the test engine used by
-  the patched application sessionmaker inspects the target table of every
-  INSERT / UPDATE / DELETE and raises unless the table is on the allowlist.
+  the patched application sessionmaker inspects the operation and target table
+  of every INSERT / UPDATE / DELETE and raises unless that pair is allowlisted.
   Drive **every tool in the default agent registry carrying READ_ONLY
   semantics** through it — regardless of how many modules deep the SQL call
   goes.
@@ -172,8 +172,8 @@ and transport suites.
 
   ```
   ALLOWED (write permitted under a READ_ONLY drive) — each entry justified:
-    discovery_runs  operational job row; the READ_ONLY job-launch semantic
-    audit_log       append-only credential-access/tool audit (fail-closed)
+    discovery_runs  INSERT/UPDATE; operational READ_ONLY job-launch lifecycle
+    audit_log       INSERT only; append-only credential-access/tool audit
   DENIED (deny-by-default) — everything else, and these by name:
     change_requests, approvals, devices, device_credentials, users,
     config_snapshots / config_archives / compliance_policies, applications,
@@ -195,9 +195,12 @@ and transport suites.
   STATE_CHANGING ChangeRequest write as erroneous behavior.
 
 - **Static facade check (secondary — fast feedback).** AST test over
-  `framework/read_facade.py`: the entire module contains no `session.add` /
-  `.delete` / `.commit` / `.flush` and no `insert()` / `update()` / `delete()`
-  construct. There are no exemptions. Separate focused tests pin
+  `framework/read_facade.py`: only the exact SQLAlchemy read imports
+  (`Select`, `func`, `select`) are accepted; mutation session methods are
+  rejected; and every `session.execute(...)` argument must be rooted in a
+  recognized `select()` expression. Synthetic textual-DML and aliased-update
+  fixtures prove the guard bites, while an ordinary `dict.update()` proves it
+  does not blacklist unrelated method names. Separate focused tests pin
   `discovery_jobs.py` to `discovery_runs`; credential-audit behavior remains
   covered by the credential service tests plus the runtime table guard.
 
@@ -211,6 +214,12 @@ required.)
 One commit per router; endpoint contracts unchanged (route-gate tests are
 the harness). Services own sessions/writes + audit; routers keep
 validation/response shaping (per the Wave 4 services-vs-engines charter).
+
+The router AST guards make a deliberately narrow claim: no direct
+`app.models*` imports, no direct session mutation/execution, and no `Any`-erased
+boundary annotations. SQLAlchemy session *type* imports are allowed, and an
+API schema may still expose a wire enum that originates in the model layer;
+those facts do not perform ORM work in a router.
 
 | Commit | Router | Session ops | Model |
 |--------|--------|-------------|-------|
@@ -420,12 +429,14 @@ Quality + spec review per task; T1, T1b, and T2c reviews are STRONG-pinned.
     task. Contract proven to bite.
   - **T1b (no indirect relational-domain write under direct tool invocation):**
     the fixture map exactly matches the registry's READ_ONLY census, and every
-    driven tool writes only `discovery_runs` / `audit_log` under the runtime
-    table guard. Everything else — explicitly including `change_requests` and
-    `devices` — is denied; the synthetic READ_ONLY `Device` insert proves the
-    guard bites. Agent-session/trace persistence remains covered separately.
+    driven tool may INSERT/UPDATE `discovery_runs` and INSERT `audit_log` under
+    the runtime operation/table guard. Everything else — explicitly including
+    audit UPDATE/DELETE, `change_requests`, and `devices` — is denied; the
+    synthetic READ_ONLY writes prove the guard bites. Agent-session/trace
+    persistence remains covered separately.
   - Neither claim substitutes for the other.
-- 3 routers ORM-free (services own the writes) with route-gate tests green.
+- 3 routers have no direct model imports, session operations, or `Any`-erased
+  boundary types (services own the writes), with route-gate tests green.
 - **FE — enumerated duplicates gone** (all 6 modal shells total, including the
   drifted ConfirmDialog pair; VirtualizationPage `EmptyState` shadow,
   5 `PILL_BASE` badges, 4 `errorMessage()` copies). `DataTable` primitive

@@ -6,6 +6,8 @@ import ast
 import re
 from collections.abc import AsyncIterator, Iterator
 from contextlib import nullcontext
+from dataclasses import FrozenInstanceError, is_dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -23,6 +25,7 @@ from sqlalchemy.sql.elements import TextClause
 
 import app.db as db
 from app.agents import build_default_registry
+from app.agents.framework import read_facade
 from app.agents.framework.credential_access import acquire_troubleshooting_ssh
 from app.agents.framework.discovery_jobs import create_discovery_run, mark_discovery_run_failed
 from app.agents.framework.tools import ToolClassification, netops_tool
@@ -37,6 +40,7 @@ from app.models import (
     NormalizedNeighborRow,
     NormalizedRouteRow,
 )
+from app.schemas.normalized import NeighborProtocol, RouteProtocol
 from app.services import audit
 from tests.agents.conftest import scripted_model
 
@@ -45,13 +49,15 @@ _UNKNOWN_DEVICE_ID = "11111111-1111-1111-1111-111111111111"
 
 # READ_ONLY direct invocation may create operational discovery jobs and append
 # credential/tool audit evidence. Neither mutates relational domain state.
-_ALLOWED_WRITES = {
-    "discovery_runs": "operational job row; READ_ONLY job-launch semantic",
-    "audit_log": "append-only credential-access/tool audit; fail-closed evidence",
+_ALLOWED_WRITES: dict[str, frozenset[str]] = {
+    # Operational job row; READ_ONLY job-launch semantic (create + failure update).
+    "discovery_runs": frozenset({"insert", "update"}),
+    # Append-only credential-access/tool audit; fail-closed evidence.
+    "audit_log": frozenset({"insert"}),
 }
 
 _TEXTUAL_DML = re.compile(
-    r"\b(?:insert\s+into|update|delete\s+from)\s+"
+    r"\b(?P<operation>insert\s+into|update|delete\s+from)\s+"
     r"(?P<table>(?:[A-Za-z_][\w$]*\.)?"
     r'(?:[A-Za-z_][\w$]*|"[^"]+"|`[^`]+`|\[[^\]]+\]))',
     re.IGNORECASE,
@@ -101,8 +107,8 @@ def _sql_code_only(statement: str) -> str:
     return "".join(output)
 
 
-def _textual_dml_targets(statement: str) -> list[str]:
-    """Return every textual DML target, failing closed on unparsed DML."""
+def _textual_dml_targets(statement: str) -> list[tuple[str, str]]:
+    """Return every textual ``(operation, table)`` pair, failing closed."""
     sql = _sql_code_only(statement)
     matches = list(_TEXTUAL_DML.finditer(sql))
     keyword_starts = [match.start() for match in _DML_KEYWORD.finditer(sql)]
@@ -110,11 +116,16 @@ def _textual_dml_targets(statement: str) -> list[str]:
         raise ReadOnlyWriteViolation(
             "READ_ONLY direct invocation attempted unparseable textual DML"
         )
-    targets: list[str] = []
+    targets: list[tuple[str, str]] = []
     for match in matches:
+        operation = match.group("operation").split()[0].lower()
         identifier = match.group("table").rsplit(".", 1)[-1]
-        targets.append(identifier.strip('"`[]'))
+        targets.append((operation, identifier.strip('"`[]')))
     return targets
+
+
+def _write_is_allowed(operation: str, table_name: str) -> bool:
+    return operation in _ALLOWED_WRITES.get(table_name, frozenset())
 
 
 class ReadOnlyWriteViolation(AssertionError):
@@ -182,6 +193,87 @@ def maker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
+@pytest.mark.asyncio
+async def test_read_facade_returns_frozen_plain_snapshots(
+    maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ORM state never escapes the facade's active database session."""
+    device_id = UUID(_UNKNOWN_DEVICE_ID)
+    collected_at = datetime.now(UTC)
+    async with maker() as session:
+        session.add(
+            NormalizedNeighborRow(
+                device_id=device_id,
+                raw_artifact_id=uuid4(),
+                collected_at=collected_at,
+                source_vendor="cisco_ios",
+                protocol=NeighborProtocol.LLDP,
+                local_interface="GigabitEthernet1",
+                neighbor_name="edge-2",
+                neighbor_interface="GigabitEthernet2",
+                neighbor_capabilities=["router"],
+            )
+        )
+        session.add(
+            NormalizedRouteRow(
+                device_id=device_id,
+                raw_artifact_id=uuid4(),
+                collected_at=collected_at,
+                source_vendor="cisco_ios",
+                prefix="203.0.113.0/24",
+                protocol=RouteProtocol.BGP,
+                next_hop="192.0.2.2",
+                interface="GigabitEthernet1",
+                vrf="",
+                distance=20,
+                metric=0,
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(db, "get_sessionmaker", lambda: maker)
+    total, devices = await read_facade.list_devices(
+        status_filter=None,
+        vendor_id=None,
+        limit=50,
+        offset=0,
+    )
+    device = await read_facade.get_device(device_id)
+    neighbor_device, neighbors = await read_facade.list_neighbors(device_id)
+    routes = await read_facade.list_routes(device_id, prefix=None)
+
+    assert total == 1
+    snapshots = [*devices, device, neighbor_device, *neighbors, *routes]
+    for snapshot in snapshots:
+        assert snapshot is not None
+        assert is_dataclass(snapshot)
+        assert not hasattr(snapshot, "_sa_instance_state")
+        with pytest.raises(FrozenInstanceError):
+            snapshot.id = uuid4()
+
+
+@pytest.mark.asyncio
+async def test_read_facade_raises_typed_invalid_status(
+    maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid filters use a typed error channel, not a union return shape."""
+    monkeypatch.setattr(db, "get_sessionmaker", lambda: maker)
+
+    with pytest.raises(ValueError) as error:
+        await read_facade.list_devices(
+            status_filter="not-a-device-status",
+            vendor_id=None,
+            limit=50,
+            offset=0,
+        )
+
+    assert error.value.args == (
+        "unknown status 'not-a-device-status'; valid values: ['new', 'reachable', 'unreachable']",
+    )
+
+
 @pytest.fixture()
 def guarded_engine(engine: AsyncEngine) -> Iterator[AsyncEngine]:
     """Deny every relational mutation outside the two justified tables."""
@@ -194,23 +286,34 @@ def guarded_engine(engine: AsyncEngine) -> Iterator[AsyncEngine]:
         _execution_options: Any,
     ) -> None:
         table_name: str | None = None
-        if isinstance(clauseelement, (Insert, Update, Delete)):
+        operation: str | None = None
+        if isinstance(clauseelement, Insert):
+            operation = "insert"
+            table_name = cast(Table, clauseelement.table).name
+        elif isinstance(clauseelement, Update):
+            operation = "update"
+            table_name = cast(Table, clauseelement.table).name
+        elif isinstance(clauseelement, Delete):
+            operation = "delete"
             table_name = cast(Table, clauseelement.table).name
         elif isinstance(clauseelement, TextClause):
-            table_names = _textual_dml_targets(clauseelement.text)
-            for textual_table_name in table_names:
-                if textual_table_name not in _ALLOWED_WRITES:
+            targets = _textual_dml_targets(clauseelement.text)
+            for textual_operation, textual_table_name in targets:
+                if not _write_is_allowed(textual_operation, textual_table_name):
+                    allowed_operations = _ALLOWED_WRITES.get(textual_table_name, frozenset())
                     raise ReadOnlyWriteViolation(
-                        "READ_ONLY direct invocation attempted a write to "
-                        f"{textual_table_name!r}; allowed tables: {sorted(_ALLOWED_WRITES)}"
+                        "READ_ONLY direct invocation attempted "
+                        f"{textual_operation.upper()} on {textual_table_name!r}; "
+                        f"allowed operations: {allowed_operations}"
                     )
             return
         else:
             return
-        if table_name not in _ALLOWED_WRITES:
+        assert operation is not None
+        if not _write_is_allowed(operation, table_name):
             raise ReadOnlyWriteViolation(
-                f"READ_ONLY direct invocation attempted a write to {table_name!r}; "
-                f"allowed tables: {sorted(_ALLOWED_WRITES)}"
+                f"READ_ONLY direct invocation attempted {operation.upper()} on {table_name!r}; "
+                f"allowed operations: {_ALLOWED_WRITES.get(table_name, frozenset())}"
             )
 
     event.listen(engine.sync_engine, "before_execute", reject_forbidden_write)
@@ -248,6 +351,32 @@ async def test_guard_bites_on_textual_device_update(
     async with maker() as session:
         with pytest.raises(ReadOnlyWriteViolation, match="devices"):
             await session.execute(text("UPDATE devices SET hostname = 'forbidden'"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE audit_log SET action = 'tampered' WHERE id IS NULL",
+        "DELETE FROM audit_log WHERE id IS NULL",
+    ],
+)
+async def test_guard_bites_on_non_append_audit_write_from_read_only_tool(
+    guarded_engine: AsyncEngine,
+    maker: async_sessionmaker[AsyncSession],
+    statement: str,
+) -> None:
+    """READ_ONLY tools may append audit evidence, never alter or erase it."""
+
+    @netops_tool(classification=ToolClassification.READ_ONLY)
+    async def synthetic_audit_tamper() -> str:
+        """Attempt to alter append-only audit evidence."""
+        async with maker() as session:
+            await session.execute(text(statement))
+        return "unreachable"
+
+    with pytest.raises(ReadOnlyWriteViolation, match="audit_log"):
+        await synthetic_audit_tamper.ainvoke({})
 
 
 @pytest.mark.asyncio
@@ -302,7 +431,7 @@ async def test_guard_checks_every_data_modifying_cte_target(
     """An allowed first CTE mutation cannot conceal a forbidden later one."""
     statement = """
         WITH removed AS (
-            DELETE FROM audit_log WHERE id IS NULL RETURNING id
+            INSERT INTO audit_log (id) VALUES (NULL) RETURNING id
         ), changed AS (
             UPDATE devices SET hostname = 'forbidden' RETURNING id
         )
@@ -313,7 +442,7 @@ async def test_guard_checks_every_data_modifying_cte_target(
             await session.execute(text(statement))
 
 
-def test_textual_parser_accepts_multiple_allowed_dml_targets() -> None:
+def test_textual_parser_returns_every_operation_and_target() -> None:
     """Every mutation in a multi-DML statement is returned for validation."""
     statement = """
         WITH removed AS (
@@ -323,7 +452,10 @@ def test_textual_parser_accepts_multiple_allowed_dml_targets() -> None:
         )
         SELECT id FROM appended
     """
-    assert _textual_dml_targets(statement) == ["audit_log", "audit_log"]
+    assert _textual_dml_targets(statement) == [
+        ("delete", "audit_log"),
+        ("insert", "audit_log"),
+    ]
 
 
 def test_textual_parser_ignores_dml_words_in_comments_and_strings() -> None:
@@ -614,28 +746,107 @@ async def test_discovery_job_lifecycle_writes_only_discovery_runs(
         assert row.error == "fixture broker refusal"
 
 
-def _call_name(node: ast.Call) -> str | None:
-    function = node.func
-    if isinstance(function, ast.Name):
-        return function.id
-    if isinstance(function, ast.Attribute):
-        return function.attr
-    return None
+_READ_FACADE_SQLALCHEMY_IMPORTS = frozenset({"Select", "func", "select"})
+
+
+def _expression_root_name(node: ast.expr) -> str | None:
+    """Return the left-most name in a call/attribute expression."""
+    current = node
+    while isinstance(current, (ast.Call, ast.Attribute, ast.Await)):
+        if isinstance(current, ast.Call):
+            current = current.func
+        elif isinstance(current, ast.Attribute):
+            current = current.value
+        else:
+            current = current.value
+    return current.id if isinstance(current, ast.Name) else None
+
+
+def _read_facade_ast_offenders(source: str) -> list[tuple[int, str]]:
+    """Return imports/calls that can make the facade execute non-SELECT SQL."""
+    tree = ast.parse(source)
+    offenders: list[tuple[int, str]] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("sqlalchemy"):
+                    offenders.append((node.lineno, f"import {alias.name}"))
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("sqlalchemy"):
+            if node.module != "sqlalchemy":
+                offenders.append((node.lineno, f"from {node.module}"))
+                continue
+            for alias in node.names:
+                if alias.name not in _READ_FACADE_SQLALCHEMY_IMPORTS or alias.asname is not None:
+                    offenders.append((node.lineno, f"sqlalchemy import {alias.name}"))
+
+    select_bindings: set[str] = set()
+    assignments = [node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))]
+    changed = True
+    while changed:
+        changed = False
+        for assignment in assignments:
+            value = assignment.value
+            if value is None:
+                continue
+            root = _expression_root_name(value)
+            if root not in {"select", *select_bindings}:
+                continue
+            targets = (
+                assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
+            )
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in select_bindings:
+                    select_bindings.add(target.id)
+                    changed = True
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if isinstance(node.func.value, ast.Name) and node.func.value.id == "session":
+            if node.func.attr in {"add", "commit", "delete", "flush", "rollback"}:
+                offenders.append((node.lineno, f"session.{node.func.attr}"))
+            elif node.func.attr == "execute":
+                argument_root = _expression_root_name(node.args[0]) if node.args else None
+                if argument_root not in {"select", *select_bindings}:
+                    offenders.append((node.lineno, f"execute({argument_root})"))
+    return sorted(offenders)
 
 
 def test_read_facade_ast_contains_no_write_constructs() -> None:
-    """Fast secondary pin: the read facade has no ORM/Core mutation syntax."""
+    """Fast secondary pin: only known SELECT expressions reach execute()."""
     path = _ROOT / "app" / "agents" / "framework" / "read_facade.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    forbidden = {"add", "delete", "commit", "flush", "insert", "update"}
-    offenders = [
-        (node.lineno, name)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and (name := _call_name(node)) is not None
-        and name in forbidden
-    ]
-    assert offenders == []
+    assert _read_facade_ast_offenders(path.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+from sqlalchemy import text
+async def bypass(session):
+    await session.execute(text("UPDATE devices SET hostname = 'x'"))
+""",
+        """
+from sqlalchemy import update as upd
+async def bypass(session, Device):
+    await session.execute(upd(Device).values(hostname="x"))
+""",
+    ],
+)
+def test_read_facade_ast_guard_bites_on_write_bypasses(source: str) -> None:
+    """Textual DML and aliased Core writes both trip the static pin."""
+    assert _read_facade_ast_offenders(source)
+
+
+def test_read_facade_ast_guard_ignores_unrelated_container_updates() -> None:
+    """The pin targets SQL/session writes, not ordinary dict mutation."""
+    source = """
+async def read_only():
+    values = {}
+    values.update({"status": "reachable"})
+"""
+    assert _read_facade_ast_offenders(source) == []
 
 
 def test_discovery_jobs_ast_writes_only_discovery_runs() -> None:

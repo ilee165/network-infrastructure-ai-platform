@@ -9,14 +9,38 @@ and reset responses) — never logged and never written to an audit ``detail``.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Protocol
 
 from fastapi import Depends
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require_role
 from app.api.v1.auth._shared import router
+from app.core.actors import AuthenticatedActor
 from app.services.users import UserService, UserUpdate
+
+
+class _RoleSummarySource(Protocol):
+    @property
+    def name(self) -> str: ...
+
+
+class _UserSummarySource(AuthenticatedActor, Protocol):
+    @property
+    def email(self) -> str | None: ...
+
+    @property
+    def display_name(self) -> str | None: ...
+
+    @property
+    def role(self) -> _RoleSummarySource: ...
+
+    @property
+    def is_active(self) -> bool: ...
+
+    @property
+    def must_change_password(self) -> bool: ...
 
 
 class CreateUserRequest(BaseModel):
@@ -56,7 +80,7 @@ class UserSummary(BaseModel):
     must_change_password: bool
 
     @classmethod
-    def from_user(cls, user: Any) -> UserSummary:
+    def from_user(cls, user: _UserSummarySource) -> UserSummary:
         """Project a :class:`User` ORM row, dropping every secret field."""
         return cls(
             id=user.id,
@@ -87,10 +111,10 @@ class TempPasswordResponse(BaseModel):
     temp_password: str
 
 
-Admin = Annotated[Any, Depends(require_role("admin"))]
+Admin = Annotated[AuthenticatedActor, Depends(require_role("admin"))]
 
 
-def get_user_service(session: Annotated[Any, Depends(get_db)]) -> UserService:
+def get_user_service(session: Annotated[AsyncSession, Depends(get_db)]) -> UserService:
     """Bind admin-user persistence to the request's overridable session."""
     return UserService(session)
 

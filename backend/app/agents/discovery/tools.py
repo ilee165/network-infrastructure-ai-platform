@@ -29,6 +29,9 @@ from app.agents.framework.discovery_jobs import (
     mark_discovery_run_failed,
 )
 from app.agents.framework.read_facade import (
+    UnknownDeviceStatus,
+)
+from app.agents.framework.read_facade import (
     get_device as read_device,
 )
 from app.agents.framework.read_facade import (
@@ -156,15 +159,15 @@ async def list_devices(
     ``items`` list where each entry contains id, hostname, mgmt_ip,
     vendor_id, status, and last_discovered_at.
     """
-    result = await read_devices(
-        status_filter=status_filter,
-        vendor_id=vendor_id,
-        limit=limit,
-        offset=offset,
-    )
-    if isinstance(result, list):
-        return json.dumps({"error": f"unknown status {status_filter!r}; valid values: {result}"})
-    total, rows = result
+    try:
+        total, rows = await read_devices(
+            status_filter=status_filter,
+            vendor_id=vendor_id,
+            limit=limit,
+            offset=offset,
+        )
+    except UnknownDeviceStatus as exc:
+        return json.dumps({"error": str(exc)})
 
     items = [
         {
@@ -172,7 +175,7 @@ async def list_devices(
             "hostname": d.hostname,
             "mgmt_ip": d.mgmt_ip,
             "vendor_id": d.vendor_id,
-            "status": d.status.value,
+            "status": d.status,
             "last_discovered_at": (
                 d.last_discovered_at.isoformat() if d.last_discovered_at else None
             ),
@@ -216,7 +219,7 @@ async def get_device(
             "model": device.model,
             "os_version": device.os_version,
             "serial": device.serial,
-            "status": device.status.value,
+            "status": device.status,
             "site": device.site,
             "last_discovered_at": (
                 device.last_discovered_at.isoformat() if device.last_discovered_at else None
@@ -257,7 +260,7 @@ async def query_neighbors(
 
     neighbors = [
         {
-            "protocol": row.protocol.value,
+            "protocol": row.protocol,
             "local_interface": row.local_interface,
             "neighbor_name": row.neighbor_name,
             "neighbor_interface": row.neighbor_interface or None,

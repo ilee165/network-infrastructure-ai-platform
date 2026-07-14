@@ -19,17 +19,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import AuditLog, NormalizedInterfaceRow, NormalizedNeighborRow
 
 
-class _PostgresDiagnostic:
+class _AsyncpgUniqueViolation(Exception):
     def __init__(self, constraint_name: str) -> None:
         self.constraint_name = constraint_name
 
 
-class _PostgresUniqueViolation(Exception):
-    pgcode = "23505"
+class _AsyncpgAdapterError(Exception):
+    sqlstate = "23505"
 
     def __init__(self, constraint_name: str) -> None:
-        super().__init__(f'duplicate key value violates unique constraint "{constraint_name}"')
-        self.diag = _PostgresDiagnostic(constraint_name)
+        # Keep the adapter message deliberately generic: these tests must prove
+        # the structured driver-exception branch, not a message substring fallback.
+        super().__init__("asyncpg integrity failure")
+        self.__cause__ = _AsyncpgUniqueViolation(constraint_name)
 
 
 def _payload(**overrides: Any) -> dict[str, Any]:
@@ -385,7 +387,7 @@ class TestDeviceUpdate:
             side_effect=IntegrityError(
                 "UPDATE devices SET mgmt_ip=%s WHERE devices.id=%s",
                 ("192.0.2.2", str(device.id)),
-                _PostgresUniqueViolation("uq_devices_mgmt_ip"),
+                _AsyncpgAdapterError("uq_devices_mgmt_ip"),
             )
         )
         session.rollback = AsyncMock()
@@ -433,7 +435,7 @@ class TestDeviceUpdate:
             side_effect=IntegrityError(
                 "UPDATE devices SET hostname=%s WHERE devices.id=%s",
                 (body.hostname, str(device.id)),
-                _PostgresUniqueViolation("uq_devices_mgmt_ip"),
+                _AsyncpgAdapterError("uq_devices_mgmt_ip"),
             )
         )
         session.rollback = AsyncMock()
@@ -446,6 +448,20 @@ class TestDeviceUpdate:
         with pytest.raises(ConflictError, match="192.0.2.1"):
             await service.update(device.id, body.model_dump(exclude_unset=True), user)
         session.rollback.assert_awaited()
+
+    def test_other_asyncpg_unique_constraint_is_not_mapped_to_mgmt_ip(self) -> None:
+        """SQLSTATE 23505 is insufficient without the management-IP constraint."""
+        from sqlalchemy.exc import IntegrityError
+
+        from app.services.devices import _is_mgmt_ip_unique_violation
+
+        error = IntegrityError(
+            "UPDATE devices SET hostname=%s",
+            ("duplicate",),
+            _AsyncpgAdapterError("uq_devices_hostname"),
+        )
+
+        assert _is_mgmt_ip_unique_violation(error) is False
 
     async def test_create_fk_integrity_error_is_not_mapped_to_mgmt_ip_409(
         self, monkeypatch: pytest.MonkeyPatch

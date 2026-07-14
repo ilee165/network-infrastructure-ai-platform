@@ -107,7 +107,7 @@ async def get_device_routes(
     routes = [
         {
             "prefix": row.prefix,
-            "protocol": row.protocol.value,
+            "protocol": row.protocol,
             "next_hop": row.next_hop or None,
             "interface": row.interface or None,
             "vrf": row.vrf or None,

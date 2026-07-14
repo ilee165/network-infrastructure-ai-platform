@@ -10,11 +10,13 @@ unknown ids as 404 problem details.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Any, Final
+from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, Query, Response
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require_role
+from app.core.actors import AuthenticatedActor
 from app.schemas.devices import (
     DeviceCreate,
     DeviceInterfaceRead,
@@ -28,15 +30,15 @@ from app.services.devices import DeviceService
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
-Viewer = Annotated[Any, Depends(require_role("viewer"))]
-Engineer = Annotated[Any, Depends(require_role("engineer"))]
+Viewer = Annotated[AuthenticatedActor, Depends(require_role("viewer"))]
+Engineer = Annotated[AuthenticatedActor, Depends(require_role("engineer"))]
 
 #: PATCH fields that may not be nulled — a JSON ``null`` for these means
 #: "leave unchanged", matching the NOT NULL columns they map onto.
 _NON_NULLABLE_FIELDS: Final = frozenset({"hostname", "mgmt_ip", "status"})
 
 
-def get_device_service(session: Annotated[Any, Depends(get_db)]) -> DeviceService:
+def get_device_service(session: Annotated[AsyncSession, Depends(get_db)]) -> DeviceService:
     """Bind the service to the request's overridable persistence lifecycle."""
     return DeviceService(session)
 

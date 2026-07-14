@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.actors import AuthenticatedActor
 from app.core.errors import ConflictError, NotFoundError
 from app.models import (
     Device,
@@ -17,10 +18,10 @@ from app.models import (
     DeviceStatus,
     NormalizedInterfaceRow,
     NormalizedNeighborRow,
-    User,
 )
 from app.schemas.devices import DeviceCreate
 from app.services import audit
+from app.services.integrity import integrity_sqlstate, unique_constraint_name
 
 _TARGET_TYPE: Final = "device"
 
@@ -31,7 +32,7 @@ class DevicePage:
     total: int
 
 
-def _actor(user: User) -> str:
+def _actor(user: AuthenticatedActor) -> str:
     return f"user:{user.username}"
 
 
@@ -41,19 +42,14 @@ def _is_mgmt_ip_unique_violation(exc: IntegrityError) -> bool:
     if orig is None:
         return False
 
-    diag = getattr(orig, "diag", None)
-    constraint_name = getattr(diag, "constraint_name", None)
-    sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
-    if sqlstate == "23505" and constraint_name == "uq_devices_mgmt_ip":
-        return True
+    sqlstate = integrity_sqlstate(exc)
+    if sqlstate is not None:
+        return sqlstate == "23505" and unique_constraint_name(exc) == "uq_devices_mgmt_ip"
 
     # SQLite exposes neither SQLSTATE nor structured constraint metadata.
     # Its driver message identifies the violated table/column directly.
     message = str(orig).lower()
-    return (
-        "unique constraint failed: devices.mgmt_ip" in message
-        or 'unique constraint "uq_devices_mgmt_ip"' in message
-    )
+    return "unique constraint failed: devices.mgmt_ip" in message
 
 
 class DeviceService:
@@ -142,7 +138,7 @@ class DeviceService:
             .all()
         )
 
-    async def create(self, body: DeviceCreate, user: User) -> Device:
+    async def create(self, body: DeviceCreate, user: AuthenticatedActor) -> Device:
         await self._ensure_mgmt_ip_free(body.mgmt_ip)
         if body.credential_id is not None:
             await self._ensure_credential_exists(body.credential_id)
@@ -166,7 +162,12 @@ class DeviceService:
         await self._session.commit()
         return row
 
-    async def update(self, device_id: uuid.UUID, updates: dict[str, Any], user: User) -> Device:
+    async def update(
+        self,
+        device_id: uuid.UUID,
+        updates: dict[str, Any],
+        user: AuthenticatedActor,
+    ) -> Device:
         row = await self._get(device_id)
         if "mgmt_ip" in updates and updates["mgmt_ip"] != row.mgmt_ip:
             await self._ensure_mgmt_ip_free(updates["mgmt_ip"], exclude_id=row.id)
@@ -194,7 +195,7 @@ class DeviceService:
         await self._session.commit()
         return row
 
-    async def delete(self, device_id: uuid.UUID, user: User) -> None:
+    async def delete(self, device_id: uuid.UUID, user: AuthenticatedActor) -> None:
         row = await self._get(device_id)
         detail = {"hostname": row.hostname, "mgmt_ip": row.mgmt_ip}
         await self._session.delete(row)

@@ -17,6 +17,7 @@ from app.core.security import create_access_token
 from app.models import AuditLog, Device, Role, User
 from app.services import audit
 from app.services.devices import DeviceService
+from app.services.integrity import unique_constraint_name
 
 pytestmark = pytest.mark.integration
 
@@ -124,6 +125,7 @@ async def test_create_duplicate_mgmt_ip_real_asyncpg_violation_is_409(
     assert driver_error is not None
     assert type(driver_error).__module__.startswith("asyncpg")
     assert getattr(driver_error, "constraint_name", None) == "uq_devices_mgmt_ip"
+    assert unique_constraint_name(integrity_error) == "uq_devices_mgmt_ip"
 
     pg_session.expire_all()
     devices = list((await pg_session.scalars(select(Device))).all())

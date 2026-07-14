@@ -80,11 +80,33 @@ any future image stage that relies on periodic `apk`/`apt` upgrade + GHA
 layer cache).
 
 **Evidence:** PR #125 docker fail (c-ares 1.34.6-r0); fix commit `cf54ac5`
-(cache-bust `2026-07-10`).
+(cache-bust `2026-07-10`). PR #163 repeated the same cache mechanism for
+curl/libcurl CVE-2026-5773 and CVE-2026-6276 (8.19.0-r0 → 8.20.0-r0), requiring
+the next cache-bust rather than an ignore.
 
 ---
 
 ## Backend / async / review hygiene
+
+### L-PROOF-1 — A regression test must prove the claimed mechanism, not only the outcome
+
+**Bit us:** PR #163's device uniqueness fake had a psycopg-shaped
+`diag.constraint_name`, while production uses asyncpg's adapter/cause chain.
+The expected 409 still passed because a message-substring fallback handled the
+fake, so the test never exercised the structured branch it claimed to cover.
+The same review found table-only write allowlisting that permitted audit
+UPDATE/DELETE and an import-string router guard whose `Any` annotations erased
+the boundary types.
+
+**Rule:** Match production exception/driver shape (and retain a real-driver
+integration assertion where practical). For every safety or architecture
+guard, add a negative control for the closest bypass and assert the exact
+operation/branch being protected. Name and document the guarantee narrowly;
+do not infer semantic isolation from imports alone.
+
+**Hits next:** Integrity-error mappers, authorization/write guards, AST/import
+architecture tests, and any fake intended to certify a production-specific
+branch.
 
 ### L-ASYNC-1 — After `session.rollback()`, never touch expired ORM attributes
 

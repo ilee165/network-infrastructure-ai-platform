@@ -33,6 +33,19 @@ from tests.api.conftest import TEST_PASSWORD
 USERS_URL = "/api/v1/auth/users"
 
 
+class _AsyncpgUniqueViolation(Exception):
+    def __init__(self, constraint_name: str) -> None:
+        self.constraint_name = constraint_name
+
+
+class _AsyncpgAdapterError(Exception):
+    sqlstate = "23505"
+
+    def __init__(self, constraint_name: str) -> None:
+        super().__init__("asyncpg integrity failure")
+        self.__cause__ = _AsyncpgUniqueViolation(constraint_name)
+
+
 def _admin(auth_headers: Callable[[str], dict[str, str]]) -> dict[str, str]:
     return auth_headers("admin")
 
@@ -256,6 +269,79 @@ async def test_create_user_duplicate_email_is_409(
         json={"username": "freshname", "role": "viewer", "email": "dup@example.com"},
     )
     assert resp.status_code == 409
+
+
+@pytest.mark.parametrize(
+    ("constraint_name", "email", "message"),
+    [
+        ("uq_users_username", None, "username"),
+        ("uq_users_email", "race@example.com", "email"),
+    ],
+)
+async def test_create_user_unique_race_maps_asyncpg_constraint_to_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    constraint_name: str,
+    email: str | None,
+    message: str,
+) -> None:
+    """A race past the pre-check must preserve the endpoint's 409 contract."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.core.errors import ConflictError
+    from app.services.users import UserService
+
+    role = MagicMock()
+    role.name = "viewer"
+    role_result = MagicMock()
+    role_result.scalar_one_or_none.return_value = role
+    no_clash = MagicMock()
+    no_clash.scalar_one_or_none.return_value = None
+
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.execute = AsyncMock(
+        side_effect=[role_result, no_clash, *([no_clash] if email is not None else [])]
+    )
+    session.flush = AsyncMock(
+        side_effect=IntegrityError(
+            "INSERT INTO users (...) VALUES (...)",
+            (),
+            _AsyncpgAdapterError(constraint_name),
+        )
+    )
+    session.rollback = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.users.hash_password_async", AsyncMock(return_value="hashed-password")
+    )
+
+    with pytest.raises(ConflictError, match=message):
+        await UserService(session).create(
+            username="racing-user",
+            role_name="viewer",
+            email=email,
+            display_name=None,
+            temp_password="temporary-password",
+            actor_username="admin_user",
+        )
+
+    session.rollback.assert_awaited_once()
+
+
+def test_unrelated_asyncpg_unique_constraint_is_not_mapped_to_user_conflict() -> None:
+    """An unrelated 23505 must not be mislabeled as username/email conflict."""
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services.users import _unique_user_conflict
+
+    error = IntegrityError(
+        "INSERT INTO users (...) VALUES (...)",
+        (),
+        _AsyncpgAdapterError("uq_users_idp_identity"),
+    )
+
+    assert _unique_user_conflict(error) is None
 
 
 async def test_create_user_unknown_role_is_rejected(

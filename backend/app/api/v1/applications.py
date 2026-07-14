@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Protocol
 
 from fastapi import APIRouter, Depends, Header, Query, Response
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require_role
+from app.core.actors import AuthenticatedActor
 from app.core.errors import BadRequestError, PreconditionRequiredError
 from app.schemas.applications import (
     ApplicationCreate,
@@ -22,11 +24,13 @@ from app.services.applications import ApplicationOrigin, ApplicationService
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
-Viewer = Annotated[Any, Depends(require_role("viewer"))]
-Engineer = Annotated[Any, Depends(require_role("engineer"))]
+Viewer = Annotated[AuthenticatedActor, Depends(require_role("viewer"))]
+Engineer = Annotated[AuthenticatedActor, Depends(require_role("engineer"))]
 
 
-def get_application_service(session: Annotated[Any, Depends(get_db)]) -> ApplicationService:
+def get_application_service(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> ApplicationService:
     """Bind the service to the request's overridable persistence lifecycle."""
     return ApplicationService(session)
 
@@ -34,7 +38,12 @@ def get_application_service(session: Annotated[Any, Depends(get_db)]) -> Applica
 Service = Annotated[ApplicationService, Depends(get_application_service)]
 
 
-def _etag(application: Any) -> str:
+class _VersionedApplication(Protocol):
+    @property
+    def updated_at(self) -> datetime: ...
+
+
+def _etag(application: _VersionedApplication) -> str:
     return f'"{application.updated_at.isoformat()}"'
 
 

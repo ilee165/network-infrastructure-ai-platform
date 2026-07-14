@@ -11,13 +11,13 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.actors import AuthenticatedActor
 from app.core.errors import ConflictError, NotFoundError, StalePreconditionError
 from app.models import (
     Application,
     ApplicationDependency,
     Device,
     NormalizedInterfaceRow,
-    User,
 )
 from app.models.applications import ApplicationOrigin, DependencySource, DependencyTargetKind
 from app.models.mixins import utcnow
@@ -39,7 +39,7 @@ class ApplicationPage:
     total: int
 
 
-def _actor(user: User) -> str:
+def _actor(user: AuthenticatedActor) -> str:
     return f"user:{user.username}"
 
 
@@ -140,7 +140,7 @@ class ApplicationService:
             .all()
         )
 
-    async def create(self, body: ApplicationCreate, user: User) -> Application:
+    async def create(self, body: ApplicationCreate, user: AuthenticatedActor) -> Application:
         await self._ensure_name_free(body.name)
         row = Application(
             name=body.name,
@@ -175,7 +175,7 @@ class ApplicationService:
         self,
         row: Application,
         body: ApplicationUpdate,
-        user: User,
+        user: AuthenticatedActor,
         expected: datetime,
     ) -> Application:
         if row.updated_at != expected:
@@ -197,7 +197,7 @@ class ApplicationService:
             await self._session.flush()
         except IntegrityError as exc:
             await self._session.rollback()
-            name = updates.get("name", row.name)
+            name = updates.get("name", before["name"])
             raise ConflictError(f"an application named {name!r} already exists") from exc
         await audit.record(
             self._session,
@@ -224,7 +224,12 @@ class ApplicationService:
             )
         return row
 
-    async def apply_delete(self, row: Application, user: User, expected: datetime | None) -> None:
+    async def apply_delete(
+        self,
+        row: Application,
+        user: AuthenticatedActor,
+        expected: datetime | None,
+    ) -> None:
         """Apply an optional precondition, delete, audit, and commit a prepared row."""
         application_id = row.id
         if expected is not None and row.updated_at != expected:
@@ -253,7 +258,10 @@ class ApplicationService:
         await self._session.commit()
 
     async def create_dependency(
-        self, application_id: uuid.UUID, body: ApplicationDependencyCreate, user: User
+        self,
+        application_id: uuid.UUID,
+        body: ApplicationDependencyCreate,
+        user: AuthenticatedActor,
     ) -> ApplicationDependency:
         application = await self._get(application_id)
         await self._ensure_target_exists(body.target_kind, body.target_ref)
@@ -303,7 +311,10 @@ class ApplicationService:
         return row
 
     async def delete_dependency(
-        self, application_id: uuid.UUID, dependency_id: uuid.UUID, user: User
+        self,
+        application_id: uuid.UUID,
+        dependency_id: uuid.UUID,
+        user: AuthenticatedActor,
     ) -> None:
         row = await self._session.get(ApplicationDependency, dependency_id)
         if row is None or row.application_id != application_id:

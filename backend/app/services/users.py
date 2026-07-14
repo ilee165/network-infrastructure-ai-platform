@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import BadRequestError, ConflictError, NotFoundError
@@ -16,6 +17,7 @@ from app.core.security import hash_password_async
 from app.models import Role, User
 from app.services.audit import service as audit_service
 from app.services.auth_sessions import service as session_service
+from app.services.integrity import integrity_sqlstate, unique_constraint_name
 
 _TEMP_PASSWORD_BYTES: Final = 16
 _EMAIL_TAKEN: Final = "That email is already in use"
@@ -43,6 +45,29 @@ class UserUpdate:
 
 def _generate_temp_password() -> str:
     return secrets.token_urlsafe(_TEMP_PASSWORD_BYTES)
+
+
+def _unique_user_conflict(exc: IntegrityError) -> str | None:
+    """Map a structured username/email uniqueness failure to its API detail."""
+    sqlstate = integrity_sqlstate(exc)
+    if sqlstate is not None:
+        if sqlstate != "23505":
+            return None
+        constraint_name = unique_constraint_name(exc)
+        if constraint_name is None:
+            return None
+        return {
+            "uq_users_username": _USERNAME_TAKEN,
+            "uq_users_email": _EMAIL_TAKEN,
+        }.get(constraint_name)
+
+    orig = exc.orig
+    message = "" if orig is None else str(orig).lower()
+    if "unique constraint failed: users.username" in message:
+        return _USERNAME_TAKEN
+    if "unique constraint failed: users.email" in message:
+        return _EMAIL_TAKEN
+    return None
 
 
 class UserService:
@@ -125,7 +150,14 @@ class UserService:
             must_change_password=True,
         )
         self._session.add(user)
-        await self._session.flush()
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            detail = _unique_user_conflict(exc)
+            if detail is None:
+                raise
+            raise ConflictError(detail) from exc
         await audit_service.record(
             self._session,
             actor=f"user:{actor_username}",

@@ -14,7 +14,7 @@ class SshCredentialMaterial:
     host: str
     username: str
     password: str = field(repr=False)
-    params: dict[str, Any]
+    params: dict[str, Any] = field(repr=False)
 
 
 class CredentialUnavailable(Exception):
@@ -33,7 +33,6 @@ async def acquire_troubleshooting_ssh(
 ) -> SshCredentialMaterial:
     """Decrypt a device-bound SSH credential with an autonomous audit write."""
     import app.db as db
-    from app.core.errors import NetOpsError
     from app.models import CredentialKind, Device, DeviceCredential
     from app.services import credentials
 
@@ -59,18 +58,18 @@ async def acquire_troubleshooting_ssh(
             raise CredentialUnavailable(
                 f"device {device_id} has no usable SSH credential; a live read opens a CLI session"
             )
-        try:
-            secret = await credentials.decrypt(
-                session,
-                key_provider,
-                row,
-                actor=actor,
-                reason=reason,
-                target=device,
-                sessionmaker=credentials.autonomous_sessionmaker(session),
-            )
-        except NetOpsError:
-            raise
+        # Scope refusal / provider unavailable: the fail-closed audit row is already
+        # durable on its own session (autonomous_sessionmaker), so the caller's
+        # session closing without a commit does not lose the evidence.
+        secret = await credentials.decrypt(
+            session,
+            key_provider,
+            row,
+            actor=actor,
+            reason=reason,
+            target=device,
+            sessionmaker=credentials.autonomous_sessionmaker(session),
+        )
         await session.commit()
         return SshCredentialMaterial(
             host=device.mgmt_ip,
