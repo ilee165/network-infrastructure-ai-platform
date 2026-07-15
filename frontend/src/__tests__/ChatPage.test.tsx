@@ -8,9 +8,9 @@
  * stream/REST error states surface.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type { StartSessionResponse } from "../api/agents";
 import { ChatPage } from "../pages/ChatPage";
 import { useAuthStore } from "../stores/auth";
@@ -162,12 +162,9 @@ function mockStartFetch(response: StartSessionResponse = START_RESPONSE) {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <ChatPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 function latestSocket(): MockWebSocket {
@@ -421,13 +418,9 @@ describe("ChatPage — unmount during stream open (M24)", () => {
       return Promise.resolve(new Response("{}", { status: 200 }));
     });
     vi.stubGlobal("fetch", fetchMock);
-
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const { unmount } = render(
-      <QueryClientProvider client={queryClient}>
+const { unmount } = renderWithQueryClient(
         <ChatPage />
-      </QueryClientProvider>,
-    );
+      );
 
     fireEvent.change(screen.getByLabelText("Chat message"), {
       target: { value: "test unmount" },

@@ -13,10 +13,11 @@
  * the M3-15 API already exposes.
  */
 
-import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { getSession, type AgentTraceStep } from "../api/agents";
+import { type AgentTraceStep } from "../api/agents";
 import { PageHeader } from "../components/PageHeader";
+import { ErrorBanner } from "../components/ErrorBanner";
+import { useAgentSession } from "../hooks/useChatQueries";
 
 // ── Tool-audit row ────────────────────────────────────────────────────────────
 
@@ -51,10 +52,7 @@ function ToolEventRow({ event }: { event: ToolEvent }) {
 // ── Results ───────────────────────────────────────────────────────────────────
 
 function ToolAuditResults({ sessionId }: { sessionId: string }) {
-  const { data, error, isPending } = useQuery({
-    queryKey: ["agent-session", sessionId],
-    queryFn: () => getSession(sessionId),
-  });
+  const { data, error, isPending } = useAgentSession(sessionId);
 
   if (isPending) {
     return (
@@ -64,11 +62,7 @@ function ToolAuditResults({ sessionId }: { sessionId: string }) {
     );
   }
   if (error) {
-    return (
-      <div role="alert" className="panel border-status-error/40 px-4 py-3 text-xs text-status-error">
-        Session load failed: {error.message}
-      </div>
-    );
+    return <ErrorBanner error={new Error(`Session load failed: ${error.message}`)} />;
   }
 
   const events: ToolEvent[] = data.traces.flatMap((trace) =>

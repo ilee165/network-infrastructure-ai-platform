@@ -12,9 +12,9 @@
  * this is asserted by the XSS-safety test.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import { ApiError } from "../api/client";
 import type { ChangeRequestListResponse, ChangeRequestRead } from "../api/changes";
 import { useAuthStore } from "../stores/auth";
@@ -23,12 +23,12 @@ import { useUiStore } from "../stores/ui";
 
 // ── Module mock: the changes api-client ─────────────────────────────────────
 
-vi.mock("../api/changes", () => ({
+vi.mock("../api/changes", async () => (await import("../test/test-utils")).mockChangesApi(() => ({
   listChangeRequests: vi.fn(),
   getChangeRequest: vi.fn(),
   approveChangeRequest: vi.fn(),
   rejectChangeRequest: vi.fn(),
-}));
+}))());
 
 import {
   approveChangeRequest,
@@ -98,19 +98,10 @@ const EMPTY_LIST: ChangeRequestListResponse = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function makeQueryClient() {
-  return new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
-}
-
 function renderPage() {
-  const qc = makeQueryClient();
-  return render(
-    <QueryClientProvider client={qc}>
+return renderWithQueryClient(
       <ChangesPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 function problem(status: number, detail: string): ApiError {

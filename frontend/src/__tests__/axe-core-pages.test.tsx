@@ -10,10 +10,10 @@
  * severity.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import { axe } from "vitest-axe";
 import type { AxeResults } from "axe-core";
 import type {
@@ -32,12 +32,12 @@ import type { UserMe } from "../stores/auth";
 import { useAuthStore } from "../stores/auth";
 import { useUiStore } from "../stores/ui";
 
-vi.mock("../api/changes", () => ({
+vi.mock("../api/changes", async () => (await import("../test/test-utils")).mockChangesApi(() => ({
   listChangeRequests: vi.fn(),
   getChangeRequest: vi.fn(),
   approveChangeRequest: vi.fn(),
   rejectChangeRequest: vi.fn(),
-}));
+}))());
 
 import { approveChangeRequest, listChangeRequests } from "../api/changes";
 import type { ChangeRequestListResponse, ChangeRequestRead } from "../api/changes";
@@ -51,10 +51,6 @@ function expectNoSeriousViolations(results: AxeResults): void {
     (violation) => violation.impact === "serious" || violation.impact === "critical",
   );
   expect(serious).toEqual([]);
-}
-
-function makeQueryClient(): QueryClient {
-  return new QueryClient({ defaultOptions: { queries: { retry: false } } });
 }
 
 const ENGINEER: UserMe = {
@@ -181,7 +177,7 @@ afterEach(() => {
 
 describe("axe — core pages (audit UI_UX #5)", () => {
   it("LoginPage has no serious/critical violations", async () => {
-    const { container } = render(
+    const { container } = renderWithQueryClient(
       <MemoryRouter initialEntries={["/login"]}>
         <LoginPage />
       </MemoryRouter>,
@@ -199,11 +195,9 @@ describe("axe — core pages (audit UI_UX #5)", () => {
       user: { ...ENGINEER, must_change_password: true },
     });
 
-    const { container } = render(
-      <MemoryRouter initialEntries={["/change-password"]}>
+    const { container } = renderWithQueryClient(<MemoryRouter initialEntries={["/change-password"]}>
         <ChangePasswordPage />
-      </MemoryRouter>,
-    );
+      </MemoryRouter>);
     await screen.findByTestId("change-password-page");
 
     const results = await axe(container, AXE_OPTIONS);
@@ -231,11 +225,9 @@ describe("axe — core pages (audit UI_UX #5)", () => {
       ),
     );
 
-    const { container } = render(
-      <QueryClientProvider client={makeQueryClient()}>
+    const { container } = renderWithQueryClient(
         <DashboardPage />
-      </QueryClientProvider>,
-    );
+      );
     await screen.findByTestId("dependency-card-postgres");
 
     const results = await axe(container, AXE_OPTIONS);
@@ -258,11 +250,9 @@ describe("axe — core pages (audit UI_UX #5)", () => {
       }),
     );
 
-    const { container } = render(
-      <QueryClientProvider client={makeQueryClient()}>
+    const { container } = renderWithQueryClient(
         <DevicesPage />
-      </QueryClientProvider>,
-    );
+      );
     await screen.findByTestId("devices-empty-state");
 
     const results = await axe(container, AXE_OPTIONS);
@@ -274,11 +264,9 @@ describe("axe — core pages (audit UI_UX #5)", () => {
     const emptyList: ChangeRequestListResponse = { items: [], total: 0, limit: 50, offset: 0 };
     vi.mocked(listChangeRequests).mockResolvedValue(emptyList);
 
-    const { container } = render(
-      <QueryClientProvider client={makeQueryClient()}>
+    const { container } = renderWithQueryClient(
         <ChangesPage />
-      </QueryClientProvider>,
-    );
+      );
     await screen.findByTestId("cr-empty-state");
 
     const results = await axe(container, AXE_OPTIONS);
@@ -315,11 +303,9 @@ describe("axe — core pages (audit UI_UX #5)", () => {
       }),
     );
 
-    const { container } = render(
-      <QueryClientProvider client={makeQueryClient()}>
+    const { container } = renderWithQueryClient(
         <DevicesPage />
-      </QueryClientProvider>,
-    );
+      );
 
     // Populated inventory row (exercises the device-status StatusPill) and
     // populated discovery-runs row (exercises the run-status StatusPill).
@@ -343,11 +329,9 @@ describe("axe — core pages (audit UI_UX #5)", () => {
     // during the axe check.
     vi.mocked(approveChangeRequest).mockReturnValue(new Promise(() => {}));
 
-    const { container } = render(
-      <QueryClientProvider client={makeQueryClient()}>
+    const { container } = renderWithQueryClient(
         <ChangesPage />
-      </QueryClientProvider>,
-    );
+      );
 
     const [pendingCr, executingCr] = LOADED_CR_LIST.items as [
       ChangeRequestRead,

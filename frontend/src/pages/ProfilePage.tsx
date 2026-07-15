@@ -17,29 +17,18 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import type { FormEvent } from "react";
 import {
-  changePassword,
-  getMe,
   listSessions,
   revokeAllSessions,
   revokeSession,
   updateMe,
 } from "../api/auth";
 import type { SessionInfo } from "../api/auth";
-import { ApiError } from "../api/client";
+import { messageFor } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
 import { useAuthStore } from "../stores/auth";
+import { useChangePassword, validatePasswordChange } from "../hooks/useChangePassword";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-
-const MIN_PASSWORD_LENGTH = 8;
-const GENERIC_ERROR = "Something went wrong. Please try again.";
-
-function errorMessage(err: unknown): string {
-  if (err instanceof ApiError) {
-    return err.problem.detail;
-  }
-  return GENERIC_ERROR;
-}
 
 // ── Profile edit form ─────────────────────────────────────────────────────────
 
@@ -60,7 +49,7 @@ function ProfileEditSection() {
       setSaveError(null);
     },
     onError: (err) => {
-      setSaveError(errorMessage(err));
+      setSaveError(messageFor(err));
       setSaveSuccess(false);
     },
   });
@@ -134,8 +123,7 @@ function ChangePasswordSection() {
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const [pending, setPending] = useState(false);
-  const setUser = useAuthStore((state) => state.setUser);
+  const mutation = useChangePassword();
 
   // Import getMe lazily to avoid circular issues
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
@@ -143,30 +131,17 @@ function ChangePasswordSection() {
     setError(null);
     setSuccess(false);
 
-    if (next.length < MIN_PASSWORD_LENGTH) {
-      setError(`New password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
-      return;
-    }
-    if (next !== confirm) {
-      setError("New password and confirmation do not match.");
-      return;
-    }
-
-    setPending(true);
+    const validation = validatePasswordChange(next, confirm);
+    if (validation.next || validation.confirm) { setError(validation.next ?? validation.confirm ?? null); return; }
     try {
-      await changePassword(current, next);
-      // Refetch /me to sync must_change_password flag
-      const user = await getMe();
-      setUser(user);
+      await mutation.mutateAsync({ current, next });
       setCurrent("");
       setNext("");
       setConfirm("");
       setSuccess(true);
     } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setPending(false);
-    }
+      setError(messageFor(err));
+    } finally { /* mutation owns pending state */ }
   }
 
   return (
@@ -215,8 +190,8 @@ function ChangePasswordSection() {
           <p className="text-xs text-status-ok">Password changed successfully.</p>
         )}
 
-        <button type="submit" disabled={pending} className="btn self-start">
-          {pending ? "Changing…" : "Change password"}
+        <button type="submit" disabled={mutation.isPending} className="btn self-start">
+          {mutation.isPending ? "Changing…" : "Change password"}
         </button>
       </form>
     </section>
@@ -316,7 +291,7 @@ function SessionsSection() {
         <p role="status" className="text-xs text-zinc-500">Loading sessions…</p>
       )}
       {error && (
-        <p role="alert" className="text-xs text-status-error">{errorMessage(error)}</p>
+        <p role="alert" className="text-xs text-status-error">{messageFor(error)}</p>
       )}
 
       {sessions && sessions.length > 0 && (

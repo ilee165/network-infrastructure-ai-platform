@@ -5,10 +5,10 @@
  * user + role, a working logout, and an admin-only Users link.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import { Layout } from "../components/Layout";
 import type { UserMe } from "../stores/auth";
 import { useAuthStore } from "../stores/auth";
@@ -17,10 +17,10 @@ const { logoutMock, getLlmProfileMock } = vi.hoisted(() => ({
   logoutMock: vi.fn(),
   getLlmProfileMock: vi.fn(),
 }));
-vi.mock("../api/auth", () => ({
+vi.mock("../api/auth", async () => (await import("../test/test-utils")).mockAuthApi(() => ({
   logout: logoutMock,
   getLlmProfile: getLlmProfileMock,
-}));
+}))());
 
 /** Must stay in sync with NAV_ITEMS in components/Layout.tsx and App.tsx. */
 const NAV_LABELS = ["Dashboard", "Devices", "Topology", "Chat", "Changes", "Audit"] as const;
@@ -56,11 +56,7 @@ function renderLayout(role = "viewer", display_name: string | null = null) {
     accessToken: "tok",
     user: userWithRole(role, display_name),
   });
-  const qc = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
-  return render(
-    <QueryClientProvider client={qc}>
+  return renderWithQueryClient(
       <MemoryRouter initialEntries={["/"]}>
         <Routes>
           <Route element={<Layout />}>
@@ -73,8 +69,7 @@ function renderLayout(role = "viewer", display_name: string | null = null) {
           <Route path="/login" element={<div data-testid="login-page" />} />
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
-  );
+    );
 }
 
 describe("Layout", () => {
@@ -129,14 +124,10 @@ describe("Layout — per-route error boundary", () => {
       accessToken: "tok",
       user: userWithRole("engineer"),
     });
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
-    // Silence React's expected error logging for the intentional throw.
+// Silence React's expected error logging for the intentional throw.
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      render(
-        <QueryClientProvider client={qc}>
+      renderWithQueryClient(
           <MemoryRouter initialEntries={["/"]}>
             <Routes>
               <Route element={<Layout />}>
@@ -144,8 +135,7 @@ describe("Layout — per-route error boundary", () => {
               </Route>
             </Routes>
           </MemoryRouter>
-        </QueryClientProvider>,
-      );
+        );
     } finally {
       errorSpy.mockRestore();
     }

@@ -25,46 +25,27 @@ import {
   type Severity,
 } from "../api/config";
 import { listDevices, type DeviceRead } from "../api/devices";
+import { ErrorBanner, messageFor } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
+import { StatusPill, type StatusPillVariant } from "../components/StatusPill";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const PILL_BASE =
-  "inline-flex items-center rounded border px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider";
-
 // ── Severity badge ────────────────────────────────────────────────────────────
 
-const SEVERITY_STYLES: Record<Severity, string> = {
-  info: "border-accent/40 bg-accent/10 text-accent",
-  warn: "border-status-warn/40 bg-status-warn/10 text-status-warn",
-  violation: "border-status-error/40 bg-status-error/10 text-status-error",
-};
+const SEVERITY_VARIANT: Record<Severity, StatusPillVariant> = { info: "info", warn: "warn", violation: "error" };
 
-const FINDING_STATUS_STYLES: Record<FindingStatus, string> = {
-  pass: "border-status-ok/40 bg-status-ok/10 text-status-ok",
-  violation: "border-status-error/40 bg-status-error/10 text-status-error",
-  skipped: "border-carbon-600 bg-carbon-800 text-zinc-400",
-};
+const FINDING_STATUS_VARIANT: Record<FindingStatus, StatusPillVariant> = { pass: "ok", violation: "error", skipped: "neutral" };
 
 function SeverityBadge({ severity }: { severity: Severity }) {
   return (
-    <span
-      data-testid={`severity-${severity}`}
-      className={`${PILL_BASE} ${SEVERITY_STYLES[severity]}`}
-    >
-      {severity}
-    </span>
+    <StatusPill data-testid={`severity-${severity}`} variant={SEVERITY_VARIANT[severity]}>{severity}</StatusPill>
   );
 }
 
 function FindingStatusBadge({ status }: { status: FindingStatus }) {
   return (
-    <span
-      data-testid={`finding-status-${status}`}
-      className={`${PILL_BASE} ${FINDING_STATUS_STYLES[status]}`}
-    >
-      {status}
-    </span>
+    <StatusPill data-testid={`finding-status-${status}`} variant={FINDING_STATUS_VARIANT[status]}>{status}</StatusPill>
   );
 }
 
@@ -110,9 +91,7 @@ function DeviceSelector({
 function BaselineBadge({ baseline }: { baseline: boolean }) {
   if (!baseline) return null;
   return (
-    <span className="border-accent/40 bg-accent/10 text-accent inline-flex items-center rounded border px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider">
-      baseline
-    </span>
+    <StatusPill variant="info">baseline</StatusPill>
   );
 }
 
@@ -131,12 +110,7 @@ function SnapshotsPanel({ deviceId }: { deviceId: string }) {
   }
   if (error) {
     return (
-      <div
-        role="alert"
-        className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-      >
-        Snapshots load failed: {error.message}
-      </div>
+      <ErrorBanner error={new Error(`Snapshots load failed: ${messageFor(error, { includeProblemTitle: true, exposeErrorMessage: true })}`)} />
     );
   }
 
@@ -246,13 +220,7 @@ function DriftPanel({ deviceId }: { deviceId: string }) {
   }
   if (error) {
     return (
-      <div
-        role="alert"
-        data-testid="drift-error"
-        className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-      >
-        Drift check failed: {error.message}
-      </div>
+      <ErrorBanner error={new Error(`Drift check failed: ${messageFor(error, { includeProblemTitle: true, exposeErrorMessage: true })}`)} data-testid="drift-error" />
     );
   }
 
@@ -407,13 +375,7 @@ function CompliancePanel({ deviceId }: { deviceId: string }) {
   }
   if (error) {
     return (
-      <div
-        role="alert"
-        data-testid="compliance-error"
-        className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-      >
-        Compliance check failed: {error.message}
-      </div>
+      <ErrorBanner error={new Error(`Compliance check failed: ${messageFor(error, { includeProblemTitle: true, exposeErrorMessage: true })}`)} data-testid="compliance-error" />
     );
   }
 

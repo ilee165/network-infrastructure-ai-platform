@@ -130,13 +130,13 @@ export interface TopologyNeighborhoodParams {
  * @returns The projected topology graph as of the latest projection pass.
  * @throws {ApiError} For any non-2xx response (RFC 7807 problem document).
  */
-export function getTopologyGraph(params: TopologyGraphParams = {}): Promise<TopologyGraph> {
+export function getTopologyGraph(params: TopologyGraphParams = {}, signal?: AbortSignal): Promise<TopologyGraph> {
   const qs = new URLSearchParams();
   if (params.site !== undefined) qs.set("site", params.site);
   if (params.vrf !== undefined) qs.set("vrf", params.vrf);
   if (params.layer !== undefined) qs.set("layer", params.layer);
   const query = qs.toString();
-  return apiFetch<TopologyGraph>(`/topology/graph${query ? `?${query}` : ""}`);
+  return apiFetch<TopologyGraph>(`/topology/graph${query ? `?${query}` : ""}`, { signal });
 }
 
 /**
@@ -150,11 +150,12 @@ export function getTopologyGraph(params: TopologyGraphParams = {}): Promise<Topo
  */
 export function getTopologyNeighborhood(
   params: TopologyNeighborhoodParams,
+  signal?: AbortSignal,
 ): Promise<TopologyGraph> {
   const qs = new URLSearchParams({ device: params.device });
   if (params.depth !== undefined) qs.set("depth", String(params.depth));
   if (params.layer !== undefined) qs.set("layer", params.layer);
-  return apiFetch<TopologyGraph>(`/topology/graph/neighborhood?${qs.toString()}`);
+  return apiFetch<TopologyGraph>(`/topology/graph/neighborhood?${qs.toString()}`, { signal });
 }
 
 /**
@@ -165,7 +166,7 @@ export function getTopologyNeighborhood(
  * @returns Added and removed nodes and edges between the two run snapshots.
  * @throws {ApiError} 404 when either run has no snapshot; 422 for invalid UUIDs.
  */
-export function getTopologyDiff(fromRun: string, toRun: string): Promise<TopologyDiffResponse> {
+export function getTopologyDiff(fromRun: string, toRun: string, signal?: AbortSignal): Promise<TopologyDiffResponse> {
   const qs = new URLSearchParams({ from_run: fromRun, to_run: toRun });
-  return apiFetch<TopologyDiffResponse>(`/topology/diff?${qs.toString()}`);
+  return apiFetch<TopologyDiffResponse>(`/topology/diff?${qs.toString()}`, { signal });
 }

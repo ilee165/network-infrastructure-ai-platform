@@ -22,21 +22,15 @@ import {
   type DocumentListResponse,
   type DocumentRead,
 } from "../api/docs";
+import { ErrorBanner, messageFor } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
+import { StatusPill, type StatusPillVariant } from "../components/StatusPill";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const PILL_BASE =
-  "inline-flex items-center rounded border px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider";
-
 // ── Kind badge ────────────────────────────────────────────────────────────────
 
-const KIND_STYLES: Record<DocumentKind, string> = {
-  inventory: "border-accent/40 bg-accent/10 text-accent",
-  diagram: "border-status-ok/40 bg-status-ok/10 text-status-ok",
-  runbook: "border-status-warn/40 bg-status-warn/10 text-status-warn",
-  incident_report: "border-status-error/40 bg-status-error/10 text-status-error",
-};
+const KIND_VARIANT: Record<DocumentKind, StatusPillVariant> = { inventory: "info", diagram: "ok", runbook: "warn", incident_report: "error" };
 
 function KindBadge({
   docId,
@@ -46,12 +40,7 @@ function KindBadge({
   kind: DocumentKind;
 }) {
   return (
-    <span
-      data-testid={`doc-kind-${docId}`}
-      className={`${PILL_BASE} ${KIND_STYLES[kind]}`}
-    >
-      {kind}
-    </span>
+    <StatusPill data-testid={`doc-kind-${docId}`} variant={KIND_VARIANT[kind]}>{kind}</StatusPill>
   );
 }
 
@@ -63,12 +52,7 @@ function FormatBadge({
   format: string;
 }) {
   return (
-    <span
-      data-testid={`doc-format-${docId}`}
-      className={`${PILL_BASE} border-carbon-600 bg-carbon-800 text-zinc-400`}
-    >
-      {format}
-    </span>
+    <StatusPill data-testid={`doc-format-${docId}`} variant="neutral">{format}</StatusPill>
   );
 }
 
@@ -339,23 +323,12 @@ export function DocumentsPage() {
 
         {/* Error */}
         {error && (
-          <div
-            role="alert"
-            className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-          >
-            Documents load failed: {error.message}
-          </div>
+          <ErrorBanner error={new Error(`Documents load failed: ${messageFor(error, { includeProblemTitle: true, exposeErrorMessage: true })}`)} />
         )}
 
         {/* Download error */}
         {downloadError !== null && (
-          <div
-            role="alert"
-            data-testid="docs-download-error"
-            className="panel border-status-error/40 px-4 py-3 text-xs text-status-error"
-          >
-            Download failed: {downloadError}
-          </div>
+          <ErrorBanner error={new Error(`Download failed: ${downloadError}`)} data-testid="docs-download-error" />
         )}
 
         {/* Empty state */}

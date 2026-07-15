@@ -46,7 +46,11 @@ const VARIANT_GLYPH: Record<StatusPillVariant, string> = {
 export function StatusPill({ variant, children, "data-testid": dataTestId }: StatusPillProps) {
   return (
     <span className={`${PILL_BASE} ${VARIANT_STYLES[variant]}`} data-testid={dataTestId}>
-      <span aria-hidden="true">{VARIANT_GLYPH[variant]}</span>
+      <span
+        aria-hidden="true"
+        className="before:content-[attr(data-glyph)]"
+        data-glyph={VARIANT_GLYPH[variant]}
+      />
       {children}
     </span>
   );

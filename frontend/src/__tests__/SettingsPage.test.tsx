@@ -5,10 +5,10 @@
  * ``../stores/theme`` is imported directly to assert store updates.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import { RoleRoute } from "../components/RoleRoute";
 import {
   SettingsAccessSection,
@@ -28,7 +28,7 @@ import { useThemeStore } from "../stores/theme";
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-vi.mock("../api/auth", () => ({
+vi.mock("../api/auth", async () => (await import("../test/test-utils")).mockAuthApi(() => ({
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
   getLlmProfile: vi.fn().mockResolvedValue({ llm_profile: "local" }),
@@ -106,9 +106,9 @@ vi.mock("../api/auth", () => ({
     audit_export_format: null,
     audit_export_configured: false,
   }),
-}));
+}))());
 
-vi.mock("../api/integrations", () => ({
+vi.mock("../api/integrations", async () => (await import("../test/test-utils")).mockIntegrationsApi(() => ({
   listIntegrations: vi.fn().mockResolvedValue({
     vendors: [
       {
@@ -119,9 +119,9 @@ vi.mock("../api/integrations", () => ({
       },
     ],
   }),
-}));
+}))());
 
-vi.mock("../api/credentials", () => ({
+vi.mock("../api/credentials", async () => (await import("../test/test-utils")).mockCredentialsApi(() => ({
   listCredentials: vi.fn().mockResolvedValue({
     items: [],
     total: 0,
@@ -136,7 +136,7 @@ vi.mock("../api/credentials", () => ({
     to_version: "test-v1",
     rows_pending: 0,
   }),
-}));
+}))());
 
 import {
   getOidcStatus,
@@ -195,18 +195,10 @@ const CURRENT_SETTINGS: SystemSettings = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function makeQueryClient() {
-  return new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
-}
-
 /** Render the settings hub as App.tsx wires it. */
 function renderSettings(path: string, user: UserMe) {
   useAuthStore.setState({ status: "authed", accessToken: "tok", user });
-  const qc = makeQueryClient();
-  return render(
-    <QueryClientProvider client={qc}>
+return renderWithQueryClient(
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/settings" element={<SettingsPage />}>
@@ -225,8 +217,7 @@ function renderSettings(path: string, user: UserMe) {
           </Route>
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
-  );
+    );
 }
 
 function resetStore(): void {

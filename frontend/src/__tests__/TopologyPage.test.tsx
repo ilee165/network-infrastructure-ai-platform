@@ -4,9 +4,10 @@
  * and a mocked cytoscape module (jsdom cannot render a canvas).
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { onlineManager } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type { DeviceListResponse, DeviceRead } from "../api/devices";
 import type { RunListResponse } from "../api/discovery";
 import type { TopologyDiffResponse, TopologyGraph } from "../api/topology";
@@ -302,14 +303,9 @@ function topologyCalls(mock: ReturnType<typeof vi.fn>): string[] {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <TopologyPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 beforeEach(() => {
@@ -317,6 +313,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  onlineManager.setOnline(true);
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -400,7 +397,9 @@ describe("TopologyPage — render and elements", () => {
     );
     renderPage();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Failed to fetch/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Topology load failed: Failed to fetch",
+    );
   });
 
   it("requests the canonical topology graph path", async () => {
@@ -843,14 +842,33 @@ const DIFF: TopologyDiffResponse = {
  * diff endpoint each return their own body. Records the requested diff URL so a
  * test can assert the run ids were passed through.
  */
-function routingFetch(diff: TopologyDiffResponse = DIFF) {
+function routingFetch(diff: TopologyDiffResponse = DIFF, failedDiffAttempt?: number) {
+  let diffAttempts = 0;
   return vi.fn((input: RequestInfo | URL): Promise<Response> => {
     const url = String(input);
     let body: unknown = GRAPH;
     if (url.includes("/discovery/runs")) body = RUNS;
     else if (url.includes("/devices")) body = DEVICES;
-    else if (url.includes("/topology/diff")) body = diff;
-    else if (url.includes("/topology/graph")) body = GRAPH;
+    else if (url.includes("/topology/diff")) {
+      diffAttempts += 1;
+      if (diffAttempts === failedDiffAttempt) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              type: "urn:netops:error:service-unavailable",
+              title: "Service Unavailable",
+              status: 503,
+              detail: "Diff retry unavailable.",
+            }),
+            {
+              status: 503,
+              headers: { "Content-Type": "application/problem+json" },
+            },
+          ),
+        );
+      }
+      body = diff;
+    } else if (url.includes("/topology/graph")) body = GRAPH;
     return Promise.resolve(
       new Response(JSON.stringify(body), {
         status: 200,
@@ -899,6 +917,105 @@ describe("TopologyPage — run-to-run diff view", () => {
       expect(diffCall).toBeDefined();
       expect(String(diffCall![0])).toContain(`from_run=${RUN_FROM}`);
       expect(String(diffCall![0])).toContain(`to_run=${RUN_TO}`);
+    });
+  });
+
+  it("refetches and reapplies the diff when Compare repeats the same run pair", async () => {
+    const mock = routingFetch();
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await selectRunsAndCompare();
+    expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(1),
+    );
+
+    fireEvent.click(screen.getByTestId("diff-compare-btn"));
+
+    await waitFor(() =>
+      expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(2),
+    );
+    expect(screen.getByTestId("topology-diff-panel")).toBeInTheDocument();
+  });
+
+  it("refetches and reapplies the same run pair after Clear diff", async () => {
+    const mock = routingFetch();
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await selectRunsAndCompare();
+    expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("diff-clear-btn"));
+    await waitFor(() => expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("diff-compare-btn"));
+
+    await waitFor(() =>
+      expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(2),
+    );
+    expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+  });
+
+  it("does not reapply a cleared diff when connectivity returns", async () => {
+    const mock = routingFetch();
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await selectRunsAndCompare();
+    expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("diff-clear-btn"));
+    await waitFor(() => expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument());
+
+    await act(async () => {
+      onlineManager.setOnline(false);
+      onlineManager.setOnline(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(1);
+    expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument();
+  });
+
+  it("does not retry a deterministic diff failure", async () => {
+    const mock = routingFetch(DIFF, 1);
+    vi.stubGlobal("fetch", mock);
+    renderWithQueryClient(<TopologyPage />, {
+      queryClientConfig: {
+        defaultOptions: {
+          queries: { retry: 1, retryDelay: 0 },
+        },
+      },
+    });
+
+    await selectRunsAndCompare();
+
+    expect(await screen.findByTestId("diff-error")).toHaveTextContent(
+      "Diff retry unavailable",
+    );
+    expect(mock.mock.calls.filter((c) => String(c[0]).includes("/topology/diff"))).toHaveLength(1);
+    expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument();
+  });
+
+  it("keeps a cleared same-pair diff absent when the retry fails", async () => {
+    const mock = routingFetch(DIFF, 2);
+    vi.stubGlobal("fetch", mock);
+    renderPage();
+
+    await selectRunsAndCompare();
+    expect(await screen.findByTestId("topology-diff-panel")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("diff-clear-btn"));
+    await waitFor(() => expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("diff-compare-btn"));
+
+    expect(await screen.findByTestId("diff-error")).toHaveTextContent("Diff retry unavailable");
+    expect(screen.queryByTestId("topology-diff-panel")).not.toBeInTheDocument();
+    await waitFor(() => {
+      const edge = lastElements().find(
+        (element) => element.data.id === `${DEVICE_KEY}:${IFACE_KEY}:HAS_INTERFACE`,
+      );
+      expect(edge?.classes).not.toContain(DIFF_REMOVED_CLASS);
     });
   });
 

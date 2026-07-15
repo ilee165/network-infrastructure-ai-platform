@@ -84,12 +84,12 @@ export function startRun(body: StartRunRequest): Promise<RunStatus> {
 }
 
 /** ``GET /api/v1/discovery/runs`` — list runs, newest first, paginated. */
-export function listRuns(params: { limit?: number; offset?: number } = {}): Promise<RunListResponse> {
+export function listRuns(params: { limit?: number; offset?: number } = {}, signal?: AbortSignal): Promise<RunListResponse> {
   const qs = new URLSearchParams();
   if (params.limit !== undefined) qs.set("limit", String(params.limit));
   if (params.offset !== undefined) qs.set("offset", String(params.offset));
   const query = qs.toString();
-  return apiFetch<RunListResponse>(`/discovery/runs${query ? `?${query}` : ""}`);
+  return apiFetch<RunListResponse>(`/discovery/runs${query ? `?${query}` : ""}`, { signal });
 }
 
 /** ``GET /api/v1/discovery/runs/{id}`` — one run's lifecycle status. */

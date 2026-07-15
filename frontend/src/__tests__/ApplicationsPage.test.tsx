@@ -7,9 +7,9 @@
  * react-query provider, no backend required — the AdcPage test style.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type {
   ApplicationDependencyRead,
   ApplicationListResponse,
@@ -110,12 +110,9 @@ function makeUser(role: string): UserMe {
 
 function renderPage(role = "viewer"): void {
   useAuthStore.setState({ user: makeUser(role), status: "authed", accessToken: "t" });
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <ApplicationsPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 beforeEach(() => {

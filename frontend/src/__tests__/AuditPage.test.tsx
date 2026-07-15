@@ -7,9 +7,9 @@
  * `GET /api/v1/agents/{id}`; global `fetch` is mocked, no backend required.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type { StartSessionResponse } from "../api/agents";
 import { AuditPage } from "../pages/AuditPage";
 
@@ -90,12 +90,9 @@ function mockSessionFetch(response: StartSessionResponse) {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <AuditPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 function loadSession(id = SESSION_ID): void {
@@ -176,6 +173,8 @@ describe("AuditPage — agent tool-audit view", () => {
     renderPage();
     loadSession("00000000-0000-0000-0000-000000000000");
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/does not exist/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Session load failed: Not Found: agent session does not exist",
+    );
   });
 });

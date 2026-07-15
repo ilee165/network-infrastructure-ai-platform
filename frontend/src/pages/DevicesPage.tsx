@@ -15,18 +15,18 @@
  * prior accent precedent and stays `neutral`.
  */
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useState } from "react";
 import type { KeyboardEvent } from "react";
 import {
-  listDeviceInterfaces,
-  listDeviceNeighbors,
-  listDevices,
   type DeviceInterfaceRead,
   type DeviceNeighborRead,
   type DeviceRead,
 } from "../api/devices";
-import { listRuns, startRun } from "../api/discovery";
+import { useDeviceInterfaces, useDeviceNeighbors, useDevices } from "../hooks/useDeviceQueries";
+import { startRun } from "../api/discovery";
+import { useDiscoveryRuns } from "../hooks/useDiscoveryQueries";
+import { queryKeys } from "../hooks/queryKeys";
 import type { RunStatus, StartRunRequest } from "../api/discovery";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
@@ -76,10 +76,7 @@ const INTERFACES_COLS = 6;
 const NEIGHBORS_COLS = 5;
 
 function InterfacesPanel({ deviceId }: { deviceId: string }) {
-  const { data, isPending, error } = useQuery({
-    queryKey: ["device-interfaces", deviceId],
-    queryFn: () => listDeviceInterfaces(deviceId),
-  });
+  const { data, isPending, error } = useDeviceInterfaces(deviceId);
 
   if (error) {
     return (
@@ -128,10 +125,7 @@ function InterfacesPanel({ deviceId }: { deviceId: string }) {
 // ── Expanded: neighbors table ─────────────────────────────────────────────────
 
 function NeighborsPanel({ deviceId }: { deviceId: string }) {
-  const { data, isPending, error } = useQuery({
-    queryKey: ["device-neighbors", deviceId],
-    queryFn: () => listDeviceNeighbors(deviceId),
-  });
+  const { data, isPending, error } = useDeviceNeighbors(deviceId);
 
   if (error) {
     return (
@@ -340,24 +334,13 @@ function DiscoveryLauncher() {
   const [allowlist, setAllowlist] = useState("");
   const [credentials, setCredentials] = useState("");
 
-  const { data: runsData, isPending: runsPending } = useQuery({
-    queryKey: ["discovery-runs"],
-    queryFn: () => listRuns({ limit: 20 }),
-    // Poll while any run is active.
-    refetchInterval: (query) => {
-      const runs = query.state.data?.items ?? [];
-      const hasActive = runs.some(
-        (r) => r.status === "pending" || r.status === "running",
-      );
-      return hasActive ? RUNS_POLL_MS : false;
-    },
-  });
+  const { data: runsData, isPending: runsPending } = useDiscoveryRuns("devices", { limit: 20 }, RUNS_POLL_MS);
 
   const mutation = useMutation({
     mutationFn: (req: StartRunRequest) => startRun(req),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["discovery-runs"] });
-      void queryClient.invalidateQueries({ queryKey: ["devices"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.discovery.runs("devices") });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.devices.all });
       setSeeds("");
       setAllowlist("");
       setCredentials("");
@@ -508,10 +491,7 @@ function DiscoveryLauncher() {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export function DevicesPage() {
-  const { data, error, isPending } = useQuery({
-    queryKey: ["devices"],
-    queryFn: () => listDevices({ limit: 100 }),
-  });
+  const { data, error, isPending } = useDevices({ limit: 100 });
 
   const devices = data?.items ?? [];
 

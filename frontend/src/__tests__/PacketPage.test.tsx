@@ -5,9 +5,9 @@
  * Mirrors the DocumentsPage / ConfigPage test pattern.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type { CaptureLaunchResponse, PacketFindings } from "../api/packet";
 import { PacketPage } from "../pages/PacketPage";
 
@@ -91,14 +91,9 @@ function makeFetch(opts: {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <PacketPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 afterEach(() => {
@@ -237,6 +232,23 @@ describe("PacketPage — capture launch", () => {
     await waitFor(() => {
       expect(screen.getByTestId("capture-launch-error")).toBeInTheDocument();
     });
+    expect(screen.getByTestId("capture-launch-error")).toHaveTextContent(
+      "Launch failed: Unprocessable Entity: BPF filter invalid",
+    );
+  });
+
+  it("shows a fallback alert when capture launch rejects a non-Error value", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue("transport closed"));
+    renderPage();
+
+    fireEvent.change(screen.getByTestId("capture-interface"), {
+      target: { value: "eth0" },
+    });
+    fireEvent.click(screen.getByTestId("capture-launch-btn"));
+
+    expect(await screen.findByTestId("capture-launch-error")).toHaveTextContent(
+      "Launch failed",
+    );
   });
 });
 

@@ -6,9 +6,9 @@
  * QueryClientProvider wrapping, afterEach unstubAll.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type {
   ComplianceRunResponse,
   ConfigSnapshotListResponse,
@@ -213,14 +213,9 @@ function fetchRouted(opts: {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <ConfigPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 /** Select a device in the dropdown and return after device is chosen. */
@@ -343,7 +338,9 @@ describe("ConfigPage — Snapshots tab", () => {
     vi.stubGlobal("fetch", mock);
     renderPage();
     await selectDevice();
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Snapshots load failed/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Snapshots load failed: Not Found: device has no snapshots",
+    );
   });
 });
 
@@ -426,7 +423,9 @@ describe("ConfigPage — Drift tab", () => {
     vi.stubGlobal("fetch", mock);
     renderPage();
     await goToDrift();
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Drift check failed/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Drift check failed: Not Found: no approved baseline",
+    );
   });
 });
 
@@ -527,6 +526,8 @@ describe("ConfigPage — Compliance tab", () => {
     vi.stubGlobal("fetch", mock);
     renderPage();
     await goToCompliance();
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Compliance check failed/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Compliance check failed: Not Found: no config snapshots to evaluate",
+    );
   });
 });

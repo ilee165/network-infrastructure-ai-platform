@@ -3,9 +3,9 @@
  * no backend, Postgres, Neo4j, or Redis required.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type { ReadinessReport } from "../api/health";
 import { DashboardPage } from "../pages/DashboardPage";
 
@@ -44,14 +44,9 @@ function fetchReturning(body: unknown, status = 200) {
 }
 
 function renderDashboard(): void {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <DashboardPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 afterEach(() => {

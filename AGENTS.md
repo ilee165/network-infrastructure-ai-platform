@@ -193,6 +193,10 @@ derived from prior milestones:
   mock `../api/*` will fail at runtime with “No X export is defined on the mock”
   if they omit the new export (Settings hub Path A: `getRotationStatus` /
   `getOidcStatus`; see `docs/roadmap/LESSONS.md` **L-FE-1**).
+- **Refactor proofs must reach the final consumer and bite (L-FE-2):** assert
+  behavior, not implementation presence; mutation-test critical callback/signal
+  paths; make unoverridden API mocks throw; and exercise structural ratchets
+  with syntax-variant fixtures. See `docs/roadmap/LESSONS.md` **L-FE-2**.
 - **Frontend image Trivy RED on a fixable Alpine package → bump the
   `apk upgrade` cache-bust date** in `deploy/docker/frontend.Dockerfile` so GHA
   layer cache does not re-ship the pre-patch packages (e.g. c-ares CVE-2026-33630

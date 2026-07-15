@@ -5,9 +5,9 @@
  * existing /docs endpoint (M4 T14 / M5 T12). Mirrors DocumentsPage test pattern.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import type { DocumentListResponse, DocumentRead } from "../api/docs";
 import { IncidentReportsPage } from "../pages/IncidentReportsPage";
 
@@ -98,14 +98,9 @@ function makeFetch(opts: {
 }
 
 function renderPage(): void {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={queryClient}>
+renderWithQueryClient(
       <IncidentReportsPage />
-    </QueryClientProvider>,
-  );
+    );
 }
 
 afterEach(() => {

@@ -11,9 +11,10 @@
     "dev": "vite",
     "build": "vite build",
     "check:chunks": "node scripts/check-chunk-split.mjs",
+    "check:patterns": "node scripts/check-platform-pattern-counts.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint .",
+    "lint": "node scripts/check-test-scaffolding.mjs && node scripts/check-platform-pattern-counts.mjs && eslint .",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

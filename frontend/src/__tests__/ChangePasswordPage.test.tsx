@@ -18,19 +18,20 @@
  * ``../api/auth`` is mocked; navigation is asserted with a location probe.
  */
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithQueryClient } from "../test/test-utils";
 import { ApiError } from "../api/client";
 import { ChangePasswordPage } from "../pages/ChangePasswordPage";
 import type { UserMe } from "../stores/auth";
 import { useAuthStore } from "../stores/auth";
 import { useUiStore } from "../stores/ui";
 
-vi.mock("../api/auth", () => ({
+vi.mock("../api/auth", async () => (await import("../test/test-utils")).mockAuthApi(() => ({
   changePassword: vi.fn(),
   getMe: vi.fn(),
-}));
+}))());
 
 import { changePassword, getMe } from "../api/auth";
 
@@ -79,15 +80,13 @@ function LocationProbe() {
 }
 
 function renderPage() {
-  return render(
-    <MemoryRouter initialEntries={["/change-password"]}>
+  return renderWithQueryClient(<MemoryRouter initialEntries={["/change-password"]}>
       <Routes>
         <Route path="/change-password" element={<ChangePasswordPage />} />
         <Route path="/" element={<div data-testid="home" />} />
       </Routes>
       <LocationProbe />
-    </MemoryRouter>,
-  );
+    </MemoryRouter>);
 }
 
 describe("ChangePasswordPage — successful change", () => {
@@ -95,7 +94,7 @@ describe("ChangePasswordPage — successful change", () => {
     vi.mocked(changePassword).mockResolvedValue({ changed: true });
     vi.mocked(getMe).mockResolvedValue({ ...FLAGGED_USER, must_change_password: false });
 
-    renderPage();
+    const { queryClient } = renderPage();
     fireEvent.change(screen.getByLabelText(/current password/i), {
       target: { value: "old-pass-1" },
     });
@@ -111,6 +110,7 @@ describe("ChangePasswordPage — successful change", () => {
     expect(changePassword).toHaveBeenCalledWith("old-pass-1", "new-pass-12");
     expect(getMe).toHaveBeenCalled();
     expect(useAuthStore.getState().user?.must_change_password).toBe(false);
+    expect(queryClient.getQueryData(["auth", "me"])).toBeUndefined();
   });
 
   it("does not present a failed post-success getMe() as a change failure", async () => {
