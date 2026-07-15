@@ -45,6 +45,10 @@ export function useAgentStream(callbacks: StreamCallbacks = {}) {
     pendingStepsRef.current.push(step);
     rafRef.current ??= requestAnimationFrame(flush);
   }, [flush]);
+  const drainPendingSteps = useCallback(() => {
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    flush();
+  }, [flush]);
   const invalidatePersisted = useCallback(() => {
     const id = sessionRef.current;
     if (!id) return;
@@ -74,6 +78,7 @@ export function useAgentStream(callbacks: StreamCallbacks = {}) {
           onEnd: (end) => {
             if (terminal || !mountedRef.current) return;
             terminal = true;
+            drainPendingSteps();
             dispatch({ type: "end", end });
             callbacksRef.current.onEnd?.(end);
             invalidatePersisted();
@@ -82,6 +87,7 @@ export function useAgentStream(callbacks: StreamCallbacks = {}) {
           onError: (message) => {
             if (terminal || !mountedRef.current) return;
             terminal = true;
+            drainPendingSteps();
             fail(message);
             invalidatePersisted();
             close();

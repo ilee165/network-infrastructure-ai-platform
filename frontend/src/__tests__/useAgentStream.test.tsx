@@ -179,6 +179,32 @@ describe("useAgentStream ownership", () => {
     ]);
   });
 
+  it.each(["end", "error"] as const)("never emits a queued step after terminal %s", async (terminal) => {
+    const frames: FrameRequestCallback[] = [];
+    const callbackOrder: string[] = [];
+    const onSteps = vi.fn(() => callbackOrder.push("steps"));
+    const onEnd = vi.fn(() => callbackOrder.push("end"));
+    const onError = vi.fn(() => callbackOrder.push("error"));
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    const view = renderHookWithQueryClient(() => useAgentStream({ onSteps, onEnd, onError }));
+    await start(view.result);
+
+    act(() => {
+      handlers.onStep(STEP);
+      if (terminal === "end") handlers.onEnd(END);
+      else handlers.onError("stream failed");
+    });
+    act(() => frames.shift()?.(0));
+
+    expect(callbackOrder).toEqual(["steps", terminal]);
+    expect(onSteps).toHaveBeenCalledOnce();
+    expect(onSteps).toHaveBeenCalledWith([STEP]);
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+  });
+
   it.each(["end", "error"] as const)("invalidates persisted session queries on terminal %s", async (terminal) => {
     const view = renderHookWithQueryClient(() => useAgentStream());
     const { queryClient } = view;
