@@ -41,8 +41,12 @@ const END: AgentStreamEnd = { event: "end", status: "succeeded", answer: "done" 
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 
 async function start(result: { current: ReturnType<typeof useAgentStream> }) {
@@ -89,6 +93,51 @@ describe("useAgentStream ownership", () => {
     expect(socket.close).toHaveBeenCalledOnce();
   });
 
+  it("reports a stream-open failure and leaves streaming state recoverable", async () => {
+    const onError = vi.fn();
+    openSessionStream.mockRejectedValueOnce(new Error("socket construction failed"));
+    const view = renderHookWithQueryClient(() => useAgentStream({ onError }));
+
+    await start(view.result);
+
+    await waitFor(() => {
+      expect(view.result.current.error).toBe("Failed to open the agent session stream.");
+    });
+    expect(view.result.current.streaming).toBe(false);
+    expect(onError).toHaveBeenCalledWith("Failed to open the agent session stream.");
+  });
+
+  it("reports only the first failure when the stream opener reports and then rejects", async () => {
+    const lateSocket = deferred<WebSocket>();
+    const onError = vi.fn();
+    openSessionStream.mockImplementationOnce((_id: string, next: StreamHandlers) => {
+      next.onError("Failed to obtain a stream ticket.");
+      return lateSocket.promise;
+    });
+    const view = renderHookWithQueryClient(() => useAgentStream({ onError }));
+
+    await start(view.result);
+    expect(onError).toHaveBeenCalledOnce();
+
+    await act(async () => lateSocket.reject(new Error("fallback socket construction failed")));
+
+    expect(view.result.current.error).toBe("Failed to obtain a stream ticket.");
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
+  it("ignores a stream-open rejection that arrives after unmount", async () => {
+    const lateSocket = deferred<WebSocket>();
+    const onError = vi.fn();
+    openSessionStream.mockReturnValueOnce(lateSocket.promise);
+    const view = renderHookWithQueryClient(() => useAgentStream({ onError }));
+
+    await start(view.result);
+    view.unmount();
+    await act(async () => lateSocket.reject(new Error("late stream failure")));
+
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("batches multiple steps into one animation-frame update", async () => {
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
@@ -128,6 +177,32 @@ describe("useAgentStream ownership", () => {
       STEP,
       { ...STEP, summary: "peer recovered" },
     ]);
+  });
+
+  it.each(["end", "error"] as const)("never emits a queued step after terminal %s", async (terminal) => {
+    const frames: FrameRequestCallback[] = [];
+    const callbackOrder: string[] = [];
+    const onSteps = vi.fn(() => callbackOrder.push("steps"));
+    const onEnd = vi.fn(() => callbackOrder.push("end"));
+    const onError = vi.fn(() => callbackOrder.push("error"));
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    const view = renderHookWithQueryClient(() => useAgentStream({ onSteps, onEnd, onError }));
+    await start(view.result);
+
+    act(() => {
+      handlers.onStep(STEP);
+      if (terminal === "end") handlers.onEnd(END);
+      else handlers.onError("stream failed");
+    });
+    act(() => frames.shift()?.(0));
+
+    expect(callbackOrder).toEqual(["steps", terminal]);
+    expect(onSteps).toHaveBeenCalledOnce();
+    expect(onSteps).toHaveBeenCalledWith([STEP]);
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
   });
 
   it.each(["end", "error"] as const)("invalidates persisted session queries on terminal %s", async (terminal) => {

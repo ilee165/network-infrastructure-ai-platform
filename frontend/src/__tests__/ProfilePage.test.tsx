@@ -237,6 +237,28 @@ describe("ProfilePage — ChangePasswordSection", () => {
     expect(useAuthStore.getState().user).toEqual(updatedUser);
   });
 
+  it("keeps a successful password change successful when the user refresh fails", async () => {
+    vi.mocked(changePassword).mockResolvedValue({ changed: true });
+    vi.mocked(getMe).mockRejectedValue(new Error("network down"));
+
+    renderPage();
+
+    const currentInput = await screen.findByLabelText(/current password/i);
+    const newInput = screen.getByLabelText(/^new password$/i);
+    const confirmInput = screen.getByLabelText(/confirm new password/i);
+
+    fireEvent.change(currentInput, { target: { value: "oldpass1" } });
+    fireEvent.change(newInput, { target: { value: "newpass123" } });
+    fireEvent.change(confirmInput, { target: { value: "newpass123" } });
+    fireEvent.click(screen.getByRole("button", { name: /change password/i }));
+
+    expect(await screen.findByText("Password changed successfully.")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(currentInput).toHaveValue("");
+    expect(newInput).toHaveValue("");
+    expect(confirmInput).toHaveValue("");
+  });
+
   it("shows a validation error and does not call changePassword when new password is too short", async () => {
     renderPage();
 

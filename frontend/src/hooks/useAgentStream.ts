@@ -45,6 +45,10 @@ export function useAgentStream(callbacks: StreamCallbacks = {}) {
     pendingStepsRef.current.push(step);
     rafRef.current ??= requestAnimationFrame(flush);
   }, [flush]);
+  const drainPendingSteps = useCallback(() => {
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    flush();
+  }, [flush]);
   const invalidatePersisted = useCallback(() => {
     const id = sessionRef.current;
     if (!id) return;
@@ -54,6 +58,7 @@ export function useAgentStream(callbacks: StreamCallbacks = {}) {
   }, [client]);
   const close = useCallback(() => { socketRef.current?.close(); socketRef.current = null; }, []);
   const fail = useCallback((message: string) => {
+    if (!mountedRef.current) return;
     dispatch({ type: "error", message });
     callbacksRef.current.onError?.(message);
   }, []);
@@ -63,21 +68,43 @@ export function useAgentStream(callbacks: StreamCallbacks = {}) {
     onMutate: () => dispatch({ type: "start" }),
     onSuccess: async (response) => {
       sessionRef.current = response.session.id;
-      const socket = await openSessionStream(response.session.id, {
-        onStep: append,
-        onEnd: (end) => {
-          dispatch({ type: "end", end });
-          callbacksRef.current.onEnd?.(end);
-          invalidatePersisted();
-          close();
-        },
-        onError: (message) => {
-          fail(message);
-          invalidatePersisted();
-          close();
-        },
-      });
-      if (!mountedRef.current) socket.close(); else socketRef.current = socket;
+      let terminal = false;
+      let socket: WebSocket;
+      try {
+        socket = await openSessionStream(response.session.id, {
+          onStep: (step) => {
+            if (!terminal && mountedRef.current) append(step);
+          },
+          onEnd: (end) => {
+            if (terminal || !mountedRef.current) return;
+            terminal = true;
+            drainPendingSteps();
+            dispatch({ type: "end", end });
+            callbacksRef.current.onEnd?.(end);
+            invalidatePersisted();
+            close();
+          },
+          onError: (message) => {
+            if (terminal || !mountedRef.current) return;
+            terminal = true;
+            drainPendingSteps();
+            fail(message);
+            invalidatePersisted();
+            close();
+          },
+        });
+      } catch (error) {
+        if (!terminal) {
+          terminal = true;
+          fail(
+            error instanceof ApiError
+              ? error.problem.detail
+              : "Failed to open the agent session stream.",
+          );
+        }
+        return;
+      }
+      if (terminal || !mountedRef.current) socket.close(); else socketRef.current = socket;
     },
     onError: (error) => fail(error instanceof ApiError ? error.problem.detail : "Failed to start the agent session."),
   });

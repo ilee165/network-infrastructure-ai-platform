@@ -123,7 +123,7 @@ function ChangePasswordSection() {
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const mutation = useChangePassword();
+  const mutation = useChangePassword({ bestEffortRefresh: true });
 
   // Import getMe lazily to avoid circular issues
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {

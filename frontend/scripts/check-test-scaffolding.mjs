@@ -68,7 +68,6 @@ function apiModuleName(specifier, fileName) {
 
   const modulePath = relative(apiRoot, resolve(dirname(fileName), specifier));
   if (
-    !modulePath ||
     modulePath === ".." ||
     modulePath.startsWith(`..${sep}`) ||
     isAbsolute(modulePath)
@@ -147,7 +146,7 @@ function apiMockViolations(
         return;
       }
       const moduleName = apiModuleName(specifier.text, fileName);
-      if (moduleName) {
+      if (moduleName !== undefined) {
         recordApiMock();
         const expectedFactory = sharedFactories.get(moduleName);
         const callback = node.arguments[1];
@@ -282,6 +281,9 @@ if (
 }
 if (apiMockViolations(`vi.mock("../api/auth", () => ({}))`).length !== 1) {
   throw new Error("API mock detector self-test did not bite");
+}
+if (apiMockViolations(`vi.mock("../api", () => ({}))`).length !== 1) {
+  throw new Error("API mock detector missed the API root module");
 }
 if (apiMockViolations(`vi.doMock("../api/auth", () => ({}))`).length !== 1) {
   throw new Error("API mock detector missed vi.doMock");
