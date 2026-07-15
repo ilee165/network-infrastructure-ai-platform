@@ -8,44 +8,39 @@ and reset responses) — never logged and never written to an audit ``detail``.
 
 from __future__ import annotations
 
-import secrets
 import uuid
-from typing import Annotated, Final
+from typing import Annotated, Protocol
 
 from fastapi import Depends
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require_role
-from app.api.v1.auth._shared import _EMAIL_TAKEN, router
-from app.core.errors import BadRequestError, ConflictError, NotFoundError
-from app.core.security import Role as RoleEnum
-from app.core.security import hash_password_async
-from app.models import Role, User
-from app.services.audit import service as audit_service
-from app.services.auth_sessions import service as session_service
-
-#: Length (chars) of a generated temp password. ``secrets.token_urlsafe(16)``
-#: yields ~22 URL-safe characters, comfortably above the >=16 requirement and
-#: well under bcrypt's 72-byte input limit.
-_TEMP_PASSWORD_BYTES: Final = 16
-
-#: A username already taken by another account.
-_USERNAME_TAKEN: Final = "That username is already in use"
-
-#: Refusing to remove the platform's last reachable admin (lockout prevention).
-_LAST_ADMIN: Final = "Cannot remove the last active admin"
+from app.api.v1.auth._shared import router
+from app.core.actors import AuthenticatedActor
+from app.services.users import UserService, UserUpdate
 
 
-def _generate_temp_password() -> str:
-    """Return a fresh, unguessable temp password (URL-safe, >=16 chars).
+class _RoleSummarySource(Protocol):
+    @property
+    def name(self) -> str: ...
 
-    Uses :mod:`secrets` so the value is cryptographically random. The plaintext
-    is returned to the admin once via the response and is never logged, audited,
-    or persisted — only its bcrypt hash is stored.
-    """
-    return secrets.token_urlsafe(_TEMP_PASSWORD_BYTES)
+
+class _UserSummarySource(AuthenticatedActor, Protocol):
+    @property
+    def email(self) -> str | None: ...
+
+    @property
+    def display_name(self) -> str | None: ...
+
+    @property
+    def role(self) -> _RoleSummarySource: ...
+
+    @property
+    def is_active(self) -> bool: ...
+
+    @property
+    def must_change_password(self) -> bool: ...
 
 
 class CreateUserRequest(BaseModel):
@@ -85,7 +80,7 @@ class UserSummary(BaseModel):
     must_change_password: bool
 
     @classmethod
-    def from_user(cls, user: User) -> UserSummary:
+    def from_user(cls, user: _UserSummarySource) -> UserSummary:
         """Project a :class:`User` ORM row, dropping every secret field."""
         return cls(
             id=user.id,
@@ -116,65 +111,32 @@ class TempPasswordResponse(BaseModel):
     temp_password: str
 
 
-async def _resolve_role(session: AsyncSession, name: str) -> Role:
-    """Resolve a wire role *name* to its :class:`Role` row or raise 400.
-
-    Validates the name against the canonical :class:`RoleEnum` first (so an
-    unknown role is a clean :class:`BadRequestError`, not a 500), then loads the
-    seeded row. A known-but-unseeded role is also a 400 rather than a crash.
-    """
-    if RoleEnum.from_name(name) is None:
-        raise BadRequestError(f"Unknown role {name!r}")
-    row = (await session.execute(select(Role).where(Role.name == name))).scalar_one_or_none()
-    if row is None:
-        raise BadRequestError(f"Unknown role {name!r}")
-    return row
+Admin = Annotated[AuthenticatedActor, Depends(require_role("admin"))]
 
 
-async def _count_other_active_admins(session: AsyncSession, *, exclude_id: uuid.UUID) -> int:
-    """Count active users with the ``admin`` role other than *exclude_id*.
-
-    Used by the last-admin guard: a demotion/deactivation of the target is only
-    safe when at least one *other* active admin remains.
-    """
-    count = (
-        await session.execute(
-            select(func.count())
-            .select_from(User)
-            .join(Role, User.role_id == Role.id)
-            .where(
-                Role.name == RoleEnum.ADMIN.value,
-                User.is_active.is_(True),
-                User.id != exclude_id,
-            )
-        )
-    ).scalar_one()
-    return int(count)
+def get_user_service(session: Annotated[AsyncSession, Depends(get_db)]) -> UserService:
+    """Bind admin-user persistence to the request's overridable session."""
+    return UserService(session)
 
 
-async def _load_user(session: AsyncSession, user_id: uuid.UUID) -> User:
-    """Load a :class:`User` by id or raise 404 (no oracle beyond existence)."""
-    user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if user is None:
-        raise NotFoundError("User not found")
-    return user
+Service = Annotated[UserService, Depends(get_user_service)]
 
 
 @router.get("/users", response_model=list[UserSummary])
 async def list_users(
-    admin: Annotated[User, Depends(require_role("admin"))],
-    session: Annotated[AsyncSession, Depends(get_db)],
+    admin: Admin,
+    service: Service,
 ) -> list[UserSummary]:
     """List every account (admin only); never includes password hashes."""
-    rows = (await session.execute(select(User).order_by(User.username))).scalars().all()
+    rows = await service.list()
     return [UserSummary.from_user(row) for row in rows]
 
 
 @router.post("/users", response_model=CreatedUserResponse, status_code=201)
 async def create_user(
     body: CreateUserRequest,
-    admin: Annotated[User, Depends(require_role("admin"))],
-    session: Annotated[AsyncSession, Depends(get_db)],
+    admin: Admin,
+    service: Service,
 ) -> CreatedUserResponse:
     """Create an account with a temp password (admin only).
 
@@ -184,53 +146,27 @@ async def create_user(
     login (``must_change_password=True``); only the bcrypt hash is stored. The
     plaintext temp password is returned exactly once and never audited.
     """
-    role = await _resolve_role(session, body.role)
-
-    clash_username = (
-        await session.execute(select(User.id).where(User.username == body.username))
-    ).scalar_one_or_none()
-    if clash_username is not None:
-        raise ConflictError(_USERNAME_TAKEN)
-    if body.email is not None:
-        clash_email = (
-            await session.execute(select(User.id).where(User.email == body.email))
-        ).scalar_one_or_none()
-        if clash_email is not None:
-            raise ConflictError(_EMAIL_TAKEN)
-
-    temp_password = body.temp_password or _generate_temp_password()
-    user = User(
+    created = await service.create(
         username=body.username,
-        password_hash=await hash_password_async(temp_password),
-        role=role,
+        role_name=body.role,
         email=body.email,
         display_name=body.display_name,
-        must_change_password=True,
+        temp_password=body.temp_password,
+        actor_username=admin.username,
     )
-    session.add(user)
-    await session.flush()
-
-    await audit_service.record(
-        session,
-        actor=f"user:{admin.username}",
-        action=audit_service.USER_CREATED,
-        target_type="user",
-        target_id=str(user.id),
-        detail={"username": user.username, "role": role.name},
+    return CreatedUserResponse(
+        user=UserSummary.from_user(created.user), temp_password=created.temp_password
     )
-    await session.commit()
-    await session.refresh(user)
-    return CreatedUserResponse(user=UserSummary.from_user(user), temp_password=temp_password)
 
 
 @router.get("/users/{user_id}", response_model=UserSummary)
 async def get_user(
     user_id: uuid.UUID,
-    admin: Annotated[User, Depends(require_role("admin"))],
-    session: Annotated[AsyncSession, Depends(get_db)],
+    admin: Admin,
+    service: Service,
 ) -> UserSummary:
     """Return one account by id (admin only); 404 if unknown."""
-    user = await _load_user(session, user_id)
+    user = await service.get(user_id)
     return UserSummary.from_user(user)
 
 
@@ -238,8 +174,8 @@ async def get_user(
 async def update_user(
     user_id: uuid.UUID,
     body: UpdateUserRequest,
-    admin: Annotated[User, Depends(require_role("admin"))],
-    session: Annotated[AsyncSession, Depends(get_db)],
+    admin: Admin,
+    service: Service,
 ) -> UserSummary:
     """Update an account's role / active flag / email / display name (admin only).
 
@@ -248,59 +184,16 @@ async def update_user(
     sessions. The last-admin guard returns 409 if demoting-from-admin or
     deactivating the target would leave zero other active admins.
     """
-    user = await _load_user(session, user_id)
-
-    role_changed = False
-    if body.role is not None and body.role != user.role.name:
-        new_role = await _resolve_role(session, body.role)
-        # Last-admin guard: demoting the final active admin would lock everyone out.
-        if (
-            user.role.name == RoleEnum.ADMIN.value
-            and new_role.name != RoleEnum.ADMIN.value
-            and user.is_active
-            and await _count_other_active_admins(session, exclude_id=user.id) == 0
-        ):
-            raise ConflictError(_LAST_ADMIN)
-        user.role = new_role
-        role_changed = True
-
-    deactivating = body.is_active is False and user.is_active
-    if body.is_active is not None and body.is_active != user.is_active:
-        # Last-admin guard: deactivating the final active admin locks everyone out.
-        if (
-            deactivating
-            and user.role.name == RoleEnum.ADMIN.value
-            and await _count_other_active_admins(session, exclude_id=user.id) == 0
-        ):
-            raise ConflictError(_LAST_ADMIN)
-        user.is_active = body.is_active
-
-    if body.email is not None and body.email != user.email:
-        clash = (
-            await session.execute(
-                select(User.id).where(User.email == body.email, User.id != user.id)
-            )
-        ).scalar_one_or_none()
-        if clash is not None:
-            raise ConflictError(_EMAIL_TAKEN)
-        user.email = body.email
-    if body.display_name is not None:
-        user.display_name = body.display_name
-
-    if deactivating:
-        await session_service.revoke_all_for_user(session, user_id=user.id)
-
-    action = audit_service.USER_ROLE_CHANGED if role_changed else audit_service.USER_UPDATED
-    await audit_service.record(
-        session,
-        actor=f"user:{admin.username}",
-        action=action,
-        target_type="user",
-        target_id=str(user.id),
-        detail=None,
+    user = await service.update(
+        user_id,
+        UserUpdate(
+            role=body.role,
+            is_active=body.is_active,
+            email=body.email,
+            display_name=body.display_name,
+        ),
+        actor_username=admin.username,
     )
-    await session.commit()
-    await session.refresh(user)
     return UserSummary.from_user(user)
 
 
@@ -308,8 +201,8 @@ async def update_user(
 async def reset_user_password(
     user_id: uuid.UUID,
     body: ResetPasswordRequest,
-    admin: Annotated[User, Depends(require_role("admin"))],
-    session: Annotated[AsyncSession, Depends(get_db)],
+    admin: Admin,
+    service: Service,
 ) -> TempPasswordResponse:
     """Set a forced-change temp password for an account (admin only).
 
@@ -318,40 +211,18 @@ async def reset_user_password(
     the target. Audits ``user.password_reset`` (never with the plaintext). The
     plaintext is returned exactly once.
     """
-    user = await _load_user(session, user_id)
-    temp_password = body.temp_password or _generate_temp_password()
-    user.password_hash = await hash_password_async(temp_password)
-    user.must_change_password = True
-
-    await session_service.revoke_all_for_user(session, user_id=user.id)
-    await audit_service.record(
-        session,
-        actor=f"user:{admin.username}",
-        action=audit_service.USER_PASSWORD_RESET,
-        target_type="user",
-        target_id=str(user.id),
-        detail=None,
+    temp_password = await service.reset_password(
+        user_id, body.temp_password, actor_username=admin.username
     )
-    await session.commit()
     return TempPasswordResponse(temp_password=temp_password)
 
 
 @router.post("/users/{user_id}/revoke-sessions", status_code=200)
 async def revoke_user_sessions(
     user_id: uuid.UUID,
-    admin: Annotated[User, Depends(require_role("admin"))],
-    session: Annotated[AsyncSession, Depends(get_db)],
+    admin: Admin,
+    service: Service,
 ) -> dict[str, int]:
     """Revoke every live session of an account (admin only); audit the revoke."""
-    user = await _load_user(session, user_id)
-    count = await session_service.revoke_all_for_user(session, user_id=user.id)
-    await audit_service.record(
-        session,
-        actor=f"user:{admin.username}",
-        action=audit_service.AUTH_SESSION_REVOKED,
-        target_type="user",
-        target_id=str(user.id),
-        detail=None,
-    )
-    await session.commit()
+    count = await service.revoke_sessions(user_id, actor_username=admin.username)
     return {"revoked": count}

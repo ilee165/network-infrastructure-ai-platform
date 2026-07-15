@@ -6,11 +6,12 @@ documents in this directory:
 - [`2026-07-10-repo-review.md`](2026-07-10-repo-review.md) — full-repo review (6 CRITICAL / 14 HIGH / 47 MEDIUM / 13 LOW)
 - [`PERF-REVIEW-2026-07-10.md`](PERF-REVIEW-2026-07-10.md) — performance review (18 ranked findings)
 - [`2026-07-10-testing-strategy-review.md`](2026-07-10-testing-strategy-review.md) — testing strategy (F1–F9)
-- [`AR1-REMEDIATION-PLAN.md`](AR1-REMEDIATION-PLAN.md) — architecture remediation track (AR-W0…W4)
+- [`AR1-REMEDIATION-PLAN.md`](AR1-REMEDIATION-PLAN.md) — historical architecture-remediation source (AR-W0…W4; superseded for execution)
 
 Finding IDs below refer to those documents. This track is **separate from P4**
-(W3–W5 pending); it does not replace or reorder P4. Discipline follows
-AR1 §0: atomic commit per task, every new CI gate must prove it bites (plant
+(W3–W5 pending); it does not replace or reorder P4. Standing discipline is
+retained here from historical AR1 §0: atomic commit per task, every new CI gate
+must prove it bites (plant
 violation → RED → revert → GREEN, run URLs in PR body), lockfiles regenerated
 in the same commit as any dependency addition.
 
@@ -22,7 +23,7 @@ not the PR count.
 
 Resolved conflicts / standing decisions from the planning session:
 
-- SettingsPage split **deferred** (opportunistic policy, per AR1).
+- Dedicated SettingsPage split **deferred**; Wave 6's measured T3/T5 conditional trigger is binding when the hub is touched.
 - Audit advisory-lock write ceiling: **no action** this track (design-level; retention ADR in Wave 7 is the venue).
 - HA-defaults flip stays **rejected** (ADR-0048); ship documented `values-prod-ha.yaml` profile instead.
 - Microservice split and router-prefix renames stay rejected.
@@ -111,14 +112,20 @@ Full plan: [`WAVE6-PLAN.md`](WAVE6-PLAN.md). **Two PRs** — PR-A backend, PR-B
 frontend. Serializes against P4-W3 (compliance reporting UI); pre-flight
 collision check at branch creation *and* every rebase.
 
-- **PR-A** — agent read-facade in `agents/framework/read_facade.py` (AR-W2-T2):
-  specialists lose their direct `app.db` / `app.models` / `app.services` /
-  `app.knowledge` edges; **plus** a table-scoped runtime write-guard proving no
-  READ_ONLY tool mutates domain state (the import contract cannot prove this —
-  two claims, two proofs). Then inline-ORM extraction to services, worst 3
-  routers (partial AR risk R1).
+- **PR-A** — read and operational framework seams (AR-W2-T2): the 8 direct
+  discovery/troubleshooting `db/models/services/knowledge` edges burn down to
+  zero. The 4 deterministic Automation write-path edges, 2 CR-kind metadata
+  edges, and 9 engine/plugin edges remain explicit with follow-on owners;
+  automation-port extraction is deferred to its own STRONG-reviewed task. A
+  table-scoped runtime guard drives the exact READ_ONLY registry census and
+  proves direct tool invocations can write only `discovery_runs` / `audit_log`
+  in PostgreSQL (the import contract cannot prove this, nor does the SQL guard
+  claim non-relational/device safety). Then inline-ORM extraction to services,
+  worst 3 routers (partial AR risk R1).
 - **PR-B** — FE shared primitives + React Query hook layer (AR-W3 scope).
-- **F5** — shared frontend mock factory + QueryClient test wrapper — structurally ends the L-FE-1 class for all 13 `vi.mock('../api/*')` sites.
+- **F5** — shared frontend mock factory + QueryClient test wrapper —
+  structurally ends the L-FE-1 class for all 13 `vi.mock('../api/*')` sites and
+  replaces all 24 test-only QueryClient constructions across 22 files.
 - ~~Route-level lazy loading if not landed in Wave 5.~~ **Landed in Wave 5**
   (perf #5: `React.lazy` per route + `manualChunks` + chunk-count build gate).
   Wave 6 only keeps that gate green through the refactor.
@@ -149,4 +156,5 @@ collision check at branch creation *and* every rebase.
 | 3 | ✅ Merged (PR #158) |
 | 4 | ✅ Merged (PR #159 / #160) |
 | 5 | ✅ Merged (PR #161, `255f159`) — T1–T15 + review fold (chord fan-out + delta projection included) |
-| 6–7 | Pending — user calls each wave |
+| 6 | 🚧 Draft PRs open (PR-A #163 / PR-B #162) |
+| 7 | Pending — user calls wave |
