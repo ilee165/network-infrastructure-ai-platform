@@ -347,6 +347,41 @@ class TestApplicationUpdate:
         # stale one — the two 409s are distinguishable by problem ``type``.
         assert response.json()["type"] == "urn:netops:error:conflict"
 
+    async def test_integrity_conflict_uses_snapshot_after_real_session_rollback(
+        self,
+        client: httpx.AsyncClient,
+        auth_headers: Headers,
+        session: AsyncSession,
+        users: dict[str, User],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A raced unique failure must not lazy-load an expired ORM row."""
+        from unittest.mock import AsyncMock
+
+        from app.core.errors import ConflictError
+        from app.schemas.applications import ApplicationUpdate
+        from app.services.applications import ApplicationService
+
+        headers = auth_headers("engineer")
+        await _create_application(client, headers, name="payroll")
+        target = await _create_application(client, headers, name="crm", fqdns=[])
+        row = await session.get(Application, uuid.UUID(target["id"]))
+        assert row is not None
+        expected = row.updated_at
+
+        service = ApplicationService(session)
+        # Model the TOCTOU: the pre-check saw no conflict, then the real SQLite
+        # unique constraint rejected the flush and rollback expired ``row``.
+        monkeypatch.setattr(service, "_ensure_name_free", AsyncMock(return_value=None))
+
+        with pytest.raises(ConflictError, match="payroll"):
+            await service.apply_update(
+                row,
+                ApplicationUpdate(name="payroll"),
+                users["engineer"],
+                expected,
+            )
+
     async def test_case_only_rename_of_same_row_is_allowed(
         self, client: httpx.AsyncClient, auth_headers: Headers
     ) -> None:
@@ -606,6 +641,31 @@ class TestApplicationDelete:
         )
         assert response.status_code == 400, response.text
         assert await session.get(Application, uuid.UUID(created["id"])) is not None
+        assert await _audit_rows(session, audit.APPLICATION_DELETE) == []
+
+    async def test_malformed_if_match_on_unknown_id_preserves_404_precedence(
+        self, client: httpx.AsyncClient, auth_headers: Headers
+    ) -> None:
+        """A malformed optional precondition cannot mask target non-existence."""
+        response = await client.delete(
+            f"{BASE}/{uuid.uuid4()}",
+            headers={**auth_headers("engineer"), "If-Match": "not-a-timestamp"},
+        )
+        assert response.status_code == 404, response.text
+        assert response.json()["type"] == "urn:netops:error:not-found"
+
+    async def test_malformed_if_match_on_derived_row_preserves_409_precedence(
+        self, client: httpx.AsyncClient, auth_headers: Headers, session: AsyncSession
+    ) -> None:
+        """Derived lifecycle ownership is classified before optional header syntax."""
+        derived = await _seed_derived_application(session, name="vs-malformed")
+        response = await client.delete(
+            f"{BASE}/{derived.id}",
+            headers={**auth_headers("engineer"), "If-Match": "not-a-timestamp"},
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["type"] == "urn:netops:error:conflict"
+        assert await session.get(Application, derived.id) is not None
         assert await _audit_rows(session, audit.APPLICATION_DELETE) == []
 
     @pytest.mark.parametrize("role", ["viewer", "operator"])

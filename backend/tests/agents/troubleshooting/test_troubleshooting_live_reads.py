@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 import app.db as _db
 import app.plugins.registry as registry_module
+from app.agents.framework.credential_access import SshCredentialMaterial
 from app.agents.troubleshooting import tools as tools_module
 from app.core.errors import CredentialScopeError, PluginError
 from app.models import Base, CredentialKind, Device, DeviceCredential
@@ -276,6 +277,21 @@ async def test_live_read_opens_credentialed_transport_and_returns_records(
     assert call["has_autonomous_sessionmaker"] is True
 
 
+def test_credential_material_string_forms_redact_password() -> None:
+    password_sentinel = "wave6-sentinel-password"
+    params_sentinel = "wave6-sentinel-enable-password"
+    material = SshCredentialMaterial(
+        host="192.0.2.10",
+        username="netops",
+        password=password_sentinel,
+        params={"port": 2222, "enable_password": params_sentinel},
+    )
+
+    for rendered in (repr(material), str(material)):
+        assert password_sentinel not in rendered
+        assert params_sentinel not in rendered
+
+
 # ---------------------------------------------------------------------------
 # Fail-fast ordering: no secret access for a read that can never run
 # ---------------------------------------------------------------------------
@@ -294,6 +310,35 @@ async def test_missing_capability_fails_before_any_decryption(
 
     assert "does not implement" in payload["error"]
     assert fake_decrypt.calls == []  # capability check precedes secret access
+    assert open_ssh_recorder == []
+
+
+async def test_inventory_mutation_between_read_seams_fails_closed(
+    engine: AsyncEngine,
+    seeded: tuple[uuid.UUID, uuid.UUID],
+    fake_registry: _FakeRegistry,
+    fake_decrypt: _DecryptRecorder,
+    open_ssh_recorder: list[SshParams],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device_id, _ = seeded
+    real_acquire = tools_module.acquire_troubleshooting_ssh
+
+    async def _mutate_then_acquire(*args: Any, **kwargs: Any) -> Any:
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            device = await session.get(Device, device_id)
+            assert device is not None
+            device.mgmt_ip = "198.51.100.99"
+            await session.commit()
+        return await real_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(tools_module, "acquire_troubleshooting_ssh", _mutate_then_acquire)
+
+    payload = await _invoke_bgp_read(device_id)
+
+    assert "inventory changed" in payload["error"]
+    assert fake_decrypt.calls == []
     assert open_ssh_recorder == []
 
 

@@ -312,52 +312,36 @@ forbidden_modules = [
 # imports are real violations here.
 allow_indirect_imports = true
 ignore_imports = [
-    # Pre-existing direct DB/model reads in the discovery + troubleshooting
-    # read-only tool wrappers, ahead of a typed read facade in agents/framework.
-    # burn-down: AR-W2-T2 (agent read-facade)
-    "app.agents.discovery.tools -> app.db",
-    "app.agents.discovery.tools -> app.models",
-    "app.agents.troubleshooting.tools -> app.db",
-    "app.agents.troubleshooting.tools -> app.models",
-    # Pre-existing direct app.models.change_requests reads (enum/state lookups)
-    # in the automation/ddi/security tool + agent modules, ahead of the same
-    # read facade.
-    # burn-down: AR-W2-T2 (agent read-facade)
+    # ChangeRequest executor input; owner: future STRONG automation-port extraction.
     "app.agents.automation.executors -> app.models.change_requests",
+    # CR enums/state drive approval lifecycle; owner: future STRONG automation-port extraction.
     "app.agents.automation.agent -> app.models.change_requests",
+    # ChangeRequestKind decorator metadata; owner: future framework/schema metadata seam.
     "app.agents.ddi.tools -> app.models.change_requests",
+    # ChangeRequestKind decorator metadata; owner: future framework/schema metadata seam.
     "app.agents.security.tools -> app.models.change_requests",
-    # Pre-existing direct app.engines reads (planner/finding/firewall-analysis
-    # types) in the discovery/packet_analysis/security tool + agent modules,
-    # ahead of the same read facade.
-    # burn-down: AR-W2-T2 (agent read-facade)
+    # DiscoveryPlan validates job input; owner: future framework planning port.
     "app.agents.discovery.tools -> app.engines.discovery.planner",
+    # Conversation/findings/count result types; owner: future framework result schema.
     "app.agents.packet_analysis.agent -> app.engines.packet",
+    # PacketFindings tool result type; owner: future framework result schema.
     "app.agents.packet_analysis.tools -> app.engines.packet",
+    # Firewall analyzers are tool capabilities; owner: future framework analysis port.
     "app.agents.security.tools -> app.engines.security.firewall",
-    # Pre-existing direct app.plugins reads (transport/registry/capability
-    # types) in the automation/troubleshooting tool + agent modules, ahead of
-    # the same read facade.
-    # burn-down: AR-W2-T2 (agent read-facade)
+    # Change protocol types drive approved execution; owner: future STRONG automation port.
     "app.agents.automation.agent -> app.plugins.base",
+    # Change plan/draft/result protocols; owner: future STRONG automation port.
     "app.agents.automation.executors -> app.plugins.base",
+    # Capability enum for live reads; owner: future framework live-read transport port.
     "app.agents.troubleshooting.tools -> app.plugins.base",
+    # Registry resolves vendor capability; owner: future framework live-read transport port.
     "app.agents.troubleshooting.tools -> app.plugins.registry",
+    # SSH params/transport helpers; owner: future framework live-read transport port.
     "app.agents.troubleshooting.tools -> app.plugins.transport",
-    # Pre-existing direct app.services reads (audit/change-request/credential
-    # services) in the automation/troubleshooting tool + agent modules, ahead
-    # of the same read facade.
-    # burn-down: AR-W2-T2 (agent read-facade)
+    # Append-only execution audit; owner: future STRONG automation-port extraction.
     "app.agents.automation.agent -> app.services.audit.service",
+    # Approved CR lifecycle service; owner: future STRONG automation-port extraction.
     "app.agents.automation.agent -> app.services.change_requests",
-    "app.agents.troubleshooting.tools -> app.services.credentials",
-    # Pre-existing direct app.knowledge reads (graph client + topology-impact
-    # helpers) in the troubleshooting tool wrappers, ahead of the same read
-    # facade.
-    # burn-down: AR-W2-T2 (agent read-facade)
-    "app.agents.troubleshooting.tools -> app.knowledge",
-    "app.agents.troubleshooting.tools -> app.knowledge.schema",
-    "app.agents.troubleshooting.tools -> app.knowledge.topology_read",
 ]
 # No new entries may be added to this allowlist without updating this
 # contract (and its REPO-STRUCTURE §3.3 contract-2 description) — new
@@ -454,9 +438,8 @@ ignore_imports = [
     # ("services MUST NOT import agents"). Flagged as an open question in the
     # T1 report, not fixed here (zero behavior change).
     "app.services.agent_session.service -> app.agents.framework.*",
-    # Pre-existing direct enqueue from a discovery agent tool, reaching past a
-    # service facade into app.workers. Flagged as an open question in the T1
-    # report, not fixed here (zero behavior change).
+    # Discovery job dispatch remains at its established Celery signature seam;
+    # owner: future discovery-dispatch framework port (not the read facade).
     "app.agents.discovery.tools -> app.workers.celery_app",
     # Pre-existing bidirectional models<->schemas cross-import: Normalized*
     # Pydantic schemas (app.schemas.normalized) are reused as ORM row
