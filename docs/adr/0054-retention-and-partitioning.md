@@ -39,7 +39,7 @@ approved policy exception.
 | Raw evidence | `raw_artifacts` | `created_at` | 30 days | 1 year | Archive every eligible row and verify the immutable manifest before dropping a complete eligible partition. | Delete archive objects only after the one-year cutoff and legal-hold/policy checks. |
 | Reasoning records | `reasoning_traces`, `reasoning_trace_steps` | The parent trace's non-NULL `completed_at` for the entire trace family | 90 days | 1 year | Archive each completed trace family across all partitions; drop a partition only when every row and cross-partition companion is eligible and archived, otherwise defer or row-prune eligible families. | Delete the complete archived trace family only after the one-year cutoff and legal-hold/policy checks. |
 | Discovery snapshots | `topology_snapshots` | `created_at` | 180 days | 1 year | Archive snapshots with discovery-run identifiers, verify the manifest, then row-prune eligible snapshots in deterministic batches. | Delete archive objects only after the one-year cutoff and legal-hold/policy checks. |
-| Configuration snapshots | `config_snapshots` | `captured_at`; for a former baseline, a new immutable `baseline_superseded_at` set when its replacement becomes current | 180 days | 1 year | Archive and verify eligible versions, then row-prune them in deterministic batches. The current approved baseline is ineligible until superseded. | Delete archive objects only after the one-year cutoff and legal-hold/policy checks. |
+| Configuration snapshots | `config_snapshots` | `captured_at` when never approved; otherwise the most recent closed baseline tenure's `superseded_at` | 180 days | 1 year | Archive and verify eligible versions, then row-prune them in deterministic batches. Any snapshot with an open baseline tenure is ineligible. | Delete archive objects only after the one-year cutoff and legal-hold/policy checks. |
 
 The **hot window** is PostgreSQL residence measured from the exact anchor in
 the matrix. At its cutoff the service archives and verifies the eligible data,
@@ -47,9 +47,11 @@ then removes it from PostgreSQL. The **archive window** is immutable external
 archive residence measured from that same anchor. At its cutoff the archive
 object may be deleted only when no legal hold or policy exception extends it.
 Failure to obtain archive proof leaves the PostgreSQL data in place. A trace
-with NULL `completed_at` never becomes eligible. A current configuration
-baseline has no effective cutoff; supersession starts its clock at the later
-of `captured_at` and `baseline_superseded_at`.
+with NULL `completed_at` never becomes eligible. Configuration baseline
+approval/supersession is recorded in an append-only tenure table. An open
+tenure makes the snapshot ineligible; re-promotion opens a new tenure, and a
+later supersession resets the anchor to that newest closed tenure rather than
+reusing an older timestamp.
 
 Partition boundaries are calendar-month UTC boundaries. A partition may be
 dropped only when it is wholly outside the hot window and every contained row
@@ -102,11 +104,17 @@ signed prune checkpoint containing:
 The unsigned payload is RFC 8785 canonical JSON over every field above except
 `signature`, encoded as UTF-8 and signed with Ed25519. Hashes and SHA-256
 digests use lowercase hexadecimal; the Ed25519 signature uses unpadded
-base64url; sequence values remain JSON integers. Algorithm and key identifier
-are inside the signed payload. The private key is secret/KMS backed. Each
-checkpoint records its key identifier; rotation affects only new checkpoints,
-and old public verification keys remain available for at least the longest
-archive window. Checkpoints are never re-signed during rotation.
+base64url; sequence values remain JSON integers; UUIDs use lowercase canonical
+8-4-4-4-12 hyphenated text; and timestamps use UTC RFC 3339 with exactly six
+fractional digits and a trailing `Z` (for example,
+`2026-07-16T12:34:56.123456Z`). Chain/string identifiers are Unicode NFC
+before JSON encoding. Algorithm and key identifier are inside the signed
+payload. The exact canonical unsigned bytes are stored with the parsed fields;
+a verifier must re-canonicalize them and reject any mismatch before signature
+verification. The private key is secret/KMS backed. Each checkpoint records
+its key identifier; rotation affects only new checkpoints, and old public
+verification keys remain available for at least the longest archive window.
+Checkpoints are never re-signed during rotation.
 
 Verification of retained audit history starts from the newest trusted
 prune checkpoint and treats its terminal hash as the signed virtual
@@ -258,8 +266,9 @@ This ADR authorizes design only. A later implementation change must include:
 
 1. an append-only `audit_prune_checkpoints` migration, canonical-signature/key
    handling, verifier support for virtual predecessors, and safe rebuilding of
-   the mutable `audit_chain_checkpoint` watermark, plus immutable
-   `baseline_superseded_at` capture for configuration snapshots;
+   the mutable `audit_chain_checkpoint` watermark, plus an append-only
+   configuration-baseline tenure table that supports repeated promotion and
+   records each `approved_at`/`superseded_at` interval;
 2. a receipt-capable immutable archive sink with manifest schema, digest,
    covered-range receipt, authenticated readback, and legacy NULL-sequence-row
    disposition;
