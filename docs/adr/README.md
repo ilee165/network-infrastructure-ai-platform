@@ -58,5 +58,6 @@
 | [0051](0051-vmware-plugin.md) | VMware vSphere Vendor Plugin (pyVmomi) — `VIRTUALIZATION_INVENTORY` Capability, Normalized Virtualization Models, Read-Only vCenter Role | Proposed | P4 W0 |
 | [0052](0052-application-dependency-topology.md) | Application-Dependency Topology — PG-Backed `Application`/`DEPENDS_ON` Layer, Four Derivation Sources, Direct-Write Tagging Under RBAC | Proposed | P4 W0 |
 | [0053](0053-compliance-audit-reporting.md) | Compliance & Audit Reporting Suite — Report Engine, Air-Gap CSV/PDF Rendering, Redaction Contract, SOC 2 CC-Series Default | Proposed | P4 W0 |
+| [0054](0054-retention-and-partitioning.md) | Retention and Partitioning Policy — Checkpoint-Anchored Audit Pruning, Archive-Then-Drop, and Bounded Snapshot Cleanup | Proposed | Audit W7 |
 
 **Conventions:** every binding decision D1–D16 has a current ADR; any deviation requires a superseding ADR (no silent drift — see `PRODUCTION.md` gate G-MNT). New capabilities, normalized models, agents, or vendors beyond the CLAUDE.md lists require an ADR *before* implementation (`REPO-STRUCTURE.md` §6–§7).
