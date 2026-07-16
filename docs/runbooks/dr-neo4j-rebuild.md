@@ -1,6 +1,6 @@
 # DR Runbook — Neo4j rebuild drill (W5-T3)
 
-> **GENERATED — do not edit by hand.** Produced by `full_platform.runbook` (W5-T5, deterministic / no-LLM, ADR-0019 §2 dogfooding mode). Re-run the generator after any drill config change to keep it current (freshness target <= 90 days once drills run in P2 — G-OBS).
+> **GENERATED — do not edit by hand.** Produced by `app.ops.drills.full_platform.runbook` (W5-T5, deterministic / no-LLM, ADR-0019 §2 dogfooding mode). Re-run the generator after any drill config change to keep it current (freshness target <= 90 days once drills run in P2 — G-OBS).
 >
 > The Documentation Agent's LLM-narrative runbook path (`app.agents.documentation.tools.generate_runbook`) needs a reachable LLM provider, which the P1 build host does not have — so the narrative layer is deferred to P2 and these runbooks carry the deterministic procedure tables only (W5-T5 spec: no fabricated generated output).
 
@@ -29,7 +29,7 @@ Prove Neo4j needs NO backup: DR is a full RE-PROJECTION from the authoritative P
 
 1. Confirm Postgres is the authoritative inventory source and Neo4j auth is present in the platform Secret (by-reference).
 2. Run the on-demand Job from `cronjob/netops-neo4j-rebuild-drill`.
-3. The pod re-projects via `app.engines.topology` (recording `topology_rebuild_seconds` + node/edge gauges) and runs `python -m topology_rebuild.run_drill`.
+3. The pod re-projects via `app.engines.topology` (recording `topology_rebuild_seconds` + node/edge gauges) and runs `python -m app.ops.drills.topology_rebuild.run_drill`.
 4. Collect the `DRILL neo4j_rebuild ...` lines (incl. the measured topology-RTO seconds) for the G-REL evidence doc.
 
 ## Structured evidence (the `DRILL ...` lines the collector parses)

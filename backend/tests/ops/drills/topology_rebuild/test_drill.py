@@ -13,9 +13,8 @@ W5-T5 collector consumer) and that the ``topology_rebuild_seconds`` metric is
 registered on the Prometheus default registry exposed at ``/metrics`` (G-OBS), or
 cleanly degrades when ``prometheus_client`` is absent.
 
-Run (from the backend venv so ``app.*`` resolves):
-  PYTHONPATH=backend:deploy/kubernetes/netops/drills \
-    python -m pytest deploy/kubernetes/netops/drills/topology_rebuild/test_drill.py -q
+Run from ``backend/`` with the project virtualenv:
+  python -m pytest tests/ops/drills/topology_rebuild/test_drill.py -q
 """
 
 from __future__ import annotations
@@ -24,15 +23,15 @@ import io
 
 import pytest
 
-from topology_rebuild.assertions import (
+from app.ops.drills.topology_rebuild.assertions import (
     DRILL_TAG,
     DrillError,
     RebuildDrillResult,
     assert_counts_match,
     assert_rto_within_target,
 )
-from topology_rebuild.fixture import build_seeded_projection, run_rebuild
-from topology_rebuild.run_drill import run
+from app.ops.drills.topology_rebuild.fixture import build_seeded_projection, run_rebuild
+from app.ops.drills.topology_rebuild.run_drill import run
 
 _SINK = io.StringIO  # fresh stream per assertion so emitted lines don't interleave.
 

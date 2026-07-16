@@ -1,6 +1,6 @@
 # DR Runbook — pcap spot-restore drill (W5-T4)
 
-> **GENERATED — do not edit by hand.** Produced by `full_platform.runbook` (W5-T5, deterministic / no-LLM, ADR-0019 §2 dogfooding mode). Re-run the generator after any drill config change to keep it current (freshness target <= 90 days once drills run in P2 — G-OBS).
+> **GENERATED — do not edit by hand.** Produced by `app.ops.drills.full_platform.runbook` (W5-T5, deterministic / no-LLM, ADR-0019 §2 dogfooding mode). Re-run the generator after any drill config change to keep it current (freshness target <= 90 days once drills run in P2 — G-OBS).
 >
 > The Documentation Agent's LLM-narrative runbook path (`app.agents.documentation.tools.generate_runbook`) needs a reachable LLM provider, which the P1 build host does not have — so the narrative layer is deferred to P2 and these runbooks carry the deterministic procedure tables only (W5-T5 spec: no fabricated generated output).
 
@@ -30,7 +30,7 @@ Prove DR HONORS the pcap retention contract: a sampled live capture restores and
 
 1. Confirm the engineer+ actor identity and that the pcap S3 credential + DB password are present in the platform Secret (by-reference).
 2. Run the on-demand Job from `cronjob/netops-pcap-spot-restore-drill`.
-3. The pod restores sampled captures into the throwaway scratch and runs `python -m pcap.run_drill` (the three assertions, incl. the negative no-resurrection self-check).
+3. The pod restores sampled captures into the throwaway scratch and runs `python -m app.ops.drills.pcap.run_drill` (the three assertions, incl. the negative no-resurrection self-check).
 4. Collect the `DRILL pcap_spot_restore ...` lines for the G-REL evidence doc.
 
 ## Structured evidence (the `DRILL ...` lines the collector parses)

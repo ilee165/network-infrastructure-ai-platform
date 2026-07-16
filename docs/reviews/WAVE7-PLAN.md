@@ -88,8 +88,8 @@ is recorded in the PR body.
 ## T3 — Drill relocation (AR-W4-T3)
 
 `wf-implementer-light`.
-- Move production Python from `deploy/kubernetes/netops/drills/*` →
-  `backend/app/ops/drills/`; move the five `test_*.py` files →
+- Relocate the deploy-tree production Python into `backend/app/ops/drills/`;
+  move the five `test_*.py` files →
   `backend/tests/ops/drills/` so normal `testpaths = ["tests"]` collection
   includes them. Manifests stay under `deploy/`.
 - Update executable paths, module/PYTHONPATH examples, and any

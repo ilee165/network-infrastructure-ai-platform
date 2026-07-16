@@ -6,13 +6,13 @@ stable (re-running yields byte-identical content — "matches the source exactly
 construction"), and every runbook carries the GENERATED banner + the per-tier
 `DRILL ...` contract lines so a reader can trace evidence back to the collector.
 
-Run:  PYTHONPATH=backend:deploy/kubernetes/netops/drills \
-        python -m pytest deploy/kubernetes/netops/drills/full_platform/test_runbook.py -q
+Run from ``backend/`` with the project virtualenv:
+  python -m pytest tests/ops/drills/full_platform/test_runbook.py -q
 """
 
 from __future__ import annotations
 
-from full_platform.runbook import ALL_RUNBOOKS, generate
+from app.ops.drills.full_platform.runbook import ALL_RUNBOOKS, generate
 
 
 def test_four_runbooks_are_generated(tmp_path) -> None:

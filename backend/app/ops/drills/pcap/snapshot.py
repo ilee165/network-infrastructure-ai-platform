@@ -180,13 +180,11 @@ async def _plan_from_db(args: argparse.Namespace) -> dict[str, object]:
     engine = create_async_engine(db_url)
     maker = async_sessionmaker(engine, expire_on_commit=False)
     async with maker() as session:
-        return await plan(
-            session, pcap_dir=pcap_dir, policy_days=args.retention_days
-        )
+        return await plan(session, pcap_dir=pcap_dir, policy_days=args.retention_days)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="pcap.snapshot")
+    parser = argparse.ArgumentParser(prog="app.ops.drills.pcap.snapshot")
     parser.add_argument("--pcap-dir", default="/data/pcaps")
     parser.add_argument("--s3-prefix", default=None)
     parser.add_argument("--retention-days", type=int, default=30)

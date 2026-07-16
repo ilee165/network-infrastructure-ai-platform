@@ -10,8 +10,8 @@ It runs all four ADR-0030 §5.1 assertions, each emitting one structured
 ``DRILL postgres_pitr <name>=PASS|FAIL duration_s=<n>`` line for the W5-T5
 G-REL evidence collector, and exits non-zero on the first failure (fail closed).
 
-Run:  python -m deploy.kubernetes.netops.drills.postgres_pitr.run_drill
-      (or wired via PYTHONPATH to the drills/ dir inside the Job image).
+Run:  python -m app.ops.drills.postgres_pitr.run_drill
+      (the runtime image installs the backend wheel under ``/opt/venv``).
 """
 
 from __future__ import annotations

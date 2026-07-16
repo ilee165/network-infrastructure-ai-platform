@@ -12,22 +12,20 @@ payload. For every property there is a tampered-input case that MUST raise
                       INCLUDE it in PRUNE (the live-vs-tombstoned decision, reused
                       from the model).
 
-Run (from the backend venv so ``app.*`` resolves):
-  PYTHONPATH=backend:deploy/kubernetes/netops/drills \
-    python -m pytest deploy/kubernetes/netops/drills/pcap/test_drill.py -q
+Run from ``backend/`` with the project virtualenv:
+  python -m pytest tests/ops/drills/pcap/test_drill.py -q
 """
 
 from __future__ import annotations
 
 import asyncio
 import io
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.engines.packet.capture import sha256_file
-
-from pcap.assertions import (
+from app.ops.drills.pcap.assertions import (
     DrillError,
     PcapDrillResult,
     assert_no_tombstoned_resurrection,
@@ -35,14 +33,14 @@ from pcap.assertions import (
     assert_sampled_sha256_matches,
     is_authorized,
 )
-from pcap.fixture import (
+from app.ops.drills.pcap.fixture import (
     build_seeded_state,
     live_snapshot_ids,
     tombstoned_capture_ids,
 )
-from pcap.run_drill import run
-from pcap.snapshot import _effective_expiry, plan
-from pcap.snapshot import run as snapshot_run
+from app.ops.drills.pcap.run_drill import run
+from app.ops.drills.pcap.snapshot import _effective_expiry, plan
+from app.ops.drills.pcap.snapshot import run as snapshot_run
 
 _SINK = io.StringIO  # fresh stream per assertion so emitted lines don't interleave.
 
@@ -53,10 +51,11 @@ _SINK = io.StringIO  # fresh stream per assertion so emitted lines don't interle
 
 
 def test_composite_result_line_is_the_t5_contract() -> None:
-    line = PcapDrillResult("abc-123", sha256_match=True, tombstoned_resurrected=False, passed=True).line()
+    line = PcapDrillResult(
+        "abc-123", sha256_match=True, tombstoned_resurrected=False, passed=True
+    ).line()
     assert line == (
-        "DRILL pcap_spot_restore sampled=abc-123 sha256=MATCH "
-        "tombstoned_resurrected=NO result=PASS"
+        "DRILL pcap_spot_restore sampled=abc-123 sha256=MATCH tombstoned_resurrected=NO result=PASS"
     )
     fail = PcapDrillResult(
         "def-456", sha256_match=False, tombstoned_resurrected=True, passed=False
@@ -208,9 +207,7 @@ def test_snapshot_planner_excludes_tombstoned_from_copy(tmp_path) -> None:
         assert str(state.tombstoned_capture_id) not in copy_ids
         assert str(state.tombstoned_capture_id) in set(doc["prune"])
         # The effective expiry is clamped to the SHORTER of policy vs retention.
-        live_row = next(
-            r for r in doc["copy"] if r["capture_id"] == str(state.live_capture_id)
-        )
+        live_row = next(r for r in doc["copy"] if r["capture_id"] == str(state.live_capture_id))
         assert "effective_expiry" in live_row
 
     asyncio.run(_body())
@@ -227,7 +224,7 @@ def test_snapshot_planner_excludes_tombstoned_from_copy(tmp_path) -> None:
 def test_effective_expiry_clamps_to_retention_when_retention_is_shorter() -> None:
     # retention_expires_at = now + 5d under policy_days=30 → retention is the SHORTER
     # window, so policy must NOT extend the copy past the pcap's own retention.
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     retention = now + timedelta(days=5)
     effective = _effective_expiry(retention, policy_days=30, now=now)
     assert effective == retention
@@ -238,7 +235,7 @@ def test_effective_expiry_clamps_to_retention_when_retention_is_shorter() -> Non
 def test_effective_expiry_clamps_to_policy_when_policy_is_shorter() -> None:
     # Inverse: retention far in the future (now+90d), policy_days=30 → policy is the
     # SHORTER window, so the copy expires at now+policy_days, not at retention.
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     retention = now + timedelta(days=90)
     effective = _effective_expiry(retention, policy_days=30, now=now)
     assert effective == now + timedelta(days=30)
@@ -257,8 +254,8 @@ def test_planner_effective_expiry_is_retention_when_retention_is_shorter(tmp_pat
         async with state.sessionmaker() as session:
             from sqlalchemy import select, update
 
-            from app.models.pcap_metadata import PcapMetadata
             from app.models.mixins import utcnow
+            from app.models.pcap_metadata import PcapMetadata
 
             now = utcnow()
             short_retention = now + timedelta(days=5)
@@ -276,12 +273,8 @@ def test_planner_effective_expiry_is_retention_when_retention_is_shorter(tmp_pat
                 )
             ).scalar_one()
 
-            doc = await plan(
-                session, pcap_dir=tmp_path / "pcaps", policy_days=30, now=now
-            )
-        live_row = next(
-            r for r in doc["copy"] if r["capture_id"] == str(state.live_capture_id)
-        )
+            doc = await plan(session, pcap_dir=tmp_path / "pcaps", policy_days=30, now=now)
+        live_row = next(r for r in doc["copy"] if r["capture_id"] == str(state.live_capture_id))
         # effective_expiry equals the (shorter) retention, NOT now+30d policy.
         assert live_row["effective_expiry"] == row.isoformat()
         assert datetime.fromisoformat(live_row["effective_expiry"]) < now + timedelta(days=30)
@@ -378,9 +371,7 @@ def test_snapshot_fails_closed_when_dsn_unset_and_not_dry_run(tmp_path, monkeypa
     monkeypatch.delenv("PCAP_DRILL_DB_URL", raising=False)
     monkeypatch.delenv("PCAP_SNAPSHOT_DRY_RUN", raising=False)
     plan_out = tmp_path / "plan.json"
-    rc = snapshot_run(
-        ["--pcap-dir", str(tmp_path / "pcaps"), "--plan-out", str(plan_out)]
-    )
+    rc = snapshot_run(["--pcap-dir", str(tmp_path / "pcaps"), "--plan-out", str(plan_out)])
     assert rc == 1
     assert not plan_out.exists()
 
@@ -391,9 +382,7 @@ def test_snapshot_dry_run_allows_empty_plan_when_dsn_unset(tmp_path, monkeypatch
     monkeypatch.delenv("PCAP_DRILL_DB_URL", raising=False)
     monkeypatch.setenv("PCAP_SNAPSHOT_DRY_RUN", "1")
     plan_out = tmp_path / "plan.json"
-    rc = snapshot_run(
-        ["--pcap-dir", str(tmp_path / "pcaps"), "--plan-out", str(plan_out)]
-    )
+    rc = snapshot_run(["--pcap-dir", str(tmp_path / "pcaps"), "--plan-out", str(plan_out)])
     assert rc == 0
     assert plan_out.exists()
     import json as _json

@@ -22,8 +22,8 @@ runbook header + the G-REL evidence doc. We do NOT fabricate LLM-narrative outpu
 When a provider is wired in P2, the narrative-grounding sections can be layered on
 top of these deterministic procedure tables (the facts stay the source of truth).
 
-Run:  python -m full_platform.run_drill ...           # runs the drill
-      python -m full_platform.runbook --out docs/runbooks   # (re)generates docs
+Run:  python -m app.ops.drills.full_platform.run_drill ...  # runs the drill
+      python -m app.ops.drills.full_platform.runbook --out docs/runbooks
 """
 
 from __future__ import annotations
@@ -37,7 +37,8 @@ from pathlib import Path
 #: Header stamped on every generated runbook so a reader knows it is generated.
 _GENERATED_BANNER = (
     "> **GENERATED — do not edit by hand.** Produced by "
-    "`full_platform.runbook` (W5-T5, deterministic / no-LLM, ADR-0019 §2 dogfooding "
+    "`app.ops.drills.full_platform.runbook` (W5-T5, deterministic / no-LLM, "
+    "ADR-0019 §2 dogfooding "
     "mode). Re-run the generator after any drill config change to keep it current "
     "(freshness target <= 90 days once drills run in P2 — G-OBS).\n>\n"
     "> The Documentation Agent's LLM-narrative runbook path "
@@ -154,16 +155,25 @@ _PITR = DrillRunbook(
         "Run the on-demand Job: `kubectl create job --from=cronjob/"
         "netops-postgres-pitr-drill netops-postgres-pitr-drill-manual`.",
         "The pod restores into the throwaway scratch, runs `pgbackrest verify`, then "
-        "`python -m postgres_pitr.run_drill` (the four assertions).",
+        "`python -m app.ops.drills.postgres_pitr.run_drill` (the four assertions).",
         "Collect the `DRILL postgres_pitr ...` lines for the G-REL evidence doc.",
     ],
     failure_modes=[
-        ("`rpo_within_window=FAIL`", "WAL replay lag exceeded the PROPOSED window — "
-         "investigate archive_command / WAL shipping cadence (W5-T1)."),
-        ("`credentials_fail_closed=FAIL`", "A restored credential decrypted WITHOUT "
-         "the KEK — envelope encryption is broken; escalate (G-SEC)."),
-        ("Empty restore / `PG_VERSION` missing", "The L5 `test -s` guard failed the "
-         "job — the restore stream was silently empty; check repo + stanza."),
+        (
+            "`rpo_within_window=FAIL`",
+            "WAL replay lag exceeded the PROPOSED window — "
+            "investigate archive_command / WAL shipping cadence (W5-T1).",
+        ),
+        (
+            "`credentials_fail_closed=FAIL`",
+            "A restored credential decrypted WITHOUT "
+            "the KEK — envelope encryption is broken; escalate (G-SEC).",
+        ),
+        (
+            "Empty restore / `PG_VERSION` missing",
+            "The L5 `test -s` guard failed the "
+            "job — the restore stream was silently empty; check repo + stanza.",
+        ),
     ],
 )
 
@@ -200,15 +210,21 @@ _NEO4J = DrillRunbook(
         "Run the on-demand Job from `cronjob/netops-neo4j-rebuild-drill`.",
         "The pod re-projects via `app.engines.topology` (recording "
         "`topology_rebuild_seconds` + node/edge gauges) and runs "
-        "`python -m topology_rebuild.run_drill`.",
+        "`python -m app.ops.drills.topology_rebuild.run_drill`.",
         "Collect the `DRILL neo4j_rebuild ...` lines (incl. the measured "
         "topology-RTO seconds) for the G-REL evidence doc.",
     ],
     failure_modes=[
-        ("`counts_match=FAIL`", "The re-projection dropped or invented topology — "
-         "the projection pipeline is incomplete (ADR-0005 D5); fix the projector."),
-        ("`rto_within_target=FAIL`", "Rebuild exceeded the PROPOSED topology-RTO — "
-         "profile the projection at scale; re-base the target on Consultant §12."),
+        (
+            "`counts_match=FAIL`",
+            "The re-projection dropped or invented topology — "
+            "the projection pipeline is incomplete (ADR-0005 D5); fix the projector.",
+        ),
+        (
+            "`rto_within_target=FAIL`",
+            "Rebuild exceeded the PROPOSED topology-RTO — "
+            "profile the projection at scale; re-base the target on Consultant §12.",
+        ),
     ],
 )
 
@@ -246,17 +262,27 @@ _PCAP = DrillRunbook(
         "password are present in the platform Secret (by-reference).",
         "Run the on-demand Job from `cronjob/netops-pcap-spot-restore-drill`.",
         "The pod restores sampled captures into the throwaway scratch and runs "
-        "`python -m pcap.run_drill` (the three assertions, incl. the negative "
+        "`python -m app.ops.drills.pcap.run_drill` (the three assertions, incl. "
+        "the negative "
         "no-resurrection self-check).",
         "Collect the `DRILL pcap_spot_restore ...` lines for the G-REL evidence doc.",
     ],
     failure_modes=[
-        ("`no_tombstoned_resurrection=FAIL`", "A purged capture came back — DR "
-         "re-extended a payload past retention; STOP and escalate (ADR-0030 §3)."),
-        ("`sampled_sha256_matches=FAIL`", "Restore lost/corrupted bytes — investigate "
-         "object-store integrity / the snapshot pipeline (W5-T4)."),
-        ("`restore_authorized=FAIL`", "Expected for a sub-engineer actor — the gate "
-         "bit; re-run as engineer+ for the positive path."),
+        (
+            "`no_tombstoned_resurrection=FAIL`",
+            "A purged capture came back — DR "
+            "re-extended a payload past retention; STOP and escalate (ADR-0030 §3).",
+        ),
+        (
+            "`sampled_sha256_matches=FAIL`",
+            "Restore lost/corrupted bytes — investigate "
+            "object-store integrity / the snapshot pipeline (W5-T4).",
+        ),
+        (
+            "`restore_authorized=FAIL`",
+            "Expected for a sub-engineer actor — the gate "
+            "bit; re-run as engineer+ for the positive path.",
+        ),
     ],
 )
 
@@ -288,8 +314,7 @@ _FULL = DrillRunbook(
         "DRILL postgres_pitr OUTCOME=PASS assertions=4",
         "DRILL neo4j_rebuild OUTCOME=PASS assertions=2",
         "DRILL pcap_spot_restore OUTCOME=PASS assertions=3",
-        "DRILL full_platform tiers=3 passed=3 rpo_s=<n> rto_s=<n> "
-        "topology_rto_s=<n> result=PASS",
+        "DRILL full_platform tiers=3 passed=3 rpo_s=<n> rto_s=<n> topology_rto_s=<n> result=PASS",
     ],
     steps=[
         "Confirm all per-tier credentials are present in the platform Secret "
@@ -297,7 +322,8 @@ _FULL = DrillRunbook(
         "cipher pass, KEK reference.",
         "Run the on-demand Job from `cronjob/netops-full-platform-dr-drill`.",
         "The pod restores Postgres from the repo ALONE into throwaway scratch, then "
-        "runs `python -m full_platform.run_drill`, which chains tier 1 -> 2 -> 3 and "
+        "runs `python -m app.ops.drills.full_platform.run_drill`, which chains "
+        "tier 1 -> 2 -> 3 and "
         "aggregates their `DRILL ...` lines.",
         "Record the composite `DRILL full_platform ...` line + the aggregated table "
         "in `docs/roadmap/evidence/P1-W5-G-REL-evidence.md` (measured-vs-PROPOSED).",
@@ -305,14 +331,23 @@ _FULL = DrillRunbook(
         "cluster and re-base the PROPOSED targets on the Consultant §12 answer.",
     ],
     failure_modes=[
-        ("Any per-tier `OUTCOME=FAIL`", "The end-to-end result rolls up to FAIL; the "
-         "aggregated table names which tier + assertion failed — follow that tier's "
-         "runbook."),
-        ("`full_platform ... result=FAIL` with a MISSING tier", "A tier produced no "
-         "terminal verdict (silent gap) — the chain ran all tiers, so check that "
-         "tier's pod logs; a missing tier is never a pass."),
-        ("`rto_s` over budget", "End-to-end RTO exceeded the PROPOSED 1 h — record "
-         "the measured number; re-base on Consultant §12 (do not weaken the gate)."),
+        (
+            "Any per-tier `OUTCOME=FAIL`",
+            "The end-to-end result rolls up to FAIL; the "
+            "aggregated table names which tier + assertion failed — follow that tier's "
+            "runbook.",
+        ),
+        (
+            "`full_platform ... result=FAIL` with a MISSING tier",
+            "A tier produced no "
+            "terminal verdict (silent gap) — the chain ran all tiers, so check that "
+            "tier's pod logs; a missing tier is never a pass.",
+        ),
+        (
+            "`rto_s` over budget",
+            "End-to-end RTO exceeded the PROPOSED 1 h — record "
+            "the measured number; re-base on Consultant §12 (do not weaken the gate).",
+        ),
     ],
 )
 
@@ -331,7 +366,7 @@ def generate(out_dir: Path) -> list[Path]:
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="full_platform.runbook")
+    parser = argparse.ArgumentParser(prog="app.ops.drills.full_platform.runbook")
     parser.add_argument(
         "--out",
         default="docs/runbooks",

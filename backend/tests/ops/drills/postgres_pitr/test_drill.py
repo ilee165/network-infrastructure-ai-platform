@@ -11,9 +11,8 @@ is a tampered-input case that MUST raise :class:`DrillError`:
   * RPO-in-window       — a lag OUTSIDE the window must fail.
   * pgbackrest verify   — a non-zero/empty verify must fail.
 
-Run (from the backend venv so ``app.core.crypto`` resolves):
-  PYTHONPATH=backend:deploy/kubernetes/netops/drills \
-    python -m pytest deploy/kubernetes/netops/drills/postgres_pitr/test_drill.py -q
+Run from ``backend/`` with the project virtualenv:
+  python -m pytest tests/ops/drills/postgres_pitr/test_drill.py -q
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ import io
 
 import pytest
 
-from postgres_pitr.assertions import (
+from app.ops.drills.postgres_pitr.assertions import (
     DrillError,
     DrillResult,
     assert_audit_log_immutable,
@@ -30,13 +29,13 @@ from postgres_pitr.assertions import (
     assert_pgbackrest_verify_clean,
     assert_rpo_within_window,
 )
-from postgres_pitr.fixture import (
+from app.ops.drills.postgres_pitr.fixture import (
     SEED_CREDENTIAL_PLAINTEXT,
     absent_kek_provider,
     build_seeded_state,
     matching_kek_provider,
 )
-from postgres_pitr.run_drill import run
+from app.ops.drills.postgres_pitr.run_drill import run
 
 _SINK = io.StringIO  # fresh stream per assertion so emitted lines don't interleave.
 

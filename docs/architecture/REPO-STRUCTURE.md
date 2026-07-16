@@ -180,6 +180,13 @@ backend/
     │   ├── security/                # Standard layout; ACL/firewall posture, credential hygiene, audit review (read-only)
     │   └── automation/              # Standard layout; executes automations — every execution via ChangeRequest (M5)
     │
+    ├── ops/                         # Independent operational composition root (same import layer as main)
+    │   └── drills/                  # Executable DR drills; manifests remain under deploy/kubernetes/
+    │       ├── postgres_pitr/       # Object-store-alone Postgres restore assertions
+    │       ├── topology_rebuild/    # Postgres-to-Neo4j rebuild assertions
+    │       ├── pcap/                # Retention-aware snapshot + spot-restore assertions
+    │       └── full_platform/       # Three-tier orchestrator, collector, and runbook generator
+    │
     ├── plugins/                     # Vendor plugin system (D6, §4) — may NOT import agents (§3)
     │   ├── base.py                  # VendorPlugin ABC, Capability StrEnum (19 members per §4), and one typed
     │   │                            #   interface per capability (e.g. InterfacesCapability.get_interfaces())
@@ -309,6 +316,7 @@ Arrows mean "may import". Everything except `core` may also import `core` and `s
 graph TD
     subgraph composition ["Composition roots"]
         MAIN["app/main.py"]
+        OPS["app/ops<br/>(operational drills)"]
         API["app/api"]
         WORKERS["app/workers"]
     end
@@ -338,6 +346,8 @@ graph TD
 
     MAIN --> API
     MAIN --> WORKERS
+    OPS --> ENG
+    OPS --> MODELS
     API --> SVC
     API --> ENG
     API --> FW
@@ -388,7 +398,8 @@ graph TD
 | 11 | `app/agents/<specialist>` (all ten agent packages) | `agents.framework`, `core`, `schemas`, `llm` (prompts/profiles) | `engines`, `services`, `plugins`, `models`, `knowledge`, `api`, `workers` | Brief §3: "agents use engines/services only through typed tool wrappers in agents/framework" |
 | 12 | `app/api` | `core`, `schemas`, `services`, `engines`, `agents.framework`, `workers.tasks` (task signatures for enqueue only) | `models`, `plugins`, `llm`, `knowledge`, `agents.<specialist>` | API stays behind service/engine facades; specialists are reached only via the framework registry/supervisor |
 | 13 | `app/workers` | `core`, `models`, `schemas`, `services`, `engines`, `knowledge`, `agents.framework` (PROPOSED — headless doc-generation agent runs) | `api`, `plugins` (use engines), `llm` directly, `agents.<specialist>` | D8: tasks are thin wrappers around engine/service calls; queue names per D8 |
-| 14 | `app/main.py` | `core`, `api` | direct imports of anything else (wired via `api`) | Composition root for the `api` container; `workers/celery_app.py` is the root for the `worker` container |
+| 14 | `app/ops` | any lower application layer (current drills use `core`, `models`, `engines`) | `main`; lower layers importing `ops` | Independent operational composition root; colocates executable drills with backend code so mypy/import-linter/pytest cover them without making deploy manifests a Python package |
+| 15 | `app/main.py` | `core`, `api` | direct imports of anything else (wired via `api`) | Composition root for the `api` container; `workers/celery_app.py` is the root for the `worker` container |
 
 ### 3.3 CI enforcement (import-linter contracts, Phase 2)
 
@@ -399,7 +410,7 @@ Declared in `backend/pyproject.toml`; the CI `lint` stage fails on violation (D1
 3. **forbidden** — `app.engines` → `app.plugins.vendors`.
 4. **forbidden** — `app.core` → any other `app.*` package.
 5. **independence** — all `app.plugins.vendors.*` packages are mutually independent.
-6. **layers** — `main` / (`api`, `workers`) / `agents` / `agents.framework` / `engines` / `services` / (`knowledge`, `llm`, `plugins`) / (`models`, `schemas`) / `core`.
+6. **layers** — (`main`, `ops`) / (`api`, `workers`) / `agents` / `agents.framework` / `engines` / `services` / (`knowledge`, `llm`, `plugins`) / (`models`, `schemas`) / `db` / `core`. `main` and `ops` are independent composition roots: neither may import the other, and lower layers may not import operational drill code.
 
 ### 3.4 Services vs. engines placement charter
 
@@ -504,6 +515,12 @@ backend/tests/
 │   ├── agents/                      # framework/ + one dir per agent; graphs run against the fake LLM
 │   └── plugins/
 │       └── vendors/<vendor_id>/     # Parser + capability tests driven by tests/fixtures/vendors/<vendor_id>/
+├── ops/
+│   └── drills/                      # Relocated drill tests collected by normal testpaths=["tests"]
+│       ├── postgres_pitr/
+│       ├── topology_rebuild/
+│       ├── pcap/
+│       └── full_platform/
 ├── contract/                        # PROPOSED: shared parametrized suites every implementation must pass
 │   ├── test_plugin_contract.py      # For each registered plugin: declared capabilities resolve via the registry
 │   │                                #   and return the correct Normalized* types (§4)

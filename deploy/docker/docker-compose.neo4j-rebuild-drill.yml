@@ -6,7 +6,8 @@
 # authoritative Postgres — forbidden by D5. This one-shot service:
 #   (1) drops/recreates the projected graph + re-projects the WHOLE Postgres
 #       inventory via the EXISTING engines/topology full-rebuild path
-#       (topology_rebuild.run_drill → app.engines.topology.metrics.timed_rebuild),
+#       (app.ops.drills.topology_rebuild.run_drill →
+#        app.engines.topology.metrics.timed_rebuild),
 #       which times the wall-clock and records `topology_rebuild_seconds` +
 #       topology_rebuild_nodes/_edges onto Prometheus (the topology-RTO; G-REL/G-OBS);
 #   (2) asserts the rebuilt node/edge counts MATCH the pre-wipe projection within
@@ -18,8 +19,8 @@
 #
 # MIRRORS the K8s neo4j-rebuild-drill-job.yaml container spec exactly: same image,
 # same env surface (TOPOLOGY_RTO_SECONDS, TOPOLOGY_COUNT_TOLERANCE,
-# TOPOLOGY_DUMP_ENABLED), same PYTHONPATH (/app:/app/drills), same command (L3/L5
-# guards: set -euo pipefail + test -s non-empty guard on the result stream).
+# TOPOLOGY_DUMP_ENABLED), same installed-wheel module command, and the same L3/L5
+# guards (set -euo pipefail + test -s non-empty guard on the result stream).
 #
 # BUILT P1, RUN P2 (ADR-0030 §5.2 / P1-PLAN.md §6): the P1 gate is a green
 # dry-run over the seeded fixture (no hardware). P2 points it at restored/live
@@ -51,7 +52,7 @@ services:
         set -euo pipefail
         mkdir -p /tmp/drill
         echo "[neo4j-rebuild-drill] re-projecting topology from Postgres -> clean Neo4j (RTO budget ${TOPOLOGY_RTO_SECONDS}s)"
-        python -m topology_rebuild.run_drill \
+        python -m app.ops.drills.topology_rebuild.run_drill \
           --rto-seconds "${TOPOLOGY_RTO_SECONDS}" \
           --count-tolerance "${TOPOLOGY_COUNT_TOLERANCE}" \
           | tee /tmp/drill/result.txt
@@ -71,7 +72,6 @@ services:
       # D5 forbids). When enabled it is validated AGAINST the rebuild, never
       # authoritative. Surfaced so the harness can branch in P2.
       TOPOLOGY_DUMP_ENABLED: ${TOPOLOGY_DUMP_ENABLED:-false}
-      PYTHONPATH: "/app:/app/drills"
       # --- connection coordinates: NON-secret env (hosts/URIs/users). ---
       NETOPS_POSTGRES_HOST: ${NETOPS_POSTGRES_HOST:-postgres}
       NETOPS_POSTGRES_PORT: ${NETOPS_POSTGRES_PORT:-5432}

@@ -5,9 +5,9 @@ script has restored Postgres from the object-store repo ALONE into a THROWAWAY
 target (the W5-T2 restore step). This orchestrator then runs the three per-tier
 ASSERTION harnesses IN CHAIN ORDER:
 
-  1. ``postgres_pitr.run_drill``      — assert the object-store-alone restore
-  2. ``topology_rebuild.run_drill``   — rebuild Neo4j over the RESTORED Postgres
-  3. ``pcap.run_drill``               — spot-restore pcaps, retention-honoring
+  1. ``app.ops.drills.postgres_pitr.run_drill`` — assert the object-store restore
+  2. ``app.ops.drills.topology_rebuild.run_drill`` — rebuild Neo4j over Postgres
+  3. ``app.ops.drills.pcap.run_drill`` — spot-restore pcaps, retention-honoring
 
 It captures each tier's structured ``DRILL ...`` lines, AGGREGATES them via the
 collector (W5-T5 requirement 2: aggregate, don't re-implement), measures the
@@ -21,9 +21,10 @@ clean-cluster run is P2 (ADR-0030 §6). The chain ALWAYS runs all three tiers ev
 if an earlier one fails, so the evidence table records every tier's measured
 result (a partial DR drill that stopped at tier 1 hides where the real gap is).
 
-Run:  python -m full_platform.run_drill --rpo-window-minutes 5 --rto-minutes 60 \
+Run:  python -m app.ops.drills.full_platform.run_drill \
+        --rpo-window-minutes 5 --rto-minutes 60 \
         --topology-rto-minutes 30
-      (wired via PYTHONPATH=/app:/app/drills inside the Job image).
+      (the runtime image installs the backend wheel under ``/opt/venv``).
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ from .collector import DrillEvidence, collect, write_report
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="full_platform.run_drill")
+    parser = argparse.ArgumentParser(prog="app.ops.drills.full_platform.run_drill")
     parser.add_argument(
         "--rpo-window-minutes",
         type=float,
@@ -104,9 +105,9 @@ def run(argv: Sequence[str] | None = None, *, stream: TextIO | None = None) -> i
 
     # Import the per-tier entrypoints lazily so a slim host that can run only one
     # tier (e.g. topology_rebuild without app DB deps) still imports this module.
-    from postgres_pitr.run_drill import run as run_postgres
-    from topology_rebuild.run_drill import run as run_neo4j
-    from pcap.run_drill import run as run_pcap
+    from app.ops.drills.pcap.run_drill import run as run_pcap
+    from app.ops.drills.postgres_pitr.run_drill import run as run_postgres
+    from app.ops.drills.topology_rebuild.run_drill import run as run_neo4j
 
     chain_start = time.monotonic()
     captured: list[str] = []

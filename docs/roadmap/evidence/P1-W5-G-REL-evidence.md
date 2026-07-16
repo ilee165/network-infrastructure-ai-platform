@@ -39,7 +39,8 @@ retention-honoring — all from object storage, with no surviving live state.
 
 ## Measured vs PROPOSED — seeded dry-run (P1, no hardware)
 
-Numbers are the aggregated output of `python -m full_platform.run_drill` over the
+Numbers are the aggregated output of
+`python -m app.ops.drills.full_platform.run_drill` over the
 T1–T4 seeded fixtures (the gate is a green dry-run at seeded scale; P1-PLAN.md §6).
 
 | Metric | PROPOSED target | Measured (seeded) | Within target? |
@@ -56,7 +57,8 @@ T1–T4 seeded fixtures (the gate is a green dry-run at seeded scale; P1-PLAN.md
 
 ## Aggregated per-tier results (the collector's table)
 
-The evidence collector (`full_platform.collector`) parses each tier's `DRILL …`
+The evidence collector (`app.ops.drills.full_platform.collector`) parses each
+tier's `DRILL …`
 lines into this table — the single source of measured numbers:
 
 | Tier | Assertions | Topology-RTO (s) | Result |
@@ -79,8 +81,8 @@ PROPOSED windows; `topology_rto_s` is the deterministic seeded projection time.)
 Reproduce locally (from the backend venv so `app.*` resolves):
 
 ```
-PYTHONPATH=backend:deploy/kubernetes/netops/drills \
-  python -m full_platform.run_drill \
+PYTHONPATH=backend \
+  python -m app.ops.drills.full_platform.run_drill \
     --rpo-window-minutes 5 --rto-minutes 60 --topology-rto-minutes 30
 ```
 
@@ -105,7 +107,8 @@ DRILL full_platform tiers=3 passed=3 rpo_s=<n> rto_s=<n> topology_rto_s=<n> resu
 ## DR runbooks (Documentation Agent dogfooding)
 
 The four DR runbooks are **generated** (ADR-0030 §5 / PRODUCTION.md §8 dogfooding),
-not hand-maintained, by `full_platform.runbook` (deterministic / no-LLM — the same
+not hand-maintained, by `app.ops.drills.full_platform.runbook` (deterministic /
+no-LLM — the same
 "output matches source content exactly by construction" mode as the Documentation
 Agent's inventory + diagram tools, ADR-0019 §2/§3):
 
@@ -118,8 +121,8 @@ Regenerate after any drill config change (freshness target ≤ 90 days once dril
 run in P2 — G-OBS):
 
 ```
-PYTHONPATH=backend:deploy/kubernetes/netops/drills \
-  python -m full_platform.runbook --out docs/runbooks
+PYTHONPATH=backend \
+  python -m app.ops.drills.full_platform.runbook --out docs/runbooks
 ```
 
 > **Documentation-Agent LLM-narrative path: deferred to P2 (honest note).** The

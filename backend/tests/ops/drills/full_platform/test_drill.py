@@ -10,17 +10,16 @@ These prove:
   * the seeded end-to-end dry-run is a GREEN PASS over all three tiers (the W5-T5
     exit criterion at seeded scale).
 
-Run (from the backend venv so ``app.*`` resolves):
-  PYTHONPATH=backend:deploy/kubernetes/netops/drills \
-    python -m pytest deploy/kubernetes/netops/drills/full_platform/test_drill.py -q
+Run from ``backend/`` with the project virtualenv:
+  python -m pytest tests/ops/drills/full_platform/test_drill.py -q
 """
 
 from __future__ import annotations
 
 import io
 
-from full_platform.collector import FULL_TAG, TIER_TAGS, collect, parse
-from full_platform.run_drill import run
+from app.ops.drills.full_platform.collector import FULL_TAG, TIER_TAGS, collect, parse
+from app.ops.drills.full_platform.run_drill import run
 
 # Realistic per-tier output, copied from the live seeded dry-run of T2/T3/T4 so the
 # parser is tested against the EXACT contract lines those harnesses emit.
@@ -82,8 +81,7 @@ def test_missing_tier_rolls_up_to_fail() -> None:
 
 def test_tier_fail_propagates_to_end_to_end() -> None:
     failed_pcap = [
-        "DRILL pcap_spot_restore sampled=abc sha256=MISMATCH "
-        "tombstoned_resurrected=NO result=FAIL",
+        "DRILL pcap_spot_restore sampled=abc sha256=MISMATCH tombstoned_resurrected=NO result=FAIL",
         "DRILL pcap_spot_restore OUTCOME=FAIL failed_assertion=sampled_sha256_matches",
     ]
     ev = parse(_PG_LINES + _NEO_LINES + failed_pcap)

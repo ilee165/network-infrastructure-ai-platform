@@ -16,7 +16,8 @@ WHAT IT PROVES (the ADR-0023 retention contract DR must HONOR, not subvert):
 
 The drill RESTORES from the `pcaps/` object-store prefix ALONE to a THROWAWAY
 target (an emptyDir scratch restorePath — NEVER the live capture volume). It then
-runs `python -m pcap.run_drill`, which REUSES app.models.pcap_metadata
+runs `python -m app.ops.drills.pcap.run_drill`, which REUSES
+app.models.pcap_metadata
 (tombstone_capture / sha256_file / expired_capture_ids / retention_expires_at) for
 its retention decisions (no duplicated retention logic) and emits the structured
 `DRILL pcap_spot_restore sampled=<id> sha256=MATCH|MISMATCH
@@ -77,8 +78,8 @@ spec:
         # $(VAR)). set -o pipefail + a `test -s` non-empty guard (L5) on the restore
         # manifest pipe so a silently-empty restore FAILS the job. The restore reads
         # ONLY the `pcaps/` object-store prefix into a THROWAWAY scratch dir (never
-        # the live capture volume). `python -m pcap.run_drill` then runs the three
-        # assertions (sha256-match a sampled LIVE capture, PROVE a tombstoned capture
+        # the live capture volume). `python -m app.ops.drills.pcap.run_drill` then
+        # runs the three assertions (sha256-match a sampled LIVE capture, PROVE a tombstoned capture
         # is NOT resurrected, and refuse restore for a sub-engineer actor) and emits
         # the `DRILL pcap_spot_restore ...` line. set -e fails the pod on any non-zero.
         - |
@@ -90,7 +91,7 @@ spec:
           # runs against the seeded fixture (no live store) so the gate is a green
           # dry-run; P2 supplies a live store + --apply. It writes a restore manifest
           # the L5 non-empty guard checks, then asserts.
-          python -m pcap.run_drill \
+          python -m app.ops.drills.pcap.run_drill \
             --restore-path "${DRILL_RESTORE_PATH}" \
             --s3-prefix "${PCAP_S3_PREFIX}" \
             --actor-role "${DRILL_ACTOR_ROLE}" \
@@ -116,11 +117,8 @@ spec:
           value: {{ $pd.minRole | quote }}
         - name: DRILL_MIN_ROLE
           value: {{ $pd.minRole | quote }}
-        # The pcap engine + model live in the app package; PYTHONPATH carries both
-        # app and the drills/ dir so `import pcap.run_drill` resolves alongside
-        # `app.models.pcap_metadata` (the harness REUSES the model, never re-impls).
-        - name: PYTHONPATH
-          value: "/app:/app/drills"
+        # The installed backend wheel supplies app.ops.drills.pcap alongside
+        # app.models.pcap_metadata.
         # Object-store coordinates (NON-secret) for the restore client.
         - name: PCAP_S3_ENDPOINT
           value: {{ printf "%s:%v" $p.repo.endpoint $p.repo.port | quote }}

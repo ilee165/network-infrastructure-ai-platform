@@ -13,7 +13,8 @@ cases the spec requires —
     and the restore must NEVER resurrect.
 
 The P2 annual run swaps this fixture for a real restore from the ``pcaps/`` prefix
-to a throwaway target; the assertions in :mod:`pcap.assertions` are unchanged.
+to a throwaway target; the assertions in :mod:`app.ops.drills.pcap.assertions`
+are unchanged.
 
 Reuse, not re-implementation (ADR-0023 §4): the tombstone state is produced by the
 SAME ``tombstone_capture`` the platform purges with, and the live/expired worklist

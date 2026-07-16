@@ -67,7 +67,9 @@ def _fixture_provider(
     kek_b64: str = _FIXTURE_KEK_B64, version: str = SEED_KEK_VERSION
 ) -> KeyProvider:
     """Build an :class:`EnvKeyProvider` over the fixture KEK (CI-only)."""
-    return EnvKeyProvider(Settings(_env_file=None, kek=kek_b64, kek_version=version))  # type: ignore[arg-type]
+    return EnvKeyProvider(
+        Settings(_env_file=None, kek=kek_b64, kek_version=version)  # type: ignore[call-arg, arg-type]
+    )
 
 
 def matching_kek_provider() -> KeyProvider:

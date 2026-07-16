@@ -1712,12 +1712,14 @@ container_runs_drill_harness(c) if {
 #   - the SNAPSHOT CronJob (backup-type `pcap-snapshot`): its object-store
 #     credential is an external-secret REF (least-privilege, write-to-`pcaps/`-
 #     prefix only — never inlined); it reads the pcap volume READ-ONLY; and it
-#     invokes the model-reusing planner (`pcap.snapshot`) that skips tombstoned
+#     invokes the model-reusing planner (`app.ops.drills.pcap.snapshot`) that skips
+#     tombstoned
 #     files (no duplicated retention logic);
 #   - the SPOT-RESTORE drill (backup-type `pcap-drill`): suspended ANNUAL CronJob
 #     (built P1, run P2 — §5.4); P2-execution flagged; credentials are external-
 #     secret REFs; it restores to a THROWAWAY emptyDir (never the live pcap PVC);
-#     and it invokes the assertion harness (`pcap.run_drill`) that sha256-verifies
+#     and it invokes the assertion harness (`app.ops.drills.pcap.run_drill`) that
+#     sha256-verifies
 #     and PROVES no tombstoned resurrection.
 # The generic per-container hardening is asserted here too (the CronJob/Job kinds
 # nest containers under their own paths). Both objects carry the `backup` component
@@ -1841,7 +1843,8 @@ deny contains msg if {
 	msg := sprintf("pcap snapshot %q must mount the pcap volume readOnly:true — it reads captures and writes only the object store (ADR-0023 §3)", [input.metadata.name])
 }
 
-# --- the snapshot must invoke the model-reusing planner (`pcap.snapshot`), which
+# --- the snapshot must invoke the model-reusing planner
+# (`app.ops.drills.pcap.snapshot`), which
 # SKIPS tombstoned files + prunes tombstoned object copies by calling the
 # pcap_metadata model — a snapshot that does not is not retention-honoring
 # (requirement 1, the no-resurrection-at-snapshot guard). Asserted on argv text. ---
@@ -1849,12 +1852,12 @@ deny contains msg if {
 	is_pcap_snapshot(input)
 	some c in pcap_snapshot_containers(input)
 	not container_runs_pcap_snapshot(c)
-	msg := sprintf("pcap snapshot %q container %q must invoke the model-reusing planner (`pcap.snapshot`) — it must skip tombstoned files + prune tombstoned copies by calling pcap_metadata, not re-implement retention (ADR-0023 §4 / ADR-0030 §3)", [input.metadata.name, c.name])
+	msg := sprintf("pcap snapshot %q container %q must invoke the model-reusing planner (`app.ops.drills.pcap.snapshot`) — it must skip tombstoned files + prune tombstoned copies by calling pcap_metadata, not re-implement retention (ADR-0023 §4 / ADR-0030 §3)", [input.metadata.name, c.name])
 }
 
 container_runs_pcap_snapshot(c) if {
 	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
-	contains(arg, "pcap.snapshot")
+	contains(arg, "app.ops.drills.pcap.snapshot")
 }
 
 # --- built P1, run P2: the ANNUAL pcap drill CronJob MUST render suspended so K8s
@@ -1893,19 +1896,20 @@ deny contains msg if {
 	msg := sprintf("pcap restore drill %q must mount NO persistentVolumeClaim — the restore is object-store-sourced to throwaway scratch only; it must never touch the live pcap volume (ADR-0030 §3/§5.1)", [input.metadata.name])
 }
 
-# --- the drill must invoke the assertion harness (`pcap.run_drill`) — the sha256-
+# --- the drill must invoke the assertion harness (`app.ops.drills.pcap.run_drill`)
+# — the sha256-
 # verify + no-resurrection + engineer+ gate assertions are the whole point; a
 # restore with no assertions is not a drill (ADR-0023 §5 / ADR-0030 §3). ---
 deny contains msg if {
 	is_pcap_drill(input)
 	some c in pcap_drill_pod_spec(input).containers
 	not container_runs_pcap_drill(c)
-	msg := sprintf("pcap restore drill %q container %q must invoke the assertion harness (`pcap.run_drill`) — a restore with no sha256/no-resurrection/gated assertions is not a drill (ADR-0023 §5 / ADR-0030 §3)", [input.metadata.name, c.name])
+	msg := sprintf("pcap restore drill %q container %q must invoke the assertion harness (`app.ops.drills.pcap.run_drill`) — a restore with no sha256/no-resurrection/gated assertions is not a drill (ADR-0023 §5 / ADR-0030 §3)", [input.metadata.name, c.name])
 }
 
 container_runs_pcap_drill(c) if {
 	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
-	contains(arg, "pcap.run_drill")
+	contains(arg, "app.ops.drills.pcap.run_drill")
 }
 
 # --- the drill restore is engineer+ GATED (ADR-0023 §5): the rendered pod must
@@ -2055,7 +2059,8 @@ deny contains msg if {
 #     a drill that auto-fires in P1 is a regression, ADR-0030 §5.2 / P1-PLAN.md §6);
 #   - the drill is P2-execution flagged (the `netops.io/execution-phase: P2` ann);
 #   - the drill invokes the EXISTING full-rebuild + assertion harness
-#     (`topology_rebuild.run_drill`) — a wipe with no reproject/assert is not a
+#     (`app.ops.drills.topology_rebuild.run_drill`) — a wipe with no
+#     reproject/assert is not a
 #     rebuild-drill (ADR-0030 §5.2);
 #   - the `neo4j-admin dump` fast-start is OPT-IN, OFF by default (true to D5 — the
 #     projection is disposable; a stale dump could disagree with Postgres);
@@ -2129,19 +2134,20 @@ deny contains msg if {
 }
 
 # --- the drill must invoke the EXISTING full-rebuild + assertion harness
-# (`topology_rebuild.run_drill`), which re-projects from Postgres and asserts the
+# (`app.ops.drills.topology_rebuild.run_drill`), which re-projects from Postgres
+# and asserts the
 # node/edge counts + topology-RTO. A wipe with no reproject/assert is not a
 # rebuild-drill (ADR-0030 §5.2). Asserted on the rendered argv text. ---
 deny contains msg if {
 	is_neo4j_rebuild_drill(input)
 	some c in neo4j_drill_pod_spec(input).containers
 	not container_runs_neo4j_rebuild_harness(c)
-	msg := sprintf("neo4j rebuild drill %q container %q must invoke the full-rebuild + assertion harness (`topology_rebuild.run_drill`) — a wipe with no reproject/count-assert is not a rebuild-drill (ADR-0030 §5.2)", [input.metadata.name, c.name])
+	msg := sprintf("neo4j rebuild drill %q container %q must invoke the full-rebuild + assertion harness (`app.ops.drills.topology_rebuild.run_drill`) — a wipe with no reproject/count-assert is not a rebuild-drill (ADR-0030 §5.2)", [input.metadata.name, c.name])
 }
 
 container_runs_neo4j_rebuild_harness(c) if {
 	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
-	contains(arg, "topology_rebuild.run_drill")
+	contains(arg, "app.ops.drills.topology_rebuild.run_drill")
 }
 
 # --- `neo4j-admin dump` fast-start is OPT-IN, OFF by default (ADR-0005 D5 — the
@@ -2269,7 +2275,8 @@ deny contains msg if {
 #   - the drill restores to a THROWAWAY emptyDir scratch, never a live PVC — the
 #     from-backups-alone / clean-cluster guarantee (ADR-0030 §5.3);
 #   - the drill actually RUNS the pgbackrest restore AND invokes the orchestrator
-#     (`full_platform.run_drill`) — a restore with no chained assertions, or a
+#     (`app.ops.drills.full_platform.run_drill`) — a restore with no chained
+#     assertions, or a
 #     chain with no object-store restore, is not the G-REL drill;
 #   - the drill pod is hardened identically to every backup/drill pod.
 # Both objects carry the `backup` component label AND a
@@ -2405,19 +2412,20 @@ fp_container_runs_restore(c) if {
 	contains(arg, "restore")
 }
 
-# --- the drill must invoke the orchestrator (`full_platform.run_drill`), which
+# --- the drill must invoke the orchestrator
+# (`app.ops.drills.full_platform.run_drill`), which
 # chains the three per-tier harnesses and aggregates their DRILL lines — a restore
 # with no chained assertions is not a drill (ADR-0030 §5.3). ---
 deny contains msg if {
 	is_full_platform_drill(input)
 	some c in fp_drill_pod_spec(input).containers
 	not fp_container_runs_orchestrator(c)
-	msg := sprintf("full-platform DR drill %q container %q must invoke the orchestrator (`full_platform.run_drill`) that chains + aggregates the three tiers — a restore with no chained assertions is not a drill (ADR-0030 §5.3)", [input.metadata.name, c.name])
+	msg := sprintf("full-platform DR drill %q container %q must invoke the orchestrator (`app.ops.drills.full_platform.run_drill`) that chains + aggregates the three tiers — a restore with no chained assertions is not a drill (ADR-0030 §5.3)", [input.metadata.name, c.name])
 }
 
 fp_container_runs_orchestrator(c) if {
 	some arg in array.concat(object.get(c, "command", []), object.get(c, "args", []))
-	contains(arg, "full_platform.run_drill")
+	contains(arg, "app.ops.drills.full_platform.run_drill")
 }
 
 # --- the drill pod talks to Postgres + Neo4j + the object stores, not the K8s
@@ -3603,4 +3611,3 @@ deny contains msg if {
 	max < min
 	msg := sprintf("KEDA ScaledObject %q maxReplicaCount (%v) must be >= minReplicaCount (%v)", [input.metadata.name, max, min])
 }
-

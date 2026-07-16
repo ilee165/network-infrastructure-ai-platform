@@ -1,8 +1,9 @@
 """pcap volume-snapshot + spot-restore drill harness (P1 W5-T4, ADR-0030 §3/§5.4).
 
 This package is the policy-as-test core of the pcap DR tier. The K8s
-``pcap-snapshot-cronjob.yaml`` invokes :mod:`pcap.snapshot` to PLAN/APPLY the
-daily snapshot; ``pcap-spot-restore-drill-job.yaml`` invokes :mod:`pcap.run_drill`
+``pcap-snapshot-cronjob.yaml`` invokes :mod:`app.ops.drills.pcap.snapshot` to
+PLAN/APPLY the daily snapshot; ``pcap-spot-restore-drill-job.yaml`` invokes
+:mod:`app.ops.drills.pcap.run_drill`
 to run the annual spot-restore assertions. Both REUSE the production retention
 model — ``app.models.pcap_metadata.PcapMetadata`` and the engine helpers
 ``expired_capture_ids`` / ``tombstone_capture`` / ``sha256_file`` plus the

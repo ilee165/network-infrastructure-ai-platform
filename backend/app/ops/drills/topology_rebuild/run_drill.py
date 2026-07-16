@@ -15,8 +15,8 @@ emits the composite contract line:
 plus one ``DRILL neo4j_rebuild <assertion>=PASS|FAIL`` per assertion. It exits
 non-zero on the first failure (fail closed).
 
-Run:  python -m topology_rebuild.run_drill --rto-seconds 1800
-      (wired via PYTHONPATH=/app:/app/drills inside the Job image).
+Run:  python -m app.ops.drills.topology_rebuild.run_drill --rto-seconds 1800
+      (the runtime image installs the backend wheel under ``/opt/venv``).
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ def _non_negative_int(value: str) -> int:
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="topology_rebuild.run_drill")
+    parser = argparse.ArgumentParser(prog="app.ops.drills.topology_rebuild.run_drill")
     parser.add_argument(
         "--rto-seconds",
         type=float,

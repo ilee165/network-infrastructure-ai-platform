@@ -258,6 +258,7 @@ forbidden_modules = [
     "app.llm",
     "app.main",
     "app.models",
+    "app.ops",
     "app.plugins",
     "app.schemas",
     "app.workers",
@@ -272,6 +273,7 @@ forbidden_modules = [
     "app.api",
     "app.engines",
     "app.main",
+    "app.ops",
     "app.plugins",
     "app.services",
     "app.workers",
@@ -412,13 +414,15 @@ ignore_imports = [
 # gets its own tier per REPO-STRUCTURE §9 A1 (a special-cased top-level module,
 # analogous in dependency order to models/schemas, sitting just above core
 # because nothing in models/schemas/knowledge/llm/plugins/core imports it and
-# it only imports app.core.config).
+# it only imports app.core.config). ``app.ops`` is an independent composition
+# root alongside ``app.main``: operational entrypoints may compose lower layers,
+# while no application layer may import operational drill code.
 [[tool.importlinter.contracts]]
 name = "Layered architecture (REPO-STRUCTURE §3.3 contract 6, §3.1 dependency graph)"
 type = "layers"
 containers = ["app"]
 layers = [
-    "main",
+    "main | ops",
     "api | workers",
     "agents.master_architect | agents.consultant | agents.discovery | agents.troubleshooting | agents.packet_analysis | agents.configuration | agents.ddi | agents.documentation | agents.security | agents.automation",
     "agents.framework",

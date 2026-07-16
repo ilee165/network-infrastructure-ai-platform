@@ -60,9 +60,9 @@ without the matching KEK. The job is built in P1; it is **executed quarterly fro
 
 - `deploy/kubernetes/<chart>/templates/backup/postgres-pitr-drill-job.yaml` — `Job` +
   (suspended) quarterly `CronJob`, gated behind `backup.drills.enabled`.
-- Drill script / assertion harness (shell + psql, or a small Python assert module reusing
-  `app.core.crypto` for the credential-decrypt proof) co-located under
-  `deploy/<...>/drills/postgres_pitr/`.
+- Drill script / assertion harness (shell + psql, or a small Python assert module
+  reusing `app.core.crypto` for the credential-decrypt proof) packaged under
+  `backend/app/ops/drills/postgres_pitr/` in the installed backend wheel.
 - Seed fixture (SQL or factory) producing the audit checkpoint + encrypted credential row.
 - Pass/fail output contract: structured lines `DRILL postgres_pitr <assertion>=PASS|FAIL
   duration_s=<n>` for the G-REL evidence collector (W5-T5).

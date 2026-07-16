@@ -13,8 +13,8 @@ collector, one composite contract line:
 plus one ``DRILL pcap_spot_restore <assertion>=PASS|FAIL`` per assertion. It exits
 non-zero on the first failure (fail closed).
 
-Run:  python -m pcap.run_drill --restore-path <dir> --actor-role engineer ...
-      (wired via PYTHONPATH=/app:/app/drills inside the Job image).
+Run:  python -m app.ops.drills.pcap.run_drill --restore-path <dir> --actor-role engineer ...
+      (the runtime image installs the backend wheel under ``/opt/venv``).
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from .fixture import build_seeded_state, live_snapshot_ids, tombstoned_capture_i
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="pcap.run_drill")
+    parser = argparse.ArgumentParser(prog="app.ops.drills.pcap.run_drill")
     parser.add_argument("--restore-path", default=None, help="throwaway restore scratch dir")
     parser.add_argument("--s3-prefix", default=None, help="pcap object-store prefix (P2)")
     parser.add_argument("--actor-role", default="engineer", help="role requesting the restore")
@@ -154,16 +154,16 @@ async def _run_async(args: argparse.Namespace, *, stream: TextIO | None = None) 
         return 1
 
     emit_line(
-        PcapDrillResult(sampled, sha256_match=True, tombstoned_resurrected=False, passed=True).line(),
+        PcapDrillResult(
+            sampled, sha256_match=True, tombstoned_resurrected=False, passed=True
+        ).line(),
         stream=stream,
     )
     emit_line(f"{DRILL_TAG} OUTCOME=PASS assertions=3", stream=stream)
     return 0
 
 
-def _assert_guard_bites(
-    tombstoned_ids: set[uuid.UUID], *, stream: TextIO | None = None
-) -> None:
+def _assert_guard_bites(tombstoned_ids: set[uuid.UUID], *, stream: TextIO | None = None) -> None:
     """The no-resurrection guard MUST raise when a tombstoned id is in the set.
 
     A drill whose guard is too weak silently passes a broken restore (ADR-0030 §3

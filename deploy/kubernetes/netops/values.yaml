@@ -1211,9 +1211,9 @@ backup:
       # forbids). When enabled it is validated AGAINST the rebuild, never authoritative.
       dump:
         enabled: false
-      # The drill image: a Python-bearing image carrying app.engines.topology (the
-      # full-rebuild + the topology_rebuild_seconds metric hook) and the drills/
-      # harness. Explicit tag ONLY (admission rejects `latest`, ADR-0029 §5).
+      # The drill image carries app.engines.topology (the full-rebuild + the
+      # topology_rebuild_seconds metric hook) and app.ops.drills. Explicit tag ONLY
+      # (admission rejects `latest`, ADR-0029 §5).
       image:
         repository: ghcr.io/netops/netops-backend
         tag: "p1"
@@ -1280,7 +1280,8 @@ backup:
     #    The COMPOSING drill: restores Postgres from object storage ALONE onto a
     #    clean target (emptyDir scratch — no live PVC), then CHAINS the three
     #    per-tier drills end-to-end (Postgres PITR assert -> Neo4j rebuild over the
-    #    RESTORED Postgres -> pcap spot-restore) via `full_platform.run_drill`,
+    #    RESTORED Postgres -> pcap spot-restore) via
+    #    `app.ops.drills.full_platform.run_drill`,
     #    which AGGREGATES — never re-implements — the per-tier `DRILL ...` lines and
     #    emits the composite line the G-REL evidence collector records. This is the
     #    G-REL "DR drill from backups alone, onto a clean cluster" gate. Built P1
