@@ -18,6 +18,14 @@ prefix without recording its terminal chain state makes the first retained row
 impossible to verify. Export and deletion therefore form one controlled
 operation, not independent maintenance jobs.
 
+Two existing mechanisms are not sufficient for this policy. First,
+`audit_chain_checkpoint` is a mutable singleton verification watermark whose
+referenced audit row must still exist; it is not immutable prune history.
+Second, the daily raw-artifact task hard-deletes rows selected by
+`raw_artifact_retention_days` without archival. That legacy path conflicts
+with the archive-before-delete decision below and must be replaced before this
+policy is effective.
+
 ## Decision
 
 Retention is configured by table class. The following values are initial
@@ -25,18 +33,33 @@ defaults; deployments may increase them to satisfy local policy, but may not
 reduce audit retention below the documented security baseline without an
 approved policy exception.
 
-| Table class | Tables | Hot window | Archive window | Terminal action | Semantics |
+| Table class | Tables | Hot window | Archive window | PostgreSQL action at hot cutoff | Archive action at archive cutoff |
 | --- | --- | ---: | ---: | --- | --- |
-| Audit evidence | `audit_log` | 90 days | 7 years | Drop exported partitions | Export to the configured SIEM/archive, verify receipt and integrity, write a chain checkpoint, then drop only complete partitions older than the archive window. |
-| Raw evidence | `raw_artifacts` | 30 days | 1 year | Drop archived partitions | Archive complete partitions, verify the archive manifest, then drop partitions older than one year. |
-| Reasoning records | `reasoning_traces`, `reasoning_trace_steps` | 90 days | 1 year | Drop complete partitions | Archive trace and step partitions as one referential unit, verify the manifest, then drop matching complete partitions. |
-| Discovery snapshots | `topology_snapshots` | 180 days | 1 year | Archive, then bounded row pruning | Export snapshots with their discovery-run identifiers, verify the archive manifest, then delete expired rows in deterministic primary-key batches. |
-| Configuration snapshots | `config_snapshots` | 180 days | 1 year | Archive, then bounded row pruning | Export and verify expired versions before batched deletion. Never prune the current approved baseline for a device; it becomes eligible only after a newer baseline supersedes it. |
+| Audit evidence | `audit_log` | 90 days | 7 years | Archive every eligible row, verify a receipt-capable immutable manifest, append a signed prune checkpoint, then drop only complete eligible partitions. | Delete archive objects only after the seven-year cutoff and legal-hold/policy checks. |
+| Raw evidence | `raw_artifacts` | 30 days | 1 year | Archive every eligible row and verify the immutable manifest before dropping a complete eligible partition. | Delete archive objects only after the one-year cutoff and legal-hold/policy checks. |
+| Reasoning records | `reasoning_traces`, `reasoning_trace_steps` | 90 days | 1 year | Archive each completed trace family across all partitions; drop a partition only when every row and cross-partition companion is eligible and archived, otherwise defer or row-prune eligible families. | Delete the complete archived trace family only after the one-year cutoff and legal-hold/policy checks. |
+| Discovery snapshots | `topology_snapshots` | 180 days | 1 year | Archive snapshots with discovery-run identifiers, verify the manifest, then row-prune eligible snapshots in deterministic batches. | Delete archive objects only after the one-year cutoff and legal-hold/policy checks. |
+| Configuration snapshots | `config_snapshots` | 180 days | 1 year | Archive and verify eligible versions, then row-prune them in deterministic batches. The current approved baseline is ineligible until superseded. | Delete archive objects only after the one-year cutoff and legal-hold/policy checks. |
 
-Partition boundaries are calendar-month UTC boundaries. A partition is never
-dropped while it intersects the active hot or archive window. Parent/child
-reasoning data is archived and removed in the same maintenance transaction or
-in an idempotent sequence that cannot leave orphaned steps.
+The **hot window** is PostgreSQL residence measured from the record's retention
+anchor. At its cutoff the service archives and verifies the eligible data,
+then removes it from PostgreSQL. The **archive window** is immutable external
+archive residence measured from the same anchor. At its cutoff the archive
+object may be deleted only when no legal hold or policy exception extends it.
+Failure to obtain archive proof leaves the PostgreSQL data in place.
+
+Partition boundaries are calendar-month UTC boundaries. A partition may be
+dropped only when it is wholly outside the hot window and every contained row
+is eligible and covered by a verified archive receipt. The external archive
+then remains until its separate archive cutoff.
+
+Reasoning eligibility is keyed by trace identity and `completed_at`, not by
+matching partition suffixes. Trace and step rows partition independently on
+their own `created_at`, steps have no database foreign key to traces, and a
+trace can span months. The service must enumerate and archive every step for
+an eligible completed trace across all partitions before deleting any member.
+If a partition also contains an ineligible or incompletely archived family,
+the service defers the drop or uses bounded row cleanup for eligible families.
 
 ### Unpartitioned snapshot trade-off
 
@@ -55,34 +78,65 @@ the one-snapshot-per-run and one-current-baseline invariants.
 
 ### Audit-chain continuity
 
-Before pruning an `audit_log` partition, the maintenance process records a
-signed, immutable checkpoint anchored in `audit_chain_checkpoint` containing:
+The current `audit_chain_checkpoint` remains the mutable incremental-verifier
+watermark. A follow-up migration adds a separate append-only
+`audit_prune_checkpoints` ledger; destructive pruning is disabled until the
+schema and verifier understand both roles.
 
-- the dropped range's first and last audit identifiers and timestamps;
-- the terminal hash of the dropped range and the first retained row's expected
-  predecessor hash;
-- the archive object identifier, manifest digest, and SIEM receipt identifier;
-- the retention policy version, actor, operation identifier, and completion
-  timestamp.
+Before pruning an `audit_log` partition, the maintenance process appends a
+signed prune checkpoint containing:
+
+- chain key plus the dropped range's first/last sequence, identifiers, and
+  timestamps;
+- the range's terminal hash and the first retained row's sequence, identifier,
+  timestamp, hash, and expected predecessor hash;
+- immutable archive object identifier, manifest SHA-256 digest, receipt
+  identifier, and covered sequence range;
+- retention policy version, actor, operation identifier, and completion time;
+- signature algorithm, signing-key identifier, and signature.
+
+The signed payload is RFC 8785 canonical JSON over every field above, encoded
+as UTF-8 and signed with Ed25519. The private key is secret/KMS backed. Each
+checkpoint records its key identifier; rotation affects only new checkpoints,
+and old public verification keys remain available for at least the longest
+archive window. Checkpoints are never re-signed during rotation.
 
 Verification of retained audit history starts from the newest trusted
-checkpoint preceding the retained range. Checkpoints are themselves exported
-and retained at least as long as the audit archive. A prune is aborted if the
-chain, archive digest, SIEM receipt, or checkpoint signature cannot be
-verified.
+prune checkpoint and treats its terminal hash as the signed virtual
+predecessor of the first retained row. Full verification first validates each
+archived segment's manifest, receipt, signature, sequence continuity, and hash
+chain, then continues through retained rows. Incremental verification rebuilds
+or resets the mutable `audit_chain_checkpoint` under the same lock so it
+references only a retained row; it may never retain an identifier that the
+prune will delete. Checkpoints are archived and retained at least as long as
+the audit archive. Any identity, sequence, predecessor, digest, receipt, key,
+or signature mismatch aborts pruning.
 
 ### Export prerequisite and concurrency
 
-Audit deletion is forbidden unless the configured SIEM/archive export is
-enabled and has acknowledged the exact immutable manifest. Export failure,
-partial acknowledgement, or an unavailable checkpoint signer makes the cycle
-fail closed.
+Current SIEM delivery is necessary but insufficient deletion proof. Syslog and
+CEF success establishes only local socket drain, and current HTTPS handling
+accepts a 2xx without retaining response metadata. A qualifying archive sink
+must instead durably acknowledge the exact manifest digest and covered range,
+return a stable receipt identifier, and support authenticated readback of the
+manifest/object. A separate immutable archive sink is the default; HTTPS may
+qualify only after its contract supplies those guarantees. Syslog/CEF alone
+can never authorize deletion.
 
-Audit appends and checkpoint/prune operations use the same PostgreSQL
-advisory lock namespace. This protects chain continuity but constrains write throughput:
-only one chain-mutating transaction may proceed for a chain at a time. Pruning
-uses bounded transactions and lock timeouts so maintenance cannot indefinitely
-block ingestion.
+Audit deletion is forbidden unless both SIEM delivery policy and the
+receipt-capable archive invariant are satisfied. Export failure, partial
+coverage, failed readback, or an unavailable checkpoint signer fails closed.
+Pre-hash-chain rows with NULL sequence values are also ineligible until a
+one-time migration either backfills verifiable sequence coverage or places
+them in an immutable archive with explicit range/identity coverage proof.
+
+Audit appends and checkpoint/prune operations use the same fixed,
+deployment-wide PostgreSQL advisory lock held through caller commit and, under
+the HA design, synchronous quorum replication. Only one chain-mutating
+transaction proceeds at a time. Performance finding #7 estimates a
+cluster-wide ceiling of roughly **50–200 audited writes/second** until measured;
+this is a planning estimate, not an SLA. Pruning uses bounded transactions and
+lock timeouts so maintenance cannot indefinitely block ingestion.
 
 If measured throughput or lock-wait objectives cannot be met, the approved
 escape hatches are:
@@ -116,11 +170,25 @@ Implementation will add the following named `Settings` fields and regenerate
 - `retention_prune_time_budget_seconds`
 - `retention_advisory_lock_timeout_seconds`
 - `retention_archive_uri`
-- `retention_siem_export_required`
+- `retention_audit_pruning_enabled` (default `false`)
+- `retention_checkpoint_signing_key_ref`
+- `retention_archive_receipt_public_key_ref`
 
 Configuration validation enforces positive windows, archive windows no shorter
-than hot windows, and the minimum audit baseline. Secrets and signing material
-remain secret-backed settings and are not placed in plaintext configuration.
+than hot windows, and the minimum audit baseline. Enabling audit pruning cannot
+disable SIEM delivery, receipt-capable archival, readback, or checkpoint
+signing. Private keys and other secret material remain secret-backed settings
+and are not placed in plaintext configuration; public verification-key
+references may be rendered as non-secret identifiers.
+
+### Legacy raw-artifact purge migration
+
+The existing `raw_artifact_retention_days=90` setting and daily
+`purge_expired_raw_artifacts` hard-delete task are a known non-conforming legacy
+path. The implementation that activates this ADR must disable and replace that
+schedule, migrate/deprecate the old setting, and prove the old and new paths
+cannot run concurrently. Archive-before-delete must be live and receipt-verified
+before any replacement cleanup is enabled.
 
 ## Consequences
 
@@ -130,8 +198,9 @@ remain secret-backed settings and are not placed in plaintext configuration.
   delete churn; unpartitioned tables still require vacuum-aware batched pruning.
 - Audit pruning depends on SIEM/archive availability and checkpoint signing, so
   storage alerts must leave enough headroom for prolonged fail-closed periods.
-- The advisory-lock design is simple and auditable but imposes a measurable
-  throughput ceiling that must be load-tested and monitored.
+- The advisory-lock design is simple and auditable but retains the estimated
+  50–200 audited-writes/second deployment-wide ceiling until load tests replace
+  that estimate with measured capacity.
 - Operators must monitor export lag, oldest retained partition, prune failures,
   lock waits, outbox backlog (if adopted), and checkpoint verification.
 
@@ -166,18 +235,27 @@ insufficient. Both add operational and verification complexity.
 
 This ADR authorizes design only. A later implementation change must include:
 
-1. migrations for checkpoint metadata and any indexes needed by bounded
-   pruning, while preserving the existing monthly partition parents and their
-   future-partition creation task;
-2. an idempotent retention service with dry-run output, bounded row pruning,
-   archive/SIEM acknowledgement verification, and fail-closed audit behavior;
-3. generated configuration documentation and validation for all named fields;
-4. unit and PostgreSQL integration tests for window boundaries, paired
-   trace/step handling, lock contention, retries, partial export, checkpoint
-   continuity, and crash-safe reruns;
-5. operational metrics, alerts, runbooks, restore drills, and measured
+1. an append-only `audit_prune_checkpoints` migration, canonical-signature/key
+   handling, verifier support for virtual predecessors, and safe rebuilding of
+   the mutable `audit_chain_checkpoint` watermark;
+2. a receipt-capable immutable archive sink with manifest schema, digest,
+   covered-range receipt, authenticated readback, and legacy NULL-sequence-row
+   disposition;
+3. an idempotent retention service with dry-run output, bounded row pruning,
+   trace-family cross-partition eligibility, legal-hold checks, and fail-closed
+   audit behavior;
+4. disabling/replacing `purge_expired_raw_artifacts`, migrating/deprecating
+   `raw_artifact_retention_days`, and proving legacy/new jobs cannot overlap;
+5. generated configuration documentation and validation for all named fields;
+6. unit and PostgreSQL integration tests for hot/archive boundaries, archive
+   expiry, cross-month trace/step handling, lock contention, partial export,
+   receipt/readback failure, checkpoint continuity, key rotation, and
+   crash-safe reruns;
+7. operational metrics, alerts, runbooks, restore drills, and measured
    advisory-lock throughput before enabling destructive cleanup;
-6. security review of checkpoint signing, archive immutability, tenant
-   isolation, and policy-exception authorization.
+8. security review of checkpoint signing, archive immutability, tenant
+   isolation, legal holds, and policy-exception authorization.
 
-No destructive retention job is enabled merely by accepting this ADR.
+Accepting this ADR does not itself change runtime. The existing raw-artifact
+purge remains a documented legacy risk until replaced, and no audit-chain
+pruning may be enabled merely by accepting this ADR.
