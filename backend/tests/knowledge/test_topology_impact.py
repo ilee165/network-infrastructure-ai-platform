@@ -490,6 +490,7 @@ async def _seed_cross_device_shared_address(client: Any) -> dict[str, Any]:
 
 
 @pytest.mark.integration
+@pytest.mark.neo4j
 class TestLiveImpactIpReach:
     async def test_live_seed_helper_produces_interface_and_ipaddress_sharing_pg_id(self) -> None:
         client = await _skip_if_unreachable()

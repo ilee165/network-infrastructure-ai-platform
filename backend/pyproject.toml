@@ -226,6 +226,8 @@ timeout = 60
 testpaths = ["tests"]
 markers = [
     "integration: requires compose-backed Postgres/Neo4j/Redis (excluded from the unit run)",
+    "neo4j: requires a live Neo4j service",
+    "redis: requires a live Redis service",
     "lab: requires real network devices; never runs in CI",
     "eval: agent eval suite (M3 + M4) — deterministic exit-criteria tests (run in CI)",
     "parity: real-provider (Ollama/Anthropic) parity run — manual pre-release gate, skipped in CI",

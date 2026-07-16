@@ -744,6 +744,7 @@ async def test_full_rebuild_wipe_is_scoped_to_projected_labels_only() -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.neo4j
 async def test_live_project_then_mutate_then_incremental_sync() -> None:
     """project -> mutate derivation -> project again: graph converges.
 

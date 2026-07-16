@@ -1938,6 +1938,134 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Wave 7 T2 — the formerly self-skipping topology/impact tests now run as a
+  # merge-blocking exact set against all three real stores they exercise.  The
+  # manifest + collect/JUnit guards make dropped markers, silent deselection,
+  # collection drift, and selected skips red rather than false-green.
+  graph-integration:
+    name: graph-integration (PostgreSQL + Neo4j + Redis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # No `needs`: this source-only integration layer runs in wave 1.  The
+    # all-gates aggregator below makes it merge-blocking.
+    env:
+      NETOPS_DATABASE_URL: postgresql+asyncpg://netops:netops@127.0.0.1:5432/netops_test
+      NETOPS_TEST_DATABASE_URL: postgresql+asyncpg://netops:netops@127.0.0.1:5432/netops_test
+      NETOPS_ADMIN_PASSWORD: graph-ci-throwaway
+      NETOPS_NEO4J_URI: bolt://127.0.0.1:7687
+      NETOPS_NEO4J_USER: neo4j
+      NETOPS_NEO4J_PASSWORD: graph-ci-password
+      NETOPS_REDIS_URL: redis://127.0.0.1:6379/15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16@sha256:ad2e18408bf447f62092a8a5259e7df10505c5a0360bd1a1853ac8b8b0763da2
+        env:
+          POSTGRES_USER: netops
+          POSTGRES_PASSWORD: netops
+          POSTGRES_DB: netops_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U netops -d netops_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      neo4j:
+        image: neo4j:5-community@sha256:4bae36aff76271e27fd6a6ed0835413f86a284cd179cfb1cb7d188f5f7533aca
+        env:
+          NEO4J_AUTH: neo4j/graph-ci-password
+        ports:
+          - 7687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p graph-ci-password 'RETURN 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install backend (editable, dev extras)
+        run: pip install -e "./backend[dev]"
+
+      - name: Apply PostgreSQL migrations
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Exact graph integration layer — RED gate
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker='integration and (neo4j or redis)'
+          manifest='../ci/manifests/graph-integration-nodes.txt'
+
+          pytest --collect-only --strict-markers -q -m "${marker}" \
+            > graph-integration-collect.txt
+          awk '/^tests.*::/ { print }' graph-integration-collect.txt \
+            | sed 's#\\#/#g' | LC_ALL=C sort -u \
+            > graph-integration-collected-nodes.txt
+          if [ ! -s graph-integration-collected-nodes.txt ]; then
+            echo "::error::graph-integration collected no selected node IDs."
+            exit 1
+          fi
+          LC_ALL=C sort -u "${manifest}" > graph-integration-expected-nodes.txt
+          if ! diff -u graph-integration-expected-nodes.txt \
+              graph-integration-collected-nodes.txt; then
+            echo "::error::graph-integration collection differs from the exact manifest."
+            exit 1
+          fi
+
+          set +e
+          pytest --strict-markers -m "${marker}" -vv \
+            --junitxml=graph-integration-junit.xml \
+            | tee graph-integration-pytest-output.txt
+          pytest_status=${PIPESTATUS[0]}
+          set -e
+
+          guard_status=0
+          python ../ci/scripts/check-graph-integration-junit.py \
+            --manifest graph-integration-collected-nodes.txt \
+            --junit graph-integration-junit.xml || guard_status=$?
+          test -s graph-integration-pytest-output.txt
+          {
+            echo "## Graph integration tests (real PostgreSQL + Neo4j + Redis)"
+            echo ""
+            echo '```text'
+            tail -n 30 graph-integration-pytest-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${pytest_status}" -ne 0 ]; then
+            exit "${pytest_status}"
+          fi
+          exit "${guard_status}"
+
+      - name: Upload graph-integration JUnit
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: graph-integration-junit
+          path: backend/graph-integration-junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
   # Packet-analysis executor-split bite-proof (ADR-0049 §Acceptance). This is the
   # RE-ENABLE gate: ADR-0049 flips the service back on by default (compose profile
   # removed, Helm packet.analysis.enabled=true) only in the SAME PR this job is
@@ -2630,7 +2758,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, packet-analysis-bite-proof, lockfile, observability, drill-bite-proofs, config-drift, contract-drift]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, graph-integration, packet-analysis-bite-proof, lockfile, observability, drill-bite-proofs, config-drift, contract-drift]
     steps:
       - name: Assert every gate succeeded
         env:
