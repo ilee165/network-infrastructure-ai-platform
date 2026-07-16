@@ -2019,18 +2019,15 @@ jobs:
           pytest --collect-only --strict-markers -q -m "${marker}" \
             > graph-integration-collect.txt
           awk '/^tests.*::/ { print }' graph-integration-collect.txt \
-            | sed 's#\\#/#g' | LC_ALL=C sort -u \
+            | sed 's#\\#/#g' | LC_ALL=C sort \
             > graph-integration-collected-nodes.txt
           if [ ! -s graph-integration-collected-nodes.txt ]; then
             echo "::error::graph-integration collected no selected node IDs."
             exit 1
           fi
-          LC_ALL=C sort -u "${manifest}" > graph-integration-expected-nodes.txt
-          if ! diff -u graph-integration-expected-nodes.txt \
-              graph-integration-collected-nodes.txt; then
-            echo "::error::graph-integration collection differs from the exact manifest."
-            exit 1
-          fi
+          python ../ci/scripts/check-graph-integration-selection.py \
+            --expected "${manifest}" \
+            --collected graph-integration-collected-nodes.txt
 
           set +e
           pytest --strict-markers -m "${marker}" -vv \

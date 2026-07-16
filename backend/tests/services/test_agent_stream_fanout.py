@@ -206,6 +206,9 @@ class _FakePubSub:
 
     async def subscribe(self, channel: str) -> None:
         self.subscribed.append(channel)
+        self._messages.put_nowait(
+            {"type": "subscribe", "channel": channel.encode(), "data": len(self.subscribed)}
+        )
 
     async def unsubscribe(self, channel: str) -> None:
         self.unsubscribed.append(channel)
@@ -241,6 +244,31 @@ class _FakeRedis:
 
     def pubsub(self) -> _FakePubSub:
         return self._pubsub
+
+
+class _ControlledAckPubSub(_FakePubSub):
+    """Holds the server's SUBSCRIBE acknowledgement until the test releases it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ack_read_started = asyncio.Event()
+        self.release_ack = asyncio.Event()
+        self.ack_consumed = False
+
+    async def get_message(
+        self, *, ignore_subscribe_messages: bool, timeout: float
+    ) -> dict[str, Any] | None:
+        self.get_message_calls.append(
+            {"ignore_subscribe_messages": ignore_subscribe_messages, "timeout": timeout}
+        )
+        self.ack_read_started.set()
+        await self.release_ack.wait()
+        self.ack_consumed = True
+        return {
+            "type": "subscribe",
+            "channel": self.subscribed[0].encode(),
+            "data": 1,
+        }
 
 
 class TestRedisCallShapeContract:
@@ -280,3 +308,41 @@ class TestRedisCallShapeContract:
         # Subscription cleaned up on exit (unsubscribe + close).
         assert fake._pubsub.unsubscribed == [channel_for(SESSION_ID)]
         assert fake._pubsub.closed is True
+
+    async def test_subscribe_waits_for_server_ack_before_yielding_frames(self) -> None:
+        """The context cannot expose its iterator until Redis confirms SUBSCRIBE."""
+        fake = _FakeRedis()
+        controlled = _ControlledAckPubSub()
+        fake._pubsub = controlled
+        fanout = RedisAgentStreamFanout(fake)  # type: ignore[arg-type]
+        subscription = fanout.subscribe(SESSION_ID)
+        enter_task = asyncio.create_task(subscription.__aenter__())
+
+        try:
+            await asyncio.sleep(0)
+            assert not enter_task.done(), "subscription yielded before Redis acknowledged it"
+            await asyncio.wait_for(controlled.ack_read_started.wait(), timeout=0.2)
+            assert controlled.ack_consumed is False
+            controlled.release_ack.set()
+            await asyncio.wait_for(enter_task, timeout=0.2)
+            assert controlled.ack_consumed is True
+            assert controlled.get_message_calls[0]["ignore_subscribe_messages"] is False
+        finally:
+            controlled.release_ack.set()
+            await asyncio.wait_for(enter_task, timeout=0.2)
+            await subscription.__aexit__(None, None, None)
+
+    async def test_subscribe_fails_closed_when_server_ack_never_arrives(self) -> None:
+        """A missing SUBSCRIBE acknowledgement times out and closes the PubSub."""
+        fake = _FakeRedis()
+        controlled = _ControlledAckPubSub()
+        fake._pubsub = controlled
+        fanout = RedisAgentStreamFanout(fake)  # type: ignore[arg-type]
+        fanout._SUBSCRIBE_ACK_TIMEOUT_SECONDS = 0.01
+
+        with pytest.raises(RuntimeError, match="subscription acknowledgement"):
+            async with fanout.subscribe(SESSION_ID):
+                pass
+
+        assert controlled.unsubscribed == [channel_for(SESSION_ID)]
+        assert controlled.closed is True

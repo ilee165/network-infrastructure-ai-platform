@@ -78,6 +78,10 @@ class RedisAgentStreamFanout:
     #: How long ``get_message`` blocks for the next frame before yielding control
     #: back to the relay loop so it can observe a cancelled/closed WebSocket.
     _POLL_TIMEOUT_SECONDS = 0.5
+    #: Maximum time to wait for Redis to confirm the SUBSCRIBE command.  The
+    #: context must not yield before this acknowledgement: publishing through a
+    #: different connection sooner can race registration and lose the first frame.
+    _SUBSCRIBE_ACK_TIMEOUT_SECONDS = 5.0
 
     def __init__(self, redis: Redis) -> None:
         self._redis = redis
@@ -105,27 +109,55 @@ class RedisAgentStreamFanout:
         """
         channel = channel_for(session_id)
         pubsub = self._redis.pubsub()
-        await pubsub.subscribe(channel)
-
-        async def _frames() -> AsyncIterator[AgentStreamFrame]:
-            while True:
-                message = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=self._POLL_TIMEOUT_SECONDS
-                )
-                if message is None:
-                    # Timeout with no frame: yield control (lets the relay loop
-                    # check for a closed socket) and poll again.
-                    await asyncio.sleep(0)
-                    continue
-                if message.get("type") != "message":
-                    continue
-                yield AgentStreamFrame.from_payload(message["data"])
+        subscribe_sent = False
 
         try:
+            await pubsub.subscribe(channel)
+            subscribe_sent = True
+            try:
+                acknowledgement = await asyncio.wait_for(
+                    pubsub.get_message(
+                        ignore_subscribe_messages=False,
+                        timeout=self._SUBSCRIBE_ACK_TIMEOUT_SECONDS,
+                    ),
+                    timeout=self._SUBSCRIBE_ACK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as exc:
+                raise RuntimeError("Redis subscription acknowledgement timed out") from exc
+
+            acknowledged_channel = (
+                None if acknowledgement is None else acknowledgement.get("channel")
+            )
+            if isinstance(acknowledged_channel, bytes):
+                acknowledged_channel = acknowledged_channel.decode("utf-8")
+            if (
+                acknowledgement is None
+                or acknowledgement.get("type") != "subscribe"
+                or acknowledged_channel != channel
+            ):
+                raise RuntimeError("Redis subscription acknowledgement was not received")
+
+            async def _frames() -> AsyncIterator[AgentStreamFrame]:
+                while True:
+                    message = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=self._POLL_TIMEOUT_SECONDS
+                    )
+                    if message is None:
+                        # Timeout with no frame: yield control (lets the relay loop
+                        # check for a closed socket) and poll again.
+                        await asyncio.sleep(0)
+                        continue
+                    if message.get("type") != "message":
+                        continue
+                    yield AgentStreamFrame.from_payload(message["data"])
+
             yield _frames()
         finally:
-            await pubsub.unsubscribe(channel)
-            await pubsub.aclose()
+            try:
+                if subscribe_sent:
+                    await pubsub.unsubscribe(channel)
+            finally:
+                await pubsub.aclose()
 
 
 # --------------------------------------------------------------------------- #
