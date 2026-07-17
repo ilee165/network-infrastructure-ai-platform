@@ -26,6 +26,13 @@ on:
 permissions:
   contents: read
 
+# The outer retry helper owns the complete three-attempt budget. Disable each
+# package manager's nested retries so one wrapper attempt is one network attempt.
+env:
+  PIP_RETRIES: "0"
+  NPM_CONFIG_FETCH_RETRIES: "0"
+  UV_HTTP_RETRIES: "0"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -47,7 +54,7 @@ jobs:
           cache-dependency-path: backend/pyproject.toml
 
       - name: Install backend (editable, dev extras)
-        run: pip install -e "./backend[dev]"
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install -e "./backend[dev]"
 
       # Dependency-vulnerability gate (P1 W6-T4, ADR-0016 §, PRODUCTION.md §5).
       # pip-audit audits the RESOLVED backend environment (the editable install
@@ -63,7 +70,7 @@ jobs:
       #     In an air-gapped self-hosted fork, point it at a mirror via
       #     PIP_AUDIT_* / --index-url (see docs/security/supply-chain-scanning.md).
       - name: Install pip-audit (pinned)
-        run: pip install "pip-audit==2.7.3"
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install "pip-audit==2.7.3"
 
       - name: Dependency audit (pip-audit) — RED gate
         shell: bash
@@ -88,8 +95,7 @@ jobs:
           # --strict still fails on any dep pip-audit cannot resolve. The excluded
           # package is first-party with no PyPI advisory surface.
           pip freeze --exclude-editable > /tmp/pip-audit-reqs.txt
-          pip-audit --strict --requirement /tmp/pip-audit-reqs.txt \
-            --progress-spinner off "${ignore_flags[@]}"
+          bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip-audit --strict --requirement /tmp/pip-audit-reqs.txt --progress-spinner off "${ignore_flags[@]}"
 
       - name: Lint (ruff check)
         working-directory: backend
@@ -159,7 +165,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- npm ci
 
       # Dependency-vulnerability gate (P1 W6-T4, ADR-0016 §, PRODUCTION.md §5).
       # npm has no native ignore file, so CI pipes `npm audit --json` through
@@ -168,17 +174,18 @@ jobs:
       # a non-expired entry in .npm-audit-allowlist.json. RED gate, not advisory.
       #   - Reviewed, EXPIRING allowlist; an expired or stale entry fails the gate
       #     so the allowlist cannot rot open (mirrors .trivyignore).
-      #   - `npm audit` itself returns non-zero when vulns exist, so `|| true`
-      #     hands the JSON to the gate which is the authoritative pass/fail.
+      #   - `fetch-npm-audit.sh` distinguishes a completed vulnerability report
+      #     from a transient registry failure; the local gate remains authoritative.
       #   - Advisory-DB fetch: npm audit queries the configured registry; an
       #     air-gapped fork points `npm config set registry` at a mirror
       #     (docs/security/supply-chain-scanning.md).
+      - name: Fetch dependency audit (npm audit, retryable egress)
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/fetch-npm-audit.sh" npm-audit.json
+
       - name: Dependency audit (npm audit) — RED gate
         shell: bash
-        run: |
-          set -o pipefail
-          npm audit --json > npm-audit.json || true
-          node scripts/npm-audit-gate.mjs < npm-audit.json
+        run: node scripts/npm-audit-gate.mjs < npm-audit.json
 
       - name: Lint (eslint)
         run: npm run lint
@@ -756,16 +763,20 @@ jobs:
 
       - name: Install kubeconform
         run: |
-          curl -sSL -o /tmp/kubeconform.tar.gz \
-            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
-          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+          bash ci/scripts/install-verified-tarball.sh \
+            "https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz" \
+            "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73" \
+            kubeconform \
+            /usr/local/bin/kubeconform
           kubeconform -v
 
       - name: Install kube-linter
         run: |
-          curl -sSL -o /tmp/kube-linter.tar.gz \
-            https://github.com/stackrox/kube-linter/releases/download/v0.7.1/kube-linter-linux.tar.gz
-          tar -xzf /tmp/kube-linter.tar.gz -C /usr/local/bin kube-linter
+          bash ci/scripts/install-verified-tarball.sh \
+            "https://github.com/stackrox/kube-linter/releases/download/v0.7.1/kube-linter-linux.tar.gz" \
+            "852f89a48ff6adc62347477f780889bb9eb046dd16057da0ee4e8e5b0c1b6e3e" \
+            kube-linter \
+            /usr/local/bin/kube-linter
           kube-linter version
 
       - name: Install conftest
@@ -1029,7 +1040,7 @@ jobs:
           # S1 (audit-W2 T7): kubeconform -skips the CNPG/KEDA CRs, so strict
           # field-validate them against the vendored pinned CRDs here — an unknown
           # field the live apply would reject (the runAsNonRoot class) fails CI now.
-          python3 -c "import yaml" 2>/dev/null || pip install --quiet --disable-pip-version-check pyyaml
+          python3 -c "import yaml" 2>/dev/null || bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install --quiet --disable-pip-version-check pyyaml
           python3 ci/kind/selftest/validate-cr-schemas.py rendered-kind-ha.yaml
           kube-linter lint rendered-kind-ha.yaml --config deploy/kubernetes/.kube-linter.yaml
           conftest test rendered-kind-ha.yaml \
@@ -1753,7 +1764,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install backend + KMS extras (aws + vault)
-        run: pip install -e "./backend[dev,kms-aws,kms-vault]"
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install -e "./backend[dev,kms-aws,kms-vault]"
 
       # Bring up the emulators with a BOUNDED RETRY around the image pull + boot
       # (#7). A transient registry blip on `docker compose pull`/`up` (image-pull
@@ -1901,7 +1912,7 @@ jobs:
           cache-dependency-path: backend/pyproject.toml
 
       - name: Install backend (editable, dev extras)
-        run: pip install -e "./backend[dev]"
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install -e "./backend[dev]"
 
       # The PG layer re-asserts the W4 controls against the real service. pipefail
       # + `test -s` (L5) so a broken PG step cannot read as green through the tee
@@ -2014,7 +2025,7 @@ jobs:
           cache-dependency-path: backend/pyproject.toml
 
       - name: Install backend (editable, dev extras)
-        run: pip install -e "./backend[dev]"
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install -e "./backend[dev]"
 
       - name: Apply PostgreSQL migrations
         working-directory: backend
@@ -2106,7 +2117,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install coverage (pinned)
-        run: pip install "coverage==7.14.3"
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install "coverage==7.14.3"
 
       - name: Download unit raw coverage
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
@@ -2397,8 +2408,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          uv pip compile pyproject.toml --extra dev --universal --generate-hashes \
-            --python-version 3.12 --output-file requirements.lock.txt
+          bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- uv pip compile pyproject.toml --extra dev --universal --generate-hashes --python-version 3.12 --output-file requirements.lock.txt
           if ! git diff --exit-code -- requirements.lock.txt; then
             echo "::error::backend/requirements.lock.txt is out of sync with pyproject.toml." \
                  "Re-lock: cd backend && uv pip compile pyproject.toml --extra dev --universal" \
@@ -2422,8 +2432,7 @@ jobs:
           set -o pipefail
           scratch="$(mktemp -d)"
           cp requirements.lock.txt "$scratch/committed.lock"
-          uv pip compile pyproject.toml --extra dev --universal --generate-hashes \
-            --python-version 3.12 --output-file "$scratch/fresh.lock"
+          bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- uv pip compile pyproject.toml --extra dev --universal --generate-hashes --python-version 3.12 --output-file "$scratch/fresh.lock"
           # Plant drift: rewrite the fastapi pin to an obvious sentinel (models a
           # stale lock after a manifest bump, or a hand-edit). The match is
           # VERSION-AGNOSTIC (`^fastapi==.*`) so it keeps working across legitimate
@@ -2458,7 +2467,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          npm ci
+          bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- npm ci
           if ! git diff --exit-code -- package-lock.json; then
             echo "::error::frontend/package-lock.json drifted during npm ci." \
                  "Re-lock: cd frontend && npm install (then commit package-lock.json)."
@@ -2493,7 +2502,7 @@ jobs:
       # The generator imports app.core.config, so the backend package + its
       # runtime deps must be importable (no dev extras needed for introspection).
       - name: Install backend (editable)
-        run: pip install -e ./backend
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install -e ./backend
 
       - name: .env.example in sync with Settings — RED gate
         working-directory: backend
@@ -2570,7 +2579,7 @@ jobs:
       # its runtime deps must be importable (no dev extras needed — `.openapi()`
       # is pure schema generation and never opens the app's lifespan).
       - name: Install backend (editable)
-        run: pip install -e ./backend
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install -e ./backend
 
       - name: OpenAPI spec in sync with the FastAPI app — RED gate
         working-directory: backend
@@ -2588,7 +2597,7 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- npm ci
 
       - name: Generated TS types in sync with the OpenAPI spec — RED gate
         working-directory: frontend
@@ -2596,10 +2605,10 @@ jobs:
         run: |
           set -o pipefail
           cp src/api/generated/openapi-types.ts /tmp/openapi-types.committed.ts
-          npx openapi-typescript ../docs/api/openapi.json -o src/api/generated/openapi-types.ts
+          ./node_modules/.bin/openapi-typescript ../docs/api/openapi.json -o src/api/generated/openapi-types.ts
           if ! diff -u /tmp/openapi-types.committed.ts src/api/generated/openapi-types.ts; then
             echo "::error::frontend/src/api/generated/openapi-types.ts is out of sync with" \
-                 "docs/api/openapi.json. Re-generate: cd frontend && npx openapi-typescript" \
+                 "docs/api/openapi.json. Re-generate: cd frontend && ./node_modules/.bin/openapi-typescript" \
                  "../docs/api/openapi.json -o src/api/generated/openapi-types.ts"
             exit 1
           fi
@@ -2628,7 +2637,7 @@ jobs:
           p.write_text(s.replace(marker, tampered, 1), encoding="utf-8")
           PY
           cp src/api/generated/openapi-types.ts /tmp/openapi-types.tampered.ts
-          npx openapi-typescript ../docs/api/openapi.json -o src/api/generated/openapi-types.ts
+          ./node_modules/.bin/openapi-typescript ../docs/api/openapi.json -o src/api/generated/openapi-types.ts
           if diff -q /tmp/openapi-types.tampered.ts src/api/generated/openapi-types.ts > /dev/null; then
             echo "::error::contract-drift did NOT bite on a planted enum mismatch (false-green)"
             cp /tmp/openapi-types.orig.ts src/api/generated/openapi-types.ts
@@ -2768,9 +2777,11 @@ jobs:
 
       - name: Install kubeconform
         run: |
-          curl -sSL -o /tmp/kubeconform.tar.gz \
-            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
-          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+          bash ci/scripts/install-verified-tarball.sh \
+            "https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz" \
+            "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73" \
+            kubeconform \
+            /usr/local/bin/kubeconform
           kubeconform -v
 
       # W4-T2b (ADR-0046 §4): sync the canonical dashboards-as-code source into
