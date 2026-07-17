@@ -75,18 +75,24 @@ replacement bite proofs run in the normal blocking backend suite.
 
 | Check | Result |
 |---|---|
+| Full backend merge-boundary suite | 4,005 passed, 95 skipped |
 | Integrated T4 contract/mutation selection | 60 passed |
 | Complete `backend/tests/scripts` suite on helper commit | 78 passed |
 | Real CNPG render-twice guard | PASS |
 | Real mTLS render-twice guard | PASS |
 | Real Redis Sentinel render-twice guard | PASS |
 | `actionlint` across all four workflows | PASS |
-| Ruff check/format (workflow commit, 593 files) | PASS |
+| Ruff check/format | PASS (594 files) |
+| mypy | PASS (273 source files) |
+| import-linter | PASS (9 contracts) |
+| Frontend lint + typecheck | PASS (3 existing warnings, 0 errors) |
+| Frontend Vitest | PASS (544 tests in 47 files) |
+| Frontend production build | PASS |
 | YAML-semantic preservation of original jobs | 20/20 |
 | Independent review | Stale deleted-extractor CI step found, fixed in `874bf673`; re-review clean |
 
-Full merge-boundary tests and `graphify update .` are recorded after final local
-integration. They do not replace the live GitHub Actions evidence below.
+`graphify update .` is run after final local integration. None of these local
+checks replaces the live GitHub Actions evidence below.
 
 ## Moved-gate live bite checklist
 
