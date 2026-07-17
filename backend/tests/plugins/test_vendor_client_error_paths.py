@@ -10,8 +10,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
+from http.client import HTTPException
 from typing import Any, cast
 from uuid import uuid4
+from xml.parsers.expat import ExpatError
 
 import httpx
 import pytest
@@ -34,6 +36,7 @@ _PANOS_KEY = "FAKE-panos-key-error-paths"  # noqa: S105
 _F5_TOKEN = "FAKE-f5-token-error-paths"  # noqa: S105
 _F5_PASSWORD = "FAKE-f5-password-error-paths"  # noqa: S105
 _VMWARE_PASSWORD = "FAKE-vmware-password-error-paths"  # noqa: S105
+_VMWARE_ERROR_DETAIL = "FAKE-vmware-error-detail-do-not-leak"
 
 
 class Scenario(StrEnum):
@@ -374,6 +377,25 @@ def test_rest_vendor_scenario_matrix(rest_vendor_run: RestVendorRun) -> None:
         rest_vendor_run.spec.invoke(rest_vendor_run.client)
 
 
+def test_bluecat_login_propagates_unrelated_value_error() -> None:
+    """Only response JSON decoding is normalized; unrelated ValueError is not mislabeled."""
+
+    def unrelated_failure(_request: httpx.Request) -> httpx.Response:
+        raise ValueError("unrelated MockTransport handler failure")
+
+    http = httpx.Client(transport=httpx.MockTransport(unrelated_failure))
+    client = BamClient(
+        base_url="https://bam.example.test",
+        credentials=BamCredentials(username="api-user", password="FAKE-bluecat-password"),
+        client=http,
+    )
+    try:
+        with pytest.raises(ValueError, match="unrelated MockTransport handler failure"):
+            client.get_configurations()
+    finally:
+        client.close()
+
+
 class _VmwareStub:
     cookie = 'vmware_soap_session="FAKE-F7-COOKIE"; Path=/; secure'
 
@@ -395,9 +417,15 @@ class _VmwareServiceInstance:
         self._stub = _VmwareStub()
 
 
-class _MalformedAbout:
-    def __str__(self) -> str:
-        return "malformed-about"
+def _vmware_client_for_about(about: object) -> VsphereClient:
+    service_instance = _VmwareServiceInstance(about)
+    return VsphereClient(
+        host="vcenter.example.test",
+        username="netops-service",
+        password=_VMWARE_PASSWORD,
+        connect_fn=lambda: service_instance,
+        disconnect_fn=lambda _si: None,
+    )
 
 
 @dataclass(frozen=True)
@@ -436,19 +464,12 @@ def vmware_run(
                 apiType="VirtualCenter",
             )
         elif vendor_scenario is Scenario.MALFORMED:
-            about = _MalformedAbout()
+            about = ExpatError(_VMWARE_ERROR_DETAIL)
         elif vendor_scenario is Scenario.SERVER_ERROR:
-            about = vmodl.fault.SystemError(reason="vCenter service unavailable")
+            about = HTTPException(_VMWARE_ERROR_DETAIL)
         else:
-            about = TimeoutError("SOAP read timed out")
-        service_instance = _VmwareServiceInstance(about)
-        client = VsphereClient(
-            host="vcenter.example.test",
-            username="netops-service",
-            password=_VMWARE_PASSWORD,
-            connect_fn=lambda: service_instance,
-            disconnect_fn=lambda _si: None,
-        )
+            about = TimeoutError(_VMWARE_ERROR_DETAIL)
+        client = _vmware_client_for_about(about)
     try:
         yield VmwareRun(vendor_scenario, client)
     finally:
@@ -461,15 +482,23 @@ def test_vmware_uses_same_scenario_contract_over_soap(vmware_run: VmwareRun) -> 
         result = vmware_run.client.fetch_about()
         assert result["properties"]["version"] == "8.0.2"
         return
-    if vmware_run.scenario is Scenario.MALFORMED:
-        result = vmware_run.client.fetch_about()
-        assert result["properties"] == "malformed-about"
-        return
-
     expected = {
+        Scenario.MALFORMED: "malformed response",
         Scenario.AUTH: "invalid credentials",
-        Scenario.SERVER_ERROR: "SystemError",
+        Scenario.SERVER_ERROR: "protocol error",
         Scenario.TIMEOUT: "transport error",
     }[vmware_run.scenario]
-    with pytest.raises(PluginError, match=expected):
+    with pytest.raises(PluginError, match=expected) as exc_info:
         vmware_run.client.fetch_about()
+    assert _VMWARE_ERROR_DETAIL not in str(exc_info.value)
+
+
+def test_vmware_normalizes_method_fault() -> None:
+    """The MethodFault catch remains independently bite-tested."""
+    client = _vmware_client_for_about(vmodl.fault.SystemError(reason=_VMWARE_ERROR_DETAIL))
+    try:
+        with pytest.raises(PluginError, match="SystemError") as exc_info:
+            client.fetch_about()
+        assert _VMWARE_ERROR_DETAIL not in str(exc_info.value)
+    finally:
+        client.disconnect()

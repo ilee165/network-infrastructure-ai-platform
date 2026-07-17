@@ -51,7 +51,9 @@ import logging
 import ssl
 import urllib.parse
 from collections.abc import Callable, Sequence
+from http.client import HTTPException
 from typing import Any
+from xml.parsers.expat import ExpatError
 
 from pyVmomi import VmomiSupport, vim, vmodl
 
@@ -332,6 +334,14 @@ class VsphereClient:
                 raise PluginError(
                     f"vmware: collection from {self._host}:{self._port} failed "
                     f"({type(exc).__name__})"
+                ) from None
+            except HTTPException:
+                raise PluginError(
+                    f"vmware: collection from {self._host}:{self._port} failed (protocol error)"
+                ) from None
+            except ExpatError:
+                raise PluginError(
+                    f"vmware: collection from {self._host}:{self._port} failed (malformed response)"
                 ) from None
             except (OSError, ConnectionError):
                 raise PluginError(
