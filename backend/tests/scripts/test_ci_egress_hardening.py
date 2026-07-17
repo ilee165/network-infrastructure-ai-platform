@@ -18,7 +18,8 @@ import pytest
 import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+_WORKFLOW_DIR = _REPO_ROOT / ".github" / "workflows"
+_ACTION_DIR = _REPO_ROOT / ".github" / "actions"
 _RETRY = _REPO_ROOT / "ci" / "scripts" / "retry-egress.sh"
 _VERIFIED_INSTALL = _REPO_ROOT / "ci" / "scripts" / "install-verified-tarball.sh"
 _NPM_AUDIT_FETCH = _REPO_ROOT / "ci" / "scripts" / "fetch-npm-audit.sh"
@@ -326,24 +327,47 @@ def test_npm_audit_persistent_503_exhausts_attempt_three(tmp_path: Path) -> None
     assert not output.exists()
 
 
-def _jobs(workflow_text: str) -> dict[str, Any]:
-    document = yaml.safe_load(workflow_text)
-    assert isinstance(document, dict)
-    jobs = document.get("jobs")
-    assert isinstance(jobs, dict)
-    return jobs
+def _ci_yaml_texts() -> dict[str, str]:
+    paths = sorted(_WORKFLOW_DIR.glob("*.yml")) + sorted(_ACTION_DIR.glob("*/action.yml"))
+    return {
+        path.relative_to(_REPO_ROOT).as_posix(): path.read_text(encoding="utf-8") for path in paths
+    }
+
+
+def _jobs(ci_yaml_texts: dict[str, str]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for path, workflow_text in ci_yaml_texts.items():
+        if not path.startswith(".github/workflows/"):
+            continue
+        document = yaml.safe_load(workflow_text)
+        assert isinstance(document, dict)
+        jobs = document.get("jobs")
+        assert isinstance(jobs, dict)
+        overlap = merged.keys() & jobs.keys()
+        assert not overlap, f"duplicate jobs across workflows: {sorted(overlap)}"
+        merged.update(jobs)
+    return merged
 
 
 def _steps(job: dict[str, Any], name: str) -> list[dict[str, Any]]:
     return [step for step in job.get("steps", []) if step.get("name") == name]
 
 
-def _run_blocks(workflow_text: str) -> Iterator[tuple[str, str, str]]:
-    for job_name, job in _jobs(workflow_text).items():
+def _run_blocks(ci_yaml_texts: dict[str, str]) -> Iterator[tuple[str, str, str]]:
+    for job_name, job in _jobs(ci_yaml_texts).items():
         for step in job.get("steps", []):
             run = step.get("run")
             if isinstance(run, str):
                 yield job_name, str(step.get("name", "<unnamed>")), run
+    for path, action_text in ci_yaml_texts.items():
+        if not path.startswith(".github/actions/"):
+            continue
+        document = yaml.safe_load(action_text)
+        assert isinstance(document, dict)
+        for step in document.get("runs", {}).get("steps", []):
+            run = step.get("run")
+            if isinstance(run, str):
+                yield path, str(step.get("name", "<unnamed>")), run
 
 
 def _executable_lines(run: str) -> Iterator[str]:
@@ -366,16 +390,22 @@ def _unwrapped_egress_lines(run: str) -> list[str]:
     return unwrapped
 
 
-def _assert_workflow_hardened(workflow_text: str) -> None:
-    document = yaml.safe_load(workflow_text)
-    assert document["env"] == {
+def _assert_workflow_hardened(ci_yaml_texts: dict[str, str]) -> None:
+    retry_env = {
         "PIP_RETRIES": "0",
         "NPM_CONFIG_FETCH_RETRIES": "0",
         "UV_HTTP_RETRIES": "0",
     }
-    jobs = _jobs(workflow_text)
+    for path, workflow_text in ci_yaml_texts.items():
+        if not path.startswith(".github/workflows/"):
+            continue
+        document = yaml.safe_load(workflow_text)
+        assert isinstance(document, dict)
+        assert document["env"] == retry_env, f"retry env drifted in {path}"
+
+    jobs = _jobs(ci_yaml_texts)
     unwrapped: list[str] = []
-    for job_name, step_name, run in _run_blocks(workflow_text):
+    for job_name, step_name, run in _run_blocks(ci_yaml_texts):
         for line in _unwrapped_egress_lines(run):
             unwrapped.append(f"{job_name}/{step_name}: {line}")
         for line in _executable_lines(run):
@@ -396,6 +426,12 @@ def _assert_workflow_hardened(workflow_text: str) -> None:
         assert "curl " not in run
         assert "tar " not in run
 
+    tools_action = ci_yaml_texts[".github/actions/setup-tools/action.yml"]
+    assert "install-verified-tarball.sh" in tools_action
+    assert "60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69" in tools_action
+    assert "curl " not in tools_action
+    assert "tar " not in tools_action
+
     fetch = _steps(jobs["frontend"], "Fetch dependency audit (npm audit, retryable egress)")
     gate = _steps(jobs["frontend"], "Dependency audit (npm audit) — RED gate")
     assert len(fetch) == len(gate) == 1
@@ -414,14 +450,14 @@ def _assert_workflow_hardened(workflow_text: str) -> None:
         "coverage report",
         "npm-audit-gate.mjs",
     )
-    for _job_name, _step_name, run in _run_blocks(workflow_text):
+    for _job_name, _step_name, run in _run_blocks(ci_yaml_texts):
         for line in _executable_lines(run):
             if any(token in line for token in forbidden_assertions):
                 assert "retry-egress.sh" not in line
 
 
 def test_repository_workflow_egress_is_hardened() -> None:
-    _assert_workflow_hardened(_WORKFLOW.read_text(encoding="utf-8"))
+    _assert_workflow_hardened(_ci_yaml_texts())
 
 
 @pytest.mark.parametrize(
@@ -455,9 +491,12 @@ def test_structural_scanner_detects_unwrapped_syntax_variants(variant: str) -> N
     ],
 )
 def test_workflow_contract_bites_on_mutation(target: str, replacement: str) -> None:
-    workflow = _WORKFLOW.read_text(encoding="utf-8")
-    assert target in workflow
-    mutated = workflow.replace(target, replacement, 1)
+    ci_yaml_texts = _ci_yaml_texts()
+    matching = [path for path, text in ci_yaml_texts.items() if target in text]
+    assert matching, f"mutation anchor disappeared: {target}"
+    mutated = dict(ci_yaml_texts)
+    path = matching[0]
+    mutated[path] = mutated[path].replace(target, replacement, 1)
     with pytest.raises(AssertionError):
         _assert_workflow_hardened(mutated)
 

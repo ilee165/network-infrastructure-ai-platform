@@ -16,7 +16,10 @@ from coverage import CoverageData
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _PYPROJECT = _REPO_ROOT / "backend" / "pyproject.toml"
-_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+_WORKFLOW_FILES = {
+    "root": _REPO_ROOT / ".github" / "workflows" / "ci.yml",
+    "backend": _REPO_ROOT / ".github" / "workflows" / "backend-gates.yml",
+}
 _DOWNLOAD_ACTION = "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131"
 
 _PRODUCERS = {
@@ -44,12 +47,21 @@ _PRODUCERS = {
 }
 
 
-def _workflow_jobs(workflow_text: str) -> dict[str, Any]:
-    parsed = yaml.safe_load(workflow_text)
-    assert isinstance(parsed, dict)
-    jobs = parsed.get("jobs")
-    assert isinstance(jobs, dict)
-    return jobs
+def _workflow_texts() -> dict[str, str]:
+    return {name: path.read_text(encoding="utf-8") for name, path in _WORKFLOW_FILES.items()}
+
+
+def _workflow_jobs(workflow_texts: dict[str, str]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for _workflow_name, workflow_text in workflow_texts.items():
+        parsed = yaml.safe_load(workflow_text)
+        assert isinstance(parsed, dict)
+        jobs = parsed.get("jobs")
+        assert isinstance(jobs, dict)
+        overlap = merged.keys() & jobs.keys()
+        assert not overlap, f"duplicate jobs across workflows: {sorted(overlap)}"
+        merged.update(jobs)
+    return merged
 
 
 def _step(job: dict[str, Any], name: str) -> dict[str, Any]:
@@ -62,7 +74,7 @@ def _assert_official_action_is_sha_pinned(step: dict[str, Any], action: str) -> 
     assert re.fullmatch(rf"{re.escape(action)}@[0-9a-f]{{40}}", step["uses"])
 
 
-def _assert_coverage_contract(pyproject_text: str, workflow_text: str) -> None:
+def _assert_coverage_contract(pyproject_text: str, workflow_texts: dict[str, str]) -> None:
     pyproject = tomllib.loads(pyproject_text)
     run_config = pyproject["tool"]["coverage"]["run"]
     assert run_config["branch"] is True
@@ -75,7 +87,7 @@ def _assert_coverage_contract(pyproject_text: str, workflow_text: str) -> None:
     assert any("generated" in pattern for pattern in omit), "generated-code omit is required"
     assert "fail_under" not in pyproject["tool"]["coverage"].get("report", {})
 
-    jobs = _workflow_jobs(workflow_text)
+    jobs = _workflow_jobs(workflow_texts)
     artifacts: set[str] = set()
 
     for job_name, expected in _PRODUCERS.items():
@@ -151,7 +163,8 @@ def _assert_coverage_contract(pyproject_text: str, workflow_text: str) -> None:
             for step in job.get("steps", [])
         )
 
-    assert "coverage-combined" in jobs["all-gates"]["needs"]
+    assert jobs["backend-gates"]["uses"] == "./.github/workflows/backend-gates.yml"
+    assert "backend-gates" in jobs["all-gates"]["needs"]
 
 
 def _run(command: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -183,7 +196,7 @@ def _assert_contexts(data_file: Path, expected: set[str]) -> None:
 def test_repository_coverage_contract() -> None:
     _assert_coverage_contract(
         _PYPROJECT.read_text(encoding="utf-8"),
-        _WORKFLOW.read_text(encoding="utf-8"),
+        _workflow_texts(),
     )
 
 
@@ -206,8 +219,8 @@ def test_repository_coverage_contract() -> None:
             False,
         ),
         (
-            "graph-integration, coverage-combined, packet-analysis-bite-proof",
-            "graph-integration, packet-analysis-bite-proof",
+            "backend-gates, frontend, security-scan",
+            "frontend, security-scan",
             False,
         ),
     ],
@@ -218,15 +231,24 @@ def test_repository_coverage_contract_bites_on_mutation(
     in_pyproject: bool,
 ) -> None:
     pyproject_text = _PYPROJECT.read_text(encoding="utf-8")
-    workflow_text = _WORKFLOW.read_text(encoding="utf-8")
-    original = pyproject_text if in_pyproject else workflow_text
+    workflow_texts = _workflow_texts()
+    if in_pyproject:
+        original = pyproject_text
+        mutated_workflows = workflow_texts
+    else:
+        matching = [name for name, text in workflow_texts.items() if target in text]
+        assert matching, f"mutation anchor disappeared: {target}"
+        mutated_workflows = dict(workflow_texts)
+        workflow_name = matching[0]
+        original = workflow_texts[workflow_name]
+        mutated_workflows[workflow_name] = original.replace(target, replacement, 1)
     assert target in original, f"mutation anchor disappeared: {target}"
     mutated = original.replace(target, replacement, 1)
 
     with pytest.raises((AssertionError, KeyError, ValueError)):
         _assert_coverage_contract(
             mutated if in_pyproject else pyproject_text,
-            workflow_text if in_pyproject else mutated,
+            workflow_texts if in_pyproject else mutated_workflows,
         )
 
 

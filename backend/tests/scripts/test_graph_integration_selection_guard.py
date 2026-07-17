@@ -8,7 +8,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GUARD = _REPO_ROOT / "ci" / "scripts" / "check-graph-integration-selection.py"
-_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "backend-gates.yml"
 
 
 def _run_guard(
