@@ -34,32 +34,18 @@
 # is the W4-T1 kind drill — named-deferred (this host has no kind). Checks (3)+(4)
 # assert the credential-stability + by-reference posture here and now.
 #
-# L5: `set -o pipefail` + `test -s` on every render so a masked helm exit / empty
-# render reads as a failure, not a false-green.
-set -euo pipefail
-
+# L5: `set -o pipefail` + the shared non-empty assertion on every render so a
+# masked helm exit / empty render reads as a failure, not a false-green.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${HERE}/../.." && pwd)"
-CHART_DIR="${REPO_ROOT}/deploy/kubernetes/netops"
+# shellcheck source=../lib/render-twice-common.sh
+source "${HERE}/../lib/render-twice-common.sh"
+render_twice_init
+
 SECRET_TEMPLATE="${CHART_DIR}/templates/secret.yaml"
 RS_TEMPLATE="${CHART_DIR}/templates/redis-sentinel.yaml"
 FIXTURE_DIR="${HERE}/reuse-fixture"
-# The dev-fallback secret extractor is shared with the CNPG guard (stdlib-only).
-EXTRACT="${REPO_ROOT}/ci/cnpg/extract_stringdata.py"
 
-WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
-
-fail=0
-ok()  { echo "PASS: $*"; }
-bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
-
-PY="$(command -v python3 || command -v python)"
-if [ -z "${PY}" ]; then
-  echo "::error::no python3/python on PATH for the render-twice extractor" >&2
-  exit 2
-fi
-extract() { "${PY}" "${EXTRACT}" "$1" "$2" "$3"; }
+extract() { extract_rendered_secret stringData "$1" "$2" "$3"; }
 
 # --- 1. the reuse-or-generate branch for the redis key is wired -----------------
 if grep -Eq 'lookup "v1" "Secret"' "${SECRET_TEMPLATE}"; then
@@ -81,7 +67,7 @@ render_fresh() { # <out>
     --set redisSentinel.enabled=true \
     --set services.redis.enabled=false \
     | tr -d '\r' > "$1"
-  test -s "$1"
+  render_twice_require_nonempty "$1"
 }
 render_fresh "${WORK}/a.yaml"
 render_fresh "${WORK}/b.yaml"
@@ -109,7 +95,7 @@ render_reuse() { # <out>
   helm template fx "${FIXTURE_DIR}" --namespace netops --kube-version 1.29.0 \
     --set prior.redisPasswordB64="${PRIOR_REDIS_B64}" \
     | tr -d '\r' > "$1"
-  test -s "$1"
+  render_twice_require_nonempty "$1"
 }
 render_reuse "${WORK}/reuse_a.yaml"
 render_reuse "${WORK}/reuse_b.yaml"
@@ -180,9 +166,4 @@ else
   ok "redis-sentinel.yaml never inlines a requirepass/masterauth/auth-pass literal (env-only, ADR-0029 §6)"
 fi
 
-echo "== Redis Sentinel render-twice summary: ${fail} failure(s) =="
-if [ "${fail}" -ne 0 ]; then
-  echo "::error::Redis Sentinel render-twice L4 guard found ${fail} violation(s)" >&2
-  exit 1
-fi
-echo "Redis Sentinel render-twice L4 guard: all invariants hold."
+render_twice_finish "Redis Sentinel render-twice" "Redis Sentinel render-twice L4 guard"

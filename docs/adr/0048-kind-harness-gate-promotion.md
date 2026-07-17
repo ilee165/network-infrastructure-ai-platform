@@ -65,7 +65,8 @@ deferred-accepted** (`P2-RELEASE-READINESS.md` §2 G-SEC, §3, §5 item 5;
 `PRODUCTION.md` §1 P2-exit marker + §11 G-SEC): their **render / static /
 harness-invariant** layers bite and are blocking (the `infra` job's render-twice L4
 guard, the `kind-harness` job's static `validate-harness.sh` + assertion-library
-self-tests + `extract_secret.py` tests), but the **live** `kind-harness.sh`
+self-tests, plus the normal backend suite's shared rendered-Secret extractor
+tests), but the **live** `kind-harness.sh`
 enforcement run is `continue-on-error: true` (`.github/workflows/ci.yml` step
 `harness`, ~ln 782) and the `kind-harness` job is **deliberately absent** from the
 `all-gates` required aggregator's `needs` list (`.github/workflows/ci.yml` job
@@ -130,10 +131,10 @@ promote it"):
    live-enforcement regression block merge atomically (the §1.1
    `P2-RELEASE-READINESS.md` "no orphan advisory gate" property).
 
-The static layers already blocking within the `kind-harness` job
-(`validate-harness.sh`, the assertion-library self-tests, the `extract_secret.py`
-tests) **stay** blocking — promotion adds the live run on top, it does not relax
-them. The DELIBERATE-OMISSION comment block (~ln 1005) and the job-name
+The static layers already blocking in CI (`validate-harness.sh`, the
+assertion-library self-tests, and the backend suite's shared rendered-Secret
+extractor tests) **stay** blocking — promotion adds the live run on top, it does
+not relax them. The DELIBERATE-OMISSION comment block and the job-name
 "— non-blocking" suffix (~ln 729) are updated to reflect the new status.
 
 ### 3. Prerequisite A — a reliable enforcing-CNI kind topology (W4-T1)

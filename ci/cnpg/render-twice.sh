@@ -29,29 +29,17 @@
 # harness — named-deferred (this host has no kind). Check (3) asserts the reuse-
 # branch LOGIC is stable here and now; the kind run confirms the live `lookup` wiring.
 #
-# L5: `set -o pipefail` + `test -s` on every render so a masked helm exit / empty
-# render reads as a failure, not a false-green.
-set -euo pipefail
-
+# L5: `set -o pipefail` + the shared non-empty assertion on every render so a
+# masked helm exit / empty render reads as a failure, not a false-green.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${HERE}/../.." && pwd)"
-CHART_DIR="${REPO_ROOT}/deploy/kubernetes/netops"
+# shellcheck source=../lib/render-twice-common.sh
+source "${HERE}/../lib/render-twice-common.sh"
+render_twice_init
+
 TEMPLATE="${CHART_DIR}/templates/cloudnativepg-secret.yaml"
 FIXTURE_DIR="${HERE}/reuse-fixture"
 
-WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
-
-fail=0
-ok()  { echo "PASS: $*"; }
-bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
-
-PY="$(command -v python3 || command -v python)"
-if [ -z "${PY}" ]; then
-  echo "::error::no python3/python on PATH for the render-twice extractor" >&2
-  exit 2
-fi
-extract() { "${PY}" "${HERE}/extract_stringdata.py" "$1" "$2" "$3"; }
+extract() { extract_rendered_secret stringData "$1" "$2" "$3"; }
 
 # --- 1. the reuse-or-generate branch is wired (the upgrade-stability guard) ----
 if grep -Eq 'lookup "v1" "Secret"' "${TEMPLATE}"; then
@@ -87,7 +75,7 @@ render_fresh() { # <out>
     --set services.postgres.enabled=false \
     --set mtls.postgres.enabled=false \
     | tr -d '\r' > "$1"
-  test -s "$1"
+  render_twice_require_nonempty "$1"
 }
 render_fresh "${WORK}/a.yaml"
 render_fresh "${WORK}/b.yaml"
@@ -126,7 +114,7 @@ render_reuse() { # <out>
     --set prior.superuserPasswordB64="${PRIOR_SUPER_B64}" \
     --set prior.appPasswordB64="${PRIOR_APP_B64}" \
     | tr -d '\r' > "$1"
-  test -s "$1"
+  render_twice_require_nonempty "$1"
 }
 render_reuse "${WORK}/reuse_a.yaml"
 render_reuse "${WORK}/reuse_b.yaml"
@@ -147,9 +135,4 @@ else
   bad "reuse branch did NOT return the injected prior password — it regenerated (the L4 trap)"
 fi
 
-echo "== CNPG render-twice summary: ${fail} failure(s) =="
-if [ "${fail}" -ne 0 ]; then
-  echo "::error::CNPG render-twice L4 guard found ${fail} violation(s)" >&2
-  exit 1
-fi
-echo "CNPG render-twice L4 guard: all invariants hold."
+render_twice_finish "CNPG render-twice" "CNPG render-twice L4 guard"

@@ -31,22 +31,15 @@
 # cluster). Check (3) asserts the reuse-branch LOGIC is stable here and now; the
 # kind run confirms the live `lookup` wiring feeds that logic. See the W4-T4 report.
 #
-# L5: `set -o pipefail` + `test -s` on every render so a masked helm exit / empty
-# render reads as a failure, not a false-green.
-
-set -euo pipefail
+# L5: `set -o pipefail` + the shared non-empty assertion on every render so a
+# masked helm exit / empty render reads as a failure, not a false-green.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${HERE}/../.." && pwd)"
-CHART_DIR="${REPO_ROOT}/deploy/kubernetes/netops"
+# shellcheck source=../lib/render-twice-common.sh
+source "${HERE}/../lib/render-twice-common.sh"
+render_twice_init
+
 TEMPLATE="${CHART_DIR}/templates/mtls-postgres.yaml"
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
-
-fail=0
-ok()  { echo "PASS: $*"; }
-bad() { echo "FAIL: $*" >&2; fail=$((fail + 1)); }
 
 # --- 1. the reuse-or-generate branch is wired (the upgrade-stability guard) ----
 # A regex grep on the template: the dev fallback MUST `lookup` the prior Secret
@@ -70,8 +63,8 @@ fi
 
 # --- 2. a fresh render produces internally-consistent, usable material ---------
 render() {
-  # L5: pipefail so a helm-template failure is not masked by `tr`; test -s guards
-  # an empty render. Dev fallback path (certManager off) so the chart GENERATES
+  # L5: pipefail so a helm-template failure is not masked by `tr`; the shared
+  # assertion guards an empty render. Dev fallback path (certManager off) so the chart GENERATES
   # the material this script inspects (the cert-manager path emits CR specs only).
   set -o pipefail
   helm template netops "${CHART_DIR}" \
@@ -79,19 +72,12 @@ render() {
     --set mtls.postgres.enabled=true \
     --set mtls.postgres.certManager.enabled=false \
     | tr -d '\r' > "$1"
-  test -s "$1"
+  render_twice_require_nonempty "$1"
 }
-
-# Python interpreter (CI ubuntu ships python3; a dev shell may only have python).
-PY="$(command -v python3 || command -v python)"
-if [ -z "${PY}" ]; then
-  echo "::error::no python3/python on PATH for the render-twice extractor" >&2
-  exit 2
-fi
 
 # Extract a base64 PEM value for a given Secret name + data key from a render.
 extract() { # <render-file> <secret-name> <data-key>  -> writes PEM to stdout
-  "${PY}" "${HERE}/extract_secret.py" "$1" "$2" "$3"
+  extract_rendered_secret data "$1" "$2" "$3"
 }
 
 render "${WORK}/a.yaml"
@@ -153,7 +139,7 @@ PRIOR="${WORK}/prior"; mkdir -p "${PRIOR}"
 set -o pipefail
 helm template fx "${FIXTURE_DIR}" --namespace netops --kube-version 1.29.0 \
   | tr -d '\r' > "${WORK}/seed.yaml"
-test -s "${WORK}/seed.yaml"
+render_twice_require_nonempty "${WORK}/seed.yaml"
 extract "${WORK}/seed.yaml" netops-db-ca-tls           ca.crt  > "${PRIOR}/ca.crt"
 extract "${WORK}/seed.yaml" netops-postgres-server-tls tls.crt > "${PRIOR}/srv.crt"
 extract "${WORK}/seed.yaml" netops-postgres-server-tls tls.key > "${PRIOR}/srv.key"
@@ -169,7 +155,7 @@ render_reuse() { # <out>
     --set-file prior.cliCrt="${PRIOR}/cli.crt" \
     --set-file prior.cliKey="${PRIOR}/cli.key" \
     | tr -d '\r' > "$1"
-  test -s "$1"
+  render_twice_require_nonempty "$1"
 }
 
 render_reuse "${WORK}/reuse_a.yaml"
@@ -217,7 +203,7 @@ render_partial_reuse() { # <out>
     --set-file prior.cliCrt="${PRIOR}/cli.crt" \
     --set prior.cliKey="" \
     | tr -d '\r' > "$1"
-  test -s "$1"
+  render_twice_require_nonempty "$1"
 }
 render_partial_reuse "${WORK}/partial.yaml"
 partial_cli_crt="${WORK}/partial_cli.crt"
@@ -231,9 +217,4 @@ else
   bad "incomplete prior emitted EMPTY/invalid client cert material (fail-open — M4 regression)"
 fi
 
-echo "== render-twice summary: ${fail} failure(s) =="
-if [ "${fail}" -ne 0 ]; then
-  echo "::error::mTLS render-twice L4 guard found ${fail} violation(s)" >&2
-  exit 1
-fi
-echo "mTLS render-twice L4 guard: all invariants hold."
+render_twice_finish "mTLS render-twice" "mTLS render-twice L4 guard"
