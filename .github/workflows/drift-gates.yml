@@ -65,9 +65,18 @@ jobs:
       - name: Set up Python 3.12
         uses: ./.github/actions/setup-python
 
-      # Re-resolve the backend manifest and assert it equals the committed lock.
-      # Drift (a dep added/changed in pyproject.toml without re-locking, or a
-      # hand-edited lock) makes `git diff --exit-code` non-zero — RED gate.
+      # Two layers, because each alone is a false-green (proved by the PR #165
+      # wave-1 bite proof, 2026-07-17):
+      #   (1) SYNC — re-resolve the manifest and require the committed lock
+      #       unchanged. uv reads the existing lock as PREFERENCES, which keeps
+      #       this stable across upstream releases but also means a hand-edited,
+      #       still-resolvable pin is reproduced byte-for-byte and sails through.
+      #   (2) HASH INTEGRITY — pip --dry-run --require-hashes downloads every
+      #       pinned artifact and verifies it against the recorded hashes, so a
+      #       re-pinned version left with the old version's hashes is RED.
+      #   Residual (documented): a hand-edit that re-pins to a resolvable version
+      #   AND regenerates that version's correct hashes is indistinguishable from
+      #   a legitimately older lock; that class is caught by review, not this gate.
       - name: Backend lockfile in sync with pyproject.toml — RED gate
         working-directory: backend
         shell: bash
@@ -82,6 +91,13 @@ jobs:
             exit 1
           fi
           echo "backend lockfile: in sync."
+          if ! bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install --dry-run --require-hashes --quiet -r requirements.lock.txt; then
+            echo "::error::backend/requirements.lock.txt failed artifact hash verification —" \
+                 "a pinned version does not match its recorded hashes (tampered or stale" \
+                 "hand-edit). Re-lock from pyproject.toml; do not hand-edit the lock."
+            exit 1
+          fi
+          echo "backend lockfile: artifact hashes verified."
 
       # Negative control: prove the recompile-and-compare logic actually BITES on
       # drift. Compile a fresh canonical lock from pyproject ONLY (uv reads no
@@ -90,31 +106,54 @@ jobs:
       # the comparison to find them DIFFERENT. If the planted drift is NOT caught,
       # the real gate above is a false-green and THIS step fails the job. The
       # committed tree is never modified.
-      - name: Prove backend drift gate bites (planted negative, scratch copy)
+      # The previous control compiled to a differently-named scratch file and
+      # diffed whole files: uv's autogeneration header embeds the output filename,
+      # so that diff was non-empty even with NO plant — a vacuous control. These
+      # two controls exercise the REAL gate's own mechanisms and each fails the
+      # job if its planted tamper is not detected.
+      - name: Prove backend drift gate bites (planted negatives, scratch copies)
         working-directory: backend
         shell: bash
         run: |
           set -o pipefail
           scratch="$(mktemp -d)"
-          cp requirements.lock.txt "$scratch/committed.lock"
-          bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- uv pip compile pyproject.toml --extra dev --universal --generate-hashes --python-version 3.12 --output-file "$scratch/fresh.lock"
-          # Plant drift: rewrite the fastapi pin to an obvious sentinel (models a
-          # stale lock after a manifest bump, or a hand-edit). The match is
-          # VERSION-AGNOSTIC (`^fastapi==.*`) so it keeps working across legitimate
-          # fastapi pin updates; committed.lock is only diffed here, never re-parsed
-          # by uv, so the sentinel need not be a valid version — it only has to
-          # differ from the canonical resolution.
-          sed -i -E 's/^fastapi==.*/fastapi==0.0.0-PLANTED-DRIFT/' "$scratch/committed.lock"
-          # Self-check: if the pin wasn't found the tamper is a no-op and the
-          # control would false-green — fail loudly instead.
-          grep -q '^fastapi==0.0.0-PLANTED-DRIFT' "$scratch/committed.lock" || {
-            echo "::error::negative control could not plant drift (no fastapi== line in lock)"; exit 1; }
-          if diff -q "$scratch/fresh.lock" "$scratch/committed.lock" >/dev/null; then
-            echo "::error::NEGATIVE CONTROL FAILED — planted lock drift was NOT detected;" \
-                 "the drift gate is a false-green. Fix the gate before relying on it."
+          # --- Control 1 (sync layer): a manifest edit without re-locking must
+          # surface through the SAME preference-based recompile the real gate
+          # runs. Plant a constraint that conflicts with the committed pin
+          # (annotated-types is locked >= 0.7.0), recompile in a scratch dir with
+          # the committed lock as preferences, and require a difference. Same
+          # output filename => the uv header is identical and cannot mask a
+          # no-op comparison.
+          mkdir "$scratch/sync" && cp pyproject.toml requirements.lock.txt "$scratch/sync/"
+          sed -i 's/^dependencies = \[/dependencies = [\n    "annotated-types<0.7.0",/' "$scratch/sync/pyproject.toml"
+          grep -q 'annotated-types<0.7.0' "$scratch/sync/pyproject.toml" || {
+            echo "::error::sync negative control could not plant the manifest edit"; exit 1; }
+          (cd "$scratch/sync" && bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- uv pip compile pyproject.toml --extra dev --universal --generate-hashes --python-version 3.12 --output-file requirements.lock.txt)
+          if git diff --no-index --quiet -- requirements.lock.txt "$scratch/sync/requirements.lock.txt"; then
+            echo "::error::NEGATIVE CONTROL FAILED — a planted manifest edit did not change" \
+                 "the preference-based recompile; the sync layer is a false-green."
             exit 1
           fi
-          echo "negative control: planted drift correctly detected (gate bites)."
+          echo "negative control (sync): planted manifest drift correctly detected."
+          # --- Control 2 (hash layer): the exact false-green found by the PR #165
+          # wave-1 proof — re-pin a version but keep the old version's hashes.
+          # uv's preference-based recompile reproduces this byte-for-byte, so it
+          # MUST be caught by the hash-verification layer instead.
+          cp requirements.lock.txt "$scratch/tampered.lock"
+          sed -i -E 's/^annotated-types==.*/annotated-types==0.6.0 \\/' "$scratch/tampered.lock"
+          if cmp -s requirements.lock.txt "$scratch/tampered.lock"; then
+            echo "::error::hash negative control is a no-op (lock already pins annotated-types 0.6.0" \
+                 "— update the planted version)"; exit 1
+          fi
+          if bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install --dry-run --require-hashes --quiet -r "$scratch/tampered.lock" >"$scratch/hash-neg.log" 2>&1; then
+            echo "::error::NEGATIVE CONTROL FAILED — a re-pinned version with stale hashes was NOT" \
+                 "detected; the hash-verification layer is a false-green."
+            exit 1
+          fi
+          grep -q "DO NOT MATCH THE HASHES" "$scratch/hash-neg.log" || {
+            echo "::error::hash negative control went red for the wrong reason (not a hash mismatch):"
+            cat "$scratch/hash-neg.log"; exit 1; }
+          echo "negative control (hash): planted stale-hash re-pin correctly detected."
 
       - name: Set up Node 22
         uses: ./.github/actions/setup-node
