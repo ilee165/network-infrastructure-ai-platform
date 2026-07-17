@@ -45,6 +45,32 @@ def test_selection_guard_rejects_duplicate_checked_manifest_node(tmp_path: Path)
     assert "expected graph-integration manifest contains duplicate node IDs" in result.stderr
 
 
+def test_selection_guard_rejects_duplicate_collected_nodes(tmp_path: Path) -> None:
+    node = "tests/integration/test_graph_redis.py::test_real_redis"
+    result = _run_guard(
+        tmp_path,
+        expected=f"{node}\n",
+        collected=f"{node}\n{node}\n",
+    )
+
+    assert result.returncode == 1
+    assert "collected graph-integration nodes contain duplicates" in result.stderr
+
+
+def test_selection_guard_rejects_collection_manifest_mismatch(tmp_path: Path) -> None:
+    manifested = "tests/integration/test_graph_redis.py::test_real_redis"
+    unmanifested = "tests/integration/test_graph_redis.py::test_added_without_manifest_entry"
+    result = _run_guard(
+        tmp_path,
+        expected=f"{manifested}\n",
+        collected=f"{manifested}\n{unmanifested}\n",
+    )
+
+    assert result.returncode == 1
+    assert "collected graph-integration nodes differ from the manifest" in result.stderr
+    assert unmanifested in result.stderr
+
+
 def test_selection_guard_compares_plain_sorted_exact_lists(tmp_path: Path) -> None:
     first = "tests/a.py::test_a"
     second = "tests/b.py::test_b"
