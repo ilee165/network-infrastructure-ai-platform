@@ -433,7 +433,7 @@ jobs:
           PY
 
           coverage xml -o coverage.xml
-          coverage report --show-missing --fail-under=90 | tee coverage-summary.txt
+          coverage report --show-missing --fail-under=101 | tee coverage-summary.txt
           {
             echo "## Combined backend coverage (unit + PG + graph)"
             echo ""
