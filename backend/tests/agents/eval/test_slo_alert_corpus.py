@@ -57,7 +57,7 @@ _OBS = _REPO_ROOT / "deploy" / "observability"
 _ALERTS_FILE = _OBS / "slo-burn-rate.alerts.yaml"
 _RECORDING_FILE = _OBS / "slo-recording.rules.yaml"
 _PERTURBATION_SCRIPT = _OBS / "run-slo-corpus-perturbation-bite.sh"
-_CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+_CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "platform-gates.yml"
 
 #: The promtool alert-as-test corpus consolidated into the coverage matrix: the
 #: W3-T3 firing/healthy cases, the W3-T5 fault-injection MTTD cases, the W4-T7
@@ -336,9 +336,19 @@ def test_perturbation_bite_is_wired_into_ci() -> None:
     """
     assert _PERTURBATION_SCRIPT.exists(), "perturbation bite script is missing"
     assert (_OBS / "slo-corpus-perturbation.test.yaml").exists(), "perturbation corpus is missing"
-    ci_text = _CI_WORKFLOW.read_text(encoding="utf-8")
-    assert re.search(r"run:\s*bash\s+\S*run-slo-corpus-perturbation-bite\.sh", ci_text), (
-        "the SLO-corpus perturbation bite is not wired as a `run:` step in "
-        ".github/workflows/ci.yml — a bare mention in a comment or a step under "
-        "continue-on-error would not run the floor as a blocking PR gate"
+    workflow = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
+    observability_steps = workflow["jobs"]["observability"]["steps"]
+    bite_steps = [
+        step
+        for step in observability_steps
+        if "run-slo-corpus-perturbation-bite.sh" in str(step.get("run", ""))
+    ]
+    assert len(bite_steps) == 1, (
+        "the SLO-corpus perturbation bite is not wired as a `run:` step of the "
+        "`observability` job in .github/workflows/platform-gates.yml — a bare mention in a "
+        "comment or a step under another job would not run the floor as a blocking PR gate"
+    )
+    assert not bite_steps[0].get("continue-on-error", False), (
+        "the SLO-corpus perturbation bite step is marked continue-on-error — the floor "
+        "would be advisory, not a blocking PR gate"
     )

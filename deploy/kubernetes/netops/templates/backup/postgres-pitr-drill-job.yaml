@@ -17,7 +17,7 @@ The drill restores from the W5-T1 object-store repo ALONE to a THROWAWAY target
 live PVC). The drill objects render into the RELEASE namespace alongside live
 Postgres; isolation from production data is the --pg1-path override + emptyDir
 scratch (torn down with the pod), NOT a separate namespace. It then runs
-`python -m postgres_pitr.run_drill`, which emits structured
+`python -m app.ops.drills.postgres_pitr.run_drill`, which emits structured
 `DRILL postgres_pitr <assertion>=PASS|FAIL duration_s=<n>` lines for the W5-T5
 G-REL evidence collector.
 
@@ -91,9 +91,8 @@ spec:
             | tee "${DRILL_RESTORE_PATH}/verify.txt"
           test -s "${DRILL_RESTORE_PATH}/verify.txt"
           echo "[pitr-drill] running the four ADR-0030 §5.1 assertions (emits DRILL ... lines)"
-          # The harness reuses app.core.crypto for the credential fail-closed proof;
-          # PYTHONPATH carries both the app package and the drills/ dir.
-          python -m postgres_pitr.run_drill
+          # The harness reuses app.core.crypto from the installed backend wheel.
+          python -m app.ops.drills.postgres_pitr.run_drill
           echo "[pitr-drill] all assertions PASSED (P2 executes this quarterly; P1 dry-run)"
       env:
         # Stanza + the THROWAWAY restore path (used by the sh -c script, never argv).
@@ -108,8 +107,6 @@ spec:
           value: {{ $b.wal.proposedRpoMinutes | quote }}
         # The drill restores from the repo only; it does NOT connect to live PG, so
         # the assertion harness uses the seeded fixture in P1 (no live PGHOST).
-        - name: PYTHONPATH
-          value: "/app:/app/drills"
         # pgBackRest config (remote view when the TLS server is enabled — the drill
         # pod, like the backup CronJob, has no live PGDATA volume; ADR-0030 §4).
         - name: PGBACKREST_CONFIG

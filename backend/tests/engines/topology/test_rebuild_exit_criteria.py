@@ -353,6 +353,7 @@ async def _destroy_graph(client: Neo4jClient) -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.neo4j
 async def test_full_rebuild_is_isomorphic_after_total_graph_loss() -> None:
     """Rebuild -> export -> destroy graph -> rebuild -> export: multisets equal.
 
@@ -420,6 +421,7 @@ async def test_full_rebuild_is_isomorphic_after_total_graph_loss() -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.neo4j
 async def test_every_projected_pg_id_resolves_to_a_postgres_row() -> None:
     """Traceability: every Device/Interface/IPAddress pg_id exists in Postgres.
 

@@ -131,13 +131,17 @@ class BamClient:
                 },
             )
             response.raise_for_status()
-            payload = response.json()
         except httpx.HTTPStatusError as exc:
             raise PluginError(
                 f"bluecat: session login failed with status {exc.response.status_code}"
             ) from None
         except httpx.HTTPError:
             raise PluginError("bluecat: session login failed (transport error)") from None
+
+        try:
+            payload = response.json()
+        except _json.JSONDecodeError:
+            raise PluginError("bluecat: session login response was not JSON") from None
 
         # The token may arrive as a JSON field or as a response header
         # (exact form is an ADR-0027 §7 open item); try both.
@@ -214,7 +218,7 @@ class BamClient:
             return None
         try:
             return response.json()
-        except Exception:
+        except _json.JSONDecodeError:
             raise PluginError(
                 f"bluecat: {op} returned a non-JSON body (status {response.status_code})"
             ) from None

@@ -1,6 +1,6 @@
 # DR Runbook — full-platform DR drill (W5-T5)
 
-> **GENERATED — do not edit by hand.** Produced by `full_platform.runbook` (W5-T5, deterministic / no-LLM, ADR-0019 §2 dogfooding mode). Re-run the generator after any drill config change to keep it current (freshness target <= 90 days once drills run in P2 — G-OBS).
+> **GENERATED — do not edit by hand.** Produced by `app.ops.drills.full_platform.runbook` (W5-T5, deterministic / no-LLM, ADR-0019 §2 dogfooding mode). Re-run the generator after any drill config change to keep it current (freshness target <= 90 days once drills run in P2 — G-OBS).
 >
 > The Documentation Agent's LLM-narrative runbook path (`app.agents.documentation.tools.generate_runbook`) needs a reachable LLM provider, which the P1 build host does not have — so the narrative layer is deferred to P2 and these runbooks carry the deterministic procedure tables only (W5-T5 spec: no fabricated generated output).
 
@@ -30,7 +30,7 @@ Prove the WHOLE platform is recoverable from object storage ALONE onto a clean c
 
 1. Confirm all per-tier credentials are present in the platform Secret (by-reference only): DB password, Neo4j auth, backup + pcap S3 keys, repo cipher pass, KEK reference.
 2. Run the on-demand Job from `cronjob/netops-full-platform-dr-drill`.
-3. The pod restores Postgres from the repo ALONE into throwaway scratch, then runs `python -m full_platform.run_drill`, which chains tier 1 -> 2 -> 3 and aggregates their `DRILL ...` lines.
+3. The pod restores Postgres from the repo ALONE into throwaway scratch, then runs `python -m app.ops.drills.full_platform.run_drill`, which chains tier 1 -> 2 -> 3 and aggregates their `DRILL ...` lines.
 4. Record the composite `DRILL full_platform ...` line + the aggregated table in `docs/roadmap/evidence/P1-W5-G-REL-evidence.md` (measured-vs-PROPOSED).
 5. P2 only: re-run at certified scale (5,000 devices) on a genuinely clean cluster and re-base the PROPOSED targets on the Consultant §12 answer.
 

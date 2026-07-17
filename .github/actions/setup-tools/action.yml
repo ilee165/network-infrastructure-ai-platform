@@ -1,0 +1,30 @@
+name: Set up Helm and optional promtool
+description: Install pinned Helm 3.16.2 and, when requested, checksum-verified promtool.
+
+inputs:
+  install-promtool:
+    description: Install the pinned Prometheus promtool binary.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Helm
+      uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
+      with:
+        version: v3.16.2
+
+    - name: Install verified promtool
+      if: ${{ inputs.install-promtool == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        PROM_VERSION=2.53.2
+        PROM_SHA256=60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69
+        bash "${GITHUB_WORKSPACE}/ci/scripts/install-verified-tarball.sh" \
+          "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz" \
+          "${PROM_SHA256}" \
+          "prometheus-${PROM_VERSION}.linux-amd64/promtool" \
+          /usr/local/bin/promtool
+        promtool --version

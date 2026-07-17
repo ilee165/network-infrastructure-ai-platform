@@ -28,7 +28,7 @@ Risks (ranked):
 | R5 | Helm default posture single-replica on every stateful tier (CNPG/sentinel toggles off); reads as GA | `deploy/kubernetes/netops/values.yaml` L332–673 |
 | R6 | Unbounded append-only growth (hash-chained `audit_log`, traces, snapshots); no partitioning in 19 migrations; chain blocks naive pruning | `app/services/audit/chain.py` |
 | R7 | CI monolith — one 2,449-line `ci.yml`, 16 jobs, zero composite actions | `.github/workflows/ci.yml` |
-| R8 | Cross-tree code + doc sprawl — deploy-tree Python imports `app.*`; dashboards JSON duplicated in two dirs; stale ADR index | `deploy/kubernetes/netops/drills/pcap/snapshot.py:42-44`; `docs/README.md` |
+| R8 | Cross-tree code + doc sprawl — drill Python formerly lived under deploy while importing `app.*`; dashboards JSON duplicated in two dirs; stale ADR index | `backend/app/ops/drills/pcap/snapshot.py`; `docs/README.md` |
 
 Notable debt not in the risk list: god files (`core/crypto.py` 1,182 L; `api/v1/agents.py` 1,150; `plugins/base.py` 1,031; `SettingsPage.tsx` 1,598; `Settings` 503 L / ~85 fields), routers with inline ORM writes (`applications.py` 20 session ops, `devices.py` 13, `auth/users.py` 13), `services/` vs `engines/` with no placement rule, FE with no shared primitives / no query-hook layer / no code-splitting / per-file hand-rolled test mocks (L-FE-1), leftover empty `app/services/config_archives/` package dir.
 
@@ -108,7 +108,7 @@ Escalation triggers in this plan: AR-W1-T1 (touches secret refs in `Settings`), 
 
 - **T1 — Retention/partitioning ADR** (STRONG + dual-strong review, per audit-surface rule). Checkpoint-anchored pruning against `audit_chain_checkpoint`; partitioning vs archival-via-SIEM-export tradeoff; covers `audit_log`, reasoning traces, discovery/config snapshots. Design only — implementation is a follow-on phase.
 - **T2 — CI decomposition** (`wf-infra`; **after** W1-T3 lands its jobs). Composite actions for the repeated setup blocks (checkout ×33, setup-python ×4, setup-node ×2); split job families into reusable workflows; consolidate the triplicated `ci/{cnpg,mtls,redis-sentinel}` helpers (`render-twice.sh` ×3, two parallel secret-extract scripts). **Exit**: all pre-existing jobs + the two W1 gates run, `all-gates` intact, one fully green run at HEAD; validate reusable-workflow compatibility with `services:` containers before committing to that shape. Re-verify one planted failure per *moved* gate (a relocated gate that no longer bites is a silent regression).
-- **T3 — Drill relocation** (`wf-implementer-light`): `deploy/kubernetes/netops/drills/*` Python → `backend/app/ops/drills/` (manifests stay under `deploy/`); update `drill-bite-proofs` paths; the code comes under import-linter, mypy, and pytest.
+- **T3 — Drill relocation** (`wf-implementer-light`): deploy-tree drill Python → `backend/app/ops/drills/` (manifests stay under `deploy/`); update `drill-bite-proofs` paths; the code comes under import-linter, mypy, and pytest.
 - **Standing policy (no task)**: god-file splits (`crypto.py` → `core/kms/{providers,envelope,rotation}`, `api/v1/agents.py` → sessions/stream/tickets routers, `plugins/base.py` → per-capability modules, `SettingsPage.tsx` → per-section files, `Settings` → nested groups) happen opportunistically when a file is next touched — no dedicated refactor PRs. `crypto.py` is always STRONG.
 
 ## 4. Sequencing & P4 collision matrix

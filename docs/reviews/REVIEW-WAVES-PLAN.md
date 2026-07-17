@@ -132,9 +132,12 @@ collision check at branch creation *and* every rebase.
 
 ## Wave 7 — Retention ADR + integration CI + CI decomposition
 
+Detailed plan: [`WAVE7-PLAN.md`](WAVE7-PLAN.md).
+
 - **Retention/partitioning ADR** (AR risk R6, design-only) — unbounded append-only growth of hash-chained `audit_log`, traces, snapshots; chain blocks naive pruning. Venue for the audit advisory-lock ceiling discussion.
-- **F4** — Neo4j + Redis pytest integration CI job (largest remaining integration blind spot).
-- **AR-W4-T2 — CI decomposition** (AR risk R7) — split the 2,449-line `ci.yml` into composite actions; schedule **last**, when no other wave is adding jobs.
+- **F4** — PostgreSQL + Neo4j + Redis pytest integration CI job (largest remaining integration blind spot).
+- **AR-W4-T3 — Drill relocation** (AR risk R8) — production drill Python moves from `deploy/` to `backend/app/ops/drills/`; tests move under `backend/tests/ops/drills/` and normal backend gates.
+- **AR-W4-T2 — CI decomposition** (AR risk R7) — fresh-census the post-first-PR workflow (18 jobs before Wave 7), then split repeated setup/job families into composite actions and reusable workflows; schedule **last**, when no other wave is adding jobs.
 - **F9 remainder** — checksum kubeconform/kube-linter downloads, bounded retries on egress-dependent steps.
 - **F7/F8** as capacity allows — REST vendor client error-path fixtures (shared parametrized MockTransport); coverage-gate semantics.
 
@@ -156,5 +159,16 @@ collision check at branch creation *and* every rebase.
 | 3 | ✅ Merged (PR #158) |
 | 4 | ✅ Merged (PR #159 / #160) |
 | 5 | ✅ Merged (PR #161, `255f159`) — T1–T15 + review fold (chord fan-out + delta projection included) |
-| 6 | 🚧 Draft PRs open (PR-A #163 / PR-B #162) |
-| 7 | Pending — user calls wave |
+| 6 | ✅ Merged (PR-A #163 / PR-B #162; follow-up #164) |
+| 7 | 🟡 Implemented locally — T4 moved-gate RED URLs + final GitHub Actions GREEN pending ([evidence](WAVE7-T4-EVIDENCE.md)) |
+
+## Residual backlog handoff
+
+- Browser-level E2E layer.
+- OpenAPI code-generation expansion beyond the currently adopted modules.
+- Opportunistic god-file splits when those areas are next changed.
+- Retention/pruning implementation for the policy designed in ADR-0054.
+- Opportunistic test expansion named by Wave 7: Master Architect coverage,
+  compliance-loader malformed-YAML edges, and frontend API-module unit tests.
+- Live CI evidence still named in Wave 7's evidence file; it is an exit gate,
+  not silently converted into backlog.

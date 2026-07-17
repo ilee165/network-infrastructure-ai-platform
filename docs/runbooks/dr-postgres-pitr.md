@@ -1,6 +1,6 @@
 # DR Runbook — Postgres PITR restore drill (W5-T2)
 
-> **GENERATED — do not edit by hand.** Produced by `full_platform.runbook` (W5-T5, deterministic / no-LLM, ADR-0019 §2 dogfooding mode). Re-run the generator after any drill config change to keep it current (freshness target <= 90 days once drills run in P2 — G-OBS).
+> **GENERATED — do not edit by hand.** Produced by `app.ops.drills.full_platform.runbook` (W5-T5, deterministic / no-LLM, ADR-0019 §2 dogfooding mode). Re-run the generator after any drill config change to keep it current (freshness target <= 90 days once drills run in P2 — G-OBS).
 >
 > The Documentation Agent's LLM-narrative runbook path (`app.agents.documentation.tools.generate_runbook`) needs a reachable LLM provider, which the P1 build host does not have — so the narrative layer is deferred to P2 and these runbooks carry the deterministic procedure tables only (W5-T5 spec: no fabricated generated output).
 
@@ -31,7 +31,7 @@ Prove the encrypted pgBackRest backup tier (W5-T1) is restorable: restore the la
 
 1. Confirm the backup repo is reachable and the cipher pass / S3 credential are present in the platform Secret (by-reference only).
 2. Run the on-demand Job: `kubectl create job --from=cronjob/netops-postgres-pitr-drill netops-postgres-pitr-drill-manual`.
-3. The pod restores into the throwaway scratch, runs `pgbackrest verify`, then `python -m postgres_pitr.run_drill` (the four assertions).
+3. The pod restores into the throwaway scratch, runs `pgbackrest verify`, then `python -m app.ops.drills.postgres_pitr.run_drill` (the four assertions).
 4. Collect the `DRILL postgres_pitr ...` lines for the G-REL evidence doc.
 
 ## Structured evidence (the `DRILL ...` lines the collector parses)

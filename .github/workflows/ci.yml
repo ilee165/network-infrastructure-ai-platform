@@ -26,117 +26,23 @@ on:
 permissions:
   contents: read
 
+# The outer retry helper owns the complete three-attempt budget. Disable each
+# package manager's nested retries so one wrapper attempt is one network attempt.
+env:
+  PIP_RETRIES: "0"
+  NPM_CONFIG_FETCH_RETRIES: "0"
+  UV_HTTP_RETRIES: "0"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  backend:
-    name: backend (ruff, mypy, import-linter, pytest)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
-
-      - name: Install backend (editable, dev extras)
-        run: pip install -e "./backend[dev]"
-
-      # Dependency-vulnerability gate (P1 W6-T4, ADR-0016 §, PRODUCTION.md §5).
-      # pip-audit audits the RESOLVED backend environment (the editable install
-      # above + dev extras) against the OSV/PyPI advisory DB and FAILS the job on
-      # any known-vulnerable dependency — a RED gate, not advisory.
-      #   - Pinned: pip-audit==2.7.3 (deterministic; the scan is not itself a
-      #     supply-chain risk, ADR-0016 §5).
-      #   - Reviewed, EXPIRING allowlist: backend/.pip-audit-allowlist.txt — each
-      #     accepted advisory ID is one line with a justification + re-review date
-      #     (mirrors the .trivyignore convention). Currently empty (no accepted
-      #     vulns); a populated line becomes a `--ignore-vuln` flag below.
-      #   - Advisory-DB fetch: pip-audit pulls OSV/PyPI advisories at run time.
-      #     In an air-gapped self-hosted fork, point it at a mirror via
-      #     PIP_AUDIT_* / --index-url (see docs/security/supply-chain-scanning.md).
-      - name: Install pip-audit (pinned)
-        run: pip install "pip-audit==2.7.3"
-
-      - name: Dependency audit (pip-audit) — RED gate
-        shell: bash
-        run: |
-          set -o pipefail
-          ignore_flags=()
-          while IFS= read -r line; do
-            line="${line%%#*}"
-            line="$(echo "$line" | tr -d '[:space:]')"
-            [ -z "$line" ] && continue
-            ignore_flags+=(--ignore-vuln "$line")
-          done < backend/.pip-audit-allowlist.txt
-          # Audit the RESOLVED third-party dependency set (no lockfile in repo).
-          # We cannot scan the live environment directly: it contains the local
-          # first-party project installed editable (netops-backend), which is not
-          # on PyPI. `--skip-editable` does NOT help under `--strict` — strict
-          # promotes the skip itself to a fatal ("distribution marked as editable",
-          # the PR #62 backend failure). Instead snapshot the environment with
-          # `pip freeze --exclude-editable` (every third-party dep, pinned; the
-          # editable first-party package omitted) and audit THAT under --strict.
-          # The gate is undiminished: all third-party deps are still audited and
-          # --strict still fails on any dep pip-audit cannot resolve. The excluded
-          # package is first-party with no PyPI advisory surface.
-          pip freeze --exclude-editable > /tmp/pip-audit-reqs.txt
-          pip-audit --strict --requirement /tmp/pip-audit-reqs.txt \
-            --progress-spinner off "${ignore_flags[@]}"
-
-      - name: Lint (ruff check)
-        working-directory: backend
-        run: ruff check .
-
-      - name: Format check (ruff format)
-        working-directory: backend
-        run: ruff format --check .
-
-      - name: Typecheck (mypy)
-        working-directory: backend
-        run: mypy
-
-      # Module-boundary contracts from backend/pyproject.toml [tool.importlinter]
-      # (REPO-STRUCTURE.md section 3.3; blocking per ADR-0016).
-      - name: Module boundaries (import-linter)
-        working-directory: backend
-        run: lint-imports
-
-      # pytest runs FROM backend/ (testpaths = ["tests"]). No external services:
-      # the suite is unit-only by design. shell: bash enables pipefail so a
-      # pytest failure is not masked by the tee pipe. --cov-fail-under enforces
-      # the D16/ADR-0016 coverage gate (>=80%).
-      # -n 4 (pytest-xdist) matches the 4-vCPU public ubuntu-latest runner; the
-      # suite is parallel-safe by construction (per-test in-memory aiosqlite
-      # engines, per-test tmp_path for the file-backed engine, no fixed ports).
-      # pytest-cov combines per-worker coverage in-process, so the >=80% floor
-      # is still evaluated over the WHOLE suite, not per worker.
-      - name: Test (pytest + coverage)
-        working-directory: backend
-        shell: bash
-        run: |
-          pytest -n 4 --cov=app --cov-report=xml --cov-report=term --cov-fail-under=80 -q | tee pytest-output.txt
-          {
-            echo "## Backend tests (pytest, unit-only)"
-            echo ""
-            echo '```text'
-            tail -n 30 pytest-output.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
-        with:
-          name: backend-coverage-xml
-          path: backend/coverage.xml
-          if-no-files-found: error
+  backend-gates:
+    name: backend gates
+    permissions:
+      contents: read
+    uses: ./.github/workflows/backend-gates.yml
 
   frontend:
     name: frontend (eslint, tsc, vitest, build)
@@ -150,14 +56,10 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
 
       - name: Set up Node 22
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+        uses: ./.github/actions/setup-node
 
       - name: Install dependencies
-        run: npm ci
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- npm ci
 
       # Dependency-vulnerability gate (P1 W6-T4, ADR-0016 §, PRODUCTION.md §5).
       # npm has no native ignore file, so CI pipes `npm audit --json` through
@@ -166,17 +68,18 @@ jobs:
       # a non-expired entry in .npm-audit-allowlist.json. RED gate, not advisory.
       #   - Reviewed, EXPIRING allowlist; an expired or stale entry fails the gate
       #     so the allowlist cannot rot open (mirrors .trivyignore).
-      #   - `npm audit` itself returns non-zero when vulns exist, so `|| true`
-      #     hands the JSON to the gate which is the authoritative pass/fail.
+      #   - `fetch-npm-audit.sh` distinguishes a completed vulnerability report
+      #     from a transient registry failure; the local gate remains authoritative.
       #   - Advisory-DB fetch: npm audit queries the configured registry; an
       #     air-gapped fork points `npm config set registry` at a mirror
       #     (docs/security/supply-chain-scanning.md).
+      - name: Fetch dependency audit (npm audit, retryable egress)
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/fetch-npm-audit.sh" npm-audit.json
+
       - name: Dependency audit (npm audit) — RED gate
         shell: bash
-        run: |
-          set -o pipefail
-          npm audit --json > npm-audit.json || true
-          node scripts/npm-audit-gate.mjs < npm-audit.json
+        run: node scripts/npm-audit-gate.mjs < npm-audit.json
 
       - name: Lint (eslint)
         run: npm run lint
@@ -272,7 +175,7 @@ jobs:
   # aggregator's direct entry — so image-build/CVE feedback lands in ~3 minutes
   # instead of after the longest upstream job. The publish half (push + keyless
   # sign + verify, main/tags only) is the `docker-publish` job below, which
-  # DOES gate on backend + frontend + this job so a test-failing or CVE-failing
+  # DOES gate on backend-gates + frontend + this job so a test-failing or CVE-failing
   # image is never pushed or signed.
   docker:
     name: docker (build + SBOM + Trivy — every-event validation)
@@ -459,7 +362,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
-    needs: [backend, frontend, docker]
+    needs: [backend-gates, frontend, docker]
     # Per-job permissions (P1 W6-T5). Default workflow token is contents:read.
     #   - packages: write  — push the built images to GHCR (ADR-0016 "push to
     #     registry on main/tags").
@@ -667,566 +570,11 @@ jobs:
               "${image}:main"
             echo "::endgroup::"
           done
-
-  # Chart-validation + policy-as-test for the K8s/Helm declarative half (P1 W4 GA
-  # chart, ADR-0029 §3/§5 + ADR-0031). This job is the G-SEC K8s-posture evidence:
-  # it renders the GA chart and asserts every OS-isolation / hardening control on
-  # the rendered manifests (helm lint → render → kubeconform → kube-linter →
-  # conftest → trivy config). It runs independently of the image jobs (no `needs`)
-  # — the manifests do not depend on built images. trivy config GATES on fixable
-  # HIGH/CRIT IaC misconfig (exit-code 1, ignore-unfixed) without duplicating
-  # conftest's policy semantics; cosign is W6 (no new image refs here — the packet
-  # + per-service workloads reuse netops-backend/-frontend).
-  infra:
-    name: infra (helm lint, kubeconform, kube-linter, conftest)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-
-      # W4-T2b (ADR-0046 §4): sync the canonical dashboards-as-code source
-      # (deploy/observability/dashboards/*.json) into the chart's own tree
-      # (deploy/kubernetes/netops/dashboards/, gitignored build artifact) BEFORE
-      # any helm lint/template — Helm `.Files.Get`/`.Files.Glob` cannot read
-      # outside the chart root.
-      - name: Sync dashboards into chart (ADR-0046 §4)
-        run: bash deploy/observability/dashboards/sync-to-chart.sh
-
-      # ADR-0031 §3 / ADR-0049 blocker 3 require every copy of the packet-analysis
-      # seccomp profiles to stay byte-for-byte identical. A one-sided edit — e.g. a
-      # syscall added to one copy only — is a silent security drift. Two profiles,
-      # each with multiple copies:
-      #   STRICT child profile (deny-by-default, no sockets) — THREE copies: the
-      #     Compose copy, the Helm chart copy, AND the in-package copy the executor
-      #     loads at runtime via importlib.resources (ADR-0049 blocker 3 single
-      #     source of truth). All three must match.
-      #   DISPATCHER container profile (strict + client sockets + seccomp()/prctl())
-      #     — TWO copies (Compose + Helm) the analysis container runs under at
-      #     container level (ADR-0049 blocker 5). The child re-confines with the
-      #     strict profile above. Both must match.
-      # (The copies had already drifted on line endings before this gate existed;
-      # .gitattributes now pins every copy eol=lf so the byte cmp is content-only.)
-      - name: seccomp profiles byte-identical (ADR-0031 §3 / ADR-0049 blockers 3+5 lockstep) — RED gate
-        shell: bash
-        run: |
-          set -euo pipefail
-          strict_docker=deploy/docker/seccomp/packet-analysis-seccomp.json
-          strict_helm=deploy/kubernetes/netops/seccomp/packet-analysis-seccomp.json
-          strict_pkg=backend/app/engines/packet/seccomp/packet-analysis-seccomp.json
-          disp_docker=deploy/docker/seccomp/packet-analysis-dispatcher-seccomp.json
-          disp_helm=deploy/kubernetes/netops/seccomp/packet-analysis-dispatcher-seccomp.json
-          # Negative controls (P1 W4 L1 "the gate must RUN and BITE"): a planted
-          # one-byte divergence in scratch copies MUST make cmp fail; otherwise the
-          # check is a false-green. Never touches the committed tree. One control per
-          # profile family so BOTH cmp legs are proven to bite.
-          tmp=$(mktemp -d)
-          cp "$strict_docker" "$tmp/sa"; cp "$strict_helm" "$tmp/sb"; printf '\n' >> "$tmp/sb"
-          if cmp -s "$tmp/sa" "$tmp/sb"; then
-            echo "::error::negative control failed — cmp did not detect planted STRICT seccomp divergence"
-            exit 1
-          fi
-          cp "$disp_docker" "$tmp/da"; cp "$disp_helm" "$tmp/db"; printf '\n' >> "$tmp/db"
-          if cmp -s "$tmp/da" "$tmp/db"; then
-            echo "::error::negative control failed — cmp did not detect planted DISPATCHER seccomp divergence"
-            exit 1
-          fi
-          rm -rf "$tmp"
-          # Real gate 1: the THREE strict copies are byte-for-byte identical.
-          if ! cmp -s "$strict_docker" "$strict_helm" || ! cmp -s "$strict_docker" "$strict_pkg"; then
-            echo "::error::strict packet-analysis seccomp profiles diverged (ADR-0031 §3 / ADR-0049 blocker 3 byte-for-byte lockstep across Compose/Helm/in-package). Diffs:"
-            diff -u "$strict_docker" "$strict_helm" || true
-            diff -u "$strict_docker" "$strict_pkg" || true
-            exit 1
-          fi
-          # Real gate 2: the DISPATCHER pair is byte-for-byte identical.
-          if ! cmp -s "$disp_docker" "$disp_helm"; then
-            echo "::error::dispatcher packet-analysis seccomp profiles diverged (ADR-0049 blocker 5 byte-for-byte lockstep across Compose/Helm). Diff:"
-            diff -u "$disp_docker" "$disp_helm" || true
-            exit 1
-          fi
-          echo "packet-analysis seccomp profiles byte-identical (strict x3 + dispatcher x2; ADR-0031 §3 / ADR-0049 blockers 3+5 lockstep)."
-
-      - name: Set up Helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
-        with:
-          version: v3.16.2
-
-      - name: Install kubeconform
-        run: |
-          curl -sSL -o /tmp/kubeconform.tar.gz \
-            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
-          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
-          kubeconform -v
-
-      - name: Install kube-linter
-        run: |
-          curl -sSL -o /tmp/kube-linter.tar.gz \
-            https://github.com/stackrox/kube-linter/releases/download/v0.7.1/kube-linter-linux.tar.gz
-          tar -xzf /tmp/kube-linter.tar.gz -C /usr/local/bin kube-linter
-          kube-linter version
-
-      - name: Install conftest
-        run: |
-          curl -sSL -o /tmp/conftest.tar.gz \
-            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
-          tar -xzf /tmp/conftest.tar.gz -C /usr/local/bin conftest
-          conftest --version
-
-      - name: Helm lint
-        run: helm lint deploy/kubernetes/netops
-
-      - name: Render chart
-        run: |
-          # pipefail so a `helm template` failure propagates through the `| tr`
-          # pipe instead of being masked by tr's exit 0 (a false-green gate);
-          # `test -s` then guards an empty render.
-          set -o pipefail
-          # Strip any CR bytes: conftest's multi-doc YAML splitter collapses a
-          # CRLF render to a SINGLE evaluated document, silently passing every
-          # deny rule (a false-green gate). Normalizing to LF keeps each rendered
-          # document evaluated independently (ADR-0029 §5).
-          helm template netops deploy/kubernetes/netops \
-            --namespace netops --kube-version 1.29.0 | tr -d '\r' > rendered.yaml
-          test -s rendered.yaml
-          echo "## Rendered chart objects" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep -E '^kind:' rendered.yaml | sort | uniq -c >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-      # Schema-validate core resources strictly; the Kyverno ClusterPolicy and the
-      # CloudNativePG Cluster/Pooler are CRDs (no built-in schema) so they are
-      # skipped, not failed (CNPG Cluster/Pooler render only on the opt-in HA tier,
-      # validated by the dedicated CNPG step below — W1-T1, ADR-0042).
-      - name: kubeconform (strict)
-        run: |
-          kubeconform -strict -summary \
-            -kubernetes-version 1.29.0 \
-            -ignore-missing-schemas \
-            -skip ClusterPolicy,Cluster,Pooler \
-            rendered.yaml
-
-      # kube-linter's curated default (security) check set; the single
-      # documented packet-capture NET_RAW deviation is suppressed at the object
-      # level (annotation) — the parser is still guarded.
-      - name: kube-linter
-        run: kube-linter lint rendered.yaml --config deploy/kubernetes/.kube-linter.yaml
-
-      # The policy-as-test gate: every ADR-0031 / ADR-0029 control asserted on
-      # the rendered manifests. Fails the build on any violation.
-      #
-      # --all-namespaces evaluates EVERY rego package found under the policy dir
-      # unambiguously; the prior `--namespace netops.hardening --all-namespaces`
-      # pair was contradictory (a single explicit namespace AND "all"). The rego
-      # lives in one package (netops.hardening), so --all-namespaces runs it and
-      # any future package without an edit here (W4-T6 deferred-minor cleanup).
-      - name: conftest (OPA policy-as-test)
-        run: |
-          conftest test rendered.yaml \
-            --policy deploy/kubernetes/policy/rego \
-            --all-namespaces
-
-      # ADR-0049 blocker 3 — packet-analysis tier render + policy validation. The
-      # packet-analysis Deployment + its NetworkPolicy are OPT-IN (default OFF,
-      # pending the T4 re-enable), so the default `rendered.yaml` above does NOT
-      # contain them and EVERY packet-analysis conftest rule (dispatcher seccomp
-      # profile, cap_drop:[ALL], no NET_RAW, RO-rootfs, non-root, RO pcap mount,
-      # default-deny+Redis egress) passes VACUOUSLY there. This step renders the
-      # chart with the analysis tier ENABLED and runs kubeconform + kube-linter +
-      # conftest on THAT render, so the executor-split invariant is actually
-      # schema/policy-gated in CI — a regression to the strict no-socket profile
-      # (which breaks the broker-connected worker) or a dropped hardening control
-      # fails the build here, not in production.
-      - name: Render + validate packet-analysis tier (ADR-0049 blocker 3)
-        run: |
-          set -o pipefail
-          helm template netops deploy/kubernetes/netops \
-            --namespace netops --kube-version 1.29.0 \
-            --set packet.analysis.enabled=true | tr -d '\r' > rendered-packet-analysis.yaml
-          test -s rendered-packet-analysis.yaml
-          kubeconform -strict -summary \
-            -kubernetes-version 1.29.0 \
-            -ignore-missing-schemas \
-            -skip ClusterPolicy,Cluster,Pooler \
-            rendered-packet-analysis.yaml
-          kube-linter lint rendered-packet-analysis.yaml --config deploy/kubernetes/.kube-linter.yaml
-          conftest test rendered-packet-analysis.yaml \
-            --policy deploy/kubernetes/policy/rego \
-            --all-namespaces
-
-      # PR#76 round-2 #26/#27/#29 — pg_hba weak-hostssl policy BITE. The conftest
-      # gate above proves the chart render PASSES; this proves the rule actually
-      # BITES: a NEGATIVE fixture (a weaker `trust clientcert=verify-full` hostssl
-      # row sitting BEFORE a strict row — first-match-wins downgrade) is DENIED,
-      # while a POSITIVE fixture (strict rows with whitespace/column variation +
-      # optional trailing pg_hba options) still PASSES (no false-reject). RED gate.
-      - name: conftest pg_hba weak-hostssl bite (negative + positive fixtures)
-        run: bash deploy/kubernetes/policy/fixtures/run-pg-hba-bite.sh
-
-      # W2-T1 (ADR-0043 §1) — api HPA + PDB policy BITE. The api HPA + PDB are
-      # ON BY DEFAULT (resilient-by-default), so they ARE in the default
-      # `rendered.yaml` above and already schema/policy-gated by the conftest +
-      # kubeconform + kube-linter steps there (no separate render step needed).
-      # This step proves the apiscale.* rules actually BITE: NEGATIVE fixtures
-      # (HPA minReplicas 1, CPU-only HPA, no-CPU HPA, PDB minAvailable 0, PDB
-      # maxUnavailable-only) are each DENIED, while POSITIVE fixtures (the
-      # compliant minReplicas-2 + CPU+request-rate HPA, the minAvailable-1 PDB)
-      # still PASS. RED gate.
-      - name: conftest api HPA + PDB bite (floor>=2 + CPU+req-rate + PDB minAvailable>=1)
-        run: bash deploy/kubernetes/policy/fixtures/run-api-hpa-pdb-bite.sh
-
-      # W2-T1 (ADR-0043 §1) — api HPA requestRate opt-out render + policy validation.
-      # requestRate.enabled=false is a DOCUMENTED opt-out for clusters without a
-      # Prometheus adapter (values.yaml services.api.autoscaling.requestRate). The
-      # template emits netops.ai/requestrate-disabled=true on the HPA; the rego rule
-      # suppresses the deny for that annotation. This step renders with the flag OFF
-      # and runs conftest to prove the opt-out render is accepted (not vacuously — the
-      # HPA IS in the render and the policy runs over it). A CPU-only HPA WITHOUT the
-      # annotation (api_hpa_cpu_only_DENY.yaml) is still rejected by the bite above.
-      - name: Render + validate api HPA requestRate opt-out (requestRate.enabled=false)
-        run: |
-          set -o pipefail
-          helm template netops deploy/kubernetes/netops \
-            --namespace netops --kube-version 1.29.0 \
-            --set services.api.autoscaling.requestRate.enabled=false | tr -d '\r' > rendered-hpa-optout.yaml
-          test -s rendered-hpa-optout.yaml
-          kubeconform -strict -summary \
-            -kubernetes-version 1.29.0 \
-            -ignore-missing-schemas \
-            -skip ClusterPolicy,Cluster,Pooler \
-            rendered-hpa-optout.yaml
-          kube-linter lint rendered-hpa-optout.yaml --config deploy/kubernetes/.kube-linter.yaml
-          conftest test rendered-hpa-optout.yaml \
-            --policy deploy/kubernetes/policy/rego \
-            --all-namespaces
-
-      # W1-T1 (ADR-0042) — CloudNativePG HA tier render + policy validation. The
-      # CNPG Cluster/Pooler/PriorityClass are OPT-IN (default OFF), so the default
-      # `rendered.yaml` above does NOT contain them and the cnpg.* conftest rules
-      # pass vacuously there. This step renders the chart with the HA tier ENABLED
-      # (services.postgres.enabled=false — mutual exclusion; mtls.postgres off, its
-      # own tier) and runs kubeconform + kube-linter + conftest on THAT render, so
-      # the HA manifests are actually schema/policy-gated in CI, not just locally.
-      - name: Render + validate CloudNativePG HA tier (ADR-0042)
-        run: |
-          set -o pipefail
-          helm template netops deploy/kubernetes/netops \
-            --namespace netops --kube-version 1.29.0 \
-            --set cloudNativePg.enabled=true \
-            --set services.postgres.enabled=false \
-            --set mtls.postgres.enabled=false | tr -d '\r' > rendered-cnpg.yaml
-          test -s rendered-cnpg.yaml
-          kubeconform -strict -summary \
-            -kubernetes-version 1.29.0 \
-            -ignore-missing-schemas \
-            -skip ClusterPolicy,Cluster,Pooler \
-            rendered-cnpg.yaml
-          kube-linter lint rendered-cnpg.yaml --config deploy/kubernetes/.kube-linter.yaml
-          conftest test rendered-cnpg.yaml \
-            --policy deploy/kubernetes/policy/rego \
-            --all-namespaces
-
-      # W1-T1 — CloudNativePG sync-quorum + pooler-budget policy BITE (ADR-0042).
-      # The conftest gate above proves the COMPLIANT HA render PASSES; this proves
-      # the cnpg.* rules actually BITE: NEGATIVE fixtures (async/no-sync,
-      # synchronous_commit forced cluster-wide, synchronous_commit UNSET so it
-      # inherits the PG default `on`, PgBouncer session-mode, an unbounded pooler)
-      # are each DENIED, while POSITIVE fixtures (the compliant ANY 1 Cluster with
-      # an explicit `synchronous_commit: local` + transaction-mode Pooler) still
-      # PASS. RED gate.
-      - name: conftest CloudNativePG HA-tier bite (sync-quorum + pooler budget)
-        run: bash deploy/kubernetes/policy/fixtures/run-cnpg-bite.sh
-
-      # W1-T1 L4 idempotency guard for the CNPG superuser/replication credential
-      # (ADR-0042 §1 / P1-W4 L4): a `helm upgrade` that REGENERATES the CNPG
-      # password would sever every DB connection. Proves the dev-fallback uses the
-      # `lookup` reuse-or-generate branch (upgrades reuse, never regenerate) and
-      # that the reuse branch is byte-stable + returns the prior verbatim. helm +
-      # python3 present on the runner. RED gate (no continue-on-error).
-      - name: CNPG render-twice L4 idempotency guard
-        run: bash ci/cnpg/render-twice.sh
-
-      # W1-T4 (ADR-0044) — Redis Sentinel HA tier render + policy validation. The
-      # Sentinel Redis/Sentinel StatefulSets + Services + config ConfigMap + the
-      # Sentinel/Redis NetworkPolicy edges are OPT-IN (default OFF), so the default
-      # `rendered.yaml` above does NOT contain them and the redis-sentinel.* conftest
-      # rules pass vacuously there. This step renders the chart with the HA tier
-      # ENABLED (services.redis.enabled=false — mutual exclusion) and runs
-      # kubeconform + kube-linter + conftest on THAT render, so the Sentinel
-      # manifests are actually schema/policy-gated in CI, not just locally.
-      - name: Render + validate Redis Sentinel HA tier (ADR-0044)
-        run: |
-          set -o pipefail
-          helm template netops deploy/kubernetes/netops \
-            --namespace netops --kube-version 1.29.0 \
-            --set redisSentinel.enabled=true \
-            --set services.redis.enabled=false | tr -d '\r' > rendered-redis-sentinel.yaml
-          test -s rendered-redis-sentinel.yaml
-          kubeconform -strict -summary \
-            -kubernetes-version 1.29.0 \
-            -ignore-missing-schemas \
-            -skip ClusterPolicy,Cluster,Pooler \
-            rendered-redis-sentinel.yaml
-          kube-linter lint rendered-redis-sentinel.yaml --config deploy/kubernetes/.kube-linter.yaml
-          conftest test rendered-redis-sentinel.yaml \
-            --policy deploy/kubernetes/policy/rego \
-            --all-namespaces
-
-      # W1-T4 — Redis Sentinel HA-tier policy BITE (ADR-0044 §1). The conftest gate
-      # above proves the COMPLIANT Sentinel render PASSES; this proves the
-      # redis-sentinel.* rules actually BITE: NEGATIVE fixtures (AOF disabled, an
-      # inlined requirepass / REDIS_PASSWORD literal, a 1-replica shard, a 1-Sentinel
-      # quorum, a Sentinel that runs plain redis-server) are each DENIED, while
-      # POSITIVE fixtures (compliant AOF config + 3-replica Redis + 3-Sentinel
-      # StatefulSets) still PASS. RED gate.
-      - name: conftest Redis Sentinel HA-tier bite (AOF + auth-by-ref + quorum + monitor)
-        run: bash deploy/kubernetes/policy/fixtures/run-redis-sentinel-bite.sh
-
-      # W1-T4 L4 idempotency guard for the dev Redis password the Sentinel tier
-      # consumes by-reference (ADR-0044 §1 / P1-W4 L4): a `helm upgrade` that
-      # REGENERATES it would sever every broker/replication/Sentinel-auth connection
-      # (the CNPG case, for Redis). Proves the dev-fallback uses the `lookup`
-      # reuse-or-generate branch (upgrades reuse, never regenerate), the reuse branch
-      # is byte-stable + returns the prior verbatim, and the Sentinel/Redis pods
-      # consume the password by-reference (no inline literal). helm + python3 present
-      # on the runner. RED gate (no continue-on-error).
-      - name: Redis Sentinel render-twice L4 idempotency guard
-        run: bash ci/redis-sentinel/render-twice.sh
-
-      # W4-T1 (ADR-0047 / ADR-0048 §3) — reduced-scale kind HA overlay render +
-      # policy validation. The ephemeral kind HA topology (CNPG 1+2 + Redis
-      # Sentinel 3+3 + KEDA per-queue workers + api HPA floor 2) is driven by the
-      # values-kind-ha.yaml overlay the HA harness path (HA=1) layers on. This step
-      # renders THAT overlay (the same one the live kind-harness-ha job applies) and
-      # runs kubeconform + kube-linter + conftest + a Trivy IaC scan on it, so the
-      # reduced-scale HA manifests are STATICALLY gated hard here even though the
-      # LIVE bring-up (kind-harness-ha) is continue-on-error until W4-T2 promotes it.
-      # ScaledObject/TriggerAuthentication (KEDA CRDs) + Cluster/Pooler (CNPG CRDs)
-      # have no built-in schema so they are -skip'd for kubeconform (the conftest
-      # cnpg.*/redis-sentinel.*/workerscale.* rules keep them policy-covered) — BUT a
-      # policy rule cannot see an UNKNOWN field the live apply would reject (the
-      # audit-W2 T7 spec.postgresql.runAsNonRoot rot, S1). So validate-cr-schemas.py
-      # strict field-validates those CRs against the VENDORED pinned CRDs right here,
-      # closing that gap; the CR-schema bite-proof step below proves it bites. The
-      # static validate-ha-overlay.sh asserts the reduced-scale counts + mutual
-      # exclusion + secure-by-default inheritance so a scale drift BITES.
-      - name: Render + validate reduced-scale kind HA overlay (ADR-0047 / W4-T1)
-        run: |
-          set -o pipefail
-          helm template netops deploy/kubernetes/netops \
-            --namespace netops --kube-version 1.29.0 \
-            -f deploy/kubernetes/netops/values-kind-ha.yaml \
-            --set mtls.postgres.enabled=true \
-            --set mtls.postgres.certManager.enabled=false | tr -d '\r' > rendered-kind-ha.yaml
-          test -s rendered-kind-ha.yaml
-          kubeconform -strict -summary \
-            -kubernetes-version 1.29.0 \
-            -ignore-missing-schemas \
-            -skip ClusterPolicy,Cluster,Pooler,ScaledObject,TriggerAuthentication \
-            rendered-kind-ha.yaml
-          # S1 (audit-W2 T7): kubeconform -skips the CNPG/KEDA CRs, so strict
-          # field-validate them against the vendored pinned CRDs here — an unknown
-          # field the live apply would reject (the runAsNonRoot class) fails CI now.
-          python3 -c "import yaml" 2>/dev/null || pip install --quiet --disable-pip-version-check pyyaml
-          python3 ci/kind/selftest/validate-cr-schemas.py rendered-kind-ha.yaml
-          kube-linter lint rendered-kind-ha.yaml --config deploy/kubernetes/.kube-linter.yaml
-          conftest test rendered-kind-ha.yaml \
-            --policy deploy/kubernetes/policy/rego \
-            --all-namespaces
-          # Static HA-overlay invariants (reduced-scale counts stated, mutual
-          # exclusion, mTLS preserved, no :latest) — RED gate, bites on scale drift.
-          bash ci/kind/ha/validate-ha-overlay.sh
-
-      # S1 (audit-W2 T7) — CR-schema guard NEGATIVE-CONTROL bite proof. Proves the
-      # strict field-validation above actually BITES: a planted unknown field under
-      # spec.postgresql turns it RED, and a vendored-CRD version drift vs the
-      # install-operators pins fails too. No cluster; blocking (this job is in
-      # all-gates), so the class that hid the runAsNonRoot rot can never recur silently.
-      - name: CR-schema guard bite proof (S1 — CNPG/KEDA unknown-field class)
-        run: bash ci/kind/selftest/validate-cr-schemas-bite.sh
-
-      # W4-T1 — Trivy IaC misconfig scan over the reduced-scale HA render. Same
-      # posture as the rendered.yaml / CNPG / Redis-Sentinel / KEDA scans (fixable
-      # HIGH/CRIT, ignore-unfixed, sanctioned-deviation ignorefile) — the HA overlay
-      # is its own object set (reduced counts + resource trims) and must be scanned
-      # so a HIGH/CRITICAL misconfig isolated to it fails CI.
-      - name: Trivy config scan (rendered kind HA overlay)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        env:
-          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
-        with:
-          scan-type: config
-          scan-ref: rendered-kind-ha.yaml
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
-
-      # W2-T3 (ADR-0043 §2/§3/§4) — KEDA per-queue worker ScaledObjects render +
-      # policy validation. The ScaledObjects + per-queue worker Deployments +
-      # TriggerAuthentications are OPT-IN (workerScaling.enabled, default OFF —
-      # KEDA is an extra operator + CRDs NOT in the GA baseline), so the default
-      # `rendered.yaml` above does NOT contain them and the workerscale.* conftest
-      # rules pass vacuously there. This step renders the chart with the tier
-      # ENABLED — and because the Sentinel-aware trigger requires a Sentinel to
-      # discover (ADR-0043 §2), it enables the Redis Sentinel HA tier too
-      # (redisSentinel.enabled=true / services.redis.enabled=false, the chart's
-      # fail-fast guard) — then runs kubeconform + kube-linter + conftest on THAT
-      # render, so the ScaledObjects are actually schema/policy-gated in CI, not
-      # just locally. The ScaledObject + TriggerAuthentication are KEDA CRDs with
-      # no built-in schema, so they are ADDED to the kubeconform -skip list FOR
-      # THIS STEP ONLY (the workerscale.* conftest rules below keep them
-      # policy-covered so the skip cannot hide a structural regression).
-      - name: Render + validate KEDA per-queue worker ScaledObjects (ADR-0043)
-        run: |
-          set -o pipefail
-          helm template netops deploy/kubernetes/netops \
-            --namespace netops --kube-version 1.29.0 \
-            --set workerScaling.enabled=true \
-            --set redisSentinel.enabled=true \
-            --set services.redis.enabled=false | tr -d '\r' > rendered-keda.yaml
-          test -s rendered-keda.yaml
-          kubeconform -strict -summary \
-            -kubernetes-version 1.29.0 \
-            -ignore-missing-schemas \
-            -skip ClusterPolicy,Cluster,Pooler,ScaledObject,TriggerAuthentication \
-            rendered-keda.yaml
-          kube-linter lint rendered-keda.yaml --config deploy/kubernetes/.kube-linter.yaml
-          conftest test rendered-keda.yaml \
-            --policy deploy/kubernetes/policy/rego \
-            --all-namespaces
-
-      # W2-T3 — KEDA ScaledObject policy BITE (ADR-0043 §2/§3/§4). The conftest
-      # gate above proves the COMPLIANT render PASSES; this proves the
-      # workerscale.* rules actually BITE: NEGATIVE fixtures (a packet SO targeting
-      # a general Deployment — sandbox-pool escape; a plain redis scaler with a
-      # static host pin — not Sentinel-aware; an inlined Redis password; a missing
-      # maxReplicaCount ceiling — per-queue isolation hole) are each DENIED, while
-      # the POSITIVE fixture (the compliant sandbox-pinned packet ScaledObject)
-      # still PASSES. RED gate.
-      - name: conftest KEDA ScaledObject bite (sandbox-pin + Sentinel trigger + cred-by-ref + ceiling)
-        run: bash deploy/kubernetes/policy/fixtures/run-keda-scaledobject-bite.sh
-
-      # The opt-in KEDA per-queue worker-scaling tier (rendered-keda.yaml) is its OWN
-      # set of objects (per-queue worker Deployments + PDBs + ScaledObjects +
-      # TriggerAuthentications) absent from rendered.yaml — kubeconform/kube-linter/
-      # conftest gate it above, but the Trivy IaC misconfig gate must ALSO cover it,
-      # else a HIGH/CRITICAL misconfig isolated to the KEDA tier (e.g. a missing
-      # securityContext on a queue-worker pod, or a future chart addition) would not
-      # fail CI. Same posture as the rendered.yaml / CNPG / Redis-Sentinel scans
-      # (fixable HIGH/CRIT, ignore-unfixed, sanctioned-deviation ignorefile). F-ci-keda-trivy.
-      - name: Trivy config scan (rendered KEDA worker-scaling tier)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        env:
-          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
-        with:
-          scan-type: config
-          scan-ref: rendered-keda.yaml
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
-
-      # W4-T4 L4 idempotency guard for the api/worker↔postgres mTLS cert material
-      # (ADR-0039 §5 / P1-W4-LESSONS L4): a `helm upgrade` that REGENERATES the DB
-      # certs would sever every connection. This proves the dev-fallback uses the
-      # `lookup` reuse-or-generate branch (so upgrades reuse) and that a fresh
-      # render produces internally-consistent, usable cert material. helm + python3
-      # + openssl are all present on the runner. RED gate (no continue-on-error).
-      - name: mTLS render-twice L4 idempotency guard
-        run: bash ci/mtls/render-twice.sh
-
-      # PR#76 round-2 #25 — external-Postgres + mTLS fail-fast guard. When the DB
-      # is external (services.postgres.enabled=false) and DB-link mTLS is on, the
-      # chart must REFUSE to render (no in-chart server cert / pg_hba) unless the
-      # operator attests external mTLS via mtls.postgres.external.enabled=true.
-      # Proves: (A) the unattested external combo FAILS fast, (B) the attested one
-      # renders with NO in-chart pg_hba, (C) the in-chart pg path still renders.
-      # RED gate (needs only helm).
-      - name: external-Postgres + mTLS fail-fast guard
-        run: bash ci/mtls/external-pg-failfast.sh
-
-      # IaC misconfiguration scan (Trivy `config` target). GATING on its OWN
-      # findings: exit-code 1 on fixable HIGH/CRITICAL misconfig, mirroring the
-      # image-scan posture (ignore-unfixed). Scoped to IaC misconfig
-      # (scan-type: config) and does NOT duplicate conftest — conftest asserts
-      # our ADR-0029/0031 policy semantics; Trivy checks generic IaC
-      # best-practice misconfig.
-      #
-      # SCOPE (W4-T6 fix): the scan-ref is the RENDERED manifest this task
-      # hardens, NOT the raw chart dir. Trivy's Helm parser renders templates
-      # with empty/default values and flags HIGH/CRIT (missing securityContext /
-      # resource limits) that the chart actually mitigates at render time via
-      # _helpers.tpl — gating over `deploy/` (un-rendered templates +
-      # deploy/spatiumddi/, neither this task's artifact) is a false-positive
-      # CI-regression risk. We gate the rendered.yaml the rest of the job
-      # validated, plus deploy/docker (real compose + Dockerfile IaC this task
-      # touches). No new image refs in W3/W4, so trivy image / cosign are N/A.
-      # SANCTIONED-DEVIATION SUPPRESSION: deploy/kubernetes/.trivyignore lists the
-      # ADR-0031 exceptions (seccomp-installer root/host-path, packet-capture
-      # NET_RAW) that conftest already guards in a resource-scoped way. Trivy's
-      # generic IaC rules cannot encode those exceptions, so they are suppressed
-      # for THIS misconfig scan only (env scope) — the gate still fails on any
-      # NEW/unexpected HIGH/CRITICAL misconfig.
-      - name: Trivy config scan (rendered chart manifest)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        env:
-          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
-        with:
-          scan-type: config
-          scan-ref: rendered.yaml
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
-
-      # The opt-in CloudNativePG HA-tier render (rendered-cnpg.yaml) is its OWN set
-      # of objects (Cluster/Pooler/PriorityClass/Pooler-NetworkPolicies/smoke Job)
-      # absent from rendered.yaml — kubeconform/kube-linter/conftest gate it above,
-      # but the Trivy IaC misconfig gate must ALSO cover it, else a HIGH/CRITICAL
-      # misconfig isolated to the HA tier would not fail CI. Same posture as the
-      # rendered.yaml scan (fixable HIGH/CRIT, ignore-unfixed, sanctioned-deviation
-      # ignorefile).
-      - name: Trivy config scan (rendered CloudNativePG HA tier)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        env:
-          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
-        with:
-          scan-type: config
-          scan-ref: rendered-cnpg.yaml
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
-
-      # The opt-in Redis Sentinel HA-tier render (rendered-redis-sentinel.yaml) is its
-      # OWN set of objects (Redis + Sentinel StatefulSets / Services / config ConfigMap
-      # / Sentinel+Redis NetworkPolicies) absent from rendered.yaml — kubeconform/
-      # kube-linter/conftest gate it above, but the Trivy IaC misconfig gate must ALSO
-      # cover it, else a HIGH/CRITICAL misconfig isolated to the HA tier would not fail
-      # CI. Same posture as the rendered.yaml scan (fixable HIGH/CRIT, ignore-unfixed,
-      # sanctioned-deviation ignorefile).
-      - name: Trivy config scan (rendered Redis Sentinel HA tier)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        env:
-          TRIVY_IGNOREFILE: deploy/kubernetes/.trivyignore
-        with:
-          scan-type: config
-          scan-ref: rendered-redis-sentinel.yaml
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
-
-      - name: Trivy config scan (docker compose + Dockerfiles)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        with:
-          scan-type: config
-          scan-ref: deploy/docker
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
+  platform-gates:
+    name: platform gates
+    permissions:
+      contents: read
+    uses: ./.github/workflows/platform-gates.yml
 
   # Ephemeral kind cluster harness (P2 W4-T3, ADR-0039 §6 / ADR-0041 §2/§3). This
   # is the "kind for cheap" enforcement validation the two W4 enforcement tasks
@@ -1252,8 +600,9 @@ jobs:
   # bite) is outstanding — it has NOT run on any runner (L1). Promoting now would be a
   # false-green blocking gate (the ADR-0048 Risk "worse than continue-on-error"), so
   # the promotion is held until a runner records the observed red→green. The STATIC
-  # validator step (validate-harness.sh) + the assertion-library self-tests +
-  # extract_secret.py tests stay blocking within the job regardless.
+  # validator step (validate-harness.sh) + assertion-library self-tests stay blocking
+  # within this job. Shared rendered-Secret extractor bites run independently in the
+  # normal blocking backend suite (`test_render_twice_helpers.py`).
   kind-harness:
     name: kind-harness (enforcing-CNI self-test + mTLS/collector assertions — signal-only, opt-in; ADR-0048 Rejected, not promoted)
     # audit-W2 T7 (2026-07-03): NOT promoted — ADR-0048 Rejected. This LIVE kind path
@@ -1294,15 +643,8 @@ jobs:
           bash ci/kind/selftest/assert-trap-bite.sh
           bash ci/kind/selftest/egress-probe-tristate.sh
 
-      # extract_secret.py hardening tests (N9 metadata-scoped name + N10 strict
-      # base64). Stdlib-only; runs as a plain script so no pip install is needed.
-      - name: mTLS extract_secret.py tests (no cluster)
-        run: python3 ci/mtls/test_extract_secret.py
-
       - name: Set up Helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
-        with:
-          version: v3.16.2
+        uses: ./.github/actions/setup-tools
 
       # kind brings up the throwaway cluster on the Docker backend the GH runner
       # already provides. The action installs the kind binary; the harness drives
@@ -1353,75 +695,6 @@ jobs:
                  "blocking gate awaits the ADR-0048 §4 planted-regression bite proof on a CI runner."
           fi
 
-  # Cluster-free drill NEGATIVE-CONTROL bite proofs — the BLOCKING gate (P3 W4, ADR-0047
-  # §2). Every W4 drill (T3–T7) ships a hardware-free *-bite.sh self-test that runs the
-  # REAL drill against a fake kubectl (+ real promtool for T7) and asserts the negative
-  # control turns it RED (plant → red → revert). These proofs need NO cluster and are
-  # deterministic, so — unlike the live HA bring-up in kind-harness-ha (signal-only for
-  # cluster-reliability reasons, ADR-0048 §3) — nothing prevents them from gating merge.
-  # This job runs them as a REQUIRED check (it is in `all-gates` `needs`) so a drill that
-  # STOPS BITING blocks merge (ADR-0047 §2 regression protection). The SAME steps also
-  # run as a fail-fast guard inside kind-harness-ha before the expensive live kind
-  # bring-up; THIS job is their authoritative merge gate. It promotes NO live drill — the
-  # G-REL/G-SCA LIVE assertions stay signal-only (a deliberate W5/GA step, ADR-0048 §4).
-  drill-bite-proofs:
-    name: drill-bite-proofs (cluster-free negative-control bite proofs — blocking)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-        with:
-          # The bite-proof / harness scripts run repo-controlled shell right after
-          # checkout and need no git auth — do NOT persist the token in .git/config
-          # (least privilege; matches the persist-credentials:false job below).
-          persist-credentials: false
-
-      # validate-ha-overlay.sh renders the reduced-scale HA overlay → needs helm.
-      - name: Set up Helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
-        with:
-          version: v3.16.2
-
-      # promtool — the W4-T7 compressed-soak bite runs a REAL `promtool test rules` over
-      # the W3-T2 recording rules + W3-T3 burn-rate alerts (same pin as the observability
-      # job). pipefail so a masked fetch cannot read green (L5).
-      - name: Install promtool (Prometheus) — for the W4-T7 compressed-soak SLO-held bite
-        run: |
-          set -o pipefail
-          PROM_VERSION=2.53.2
-          # Pin the official release digest (prometheus SHA256SUMS) and verify BEFORE
-          # extract/install — a poisoned release asset must not execute as promtool in a
-          # required CI gate. Mirrors the gitleaks download-verify pattern above.
-          PROM_SHA256=60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69
-          curl -sSL -o /tmp/prometheus.tar.gz \
-            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
-          echo "${PROM_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/prometheus.tar.gz -C /tmp
-          install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
-          promtool --version
-
-      # Static harness invariants + reduced-scale HA overlay render/counts (no cluster).
-      - name: Validate harness invariants incl. HA add-on (static, no cluster)
-        run: bash ci/kind/selftest/validate-harness.sh
-      - name: Validate reduced-scale HA overlay (render + counts, static)
-        run: bash ci/kind/ha/validate-ha-overlay.sh
-
-      # The five W4 drill negative-control bite proofs (plant → red → revert, no cluster).
-      # BLOCKING — a drill that stops biting fails this required gate.
-      - name: W4-T3 failover drill negative-control bite proof
-        run: bash ci/kind/selftest/pg-failover-bite.sh
-      - name: W4-T4 Neo4j rebuild drill negative-control bite proof
-        run: bash ci/kind/selftest/neo4j-rebuild-bite.sh
-      - name: W4-T5 worker-kill idempotency drill negative-control bite proof
-        run: bash ci/kind/selftest/worker-kill-idempotency-bite.sh
-      - name: W4-T6 queue-burst + API load + PgBouncer budget drill negative-control bite proof
-        run: bash ci/kind/selftest/queue-burst-load-bite.sh
-      - name: W4-T7 compressed-soak drill negative-control bite proof (real promtool + fake-kubectl)
-        run: bash ci/kind/selftest/compressed-soak-bite.sh
-      - name: W4-T8 N-2 -> N upgrade rehearsal drill negative-control bite proof (fake-kubectl)
-        run: bash ci/kind/selftest/n2-upgrade-rehearsal-bite.sh
-
   # Ephemeral HA kind topology (P3 W4-T1, ADR-0047 / ADR-0048 §3). This job stands
   # up the reduced-scale HA substrate the W4 drills (T3–T8) + the gate promotion
   # (T2) run against: the SAME enforcing-CNI kind harness as the P2 kind-harness
@@ -1468,10 +741,10 @@ jobs:
       - name: Validate harness invariants incl. HA add-on (static, no cluster)
         run: bash ci/kind/selftest/validate-harness.sh
 
-      - name: Set up Helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
+      - name: Set up Helm and promtool
+        uses: ./.github/actions/setup-tools
         with:
-          version: v3.16.2
+          install-promtool: "true"
 
       # Static HA-overlay bite — renders the reduced-scale HA overlay + asserts the
       # stated counts / mutual exclusion / mTLS-preserved / no-:latest. No cluster.
@@ -1558,20 +831,6 @@ jobs:
       # rules + W3-T3 burn-rate alerts to prove the soak's "§6 SLOs held / no
       # burn-rate alert fires" assertion bites cluster-free. Same pin as the
       # `observability` job (2.53.2). pipefail so a masked fetch cannot read green (L5).
-      - name: Install promtool (Prometheus) — for the W4-T7 compressed-soak SLO-held bite
-        run: |
-          set -o pipefail
-          PROM_VERSION=2.53.2
-          # Pin the official release digest (prometheus SHA256SUMS) and verify BEFORE
-          # extract/install — a poisoned release asset must not execute as promtool in a
-          # required CI gate. Mirrors the gitleaks download-verify pattern above.
-          PROM_SHA256=60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69
-          curl -sSL -o /tmp/prometheus.tar.gz \
-            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
-          echo "${PROM_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/prometheus.tar.gz -C /tmp
-          install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
-          promtool --version
 
       # W4-T7 compressed-soak drill — NEGATIVE-CONTROL BITE PROOF (no cluster).
       # ADR-0047 §2 requires every drill's negative control be SHOWN to bite (plant →
@@ -1746,12 +1005,10 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
-        with:
-          python-version: "3.12"
+        uses: ./.github/actions/setup-python
 
       - name: Install backend + KMS extras (aws + vault)
-        run: pip install -e "./backend[dev,kms-aws,kms-vault]"
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install -e "./backend[dev,kms-aws,kms-vault]"
 
       # Bring up the emulators with a BOUNDED RETRY around the image pull + boot
       # (#7). A transient registry blip on `docker compose pull`/`up` (image-pull
@@ -1843,100 +1100,6 @@ jobs:
       - name: Tear down emulators
         if: always()
         run: docker compose -f deploy/docker/docker-compose.kms-emulators.yml down -v
-
-  # Postgres-backed test layer (P2 W5-T0). The offline backend job runs the unit
-  # suite on in-memory aiosqlite, which silently passes code that is wrong under
-  # PostgreSQL (the four documented W4 false-PASSes — NULLS FIRST ordering, a
-  # unique index on a partitioned table, REVOKE UPDATE append-only, and the
-  # prev_hash chain walk). THIS job re-asserts the W4 audit-hash-chain + credential
-  # rotation controls against a REAL Postgres so the W5-T3 gate flip does not rest
-  # on a backend that hides the bug it gates.
-  #
-  #   - `services: postgres` uses the pgvector/pgvector image (migration 0006 needs
-  #     the `vector` extension); a stock postgres image would fail `alembic upgrade
-  #     head`. The CI-native service is health-gated before the tests run (no
-  #     Docker-in-test, L1).
-  #   - The harness skips CLEANLY off-CI (no reachable Postgres) and BITES here on a
-  #     regressed W4 control. `tests/pg/` is the marker-`integration` PG layer; it is
-  #     NOT in the default SQLite smoke (separate job, additive).
-  #   - `set -o pipefail` + `test -s` on the piped step (L5) so a broken PG step
-  #     cannot mask its exit code as green.
-  pg-integration:
-    name: pg-integration (real PostgreSQL — W4 controls under PG)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # No `needs`: runs in wave 1 (t=0). Merge-blocking is enforced by the
-    # all-gates aggregator's direct `needs` entry; the PG layer shares no
-    # artifacts with the unit-suite backend job (it installs and runs from
-    # source), so the old `needs: [backend]` edge was pure scheduling.
-    services:
-      postgres:
-        # pgvector image: the migration chain's `CREATE EXTENSION vector`
-        # (migration 0006) requires it; a stock postgres would fail upgrade head.
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: netops
-          POSTGRES_PASSWORD: netops
-          POSTGRES_DB: netops_test
-        ports:
-          - 5432:5432
-        # Health-gate the service so the tests never race the boot (L1): the job
-        # does not start steps until pg_isready reports healthy.
-        options: >-
-          --health-cmd "pg_isready -U netops -d netops_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
-
-      - name: Install backend (editable, dev extras)
-        run: pip install -e "./backend[dev]"
-
-      # The PG layer re-asserts the W4 controls against the real service. pipefail
-      # + `test -s` (L5) so a broken PG step cannot read as green through the tee
-      # pipe; an EMPTY pytest output (the binary never ran) also fails the gate.
-      # NETOPS_TEST_DATABASE_URL points the harness's connection probe + alembic
-      # upgrade head at the service; `-m integration` selects exactly this layer.
-      - name: PG test layer (alembic upgrade head + W4 controls) — RED gate
-        working-directory: backend
-        shell: bash
-        env:
-          NETOPS_TEST_DATABASE_URL: postgresql+asyncpg://netops:netops@127.0.0.1:5432/netops_test
-          NETOPS_ADMIN_PASSWORD: pg-ci-throwaway
-        run: |
-          set -o pipefail
-          pytest tests/pg/ -m integration -v | tee pg-pytest-output.txt
-          # Guard against a silent no-collection green (the harness skips off-CI;
-          # here Postgres IS reachable, so the tests MUST actually run, not skip).
-          test -s pg-pytest-output.txt
-          if grep -qE '([1-9][0-9]* skipped)|no tests ran' pg-pytest-output.txt; then
-            echo "::error::PG layer skipped or collected nothing — the service was not reachable; this gate must RUN and BITE."
-            exit 1
-          fi
-          # Silent-drop guard (F1, 2026-07-10 testing review): a tests/pg/ file
-          # missing `pytestmark = pytest.mark.integration` is DESELECTED here and
-          # then runs in NO job at all (the unit job skips all of tests/pg/ via
-          # the PG-unreachable collection hook). Deselection is a red gate.
-          if grep -qE '[1-9][0-9]* deselected' pg-pytest-output.txt; then
-            echo "::error::PG layer deselected tests — a tests/pg/ file is missing 'pytestmark = pytest.mark.integration' and would run in NO CI job."
-            exit 1
-          fi
-          {
-            echo "## PG-backed W4-control tests (real PostgreSQL)"
-            echo ""
-            echo '```text'
-            tail -n 30 pg-pytest-output.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
 
   # Packet-analysis executor-split bite-proof (ADR-0049 §Acceptance). This is the
   # RE-ENABLE gate: ADR-0049 flips the service back on by default (compose profile
@@ -2097,465 +1260,11 @@ jobs:
             -v "$PWD/ci/packet:/ci:ro" \
             netops-backend-packet:citest \
             python /ci/timeout_reap_driver.py
-
-  # Dependency-lockfile drift gate (P3 W0-T8, closes the P1 systemic TODO "add a
-  # dep lockfile — drift bit twice", PRODUCTION.md §10 deps-pinned-per-release /
-  # §11 G-MNT no-silent-drift). The P1 `fastapi 0.137 include_router` break had
-  # root cause "no lockfile": the manifest declared a range, so a fresh resolve
-  # silently floated past the flattening boundary. This job asserts the COMMITTED
-  # lockfiles equal a fresh deterministic resolve of the manifests, so a manifest
-  # edit without a re-lock (or a hand-edited lock) is RED.
-  #
-  #   - Backend: backend/requirements.lock.txt is `uv pip compile pyproject.toml
-  #     --extra dev --universal --generate-hashes --python-version 3.12`. uv is
-  #     PINNED to the exact version the lock was generated with (UV_VERSION); a
-  #     different uv version can reorder/re-resolve, so determinism requires the
-  #     pin (L1: a new gating tool is pinned and proven). `--universal` emits
-  #     platform-marker lines so the lock is host-independent — it recompiles
-  #     byte-identically on linux-CI from the Windows authoring host (verified
-  #     locally, see docs/security/supply-chain-scanning.md "Dependency lockfiles").
-  #   - Frontend: `npm ci` already FAILS when package.json and package-lock.json
-  #     are out of sync (it refuses to mutate the lock); the explicit
-  #     `git diff --exit-code` after it is belt-and-braces against any in-place
-  #     lock rewrite. RED on any drift.
-  #   - Negative control (L1, "the gate must RUN and BITE"): the self-test step
-  #     plants an out-of-lock edit in a SCRATCH COPY, runs the same recompile/diff
-  #     logic, and FAILS THE JOB if that planted drift is NOT detected. It never
-  #     touches the committed tree. This proves the gate bites without leaving a
-  #     planted negative in the repo.
-  lockfile:
-    name: lockfile (backend + frontend dependency drift)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      # Pin uv to the exact version the committed lock was generated with. Bump
-      # this AND re-lock together (docs/security/supply-chain-scanning.md).
-      UV_VERSION: "0.11.19"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-        with:
-          # This job runs `npm ci`, which can execute repo-controlled package
-          # lifecycle scripts; don't leave the Actions token in local git config
-          # where they could read it (zizmor artipacked / supply-chain hardening).
-          persist-credentials: false
-
-      - name: Install uv (pinned)
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
-        with:
-          version: ${{ env.UV_VERSION }}
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
-        with:
-          python-version: "3.12"
-
-      # Re-resolve the backend manifest and assert it equals the committed lock.
-      # Drift (a dep added/changed in pyproject.toml without re-locking, or a
-      # hand-edited lock) makes `git diff --exit-code` non-zero — RED gate.
-      - name: Backend lockfile in sync with pyproject.toml — RED gate
-        working-directory: backend
-        shell: bash
-        run: |
-          set -o pipefail
-          uv pip compile pyproject.toml --extra dev --universal --generate-hashes \
-            --python-version 3.12 --output-file requirements.lock.txt
-          if ! git diff --exit-code -- requirements.lock.txt; then
-            echo "::error::backend/requirements.lock.txt is out of sync with pyproject.toml." \
-                 "Re-lock: cd backend && uv pip compile pyproject.toml --extra dev --universal" \
-                 "--generate-hashes --python-version 3.12 --output-file requirements.lock.txt" \
-                 "(then commit the lock). See docs/security/supply-chain-scanning.md."
-            exit 1
-          fi
-          echo "backend lockfile: in sync."
-
-      # Negative control: prove the recompile-and-compare logic actually BITES on
-      # drift. Compile a fresh canonical lock from pyproject ONLY (uv reads no
-      # tampered file as preferences, so it is the true canonical resolution),
-      # plant a valid-but-wrong pin into a copy of the committed lock, and require
-      # the comparison to find them DIFFERENT. If the planted drift is NOT caught,
-      # the real gate above is a false-green and THIS step fails the job. The
-      # committed tree is never modified.
-      - name: Prove backend drift gate bites (planted negative, scratch copy)
-        working-directory: backend
-        shell: bash
-        run: |
-          set -o pipefail
-          scratch="$(mktemp -d)"
-          cp requirements.lock.txt "$scratch/committed.lock"
-          uv pip compile pyproject.toml --extra dev --universal --generate-hashes \
-            --python-version 3.12 --output-file "$scratch/fresh.lock"
-          # Plant drift: rewrite the fastapi pin to an obvious sentinel (models a
-          # stale lock after a manifest bump, or a hand-edit). The match is
-          # VERSION-AGNOSTIC (`^fastapi==.*`) so it keeps working across legitimate
-          # fastapi pin updates; committed.lock is only diffed here, never re-parsed
-          # by uv, so the sentinel need not be a valid version — it only has to
-          # differ from the canonical resolution.
-          sed -i -E 's/^fastapi==.*/fastapi==0.0.0-PLANTED-DRIFT/' "$scratch/committed.lock"
-          # Self-check: if the pin wasn't found the tamper is a no-op and the
-          # control would false-green — fail loudly instead.
-          grep -q '^fastapi==0.0.0-PLANTED-DRIFT' "$scratch/committed.lock" || {
-            echo "::error::negative control could not plant drift (no fastapi== line in lock)"; exit 1; }
-          if diff -q "$scratch/fresh.lock" "$scratch/committed.lock" >/dev/null; then
-            echo "::error::NEGATIVE CONTROL FAILED — planted lock drift was NOT detected;" \
-                 "the drift gate is a false-green. Fix the gate before relying on it."
-            exit 1
-          fi
-          echo "negative control: planted drift correctly detected (gate bites)."
-
-      - name: Set up Node 22
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      # `npm ci` itself refuses to run when package.json and package-lock.json are
-      # out of sync (it errors instead of mutating the lock), so an unlocked
-      # dependency change is already RED here. The `git diff --exit-code` after it
-      # is defence-in-depth against any in-place lock rewrite.
-      - name: Frontend lockfile in sync with package.json — RED gate
-        working-directory: frontend
-        shell: bash
-        run: |
-          set -o pipefail
-          npm ci
-          if ! git diff --exit-code -- package-lock.json; then
-            echo "::error::frontend/package-lock.json drifted during npm ci." \
-                 "Re-lock: cd frontend && npm install (then commit package-lock.json)."
-            exit 1
-          fi
-          echo "frontend lockfile: in sync."
-
-  # Config single-source drift gate (AR-W1-T1, closes H3 + the C5/C6 seam).
-  # backend/scripts/generate_env_example.py introspects app.core.config.Settings
-  # and is the single source for `.env.example` (every field, 1:1) and for the
-  # Helm-chart config-key contract. This job re-generates `.env.example` and
-  # fails on any diff (H3: docs ⊇ Settings), and runs the chart key-coverage +
-  # ConfigMap secret-safety checks (C5/C6: every rendered NETOPS_* key is a
-  # Settings field or a documented exception; no secret material in a plaintext
-  # ConfigMap). Wired into the `all-gates` needs list (T7, AR-W1-T3). pipefail
-  # so a piped invocation cannot mask a non-zero exit.
-  config-drift:
-    name: config-drift (.env.example + chart key coverage)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
-
-      # The generator imports app.core.config, so the backend package + its
-      # runtime deps must be importable (no dev extras needed for introspection).
-      - name: Install backend (editable)
-        run: pip install -e ./backend
-
-      - name: .env.example in sync with Settings — RED gate
-        working-directory: backend
-        shell: bash
-        run: |
-          set -o pipefail
-          python scripts/generate_env_example.py --check
-
-      - name: Helm chart config-key coverage + ConfigMap secret-safety — RED gate
-        working-directory: backend
-        shell: bash
-        run: |
-          set -o pipefail
-          python scripts/generate_env_example.py --check-chart
-
-      # BITE proof (the run-and-bite rule for a NEW gate): plant a REAL new
-      # Settings field and require a fresh `--check` subprocess to go RED (the
-      # committed .env.example is now stale relative to the mutated Settings);
-      # then restore config.py and require GREEN. Proves the drift gate is not a
-      # false-green. config.py is restored from git; the committed tree is
-      # unchanged after this step.
-      - name: Prove config-drift gate bites (planted scratch field)
-        working-directory: backend
-        shell: bash
-        run: |
-          set -o pipefail
-          python - <<'PY'
-          import pathlib
-          p = pathlib.Path("app/core/config.py")
-          s = p.read_text(encoding="utf-8")
-          marker = '    env: Literal["dev", "prod"] = "dev"\n'
-          assert marker in s, "anchor line for the planted field not found"
-          planted = (
-              '    #: Wave4 config-drift bite scratch field (planted in CI; reverted below).\n'
-              '    wave4_bite_scratch_field: str = "x"\n'
-          )
-          p.write_text(s.replace(marker, marker + planted, 1), encoding="utf-8")
-          PY
-          if python scripts/generate_env_example.py --check; then
-            echo "::error::config-drift did NOT bite on a planted Settings field (false-green)"
-            git checkout -- app/core/config.py
-            exit 1
-          fi
-          echo "planted field correctly detected (gate bites); reverting."
-          git checkout -- app/core/config.py
-          python scripts/generate_env_example.py --check
-          echo "config-drift bite proof: RED on planted field, GREEN after revert."
-
-  # OpenAPI→TypeScript contract-drift gate (AR-W1-T2, closes the H14/M25-class
-  # FE/BE enum-drift seam for the devices+applications modules adopted this wave).
-  # backend/scripts/export_openapi.py is the single source for docs/api/openapi.json
-  # (a pure FastAPI `.openapi()` schema export — no live infra, lifespan never
-  # runs); `openapi-typescript` is the single source for
-  # frontend/src/api/generated/openapi-types.ts. This job re-exports the spec and
-  # regenerates the TS types, failing on any drift from the committed files.
-  # Wired into the `all-gates` needs list (T7, AR-W1-T3). pipefail so a piped
-  # invocation cannot mask a non-zero exit.
-  contract-drift:
-    name: contract-drift (OpenAPI spec + generated TS types)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
-
-      # The exporter imports app.main / app.core.config, so the backend package +
-      # its runtime deps must be importable (no dev extras needed — `.openapi()`
-      # is pure schema generation and never opens the app's lifespan).
-      - name: Install backend (editable)
-        run: pip install -e ./backend
-
-      - name: OpenAPI spec in sync with the FastAPI app — RED gate
-        working-directory: backend
-        shell: bash
-        run: |
-          set -o pipefail
-          python scripts/export_openapi.py --check
-
-      - name: Set up Node 22
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Generated TS types in sync with the OpenAPI spec — RED gate
-        working-directory: frontend
-        shell: bash
-        run: |
-          set -o pipefail
-          cp src/api/generated/openapi-types.ts /tmp/openapi-types.committed.ts
-          npx openapi-typescript ../docs/api/openapi.json -o src/api/generated/openapi-types.ts
-          if ! diff -u /tmp/openapi-types.committed.ts src/api/generated/openapi-types.ts; then
-            echo "::error::frontend/src/api/generated/openapi-types.ts is out of sync with" \
-                 "docs/api/openapi.json. Re-generate: cd frontend && npx openapi-typescript" \
-                 "../docs/api/openapi.json -o src/api/generated/openapi-types.ts"
-            exit 1
-          fi
-          echo "generated TS types: in sync with docs/api/openapi.json."
-
-      # BITE proof (the run-and-bite rule for a NEW gate): hand-plant a real enum
-      # mismatch into the (already-verified-in-sync) generated file, prove a fresh
-      # regeneration disagrees with it (RED — the gate is not a false-green), then
-      # confirm the clean regenerate restores the exact pre-tamper content (GREEN).
-      # The working tree ends up unchanged either way (never left tampered/dirty).
-      - name: Prove contract-drift gate bites (planted enum mismatch)
-        working-directory: frontend
-        shell: bash
-        run: |
-          set -o pipefail
-          cp src/api/generated/openapi-types.ts /tmp/openapi-types.orig.ts
-          python - <<'PY'
-          import pathlib
-          p = pathlib.Path("src/api/generated/openapi-types.ts")
-          s = p.read_text(encoding="utf-8")
-          marker = 'DeviceStatus: "new" | "reachable" | "unreachable";'
-          assert marker in s, "anchor line for the planted enum mismatch not found"
-          tampered = (
-              'DeviceStatus: "new" | "reachable" | "unreachable" | "wave4_bite_scratch";'
-          )
-          p.write_text(s.replace(marker, tampered, 1), encoding="utf-8")
-          PY
-          cp src/api/generated/openapi-types.ts /tmp/openapi-types.tampered.ts
-          npx openapi-typescript ../docs/api/openapi.json -o src/api/generated/openapi-types.ts
-          if diff -q /tmp/openapi-types.tampered.ts src/api/generated/openapi-types.ts > /dev/null; then
-            echo "::error::contract-drift did NOT bite on a planted enum mismatch (false-green)"
-            cp /tmp/openapi-types.orig.ts src/api/generated/openapi-types.ts
-            exit 1
-          fi
-          echo "planted enum mismatch correctly detected (gate bites); confirming the clean"
-          echo "regenerate restores the exact pre-tamper committed content."
-          diff -u /tmp/openapi-types.orig.ts src/api/generated/openapi-types.ts
-          echo "contract-drift bite proof: RED on planted mismatch, GREEN after regenerate."
-
-  # Observability SLO gate (P3 W3-T3, ADR-0046 §6; PRODUCTION.md §11 G-OBS §385).
-  # Validates the SLO recording rules (W3-T2) AND the multi-window burn-rate alert
-  # rules (W3-T3) with `promtool check rules`, runs the `promtool test rules` cases
-  # (recording-rule semantics + the alert FIRING/healthy alert-as-test), and runs
-  # the alert-as-test BITE proof (a muted, never-firing alert MUST fail its firing
-  # test — the anti-false-green control). Cluster-free: promtool over synthetic
-  # series, so it bites on every PR (ADR-0046 §0/§6). L5 (pipefail) + `test -s` so a
-  # piped promtool invocation cannot mask a non-zero exit (the P1-W4 pipe-masks-exit
-  # trap). This job is in the `all-gates` needs list below — a red promtool gate
-  # blocks merge.
-  observability:
-    name: observability (promtool check + test + alert-as-test bite)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-
-      - name: Install promtool (Prometheus)
-        run: |
-          set -o pipefail
-          PROM_VERSION=2.53.2
-          # Pin the official release digest (prometheus SHA256SUMS) and verify BEFORE
-          # extract/install — a poisoned release asset must not execute as promtool in a
-          # required CI gate. Mirrors the gitleaks download-verify pattern above.
-          PROM_SHA256=60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69
-          curl -sSL -o /tmp/prometheus.tar.gz \
-            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
-          echo "${PROM_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/prometheus.tar.gz -C /tmp
-          install "/tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
-          promtool --version
-
-      # `promtool check rules` validates the rule files load (syntax + PromQL parse)
-      # for BOTH the W3-T2 recording rules and the W3-T3 burn-rate alerts. pipefail +
-      # `test -s` guard so a piped/empty result cannot pass green.
-      - name: promtool check rules (recording + burn-rate alerts)
-        run: |
-          set -o pipefail
-          promtool check rules \
-            deploy/observability/slo-recording.rules.yaml \
-            deploy/observability/api-request-rate.rules.yaml \
-            deploy/observability/slo-burn-rate.alerts.yaml | tee /tmp/promtool-check.out
-          test -s /tmp/promtool-check.out
-
-      # `promtool test rules` runs the semantic cases: the W3-T2 recording-rule
-      # tests (the SLI computes the expected value on healthy + regressed series) and
-      # the W3-T3 alert-as-test cases (each alert FIRES on a perturbed series and
-      # stays SILENT on a healthy one). A green-at-setup alert that never fires fails
-      # here (ADR-0046 §6).
-      - name: promtool test rules (recording-rule semantics + alert firing/healthy)
-        run: |
-          set -o pipefail
-          promtool test rules deploy/observability/slo-recording.rules.test.yaml | tee /tmp/promtool-rec.out
-          test -s /tmp/promtool-rec.out
-          promtool test rules deploy/observability/slo-burn-rate.alerts.test.yaml | tee /tmp/promtool-alert.out
-          test -s /tmp/promtool-alert.out
-
-      # BITE proof: the clean rules pass AND a MUTED (never-firing) alert fails its
-      # firing test — proves the alert-as-test gate actually catches a false-green
-      # alert before it is relied on (ADR-0046 §6; the carry-forward run-and-bite
-      # rule). The mutation is on a temp copy; committed rules are untouched.
-      - name: promtool alert-as-test bite proof
-        run: bash deploy/observability/run-promtool-bite.sh
-
-      # W3-T5 fault-injection MTTD harness (ADR-0046 §5; §386). Drives the three
-      # synthetic §386 faults (DB down -> 5xx spike, queue stall -> discovery
-      # success drop, LLM-provider failure -> first-token spill) and asserts the
-      # corresponding fast/PAGE alert FIRES within MTTD < 5 min (firing at 3 m,
-      # strictly < the budget), plus a healthy negative control per scenario that
-      # stays silent. The window IS the assertion — not just "fires eventually".
-      # Cluster-free: promtool over synthetic series at compressed timestamps; the
-      # live-cluster MTTD run is named-deferred to W4/W5 (ADR-0046 §0/§5).
-      - name: promtool fault-injection MTTD harness (< 5 min, 3 scenarios + neg controls)
-        run: |
-          set -o pipefail
-          promtool test rules deploy/observability/slo-mttd.faultinjection.test.yaml | tee /tmp/promtool-mttd.out
-          test -s /tmp/promtool-mttd.out
-
-      # BITE proof for the MTTD gate (the run-and-bite rule for a NEW gate,
-      # ADR-0046 §6): the clean rules detect each fault < 5 min AND fast alerts
-      # SLOWED past the budget (for:2m -> for:6m) MUST fail the MTTD assertions —
-      # proving the window is load-bearing, not a vacuous "fires eventually" check.
-      # Mutation is on a temp copy; committed rules are untouched.
-      - name: promtool fault-injection MTTD bite proof
-        run: bash deploy/observability/run-mttd-bite.sh
-
-      # W5-T1 SLO-corpus perturbation bite (ADR-0046 §5/§6; §386): the alert
-      # coverage corpus's fire-WITHIN-WINDOW floor is not vacuous. The committed
-      # slo-corpus-perturbation.test.yaml passes (a from-t0 breach fires by 8m; a
-      # delayed-onset breach stays silent) AND a copy whose FIRING cases' onset is
-      # DELAYED past the window MUST fail their firing assertion (got:[]). The
-      # corpus-DELAY counterpart to the MTTD rule-SLOW bite above; the byte-stable
-      # coverage matrix + shape guards run in the backend pytest job. Mutation on a
-      # temp copy; committed corpus untouched.
-      - name: promtool SLO-corpus perturbation bite proof (delay past window)
-        run: bash deploy/observability/run-slo-corpus-perturbation-bite.sh
-
-      # W3-T4 golden-signal dashboards-as-code (ADR-0046 §4; §335). Visual
-      # rendering is named-deferred (no live Grafana on the host) — the BITING
-      # layer is this structural/coverage lint + the provisioning-ConfigMap
-      # kubeconform below. The lint asserts all 9 §335 subjects × 4 golden
-      # signals exist and every panel target binds to a known slo:/netops_*/
-      # exporter series (a renamed base metric breaks the lint, ADR-0046 §4).
-      - name: dashboard structural + coverage lint
-        run: |
-          set -o pipefail
-          python3 deploy/observability/dashboards/lint_dashboards.py | tee /tmp/dash-lint.out
-          test -s /tmp/dash-lint.out
-
-      # BITE proof for the dashboard gate (the run-and-bite rule for a NEW gate):
-      # the committed dashboards pass AND each of {missing golden signal, renamed
-      # metric, dropped §335 subject} fails the lint, AND the canonical source ==
-      # the chart-vendored copy (no embed drift). Mutations are on a temp copy.
-      - name: dashboard-lint bite proof (+ vendor sync)
-        run: bash deploy/observability/dashboards/run-dashboard-lint-bite.sh
-
-      # The dashboards provision via the chart as a Grafana-sidecar ConfigMap and
-      # are OFF by default (expose-don't-bundle), so the infra job's default render
-      # does NOT cover them. Render WITH the flag on and kubeconform-validate the
-      # provisioning ConfigMap here (the as-code provisioning is the biting layer,
-      # not a live Grafana). pipefail + `test -s` guard a piped/empty render.
-      - name: Set up Helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
-        with:
-          version: v3.16.2
-
-      - name: Install kubeconform
-        run: |
-          curl -sSL -o /tmp/kubeconform.tar.gz \
-            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
-          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
-          kubeconform -v
-
-      # W4-T2b (ADR-0046 §4): sync the canonical dashboards-as-code source into
-      # the chart's own tree before rendering — the dashboard-lint bite proof
-      # above already ran the sync once, but this job's render step must not
-      # depend on step ordering inside that script; re-run it explicitly here
-      # (idempotent) immediately before the render that needs it.
-      - name: Sync dashboards into chart (ADR-0046 §4)
-        run: bash deploy/observability/dashboards/sync-to-chart.sh
-
-      - name: Render + kubeconform the dashboards provisioning ConfigMap
-        run: |
-          set -o pipefail
-          helm template netops deploy/kubernetes/netops \
-            --namespace netops --kube-version 1.29.0 \
-            --set observability.grafanaDashboards.enabled=true \
-            | tr -d '\r' > /tmp/rendered-dashboards.yaml
-          test -s /tmp/rendered-dashboards.yaml
-          grep -q 'name: netops-grafana-dashboards' /tmp/rendered-dashboards.yaml
-          kubeconform -strict -summary \
-            -kubernetes-version 1.29.0 \
-            -ignore-missing-schemas \
-            -skip ClusterPolicy,Cluster,Pooler \
-            /tmp/rendered-dashboards.yaml
+  drift-gates:
+    name: drift gates
+    permissions:
+      contents: read
+    uses: ./.github/workflows/drift-gates.yml
 
   # Single required-check aggregator (P1 W6-T4). Branch protection should require
   # ONLY this job; it transitively depends on every gate, so a failure or skip of
@@ -2585,12 +1294,12 @@ jobs:
   # signal-only; promoting the G-REL/G-SCA HA drills to blocking is a deliberate
   # later step (W5/GA), not W4-T2. NOTE: only the LIVE bring-up is omitted — the
   # cluster-free drill negative-control bite proofs (ADR-0047 §2) ARE required via the
-  # `drill-bite-proofs` job below, so a drill that stops biting blocks merge.
+  # the reusable `platform-gates` call, so a drill that stops biting blocks merge.
   #
   # DELIBERATE OMISSION (CI split): `docker-publish` is NOT in `needs`. It runs
   # only on push/tag events, and this aggregator fails on skipped results — a
   # push-only job here would wedge every PR. Its gating is upstream instead
-  # (docker-publish `needs: [backend, frontend, docker]`), so nothing unsigned
+  # (docker-publish `needs: [backend-gates, frontend, docker]`), so nothing unsigned
   # or unscanned can publish; a docker-publish failure turns the main/tag run
   # red on its own. The every-event `docker` validation job IS required here.
   # PG-test routing heuristic (audit ARCH_DEBT #2). Flags a diff that adds
@@ -2630,7 +1339,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, packet-analysis-bite-proof, lockfile, observability, drill-bite-proofs, config-drift, contract-drift]
+    needs: [backend-gates, frontend, security-scan, docker, platform-gates, kms-emulators, packet-analysis-bite-proof, drift-gates]
     steps:
       - name: Assert every gate succeeded
         env:

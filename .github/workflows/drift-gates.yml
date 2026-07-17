@@ -1,0 +1,344 @@
+name: Drift gates
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# Workflow-level env does not propagate through reusable-workflow calls.
+# Keep one wrapper attempt equal to one package-manager network attempt.
+env:
+  PIP_RETRIES: "0"
+  NPM_CONFIG_FETCH_RETRIES: "0"
+  UV_HTTP_RETRIES: "0"
+
+jobs:
+
+  # Dependency-lockfile drift gate (P3 W0-T8, closes the P1 systemic TODO "add a
+  # dep lockfile — drift bit twice", PRODUCTION.md §10 deps-pinned-per-release /
+  # §11 G-MNT no-silent-drift). The P1 `fastapi 0.137 include_router` break had
+  # root cause "no lockfile": the manifest declared a range, so a fresh resolve
+  # silently floated past the flattening boundary. This job asserts the COMMITTED
+  # lockfiles equal a fresh deterministic resolve of the manifests, so a manifest
+  # edit without a re-lock (or a hand-edited lock) is RED.
+  #
+  #   - Backend: backend/requirements.lock.txt is `uv pip compile pyproject.toml
+  #     --extra dev --universal --generate-hashes --python-version 3.12`. uv is
+  #     PINNED to the exact version the lock was generated with (UV_VERSION); a
+  #     different uv version can reorder/re-resolve, so determinism requires the
+  #     pin (L1: a new gating tool is pinned and proven). `--universal` emits
+  #     platform-marker lines so the lock is host-independent — it recompiles
+  #     byte-identically on linux-CI from the Windows authoring host (verified
+  #     locally, see docs/security/supply-chain-scanning.md "Dependency lockfiles").
+  #   - Frontend: `npm ci` already FAILS when package.json and package-lock.json
+  #     are out of sync (it refuses to mutate the lock); the explicit
+  #     `git diff --exit-code` after it is belt-and-braces against any in-place
+  #     lock rewrite. RED on any drift.
+  #   - Negative control (L1, "the gate must RUN and BITE"): the self-test step
+  #     plants an out-of-lock edit in a SCRATCH COPY, runs the same recompile/diff
+  #     logic, and FAILS THE JOB if that planted drift is NOT detected. It never
+  #     touches the committed tree. This proves the gate bites without leaving a
+  #     planted negative in the repo.
+  lockfile:
+    name: lockfile (backend + frontend dependency drift)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Pin uv to the exact version the committed lock was generated with. Bump
+      # this AND re-lock together (docs/security/supply-chain-scanning.md).
+      UV_VERSION: "0.11.19"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        with:
+          # This job runs `npm ci`, which can execute repo-controlled package
+          # lifecycle scripts; don't leave the Actions token in local git config
+          # where they could read it (zizmor artipacked / supply-chain hardening).
+          persist-credentials: false
+
+      - name: Install uv (pinned)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Set up Python 3.12
+        uses: ./.github/actions/setup-python
+
+      # Two layers, because each alone is a false-green (proved by the PR #165
+      # wave-1 bite proof, 2026-07-17):
+      #   (1) SYNC — re-resolve the manifest and require the committed lock
+      #       unchanged. uv reads the existing lock as PREFERENCES, which keeps
+      #       this stable across upstream releases but also means a hand-edited,
+      #       still-resolvable pin is reproduced byte-for-byte and sails through.
+      #   (2) HASH INTEGRITY — pip --dry-run --require-hashes downloads every
+      #       pinned artifact and verifies it against the recorded hashes, so a
+      #       re-pinned version left with the old version's hashes is RED.
+      #   Residual (documented): a hand-edit that re-pins to a resolvable version
+      #   AND regenerates that version's correct hashes is indistinguishable from
+      #   a legitimately older lock; that class is caught by review, not this gate.
+      - name: Backend lockfile in sync with pyproject.toml — RED gate
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- uv pip compile pyproject.toml --extra dev --universal --generate-hashes --python-version 3.12 --output-file requirements.lock.txt
+          if ! git diff --exit-code -- requirements.lock.txt; then
+            echo "::error::backend/requirements.lock.txt is out of sync with pyproject.toml." \
+                 "Re-lock: cd backend && uv pip compile pyproject.toml --extra dev --universal" \
+                 "--generate-hashes --python-version 3.12 --output-file requirements.lock.txt" \
+                 "(then commit the lock). See docs/security/supply-chain-scanning.md."
+            exit 1
+          fi
+          echo "backend lockfile: in sync."
+          if ! bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install --dry-run --require-hashes --quiet -r requirements.lock.txt; then
+            echo "::error::backend/requirements.lock.txt failed artifact hash verification —" \
+                 "a pinned version does not match its recorded hashes (tampered or stale" \
+                 "hand-edit). Re-lock from pyproject.toml; do not hand-edit the lock."
+            exit 1
+          fi
+          echo "backend lockfile: artifact hashes verified."
+
+      # Negative control: prove the recompile-and-compare logic actually BITES on
+      # drift. Compile a fresh canonical lock from pyproject ONLY (uv reads no
+      # tampered file as preferences, so it is the true canonical resolution),
+      # plant a valid-but-wrong pin into a copy of the committed lock, and require
+      # the comparison to find them DIFFERENT. If the planted drift is NOT caught,
+      # the real gate above is a false-green and THIS step fails the job. The
+      # committed tree is never modified.
+      # The previous control compiled to a differently-named scratch file and
+      # diffed whole files: uv's autogeneration header embeds the output filename,
+      # so that diff was non-empty even with NO plant — a vacuous control. These
+      # two controls exercise the REAL gate's own mechanisms and each fails the
+      # job if its planted tamper is not detected.
+      - name: Prove backend drift gate bites (planted negatives, scratch copies)
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          scratch="$(mktemp -d)"
+          # --- Control 1 (sync layer): a manifest edit without re-locking must
+          # surface through the SAME preference-based recompile the real gate
+          # runs. Plant a constraint that conflicts with the committed pin
+          # (annotated-types is locked >= 0.7.0), recompile in a scratch dir with
+          # the committed lock as preferences, and require a difference. Same
+          # output filename => the uv header is identical and cannot mask a
+          # no-op comparison.
+          mkdir "$scratch/sync" && cp pyproject.toml requirements.lock.txt "$scratch/sync/"
+          sed -i 's/^dependencies = \[/dependencies = [\n    "annotated-types<0.7.0",/' "$scratch/sync/pyproject.toml"
+          grep -q 'annotated-types<0.7.0' "$scratch/sync/pyproject.toml" || {
+            echo "::error::sync negative control could not plant the manifest edit"; exit 1; }
+          (cd "$scratch/sync" && bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- uv pip compile pyproject.toml --extra dev --universal --generate-hashes --python-version 3.12 --output-file requirements.lock.txt)
+          if git diff --no-index --quiet -- requirements.lock.txt "$scratch/sync/requirements.lock.txt"; then
+            echo "::error::NEGATIVE CONTROL FAILED — a planted manifest edit did not change" \
+                 "the preference-based recompile; the sync layer is a false-green."
+            exit 1
+          fi
+          echo "negative control (sync): planted manifest drift correctly detected."
+          # --- Control 2 (hash layer): the exact false-green found by the PR #165
+          # wave-1 proof — re-pin a version but keep the old version's hashes.
+          # uv's preference-based recompile reproduces this byte-for-byte, so it
+          # MUST be caught by the hash-verification layer instead.
+          cp requirements.lock.txt "$scratch/tampered.lock"
+          sed -i -E 's/^annotated-types==.*/annotated-types==0.6.0 \\/' "$scratch/tampered.lock"
+          if cmp -s requirements.lock.txt "$scratch/tampered.lock"; then
+            echo "::error::hash negative control is a no-op (lock already pins annotated-types 0.6.0" \
+                 "— update the planted version)"; exit 1
+          fi
+          if bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install --dry-run --require-hashes --quiet -r "$scratch/tampered.lock" >"$scratch/hash-neg.log" 2>&1; then
+            echo "::error::NEGATIVE CONTROL FAILED — a re-pinned version with stale hashes was NOT" \
+                 "detected; the hash-verification layer is a false-green."
+            exit 1
+          fi
+          grep -q "DO NOT MATCH THE HASHES" "$scratch/hash-neg.log" || {
+            echo "::error::hash negative control went red for the wrong reason (not a hash mismatch):"
+            cat "$scratch/hash-neg.log"; exit 1; }
+          echo "negative control (hash): planted stale-hash re-pin correctly detected."
+
+      - name: Set up Node 22
+        uses: ./.github/actions/setup-node
+
+      # `npm ci` itself refuses to run when package.json and package-lock.json are
+      # out of sync (it errors instead of mutating the lock), so an unlocked
+      # dependency change is already RED here. The `git diff --exit-code` after it
+      # is defence-in-depth against any in-place lock rewrite.
+      - name: Frontend lockfile in sync with package.json — RED gate
+        working-directory: frontend
+        shell: bash
+        run: |
+          set -o pipefail
+          bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- npm ci
+          if ! git diff --exit-code -- package-lock.json; then
+            echo "::error::frontend/package-lock.json drifted during npm ci." \
+                 "Re-lock: cd frontend && npm install (then commit package-lock.json)."
+            exit 1
+          fi
+          echo "frontend lockfile: in sync."
+
+  # Config single-source drift gate (AR-W1-T1, closes H3 + the C5/C6 seam).
+  # backend/scripts/generate_env_example.py introspects app.core.config.Settings
+  # and is the single source for `.env.example` (every field, 1:1) and for the
+  # Helm-chart config-key contract. This job re-generates `.env.example` and
+  # fails on any diff (H3: docs ⊇ Settings), and runs the chart key-coverage +
+  # ConfigMap secret-safety checks (C5/C6: every rendered NETOPS_* key is a
+  # Settings field or a documented exception; no secret material in a plaintext
+  # ConfigMap). The caller's blocking `drift-gates` result covers this job.
+  # pipefail
+  # so a piped invocation cannot mask a non-zero exit.
+  config-drift:
+    name: config-drift (.env.example + chart key coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+
+      - name: Set up Python 3.12
+        uses: ./.github/actions/setup-python
+        with:
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      # The generator imports app.core.config, so the backend package + its
+      # runtime deps must be importable (no dev extras needed for introspection).
+      - name: Install backend (editable)
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install -e ./backend
+
+      - name: .env.example in sync with Settings — RED gate
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/generate_env_example.py --check
+
+      - name: Helm chart config-key coverage + ConfigMap secret-safety — RED gate
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/generate_env_example.py --check-chart
+
+      # BITE proof (the run-and-bite rule for a NEW gate): plant a REAL new
+      # Settings field and require a fresh `--check` subprocess to go RED (the
+      # committed .env.example is now stale relative to the mutated Settings);
+      # then restore config.py and require GREEN. Proves the drift gate is not a
+      # false-green. config.py is restored from git; the committed tree is
+      # unchanged after this step.
+      - name: Prove config-drift gate bites (planted scratch field)
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          python - <<'PY'
+          import pathlib
+          p = pathlib.Path("app/core/config.py")
+          s = p.read_text(encoding="utf-8")
+          marker = '    env: Literal["dev", "prod"] = "dev"\n'
+          assert marker in s, "anchor line for the planted field not found"
+          planted = (
+              '    #: Wave4 config-drift bite scratch field (planted in CI; reverted below).\n'
+              '    wave4_bite_scratch_field: str = "x"\n'
+          )
+          p.write_text(s.replace(marker, marker + planted, 1), encoding="utf-8")
+          PY
+          if python scripts/generate_env_example.py --check; then
+            echo "::error::config-drift did NOT bite on a planted Settings field (false-green)"
+            git checkout -- app/core/config.py
+            exit 1
+          fi
+          echo "planted field correctly detected (gate bites); reverting."
+          git checkout -- app/core/config.py
+          python scripts/generate_env_example.py --check
+          echo "config-drift bite proof: RED on planted field, GREEN after revert."
+
+  # OpenAPI→TypeScript contract-drift gate (AR-W1-T2, closes the H14/M25-class
+  # FE/BE enum-drift seam for the devices+applications modules adopted this wave).
+  # backend/scripts/export_openapi.py is the single source for docs/api/openapi.json
+  # (a pure FastAPI `.openapi()` schema export — no live infra, lifespan never
+  # runs); `openapi-typescript` is the single source for
+  # frontend/src/api/generated/openapi-types.ts. This job re-exports the spec and
+  # regenerates the TS types, failing on any drift from the committed files.
+  # The caller's blocking `drift-gates` result covers this job. pipefail so a piped
+  # invocation cannot mask a non-zero exit.
+  contract-drift:
+    name: contract-drift (OpenAPI spec + generated TS types)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+
+      - name: Set up Python 3.12
+        uses: ./.github/actions/setup-python
+        with:
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      # The exporter imports app.main / app.core.config, so the backend package +
+      # its runtime deps must be importable (no dev extras needed — `.openapi()`
+      # is pure schema generation and never opens the app's lifespan).
+      - name: Install backend (editable)
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install -e ./backend
+
+      - name: OpenAPI spec in sync with the FastAPI app — RED gate
+        working-directory: backend
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/export_openapi.py --check
+
+      - name: Set up Node 22
+        uses: ./.github/actions/setup-node
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- npm ci
+
+      - name: Generated TS types in sync with the OpenAPI spec — RED gate
+        working-directory: frontend
+        shell: bash
+        run: |
+          set -o pipefail
+          cp src/api/generated/openapi-types.ts /tmp/openapi-types.committed.ts
+          ./node_modules/.bin/openapi-typescript ../docs/api/openapi.json -o src/api/generated/openapi-types.ts
+          if ! diff -u /tmp/openapi-types.committed.ts src/api/generated/openapi-types.ts; then
+            echo "::error::frontend/src/api/generated/openapi-types.ts is out of sync with" \
+                 "docs/api/openapi.json. Re-generate: cd frontend && ./node_modules/.bin/openapi-typescript" \
+                 "../docs/api/openapi.json -o src/api/generated/openapi-types.ts"
+            exit 1
+          fi
+          echo "generated TS types: in sync with docs/api/openapi.json."
+
+      # BITE proof (the run-and-bite rule for a NEW gate): hand-plant a real enum
+      # mismatch into the (already-verified-in-sync) generated file, prove a fresh
+      # regeneration disagrees with it (RED — the gate is not a false-green), then
+      # confirm the clean regenerate restores the exact pre-tamper content (GREEN).
+      # The working tree ends up unchanged either way (never left tampered/dirty).
+      - name: Prove contract-drift gate bites (planted enum mismatch)
+        working-directory: frontend
+        shell: bash
+        run: |
+          set -o pipefail
+          cp src/api/generated/openapi-types.ts /tmp/openapi-types.orig.ts
+          python - <<'PY'
+          import pathlib
+          p = pathlib.Path("src/api/generated/openapi-types.ts")
+          s = p.read_text(encoding="utf-8")
+          marker = 'DeviceStatus: "new" | "reachable" | "unreachable";'
+          assert marker in s, "anchor line for the planted enum mismatch not found"
+          tampered = (
+              'DeviceStatus: "new" | "reachable" | "unreachable" | "wave4_bite_scratch";'
+          )
+          p.write_text(s.replace(marker, tampered, 1), encoding="utf-8")
+          PY
+          cp src/api/generated/openapi-types.ts /tmp/openapi-types.tampered.ts
+          ./node_modules/.bin/openapi-typescript ../docs/api/openapi.json -o src/api/generated/openapi-types.ts
+          if diff -q /tmp/openapi-types.tampered.ts src/api/generated/openapi-types.ts > /dev/null; then
+            echo "::error::contract-drift did NOT bite on a planted enum mismatch (false-green)"
+            cp /tmp/openapi-types.orig.ts src/api/generated/openapi-types.ts
+            exit 1
+          fi
+          echo "planted enum mismatch correctly detected (gate bites); confirming the clean"
+          echo "regenerate restores the exact pre-tamper committed content."
+          diff -u /tmp/openapi-types.orig.ts src/api/generated/openapi-types.ts
+          echo "contract-drift bite proof: RED on planted mismatch, GREEN after regenerate."

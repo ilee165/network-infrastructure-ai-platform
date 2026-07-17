@@ -83,10 +83,10 @@ spec:
           set -euo pipefail
           echo "[neo4j-rebuild-drill] re-projecting topology from Postgres -> clean Neo4j (RTO budget ${TOPOLOGY_RTO_SECONDS}s)"
           # The harness reuses app.engines.topology (full-rebuild + the
-          # topology_rebuild_seconds metric hook); PYTHONPATH carries both the app
-          # package and the drills/ dir. Tee the DRILL lines so the non-empty guard
+          # topology_rebuild_seconds metric hook) from the installed backend wheel.
+          # Tee the DRILL lines so the non-empty guard
           # can assert the harness actually produced evidence (L5).
-          python -m topology_rebuild.run_drill \
+          python -m app.ops.drills.topology_rebuild.run_drill \
             --rto-seconds "${TOPOLOGY_RTO_SECONDS}" \
             --count-tolerance "${TOPOLOGY_COUNT_TOLERANCE}" \
             | tee /tmp/drill/result.txt
@@ -109,8 +109,6 @@ spec:
         # never authoritative. Surfaced so the harness can branch in P2.
         - name: TOPOLOGY_DUMP_ENABLED
           value: {{ $d.dump.enabled | quote }}
-        - name: PYTHONPATH
-          value: "/app:/app/drills"
         # --- connection coordinates: NON-secret configMap env (hosts/URIs/users). ---
         - name: NETOPS_POSTGRES_HOST
           valueFrom:

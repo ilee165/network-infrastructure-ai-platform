@@ -11,7 +11,7 @@ requirement):
      pcap_metadata model (app.models.pcap_metadata.PcapMetadata + the engine's
      expired_capture_ids / tombstone columns) — a tombstoned row's file is SKIPPED,
      never copied. The chart does NOT re-implement retention; the snapshot script
-     `python -m pcap.snapshot` calls the model (requirement 1).
+     `python -m app.ops.drills.pcap.snapshot` calls the model (requirement 1).
   2. PRUNE TOMBSTONED COPIES. Any object already in `pcaps/` whose pcap_metadata
      row is tombstoned (or past retention_expires_at) is DELETED from the store —
      so DR can never re-extend a purged payload's lifetime (requirement 1/3).
@@ -90,7 +90,8 @@ spec:
                 # ONE sh -c script (L3: env vars expand HERE; a raw exec argv would
                 # NOT do $(VAR)). set -o pipefail + a `test -s` non-empty guard (L5)
                 # on the snapshot-manifest pipe so a silently-empty plan FAILS the
-                # job. `python -m pcap.snapshot` REUSES app.models.pcap_metadata to
+                # job. `python -m app.ops.drills.pcap.snapshot` REUSES
+                # app.models.pcap_metadata to
                 # decide live-vs-tombstoned + the per-file retention window (it does
                 # NOT re-implement retention) and emits the snapshot/prune plan;
                 # rclone/aws then mirrors only the LIVE files to the `pcaps/` prefix
@@ -104,7 +105,7 @@ spec:
                   #   live capture ids to COPY (non-tombstoned, file present), and
                   #   tombstoned/expired object keys to PRUNE. It NEVER lists a
                   #   tombstoned capture in the COPY set (the no-resurrection guard).
-                  python -m pcap.snapshot \
+                  python -m app.ops.drills.pcap.snapshot \
                     --pcap-dir "${PCAP_DIR}" \
                     --s3-prefix "${PCAP_S3_PREFIX}" \
                     --retention-days "${PCAP_RETENTION_DAYS}" \
@@ -128,7 +129,7 @@ spec:
                   # snapshot actually copies/prunes. Rendering the literal flag (vs
                   # a runtime `${VAR:+--apply}` that always expanded empty because
                   # no such env was ever set) is what makes apply mode reachable.
-                  python -m pcap.snapshot --apply-plan /tmp/pcap-snapshot/plan.json {{- if not $p.dryRun }} --apply{{- end }}
+                  python -m app.ops.drills.pcap.snapshot --apply-plan /tmp/pcap-snapshot/plan.json {{- if not $p.dryRun }} --apply{{- end }}
                   echo "[pcap-snapshot] daily snapshot complete (live-only, retention-honored)"
               env:
                 # On-volume pcap dir + the pcap object-store prefix (used by the
@@ -150,11 +151,8 @@ spec:
                 # supplies a real DSN and sets this false.
                 - name: PCAP_SNAPSHOT_DRY_RUN
                   value: {{ $p.dryRun | quote }}
-                # The pcap engine reads its on-disk layout + retention defaults from
-                # the app package; PYTHONPATH carries both app and the drills/ dir
-                # (so `import pcap.snapshot` resolves alongside `app.models...`).
-                - name: PYTHONPATH
-                  value: "/app:/app/drills"
+                # The installed backend wheel supplies app.ops.drills.pcap and the
+                # app models/engine helpers it reuses.
                 # Object-store coordinates (NON-secret) for the snapshot client.
                 - name: PCAP_S3_ENDPOINT
                   value: {{ printf "%s:%v" $p.repo.endpoint $p.repo.port | quote }}

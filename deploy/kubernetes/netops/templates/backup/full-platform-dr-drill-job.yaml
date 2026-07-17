@@ -17,7 +17,8 @@ NO surviving live state, by CHAINING the three per-tier drills end-to-end:
       sha256-verify a live sample, and PROVE no tombstoned capture is resurrected.
 
 This Job AGGREGATES — never re-implements — the per-tier structured `DRILL ...`
-lines via `full_platform.run_drill`, measures the end-to-end RPO/RTO, and emits
+lines via `app.ops.drills.full_platform.run_drill`, measures the end-to-end
+RPO/RTO, and emits
 the composite `DRILL full_platform ...` line the W5-T5 G-REL evidence collector
 records. A non-zero from ANY tier fails the pod (set -e); the orchestrator runs
 ALL three tiers regardless so the evidence table is complete.
@@ -96,7 +97,7 @@ spec:
         # aggregate stream FAILS the job. The restore reads ONLY the object-store
         # repo into a THROWAWAY scratch dir (never a live PVC) — proving the
         # from-backups-alone / clean-cluster property (ADR-0030 §5.3). Then the
-        # `full_platform.run_drill` orchestrator chains the three tier harnesses
+        # `app.ops.drills.full_platform.run_drill` chains the three tier harnesses
         # (Postgres assert -> Neo4j rebuild over restored PG -> pcap spot-restore),
         # AGGREGATES their `DRILL ...` lines, and emits the composite line. A
         # non-zero from restore OR the orchestrator fails the pod (set -e).
@@ -116,7 +117,7 @@ spec:
           # The orchestrator runs all three tier harnesses, aggregates their
           # structured lines, and emits the composite `DRILL full_platform ...`
           # line. Tee so the L5 non-empty guard can assert evidence was produced.
-          python -m full_platform.run_drill \
+          python -m app.ops.drills.full_platform.run_drill \
             --rpo-window-minutes "${DRILL_RPO_WINDOW_MINUTES}" \
             --rto-minutes "${DRILL_RTO_MINUTES}" \
             --topology-rto-minutes "${DRILL_TOPOLOGY_RTO_MINUTES}" \
@@ -148,10 +149,8 @@ spec:
           value: {{ $fp.pcap.minRole | quote }}
         - name: DRILL_MIN_ROLE
           value: {{ $fp.pcap.minRole | quote }}
-        # PYTHONPATH carries the app package + the drills/ dir so the orchestrator
-        # can import postgres_pitr / topology_rebuild / pcap alongside app.*.
-        - name: PYTHONPATH
-          value: "/app:/app/drills"
+        # The installed backend wheel supplies the orchestrator and every
+        # app.ops.drills tier package.
         # pgBackRest config (remote view when the TLS server is enabled — the drill
         # pod, like the backup CronJob, has no live PGDATA volume; ADR-0030 §4).
         - name: PGBACKREST_CONFIG

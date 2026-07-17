@@ -1,0 +1,22 @@
+name: Set up Python 3.12
+description: Install the pinned Python toolchain with optional pip caching.
+
+inputs:
+  cache:
+    description: Cache backend dependencies with the setup-python cache backend.
+    required: false
+    default: ""
+  cache-dependency-path:
+    description: Dependency manifest used to invalidate the optional cache.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python 3.12
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      with:
+        python-version: "3.12"
+        cache: ${{ inputs.cache }}
+        cache-dependency-path: ${{ inputs.cache-dependency-path }}

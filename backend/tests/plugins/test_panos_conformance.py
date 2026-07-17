@@ -303,9 +303,9 @@ def _handle(request: httpx.Request) -> httpx.Response:
     """Route PAN-OS XML API fixture requests by query parameters.
 
     Replicates the PAN-OS XML API URL structure so the capability layer can
-    issue requests without a running appliance (D16). The API key is expected
-    as a query parameter but MUST NOT appear in any log line or error message
-    (ADR-0011 / ADR-0035 §2).
+    issue requests without a running appliance (D16). The API key is carried in
+    the ``X-PAN-KEY`` header, never the query string, and MUST NOT appear in any
+    log line or error message (ADR-0011 / ADR-0035 §2).
 
     Note: httpx decodes URL-encoded query parameters, so the ``cmd`` and
     ``xpath`` values arrive here as plain strings (e.g. ``<show><system>...``).

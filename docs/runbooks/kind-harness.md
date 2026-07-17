@@ -684,9 +684,11 @@ because the ADR-0048 §4 prerequisite has not been met:
   records both bites (with run URLs / a planted→red→reverted commit pair cited here)
   are the two promotion edits applied: drop the step's `continue-on-error` and add
   `kind-harness` to `all-gates` `needs`.
-- The static `validate-harness.sh` step + the assertion-library self-tests +
-  `extract_secret.py` tests stay **blocking within the job** regardless — the live
-  run is signal-only **on top of** them.
+- The static `validate-harness.sh` step + the assertion-library self-tests stay
+  **blocking within the job** regardless. The shared rendered-Secret extractor's
+  bite proofs run separately in the normal blocking backend suite
+  (`test_render_twice_helpers.py`) — the live run is signal-only **on top of**
+  those static layers.
 - **Scope (when promoted):** only the two P2 sub-items above (ADR-0048 §1 / §6). No
   new security claim; no other live assertion joins `all-gates`.
 

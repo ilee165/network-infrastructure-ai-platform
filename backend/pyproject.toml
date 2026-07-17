@@ -91,8 +91,8 @@ dev = [
     "pytest-asyncio",
     "pytest-cov",
     # Parallel test execution: CI runs the unit suite with `-n 4` (4-vCPU
-    # runners); pytest-cov combines per-worker data in-process, so the
-    # --cov-fail-under=80 gate stays computed over the whole suite (ADR-0016).
+    # runners); pytest-cov combines per-worker data in-process before the raw
+    # unit data joins the two integration-job artifacts (ADR-0016 / Wave 7 F8).
     "pytest-xdist",
     # Hard cap hung tests (F6): default 60s; de-sleep real-clock waits in suite.
     "pytest-timeout",
@@ -146,6 +146,26 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
+
+# ---------------------------------------------------------------------------
+# Coverage (D16 / Wave 7 F8)
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+branch = true
+parallel = true
+relative_files = true
+source = ["app"]
+# Every CI producer sets a stable static context. Local runs remain labelled
+# rather than silently writing context-free data.
+context = "${COVERAGE_CONTEXT-local}"
+omit = [
+    # Alembic revisions are schema history, exercised by migration gates rather
+    # than treated as application source in the headline coverage number.
+    "alembic/*",
+    # Future generated Python belongs outside the authored-code ratchet. The
+    # current OpenAPI generated artifact is TypeScript and therefore unaffected.
+    "app/**/generated/*",
+]
 
 # ---------------------------------------------------------------------------
 # Type checking (D16). Strict flags on app.core / app.plugins / app.agents;
@@ -226,6 +246,8 @@ timeout = 60
 testpaths = ["tests"]
 markers = [
     "integration: requires compose-backed Postgres/Neo4j/Redis (excluded from the unit run)",
+    "neo4j: requires a live Neo4j service",
+    "redis: requires a live Redis service",
     "lab: requires real network devices; never runs in CI",
     "eval: agent eval suite (M3 + M4) — deterministic exit-criteria tests (run in CI)",
     "parity: real-provider (Ollama/Anthropic) parity run — manual pre-release gate, skipped in CI",
@@ -256,6 +278,7 @@ forbidden_modules = [
     "app.llm",
     "app.main",
     "app.models",
+    "app.ops",
     "app.plugins",
     "app.schemas",
     "app.workers",
@@ -270,6 +293,7 @@ forbidden_modules = [
     "app.api",
     "app.engines",
     "app.main",
+    "app.ops",
     "app.plugins",
     "app.services",
     "app.workers",
@@ -410,13 +434,15 @@ ignore_imports = [
 # gets its own tier per REPO-STRUCTURE §9 A1 (a special-cased top-level module,
 # analogous in dependency order to models/schemas, sitting just above core
 # because nothing in models/schemas/knowledge/llm/plugins/core imports it and
-# it only imports app.core.config).
+# it only imports app.core.config). ``app.ops`` is an independent composition
+# root alongside ``app.main``: operational entrypoints may compose lower layers,
+# while no application layer may import operational drill code.
 [[tool.importlinter.contracts]]
 name = "Layered architecture (REPO-STRUCTURE §3.3 contract 6, §3.1 dependency graph)"
 type = "layers"
 containers = ["app"]
 layers = [
-    "main",
+    "main | ops",
     "api | workers",
     "agents.master_architect | agents.consultant | agents.discovery | agents.troubleshooting | agents.packet_analysis | agents.configuration | agents.ddi | agents.documentation | agents.security | agents.automation",
     "agents.framework",

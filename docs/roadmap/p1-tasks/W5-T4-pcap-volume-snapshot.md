@@ -63,8 +63,9 @@ lowest-criticality tier (diagnostic artifacts), so the drill is an annual spot-r
 - `deploy/kubernetes/<chart>/templates/backup/pcap-snapshot-cronjob.yaml` +
   `pcap-spot-restore-drill-job.yaml`, behind `backup.pcap.enabled` (default on) /
   `backup.drills.pcap.enabled`.
-- Snapshot/restore script that joins `pcap_metadata` (read-only) to decide live-vs-tombstoned and
-  to source the capture-time sha256 — co-located under `deploy/<...>/drills/pcap/`.
+- Snapshot/restore script that joins `pcap_metadata` (read-only) to decide
+  live-vs-tombstoned and source the capture-time sha256 — packaged under
+  `backend/app/ops/drills/pcap/` in the installed backend wheel.
 - Structured output `DRILL pcap_spot_restore sampled=<id> sha256=MATCH|MISMATCH
   tombstoned_resurrected=NO|YES result=PASS|FAIL` for the W5-T5 collector.
 

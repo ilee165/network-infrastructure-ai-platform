@@ -51,7 +51,9 @@ import logging
 import ssl
 import urllib.parse
 from collections.abc import Callable, Sequence
+from http.client import HTTPException
 from typing import Any
+from xml.parsers.expat import ExpatError
 
 from pyVmomi import VmomiSupport, vim, vmodl
 
@@ -278,15 +280,15 @@ class VsphereClient:
         self.__cookie = cookie
         self.__log_filter.add_secret(cookie)
 
-    def _reconnect(self) -> Any:
-        """Re-authenticate once after a mid-run ``NotAuthenticated`` (ADR-0051 §2)."""
+    def _teardown_session(self) -> None:
+        """Drop the dead session after ``NotAuthenticated`` so the next
+        ``_ensure_connected`` re-authenticates (ADR-0051 §2)."""
         old = self._si
         self._si = None
         self.__cookie = None
         if old is not None:
             with contextlib.suppress(Exception):  # best-effort teardown of the dead session
                 self._disconnect_fn(old)
-        return self._ensure_connected()
 
     def disconnect(self) -> None:
         """Terminate the vCenter session server-side (SOAP ``Logout``); idempotent.
@@ -316,19 +318,40 @@ class VsphereClient:
     # ------------------------------------------------------------------
 
     def _with_reauth(self, build: Callable[[], list[PropertySetBatch]]) -> list[PropertySetBatch]:
-        """Run *build*; on a mid-run ``NotAuthenticated`` re-auth once then retry (§2)."""
-        self._ensure_connected()
-        try:
-            return build()
-        except vim.fault.NotAuthenticated:
-            self._reconnect()
+        """Run *build* with typed SDK/transport errors and one re-auth retry (§2).
+
+        Connection and re-connection run inside the guarded block so their
+        failures normalize identically to collection failures.
+        """
+        for attempt in range(2):
             try:
+                self._ensure_connected()
                 return build()
             except vim.fault.NotAuthenticated:
+                if attempt == 1:
+                    raise PluginError(
+                        f"vmware: session re-authentication to {self._host}:{self._port} failed "
+                        "after one retry"
+                    ) from None
+                self._teardown_session()
+            except vmodl.MethodFault as exc:
                 raise PluginError(
-                    f"vmware: session re-authentication to {self._host}:{self._port} failed "
-                    "after one retry"
+                    f"vmware: collection from {self._host}:{self._port} failed "
+                    f"({type(exc).__name__})"
                 ) from None
+            except HTTPException:
+                raise PluginError(
+                    f"vmware: collection from {self._host}:{self._port} failed (protocol error)"
+                ) from None
+            except ExpatError:
+                raise PluginError(
+                    f"vmware: collection from {self._host}:{self._port} failed (malformed response)"
+                ) from None
+            except (OSError, ConnectionError):
+                raise PluginError(
+                    f"vmware: collection from {self._host}:{self._port} failed (transport error)"
+                ) from None
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def _datacenters(self) -> list[Any]:
         content = self._si.content
