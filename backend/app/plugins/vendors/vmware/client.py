@@ -280,15 +280,15 @@ class VsphereClient:
         self.__cookie = cookie
         self.__log_filter.add_secret(cookie)
 
-    def _reconnect(self) -> Any:
-        """Re-authenticate once after a mid-run ``NotAuthenticated`` (ADR-0051 §2)."""
+    def _teardown_session(self) -> None:
+        """Drop the dead session after ``NotAuthenticated`` so the next
+        ``_ensure_connected`` re-authenticates (ADR-0051 §2)."""
         old = self._si
         self._si = None
         self.__cookie = None
         if old is not None:
             with contextlib.suppress(Exception):  # best-effort teardown of the dead session
                 self._disconnect_fn(old)
-        return self._ensure_connected()
 
     def disconnect(self) -> None:
         """Terminate the vCenter session server-side (SOAP ``Logout``); idempotent.
@@ -318,10 +318,14 @@ class VsphereClient:
     # ------------------------------------------------------------------
 
     def _with_reauth(self, build: Callable[[], list[PropertySetBatch]]) -> list[PropertySetBatch]:
-        """Run *build* with typed SDK/transport errors and one re-auth retry (§2)."""
-        self._ensure_connected()
+        """Run *build* with typed SDK/transport errors and one re-auth retry (§2).
+
+        Connection and re-connection run inside the guarded block so their
+        failures normalize identically to collection failures.
+        """
         for attempt in range(2):
             try:
+                self._ensure_connected()
                 return build()
             except vim.fault.NotAuthenticated:
                 if attempt == 1:
@@ -329,7 +333,7 @@ class VsphereClient:
                         f"vmware: session re-authentication to {self._host}:{self._port} failed "
                         "after one retry"
                     ) from None
-                self._reconnect()
+                self._teardown_session()
             except vmodl.MethodFault as exc:
                 raise PluginError(
                     f"vmware: collection from {self._host}:{self._port} failed "

@@ -378,7 +378,7 @@ def test_rest_vendor_scenario_matrix(rest_vendor_run: RestVendorRun) -> None:
 
 
 def test_bluecat_login_propagates_unrelated_value_error() -> None:
-    """Only response JSON decoding is normalized; unrelated ValueError is not mislabeled."""
+    """A transport-stage ValueError is not swallowed by the login HTTP error mapping."""
 
     def unrelated_failure(_request: httpx.Request) -> httpx.Response:
         raise ValueError("unrelated MockTransport handler failure")
@@ -391,6 +391,30 @@ def test_bluecat_login_propagates_unrelated_value_error() -> None:
     )
     try:
         with pytest.raises(ValueError, match="unrelated MockTransport handler failure"):
+            client.get_configurations()
+    finally:
+        client.close()
+
+
+def test_bluecat_login_propagates_unrelated_json_accessor_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only JSON decoding is normalized in ``_login``; unrelated errors are not mislabeled."""
+
+    def login_ok(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"token": _BLUECAT_TOKEN})
+
+    def unrelated_json_failure(self: httpx.Response, **kwargs: Any) -> Any:
+        raise RuntimeError("unrelated login response.json failure")
+
+    client = BamClient(
+        base_url="https://bam.example.test",
+        credentials=BamCredentials(username="api-user", password="FAKE-bluecat-password"),
+        client=httpx.Client(transport=httpx.MockTransport(login_ok)),
+    )
+    monkeypatch.setattr(httpx.Response, "json", unrelated_json_failure)
+    try:
+        with pytest.raises(RuntimeError, match="unrelated login response.json failure"):
             client.get_configurations()
     finally:
         client.close()
@@ -533,6 +557,55 @@ def test_vmware_uses_same_scenario_contract_over_soap(vmware_run: VmwareRun) -> 
     with pytest.raises(PluginError, match=expected) as exc_info:
         vmware_run.client.fetch_about()
     assert _VMWARE_ERROR_DETAIL not in str(exc_info.value)
+
+
+def test_vmware_normalizes_initial_connect_protocol_error() -> None:
+    """Connection setup runs inside the same normalization as collection."""
+
+    def failing_connect() -> object:
+        raise HTTPException(_VMWARE_ERROR_DETAIL)
+
+    client = VsphereClient(
+        host="vcenter.example.test",
+        username="netops-service",
+        password=_VMWARE_PASSWORD,
+        connect_fn=failing_connect,
+        disconnect_fn=lambda _si: None,
+    )
+    try:
+        with pytest.raises(PluginError, match="protocol error") as exc_info:
+            client.fetch_about()
+        assert _VMWARE_ERROR_DETAIL not in str(exc_info.value)
+    finally:
+        client.disconnect()
+
+
+def test_vmware_normalizes_reconnect_malformed_response() -> None:
+    """A failure while re-authenticating after NotAuthenticated is normalized too."""
+    connect_calls = 0
+    service_instance = _VmwareServiceInstance(vim.fault.NotAuthenticated())
+
+    def connect_then_fail() -> object:
+        nonlocal connect_calls
+        connect_calls += 1
+        if connect_calls == 1:
+            return service_instance
+        raise ExpatError(_VMWARE_ERROR_DETAIL)
+
+    client = VsphereClient(
+        host="vcenter.example.test",
+        username="netops-service",
+        password=_VMWARE_PASSWORD,
+        connect_fn=connect_then_fail,
+        disconnect_fn=lambda _si: None,
+    )
+    try:
+        with pytest.raises(PluginError, match="malformed response") as exc_info:
+            client.fetch_about()
+        assert connect_calls == 2
+        assert _VMWARE_ERROR_DETAIL not in str(exc_info.value)
+    finally:
+        client.disconnect()
 
 
 def test_vmware_normalizes_method_fault() -> None:
