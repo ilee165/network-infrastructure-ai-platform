@@ -245,6 +245,31 @@ def test_http_404_is_not_retried(tmp_path: Path) -> None:
     assert _attempts(counter) == 1
 
 
+def test_curl_connection_refused_is_retried_and_recovers(tmp_path: Path) -> None:
+    """curl prints the literal 'Connection refused', never 'ECONNREFUSED'."""
+    command, counter = _counter_script(
+        tmp_path,
+        'if [ "$count" -lt 3 ]; then\n'
+        '  echo "curl: (7) Failed to connect to registry.example.test port 443'
+        ' after 12 ms: Connection refused" >&2\n'
+        "  exit 7\n"
+        "fi\n"
+        'echo "download complete"\n',
+    )
+    result = _run_bash(
+        _RETRY,
+        "--timeout-seconds",
+        "5",
+        "--",
+        "bash",
+        command.as_posix(),
+        env={"RETRY_EGRESS_BACKOFF_SECONDS": "0"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _attempts(counter) == 3
+
+
 def test_npm_audit_findings_are_fetched_once_for_the_local_gate(tmp_path: Path) -> None:
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()

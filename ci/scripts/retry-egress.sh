@@ -29,7 +29,7 @@ is_transient() {
   fi
 
   grep -Eiq \
-    'HTTP([^0-9]|[[:space:]])*(500|502|503|504)([^0-9]|$)|(^|[^0-9])(500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout)([^0-9]|$)|returned (an )?error: (500|502|503|504)([^0-9]|$)|status( code)?[^0-9]*(500|502|503|504)([^0-9]|$)|(^|[^A-Z0-9_])E(500|502|503|504)([^0-9]|$)|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ENETUNREACH|ETIMEDOUT|ERR_SOCKET_TIMEOUT|Temporary failure in name resolution|Could not resolve host|Connection reset by peer|TLS handshake timeout|TLS[^[:cntrl:]]*timed out|[Rr]ead[Tt]imeout|[Cc]onnect[Tt]imeout|read timed out|connection timed out' \
+    'HTTP([^0-9]|[[:space:]])*(500|502|503|504)([^0-9]|$)|(^|[^0-9])(500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout)([^0-9]|$)|returned (an )?error: (500|502|503|504)([^0-9]|$)|status( code)?[^0-9]*(500|502|503|504)([^0-9]|$)|(^|[^A-Z0-9_])E(500|502|503|504)([^0-9]|$)|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ENETUNREACH|ETIMEDOUT|ERR_SOCKET_TIMEOUT|Temporary failure in name resolution|Could not resolve host|Connection refused|Failed to connect to|Connection reset by peer|TLS handshake timeout|TLS[^[:cntrl:]]*timed out|[Rr]ead[Tt]imeout|[Cc]onnect[Tt]imeout|read timed out|connection timed out' \
     "$output_file"
 }
 
