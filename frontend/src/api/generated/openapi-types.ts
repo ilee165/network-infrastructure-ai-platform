@@ -1947,7 +1947,7 @@ export interface components {
          * @description Lifecycle of one agent (supervisor) run.
          * @enum {string}
          */
-        AgentSessionStatus: "running" | "completed" | "failed" | "wave7-red-proof";
+        AgentSessionStatus: "running" | "completed" | "failed";
         /**
          * AgentTraceRead
          * @description The full reasoning record of one agent run (mirrors ``ReasoningTrace``).

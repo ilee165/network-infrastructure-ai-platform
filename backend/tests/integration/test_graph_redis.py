@@ -73,7 +73,7 @@ async def test_real_redis_lua_enforces_limit_and_ttl(
         first = await limiter.hit(key, limit=1, window_secs=30)
         second = await limiter.hit(key, limit=1, window_secs=30)
 
-        assert (first.count, first.allowed) == (1, False)
+        assert (first.count, first.allowed) == (1, True)
         assert (second.count, second.allowed) == (2, False)
         assert 0 < second.retry_after_secs <= 30
         assert 0 < await client.ttl(redis_key) <= 30

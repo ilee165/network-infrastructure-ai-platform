@@ -508,7 +508,7 @@ cloudNativePg:
   enabled: false
   # 1 primary + 2 streaming replicas (ADR-0042 §1). 3 is the minimum for a
   # quorum (ANY 1 over 2 standbys) AND for CNPG failover quorum — do not lower.
-  instances: 2
+  instances: 3
   # pgvector image (the system of record carries documents/embeddings — ADR-0004;
   # pgvector MUST be present on every instance, replicas included — ADR-0042 §5).
   # CNPG ships operand images; we pin the pgvector-bearing PostgreSQL 16 build to
