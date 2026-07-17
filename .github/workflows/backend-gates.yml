@@ -317,8 +317,9 @@ jobs:
             --expected "${manifest}" \
             --collected graph-integration-collected-nodes.txt
 
+          mapfile -t graph_nodes < graph-integration-collected-nodes.txt
           set +e
-          pytest --strict-markers -m "${marker}" -vv --cov=app --cov-report= \
+          pytest "${graph_nodes[@]}" --strict-markers -vv --cov=app --cov-report= \
             --junitxml=graph-integration-junit.xml \
             | tee graph-integration-pytest-output.txt
           pytest_status=${PIPESTATUS[0]}

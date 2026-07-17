@@ -67,3 +67,14 @@ def test_workflow_does_not_deduplicate_before_selection_guard() -> None:
     assert "sort -u" not in graph_step
     assert "check-graph-integration-selection.py" in graph_step
     assert '--expected "${manifest}"' in graph_step
+
+
+def test_workflow_executes_only_the_verified_collected_nodes() -> None:
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    graph_step = workflow.split("- name: Exact graph integration layer — RED gate", 1)[1].split(
+        "- name: Upload graph-integration JUnit", 1
+    )[0]
+
+    assert 'mapfile -t graph_nodes < graph-integration-collected-nodes.txt' in graph_step
+    assert 'pytest "${graph_nodes[@]}" --strict-markers -vv' in graph_step
+    assert 'pytest --strict-markers -m "${marker}" -vv' not in graph_step
