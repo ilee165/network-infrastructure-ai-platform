@@ -160,4 +160,15 @@ Detailed plan: [`WAVE7-PLAN.md`](WAVE7-PLAN.md).
 | 4 | ✅ Merged (PR #159 / #160) |
 | 5 | ✅ Merged (PR #161, `255f159`) — T1–T15 + review fold (chord fan-out + delta projection included) |
 | 6 | ✅ Merged (PR-A #163 / PR-B #162; follow-up #164) |
-| 7 | Pending — user calls wave |
+| 7 | 🟡 Implemented locally — T4 moved-gate RED URLs + final GitHub Actions GREEN pending ([evidence](WAVE7-T4-EVIDENCE.md)) |
+
+## Residual backlog handoff
+
+- Browser-level E2E layer.
+- OpenAPI code-generation expansion beyond the currently adopted modules.
+- Opportunistic god-file splits when those areas are next changed.
+- Retention/pruning implementation for the policy designed in ADR-0054.
+- Opportunistic test expansion named by Wave 7: Master Architect coverage,
+  compliance-loader malformed-YAML edges, and frontend API-module unit tests.
+- Live CI evidence still named in Wave 7's evidence file; it is an exit gate,
+  not silently converted into backlog.
