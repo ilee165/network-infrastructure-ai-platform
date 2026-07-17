@@ -1,7 +1,9 @@
 # Wave 7 T4 — CI decomposition evidence
 
-Date: 2026-07-16  
-Implementation branch: `codex/wave7-t4`  
+Date: 2026-07-16
+
+Implementation branch: `codex/wave7-t4`
+
 Baseline: `870e9353` (first Wave 7 delivery merged locally)
 
 This file is the durable source for the T4 PR-body census and moved-gate bite
