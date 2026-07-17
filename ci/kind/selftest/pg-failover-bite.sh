@@ -221,7 +221,7 @@ else
 fi
 
 # --- 2. NEGATIVE CONTROL — async last row LOST → RED (the bite) ----------------
-run_scenario export PG_FAILOVER_DRILL_NEGATIVE_CONTROL=1 LOSE_LAST=1
+run_scenario export PG_FAILOVER_DRILL_NEGATIVE_CONTROL=1 LOSE_LAST=0
 rc_neg=$?
 if [ "${rc_neg}" -ne 0 ]; then
   ok "NEGATIVE CONTROL: async last row lost on the promoted primary → drill RED (exit ${rc_neg}) — the zero-audit-loss assertion BITES (ADR-0047 §2)"

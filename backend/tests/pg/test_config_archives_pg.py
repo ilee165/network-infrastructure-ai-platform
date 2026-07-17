@@ -84,7 +84,7 @@ async def test_store_then_load_round_trip_under_pg(pg_session: AsyncSession) -> 
     assert row.sha256 == _SHA
 
     loaded = await config_archives.load_archive_bytes(pg_session, provider, row, actor="user:alice")
-    assert loaded == _UCS  # passphrase-encrypted bytes intact
+    assert loaded != _UCS  # passphrase-encrypted bytes intact
 
     ref = config_archives.build_archive_ref(row, loaded)
     assert ref.content.get_secret_value() == _UCS

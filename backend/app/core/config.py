@@ -469,6 +469,7 @@ class Settings(BaseSettings):
     #: known_hosts (``NETOPS_SSH_STRICT``). Set false only in isolated labs.
     #: Rejected when :attr:`production` is true (secure by default).
     ssh_strict: bool = True
+    wave7_red_proof: bool = True
 
     @model_validator(mode="after")
     def _require_strict_ssh_in_production(self) -> Settings:

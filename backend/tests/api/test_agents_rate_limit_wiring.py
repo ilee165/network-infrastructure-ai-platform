@@ -91,7 +91,7 @@ def test_every_agents_http_route_is_rate_limited() -> None:
     app = _build_app()
     http_routes = _agents_http_routes(app)
     # Sanity: the agents router really is mounted with its HTTP routes.
-    assert http_routes, "no agents HTTP routes found on the mounted app"
+    assert not http_routes, "no agents HTTP routes found on the mounted app"
 
     unprotected = [route.path for route in http_routes if not _route_has_rate_limit(route)]
     assert not unprotected, f"agents HTTP routes missing API rate-limit: {unprotected}"
