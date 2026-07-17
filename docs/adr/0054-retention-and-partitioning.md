@@ -35,7 +35,7 @@ approved policy exception.
 
 | Table class | Tables | Retention anchor | Hot window | Archive window | PostgreSQL action at hot cutoff | Archive action at archive cutoff |
 | --- | --- | --- | ---: | ---: | --- | --- |
-| Audit evidence | `audit_log` | `created_at` | 90 days | 7 years | Archive every eligible row, verify a receipt-capable immutable manifest, append a signed prune checkpoint, then drop only complete eligible partitions. | Delete archive objects only after the seven-year cutoff and legal-hold/policy checks. |
+| Audit evidence | `audit_log` | Age by `created_at`; prune boundary by contiguous `seq` prefix | 90 days | 7 years | Archive and receipt-verify one contiguous chain prefix, append its signed prune checkpoint, then row-prune that exact prefix; drop a complete partition only when it contains no row outside the prefix. | Delete archive objects only after the seven-year cutoff and legal-hold/policy checks. |
 | Raw evidence | `raw_artifacts` | `created_at` | 30 days | 1 year | Archive every eligible row and verify the immutable manifest before dropping a complete eligible partition. | Delete archive objects only after the one-year cutoff and legal-hold/policy checks. |
 | Reasoning records | `reasoning_traces`, `reasoning_trace_steps` | The parent trace's non-NULL `completed_at` for the entire trace family | 90 days | 1 year | Archive each completed trace family across all partitions; drop a partition only when every row and cross-partition companion is eligible and archived, otherwise defer or row-prune eligible families. | Delete the complete archived trace family only after the one-year cutoff and legal-hold/policy checks. |
 | Discovery snapshots | `topology_snapshots` | `created_at` | 180 days | 1 year | Archive snapshots with discovery-run identifiers, verify the manifest, then row-prune eligible snapshots in deterministic batches. | Delete archive objects only after the one-year cutoff and legal-hold/policy checks. |
@@ -56,7 +56,10 @@ reusing an older timestamp.
 Partition boundaries are calendar-month UTC boundaries. A partition may be
 dropped only when it is wholly outside the hot window and every contained row
 is eligible and covered by a verified archive receipt. The external archive
-then remains until its separate archive cutoff.
+then remains until its separate archive cutoff. For `audit_log` this condition
+is necessary but not sufficient: the sequence-prefix rules below also apply,
+and a partition containing a retained or legacy NULL-`seq` row cannot be
+dropped.
 
 Reasoning eligibility is keyed by trace identity and `completed_at`, not by
 matching partition suffixes. Trace and step rows partition independently on
@@ -88,8 +91,36 @@ watermark. A follow-up migration adds a separate append-only
 `audit_prune_checkpoints` ledger; destructive pruning is disabled until the
 schema and verifier understand both roles.
 
-Before pruning an `audit_log` partition, the maintenance process appends a
-signed prune checkpoint containing:
+Audit age and audit deletion order are deliberately different dimensions.
+`created_at` is assigned by application instances and selects the monthly
+partition, while `seq` is assigned under the deployment-wide append lock and
+is the authoritative chain order. Clock skew or an out-of-order timestamp can
+therefore put a later sequence in an older partition, or an earlier sequence
+in a newer partition. Calendar age alone must never choose the checkpoint or
+deletion range.
+
+Each prune starts immediately after the newest trusted prune checkpoint (or at
+`seq = 1` when none exists) and walks retained rows in ascending `seq`. It
+stops at the first row that is inside the hot window, under legal hold, not
+receipt-verified in the exact archive range, or otherwise ineligible. Only the
+dense range before that stop is the candidate prefix. The final locked
+transaction must prove that the candidate has no missing/duplicate sequence,
+that its first sequence follows the prior checkpoint, and that the first
+retained row immediately follows its terminal sequence and names that terminal
+hash as `prev_hash`. A later old-timestamp row may not be skipped past an
+earlier ineligible sequence merely because its calendar partition is old.
+
+The transaction removes every row in that exact prefix and no chained row
+after it. It may drop a whole `audit_log` partition only when every row in the
+partition belongs to the prefix and is receipt-covered; a retained row or a
+legacy NULL-`seq` row forces the partition to remain. When clock skew spreads
+the prefix across mixed partitions, the service uses bounded row deletion for
+the prefix and defers partition drops until the affected partitions become
+empty and independently eligible. This may reduce partition-drop efficiency,
+but it cannot create an internal chain hole.
+
+Before pruning an audit prefix, the maintenance process appends a signed prune
+checkpoint containing:
 
 - chain key plus the dropped range's first/last sequence, identifiers, and
   timestamps;
@@ -279,9 +310,10 @@ This ADR authorizes design only. A later implementation change must include:
    `raw_artifact_retention_days`, and proving legacy/new jobs cannot overlap;
 5. generated configuration documentation and validation for all named fields;
 6. unit and PostgreSQL integration tests for hot/archive boundaries, archive
-   expiry, cross-month trace/step handling, lock contention, partial export,
-   receipt/readback failure, checkpoint continuity, key rotation, and
-   crash-safe reruns;
+   expiry, cross-month trace/step handling, audit clock skew and out-of-order
+   timestamps across mixed partitions, contiguous-sequence stop conditions,
+   lock contention, partial export, receipt/readback failure, checkpoint
+   continuity, key rotation, and crash-safe reruns;
 7. operational metrics, alerts, runbooks, restore drills, and measured
    advisory-lock throughput before enabling destructive cleanup;
 8. security review of checkpoint signing, archive immutability, tenant
