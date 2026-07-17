@@ -65,39 +65,49 @@ def _direct_block_value(lines: list[str], block: str, key: str) -> str | None:
 
     direct_indent = min(_indent(line) for line in members)
     prefix = f"{key}:"
+    values: list[str] = []
     for line in members:
         if _indent(line) != direct_indent:
             continue
         stripped = line.strip()
         if stripped.startswith(prefix):
-            return stripped[len(prefix) :].strip()
-    return None
+            values.append(stripped[len(prefix) :].strip())
+    if len(values) > 1:
+        # A YAML loader takes the last duplicate; a first-match read here could
+        # validate a value Kubernetes never deploys. Ambiguity is a hard failure.
+        raise ValueError(f"duplicate key {key!r} in {block!r} block")
+    return values[0] if values else None
 
 
 def _extract(text: str, mode: str, secret_name: str, key: str) -> bytes:
-    matched_secret = False
+    matches: list[list[str]] = []
     for document in _DOCUMENT_BOUNDARY.split(text):
         lines = document.splitlines()
         if _top_level_value(lines, "kind") != "Secret":
             continue
         if _direct_block_value(lines, "metadata", "name") != secret_name:
             continue
-        matched_secret = True
-        value = _direct_block_value(lines, mode, key)
-        if value is None:
-            continue
-        if mode == "stringData":
-            return _unquote(value).encode("utf-8")
-        try:
-            return base64.b64decode(_unquote(value), validate=True)
-        except (ValueError, binascii.Error) as exc:
-            raise ValueError(
-                f"key {key!r} in Secret {secret_name!r} is not valid base64: {exc}"
-            ) from exc
+        matches.append(lines)
 
-    if matched_secret:
+    if not matches:
+        raise ValueError(f"Secret {secret_name!r} not found")
+    if len(matches) > 1:
+        raise ValueError(
+            f"Secret {secret_name!r} matched {len(matches)} rendered documents; "
+            "expected exactly one"
+        )
+
+    value = _direct_block_value(matches[0], mode, key)
+    if value is None:
         raise ValueError(f"key {key!r} not found in Secret {secret_name!r}")
-    raise ValueError(f"Secret {secret_name!r} not found")
+    if mode == "stringData":
+        return _unquote(value).encode("utf-8")
+    try:
+        return base64.b64decode(_unquote(value), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError(
+            f"key {key!r} in Secret {secret_name!r} is not valid base64: {exc}"
+        ) from exc
 
 
 def _parser() -> argparse.ArgumentParser:

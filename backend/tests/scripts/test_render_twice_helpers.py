@@ -154,6 +154,36 @@ def test_secret_kind_and_direct_metadata_name_are_both_required(tmp_path: Path) 
     assert result.stdout == b"right-secret"
 
 
+def test_duplicate_matching_secrets_are_blocking(tmp_path: Path) -> None:
+    """Two rendered Secrets with the target name must fail, not first-match."""
+    first = _secret(name="target-secret", block="stringData", key="credential", value="first")
+    second = _secret(name="target-secret", block="stringData", key="credential", value="second")
+
+    result = _run_extractor(tmp_path, "stringData", first + "---\n" + second)
+
+    assert result.returncode == 1
+    assert b"matched 2 rendered documents" in result.stderr
+
+
+def test_duplicate_direct_key_is_blocking(tmp_path: Path) -> None:
+    """A duplicated key inside the target block must fail: a first-match read can
+    disagree with the last-wins value Kubernetes would actually deploy."""
+    manifest = (
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata:\n"
+        "  name: target-secret\n"
+        "stringData:\n"
+        "  credential: first\n"
+        "  credential: last-wins-in-kubernetes\n"
+    )
+
+    result = _run_extractor(tmp_path, "stringData", manifest)
+
+    assert result.returncode == 1
+    assert b"duplicate key 'credential'" in result.stderr
+
+
 def test_missing_key_is_blocking(tmp_path: Path) -> None:
     manifest = _secret(
         name="target-secret",
