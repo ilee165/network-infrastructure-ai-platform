@@ -138,6 +138,8 @@ class BamClient:
             ) from None
         except httpx.HTTPError:
             raise PluginError("bluecat: session login failed (transport error)") from None
+        except ValueError:
+            raise PluginError("bluecat: session login response was not JSON") from None
 
         # The token may arrive as a JSON field or as a response header
         # (exact form is an ADR-0027 §7 open item); try both.

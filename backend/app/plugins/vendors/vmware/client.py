@@ -316,19 +316,28 @@ class VsphereClient:
     # ------------------------------------------------------------------
 
     def _with_reauth(self, build: Callable[[], list[PropertySetBatch]]) -> list[PropertySetBatch]:
-        """Run *build*; on a mid-run ``NotAuthenticated`` re-auth once then retry (§2)."""
+        """Run *build* with typed SDK/transport errors and one re-auth retry (§2)."""
         self._ensure_connected()
-        try:
-            return build()
-        except vim.fault.NotAuthenticated:
-            self._reconnect()
+        for attempt in range(2):
             try:
                 return build()
             except vim.fault.NotAuthenticated:
+                if attempt == 1:
+                    raise PluginError(
+                        f"vmware: session re-authentication to {self._host}:{self._port} failed "
+                        "after one retry"
+                    ) from None
+                self._reconnect()
+            except vmodl.MethodFault as exc:
                 raise PluginError(
-                    f"vmware: session re-authentication to {self._host}:{self._port} failed "
-                    "after one retry"
+                    f"vmware: collection from {self._host}:{self._port} failed "
+                    f"({type(exc).__name__})"
                 ) from None
+            except (OSError, ConnectionError):
+                raise PluginError(
+                    f"vmware: collection from {self._host}:{self._port} failed (transport error)"
+                ) from None
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def _datacenters(self) -> list[Any]:
         content = self._si.content
