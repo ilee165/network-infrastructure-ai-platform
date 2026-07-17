@@ -396,6 +396,48 @@ def test_bluecat_login_propagates_unrelated_value_error() -> None:
         client.close()
 
 
+def _make_authenticated_bluecat(handler: Callable[[httpx.Request], httpx.Response]) -> BamClient:
+    """A BamClient with a session token already set, so ``_request`` runs without login."""
+    return BamClient(
+        base_url="https://bam.example.test",
+        credentials=BamCredentials(username="api-user", password="FAKE-bluecat-password"),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        session_token=_BLUECAT_TOKEN,
+    )
+
+
+def test_bluecat_request_maps_non_json_body_to_plugin_error() -> None:
+    def non_json_body(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>maintenance page</html>")
+
+    client = _make_authenticated_bluecat(non_json_body)
+    try:
+        with pytest.raises(PluginError, match="returned a non-JSON body"):
+            client.get_configurations()
+    finally:
+        client.close()
+
+
+def test_bluecat_request_propagates_unrelated_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only JSON decoding is normalized in ``_request``; unrelated errors are not mislabeled."""
+
+    def ok_body(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"count": 0, "data": []})
+
+    def unrelated_json_failure(self: httpx.Response, **kwargs: Any) -> Any:
+        raise RuntimeError("unrelated response.json failure")
+
+    client = _make_authenticated_bluecat(ok_body)
+    monkeypatch.setattr(httpx.Response, "json", unrelated_json_failure)
+    try:
+        with pytest.raises(RuntimeError, match="unrelated response.json failure"):
+            client.get_configurations()
+    finally:
+        client.close()
+
+
 class _VmwareStub:
     cookie = 'vmware_soap_session="FAKE-F7-COOKIE"; Path=/; secure'
 

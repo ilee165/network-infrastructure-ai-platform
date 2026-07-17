@@ -218,7 +218,7 @@ class BamClient:
             return None
         try:
             return response.json()
-        except Exception:
+        except _json.JSONDecodeError:
             raise PluginError(
                 f"bluecat: {op} returned a non-JSON body (status {response.status_code})"
             ) from None
