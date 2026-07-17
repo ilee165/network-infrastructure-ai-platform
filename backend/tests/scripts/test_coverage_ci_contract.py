@@ -120,6 +120,13 @@ def _assert_coverage_contract(pyproject_text: str, workflow_text: str) -> None:
     ]
     positions = [combine_run.index(token) for token in tokens]
     assert positions == sorted(positions), "combine, context guard, XML, report order changed"
+    context_failure = (
+        "measured = set(data.measured_contexts())\n"
+        "missing = expected - measured\n"
+        "if missing:\n"
+        '    raise SystemExit(f"missing coverage contexts: {sorted(missing)}")'
+    )
+    assert context_failure in combine_run, "missing producer context must terminate the gate"
     assert all(expected["data_file"] in combine_run for expected in _PRODUCERS.values())
 
     threshold_matches: list[tuple[str, float]] = []
@@ -191,6 +198,11 @@ def test_repository_coverage_contract() -> None:
         (
             "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
             "actions/download-artifact@0000000000000000000000000000000000000000",
+            False,
+        ),
+        (
+            'raise SystemExit(f"missing coverage contexts: {sorted(missing)}")',
+            'print(f"missing coverage contexts: {sorted(missing)}")',
             False,
         ),
         (
