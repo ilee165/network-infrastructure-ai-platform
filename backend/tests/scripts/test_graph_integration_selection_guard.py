@@ -75,6 +75,6 @@ def test_workflow_executes_only_the_verified_collected_nodes() -> None:
         "- name: Upload graph-integration JUnit", 1
     )[0]
 
-    assert 'mapfile -t graph_nodes < graph-integration-collected-nodes.txt' in graph_step
+    assert "mapfile -t graph_nodes < graph-integration-collected-nodes.txt" in graph_step
     assert 'pytest "${graph_nodes[@]}" --strict-markers -vv' in graph_step
     assert 'pytest --strict-markers -m "${marker}" -vv' not in graph_step
