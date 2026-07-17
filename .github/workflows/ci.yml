@@ -110,19 +110,20 @@ jobs:
         run: lint-imports
 
       # pytest runs FROM backend/ (testpaths = ["tests"]). No external services:
-      # the suite is unit-only by design. shell: bash enables pipefail so a
-      # pytest failure is not masked by the tee pipe. --cov-fail-under enforces
-      # the D16/ADR-0016 coverage gate (>=80%).
+      # the suite is unit-only by design. The raw, context-labelled data joins
+      # the PG + graph layers in coverage-combined, the sole headline >=90% gate.
       # -n 4 (pytest-xdist) matches the 4-vCPU public ubuntu-latest runner; the
-      # suite is parallel-safe by construction (per-test in-memory aiosqlite
-      # engines, per-test tmp_path for the file-backed engine, no fixed ports).
-      # pytest-cov combines per-worker coverage in-process, so the >=80% floor
-      # is still evaluated over the WHOLE suite, not per worker.
+      # suite is parallel-safe by construction; pytest-cov consolidates worker
+      # data into the .coverage.unit* artifact before upload.
       - name: Test (pytest + coverage)
         working-directory: backend
         shell: bash
+        env:
+          COVERAGE_CONTEXT: unit
+          COVERAGE_FILE: .coverage.unit
         run: |
-          pytest -n 4 --cov=app --cov-report=xml --cov-report=term --cov-fail-under=80 -q | tee pytest-output.txt
+          set -o pipefail
+          pytest -n 4 --cov=app --cov-report=term -q | tee pytest-output.txt
           {
             echo "## Backend tests (pytest, unit-only)"
             echo ""
@@ -131,12 +132,13 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload coverage report
+      - name: Upload unit raw coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
-          name: backend-coverage-xml
-          path: backend/coverage.xml
+          name: backend-coverage-unit-raw
+          path: backend/.coverage.unit*
           if-no-files-found: error
+          include-hidden-files: true
 
   frontend:
     name: frontend (eslint, tsc, vitest, build)
@@ -1912,9 +1914,11 @@ jobs:
         env:
           NETOPS_TEST_DATABASE_URL: postgresql+asyncpg://netops:netops@127.0.0.1:5432/netops_test
           NETOPS_ADMIN_PASSWORD: pg-ci-throwaway
+          COVERAGE_CONTEXT: pg-integration
+          COVERAGE_FILE: .coverage.pg-integration
         run: |
           set -o pipefail
-          pytest tests/pg/ -m integration -v | tee pg-pytest-output.txt
+          pytest tests/pg/ -m integration --cov=app --cov-report= -v | tee pg-pytest-output.txt
           # Guard against a silent no-collection green (the harness skips off-CI;
           # here Postgres IS reachable, so the tests MUST actually run, not skip).
           test -s pg-pytest-output.txt
@@ -1937,6 +1941,14 @@ jobs:
             tail -n 30 pg-pytest-output.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload pg-integration raw coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: backend-coverage-pg-integration-raw
+          path: backend/.coverage.pg-integration*
+          if-no-files-found: error
+          include-hidden-files: true
 
   # Wave 7 T2 — the formerly self-skipping topology/impact tests now run as a
   # merge-blocking exact set against all three real stores they exercise.  The
@@ -2011,6 +2023,9 @@ jobs:
       - name: Exact graph integration layer — RED gate
         working-directory: backend
         shell: bash
+        env:
+          COVERAGE_CONTEXT: graph-integration
+          COVERAGE_FILE: .coverage.graph-integration
         run: |
           set -euo pipefail
           marker='integration and (neo4j or redis)'
@@ -2030,7 +2045,7 @@ jobs:
             --collected graph-integration-collected-nodes.txt
 
           set +e
-          pytest --strict-markers -m "${marker}" -vv \
+          pytest --strict-markers -m "${marker}" -vv --cov=app --cov-report= \
             --junitxml=graph-integration-junit.xml \
             | tee graph-integration-pytest-output.txt
           pytest_status=${PIPESTATUS[0]}
@@ -2054,6 +2069,14 @@ jobs:
           fi
           exit "${guard_status}"
 
+      - name: Upload graph-integration raw coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: backend-coverage-graph-integration-raw
+          path: backend/.coverage.graph-integration*
+          if-no-files-found: error
+          include-hidden-files: true
+
       - name: Upload graph-integration JUnit
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
@@ -2062,6 +2085,97 @@ jobs:
           path: backend/graph-integration-junit.xml
           if-no-files-found: warn
           retention-days: 14
+
+  # Wave 7 F8 — one honest backend headline from all service tiers. The three
+  # upstream jobs retain their test-gate identity and diagnostic output; only
+  # this job reports/enforces the branch-aware >=90% coverage ratchet. The floor
+  # is the measured 2026-07-16 unit-only branch baseline (90%); integration data
+  # adds hits over the same source=["app"] denominator and cannot lower it.
+  coverage-combined:
+    name: coverage-combined (unit + PostgreSQL + Neo4j/Redis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [backend, pg-integration, graph-integration]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install coverage (pinned)
+        run: pip install "coverage==7.14.3"
+
+      - name: Download unit raw coverage
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: backend-coverage-unit-raw
+          path: backend/.coverage-input/unit
+
+      - name: Download pg-integration raw coverage
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: backend-coverage-pg-integration-raw
+          path: backend/.coverage-input/pg-integration
+
+      - name: Download graph-integration raw coverage
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: backend-coverage-graph-integration-raw
+          path: backend/.coverage-input/graph-integration
+
+      - name: Combine coverage and enforce headline floor
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          for raw in \
+            '.coverage-input/unit/.coverage.unit*' \
+            '.coverage-input/pg-integration/.coverage.pg-integration*' \
+            '.coverage-input/graph-integration/.coverage.graph-integration*'
+          do
+            if ! compgen -G "${raw}" > /dev/null; then
+              echo "::error::missing raw coverage input matching ${raw}"
+              exit 1
+            fi
+          done
+
+          coverage combine --keep \
+            .coverage-input/unit \
+            .coverage-input/pg-integration \
+            .coverage-input/graph-integration
+
+          python - <<'PY'
+          from coverage import CoverageData
+
+          expected = {"unit", "pg-integration", "graph-integration"}
+          data = CoverageData(basename=".coverage")
+          data.read()
+          measured = set(data.measured_contexts())
+          missing = expected - measured
+          if missing:
+              raise SystemExit(f"missing coverage contexts: {sorted(missing)}")
+          print(f"combined coverage contexts: {sorted(measured)}")
+          PY
+
+          coverage xml -o coverage.xml
+          coverage report --show-missing --fail-under=90 | tee coverage-summary.txt
+          {
+            echo "## Combined backend coverage (unit + PG + graph)"
+            echo ""
+            echo '```text'
+            cat coverage-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload combined coverage XML
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: backend-coverage-xml
+          path: backend/coverage.xml
+          if-no-files-found: error
 
   # Packet-analysis executor-split bite-proof (ADR-0049 §Acceptance). This is the
   # RE-ENABLE gate: ADR-0049 flips the service back on by default (compose profile
@@ -2755,7 +2869,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, graph-integration, packet-analysis-bite-proof, lockfile, observability, drill-bite-proofs, config-drift, contract-drift]
+    needs: [backend, frontend, security-scan, docker, infra, kms-emulators, pg-integration, graph-integration, coverage-combined, packet-analysis-bite-proof, lockfile, observability, drill-bite-proofs, config-drift, contract-drift]
     steps:
       - name: Assert every gate succeeded
         env:

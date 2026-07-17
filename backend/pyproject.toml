@@ -91,8 +91,8 @@ dev = [
     "pytest-asyncio",
     "pytest-cov",
     # Parallel test execution: CI runs the unit suite with `-n 4` (4-vCPU
-    # runners); pytest-cov combines per-worker data in-process, so the
-    # --cov-fail-under=80 gate stays computed over the whole suite (ADR-0016).
+    # runners); pytest-cov combines per-worker data in-process before the raw
+    # unit data joins the two integration-job artifacts (ADR-0016 / Wave 7 F8).
     "pytest-xdist",
     # Hard cap hung tests (F6): default 60s; de-sleep real-clock waits in suite.
     "pytest-timeout",
@@ -146,6 +146,26 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
+
+# ---------------------------------------------------------------------------
+# Coverage (D16 / Wave 7 F8)
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+branch = true
+parallel = true
+relative_files = true
+source = ["app"]
+# Every CI producer sets a stable static context. Local runs remain labelled
+# rather than silently writing context-free data.
+context = "${COVERAGE_CONTEXT-local}"
+omit = [
+    # Alembic revisions are schema history, exercised by migration gates rather
+    # than treated as application source in the headline coverage number.
+    "alembic/*",
+    # Future generated Python belongs outside the authored-code ratchet. The
+    # current OpenAPI generated artifact is TypeScript and therefore unaffected.
+    "app/**/generated/*",
+]
 
 # ---------------------------------------------------------------------------
 # Type checking (D16). Strict flags on app.core / app.plugins / app.agents;
