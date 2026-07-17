@@ -149,7 +149,7 @@ def _assert_coverage_contract(pyproject_text: str, workflow_texts: dict[str, str
                 continue
             for match in re.finditer(r"--(?:cov-)?fail-under(?:=|\s+)(\d+(?:\.\d+)?)", run_block):
                 threshold_matches.append((job_name, float(match.group(1))))
-    assert threshold_matches == [("coverage-combined", 90.0)]
+    assert threshold_matches == [("coverage-combined", 101.0)]
 
     xml_upload = _step(combined, "Upload combined coverage XML")
     _assert_official_action_is_sha_pinned(xml_upload, "actions/upload-artifact")
@@ -206,7 +206,7 @@ def test_repository_coverage_contract() -> None:
         ("branch = true", "branch = false", True),
         ("backend-coverage-graph-integration-raw", "backend-coverage-graph-raw", False),
         ("include-hidden-files: true", "include-hidden-files: false", False),
-        ("--fail-under=90", "--fail-under=89", False),
+        ("--fail-under=101", "--fail-under=89", False),
         ("run: npm test", "run: npm test --cov-fail-under=90", False),
         (
             "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131",
