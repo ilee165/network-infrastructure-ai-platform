@@ -255,10 +255,10 @@ def _assert_flattened_wiring(documents: dict[str, dict[str, Any]]) -> None:
         )["continue-on-error"]
         is True
     )
-    assert (
-        _named_step(root_jobs["kind-harness"], "mTLS extract_secret.py tests (no cluster)")["run"]
-        == "python3 ci/mtls/test_extract_secret.py"
+    kind_runs = "\n".join(
+        str(step.get("run", "")) for step in root_jobs["kind-harness"].get("steps", [])
     )
+    assert "extract_secret.py" not in kind_runs
 
 
 def _assert_retry_env(documents: dict[str, dict[str, Any]]) -> None:

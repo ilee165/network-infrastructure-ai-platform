@@ -600,8 +600,9 @@ jobs:
   # bite) is outstanding — it has NOT run on any runner (L1). Promoting now would be a
   # false-green blocking gate (the ADR-0048 Risk "worse than continue-on-error"), so
   # the promotion is held until a runner records the observed red→green. The STATIC
-  # validator step (validate-harness.sh) + the assertion-library self-tests +
-  # extract_secret.py tests stay blocking within the job regardless.
+  # validator step (validate-harness.sh) + assertion-library self-tests stay blocking
+  # within this job. Shared rendered-Secret extractor bites run independently in the
+  # normal blocking backend suite (`test_render_twice_helpers.py`).
   kind-harness:
     name: kind-harness (enforcing-CNI self-test + mTLS/collector assertions — signal-only, opt-in; ADR-0048 Rejected, not promoted)
     # audit-W2 T7 (2026-07-03): NOT promoted — ADR-0048 Rejected. This LIVE kind path
@@ -641,11 +642,6 @@ jobs:
         run: |
           bash ci/kind/selftest/assert-trap-bite.sh
           bash ci/kind/selftest/egress-probe-tristate.sh
-
-      # extract_secret.py hardening tests (N9 metadata-scoped name + N10 strict
-      # base64). Stdlib-only; runs as a plain script so no pip install is needed.
-      - name: mTLS extract_secret.py tests (no cluster)
-        run: python3 ci/mtls/test_extract_secret.py
 
       - name: Set up Helm
         uses: ./.github/actions/setup-tools
