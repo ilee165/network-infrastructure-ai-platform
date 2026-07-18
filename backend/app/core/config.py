@@ -359,6 +359,12 @@ class Settings(BaseSettings):
     report_compliance_posture_retention_days: int | None = None
     report_access_review_retention_days: int | None = None
     report_audit_integrity_retention_days: int | None = None
+    #: Dormant-account window (days) for the access-review report (ADR-0053
+    #: §7.3, W3-T4): an account with no recorded login within this many days
+    #: before the report's period end classifies as dormant. Accounts that
+    #: never logged in (service/bootstrap) carry their own explicit
+    #: classification — surfaced, never silently excluded. Floor 1 day.
+    report_access_review_dormant_days: int = Field(default=90, ge=1)
     #: Daily UTC schedule of the report-artifact retention purge (ADR-0053 §4).
     report_purge_hour: int = 5
     report_purge_minute: int = 30

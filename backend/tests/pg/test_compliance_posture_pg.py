@@ -263,6 +263,12 @@ async def test_sweep_is_idempotent_per_day_on_pg(
     async with maker() as session:
         device = _device(_CORE, "core-sw-01", "10.0.0.1", "cisco_ios")
         session.add(device)
+        # Flush the device BEFORE adding the snapshot: ConfigSnapshot carries a
+        # raw ``device_id`` FK column with no relationship(), so the unit of
+        # work has no flush-ordering edge between the two mappers — on real PG
+        # the snapshot INSERT can be emitted first and trip the FK (caught on
+        # the first real-PG run of this suite, W3-T4).
+        await session.flush()
         session.add(
             ConfigSnapshot(
                 device_id=_CORE,

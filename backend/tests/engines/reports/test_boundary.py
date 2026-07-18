@@ -46,7 +46,15 @@ _DENY_IMPORTS = (
 
 #: Deny-set tables no report generation statement may touch (§6 layer 1), plus
 #: the RAG-embedded documents table no generation statement may WRITE (§1).
-_DENY_TABLES = ("device_credentials", "raw_artifacts", "config_snapshots")
+#: ``refresh_sessions`` joined in W3-T4: session data is credential-adjacent —
+#: the access-review report derives last-login from AUDIT events, never from
+#: the session table.
+_DENY_TABLES = ("device_credentials", "raw_artifacts", "config_snapshots", "refresh_sessions")
+
+#: Credential-adjacent COLUMNS no generation statement may select (W3-T4): the
+#: access-review builder must project explicit ``users`` columns — a full-row
+#: ``SELECT users.*`` would drag the bcrypt hash into the report engine.
+_DENY_COLUMNS = ("password_hash",)
 
 
 def _python_files(root: Path) -> Iterator[Path]:
@@ -166,6 +174,15 @@ def test_generation_touches_no_deny_set_table_for_any_kind(statements: list[str]
             f"report generation issued SQL touching deny-set table {table!r} "
             "(ADR-0053 §6 layer 1 — what is never queried can never leak)"
         )
+    for column in _DENY_COLUMNS:
+        assert column not in joined, (
+            f"report generation issued SQL selecting credential-adjacent column "
+            f"{column!r} (W3-T4: the access-review builder must project explicit "
+            "secret-free columns, never the full users row)"
+        )
+    # Anti-vacuous for the W3-T4 assertions: the access-review generation DID
+    # read the users table (so the column check observed the relevant SQL).
+    assert re.search(r"from\s+users\b", joined)
     # Reports are NEVER the RAG-embedded documents table (ADR-0053 §1): no
     # generation statement may write into it.
     assert not re.search(r"insert\s+into\s+documents\b", joined)

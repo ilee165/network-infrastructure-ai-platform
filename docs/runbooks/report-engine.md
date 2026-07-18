@@ -135,3 +135,52 @@ pins it for the W4-T3 conformance checks):
    text-config compliance surface in P4** (ADR-0050 §7.6 / ADR-0051 §3 named
    deferrals): their devices are reported as uncovered — out-of-scope is
    **not** passing.
+
+## Report contents — access review report (`kind=access_review`; ADR-0053 §7.3, W3-T4)
+
+API note for consumers of `POST/GET /api/v1/reports` with `kind=access_review`
+(**admin floor at BOTH generation and artifact download** — the
+highest-sensitivity report; monthly beat cadence; regime tags `soc2:CC6.1` +
+`soc2:CC6.2` + `soc2:CC6.3`): the artifact is the periodic access-review
+evidence for the CLOSED-OPEN UTC period `[start, end)`. Every download of this
+report writes its own audit entry (`report.artifact_downloaded` with the
+artifact sha256) — evidence about evidence — and the admin floor is
+re-evaluated from the database at download time, so a demotion after
+generation denies the download.
+
+Five sections per artifact (CSV and PDF carry the same structure; the golden
+fixture `backend/tests/engines/reports/golden/access_review_golden.json` pins
+it for the W4-T3 conformance checks):
+
+1. **User accounts and role assignments** — every local + OIDC account with
+   role, provider (`local`, `oidc`, `local (break-glass)` for local admins
+   while OIDC is enabled, `local (fenced while OIDC enabled)` otherwise),
+   enabled/disabled status, creation time, **last login** (derived from the
+   audit login events `auth.login` / `auth.local.breakglass_login` /
+   `auth.oidc.login_succeeded`, anchored strictly before the period end), and
+   an honest activity classification: `active`, `dormant`,
+   `never-logged-in (dormant)` (the service/bootstrap-account surface —
+   **surfaced, never silently excluded**), or `never-logged-in (new account)`
+   (created inside the dormancy window — new, not dormant). The window is
+   `NETOPS_REPORT_ACCESS_REVIEW_DORMANT_DAYS` (default 90) ending at the
+   period end.
+2. **Role assignment summary** — accounts/enabled/disabled per RBAC role in
+   rank order (`viewer` → `admin`); zero-account roles render measured zeros.
+3. **OIDC federation posture** — enabled/disabled, groups claim, the
+   admin-via-OIDC opt-in state, the break-glass local-login fence state
+   (ADR-0028 §5), and the dormancy window in force.
+4. **IdP group-to-role assignments** — the configured `group → role` map with
+   the **effective** role at login (the ADR-0028 §4 admin cap and deny-default
+   are surfaced, and an invalid role name renders as a visible
+   misconfiguration).
+5. **Break-glass local logins in period** — **every**
+   `auth.local.breakglass_login` audit entry in the period (time, actor, user
+   id, request id); an empty period carries an explicit note. A row here means
+   the alerted local-admin recovery path was used — review each one.
+
+Zero credential-adjacent data (ADR-0053 §6 layer 1): the builder projects
+explicit secret-free columns only — `users.password_hash` and the
+`refresh_sessions` table are deny-set surfaces the no-SELECT boundary proof
+(`backend/tests/engines/reports/test_boundary.py`) asserts are never queried.
+Roster/role/mapping state is generation-time state (the platform keeps no
+role-assignment history); login-derived columns are anchored at the period end.
