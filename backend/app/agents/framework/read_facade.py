@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 if TYPE_CHECKING:
+    from app.core.security import Role
     from app.models import Device, NormalizedNeighborRow, NormalizedRouteRow
+    from app.models.reports import ReportKind
 
 
 class UnknownDeviceStatus(ValueError):
@@ -271,3 +273,207 @@ async def application_impact(client: Any, *, kind: str, ref: str, depth: int) ->
 
 
 APPLICATION_IMPACT_KINDS = frozenset({"device", "ip_address", "interface", "subnet", "application"})
+
+
+# ---------------------------------------------------------------------------
+# Compliance/audit report engine (P4 W3-T1, ADR-0053 §1 "Documentation Agent
+# alignment"): typed read access + the per-kind RBAC floor, enforced against
+# the INVOKING user's bound role. The agent triggers and cites reports; it
+# never authors artifact content (artifact bytes are NOT exposed here — only
+# metadata incl. sha256 for citation).
+# ---------------------------------------------------------------------------
+
+
+class ReportAccessDeniedError(PermissionError):
+    """The invoking user's role is below the report kind's ADR-0053 §3 floor."""
+
+    def __init__(self, kind: str, required: str) -> None:
+        self.kind = kind
+        self.required = required
+        super().__init__(
+            f"the {kind!r} report requires the {required!r} role or higher (ADR-0053 §3)"
+        )
+
+
+class UnknownReportKind(ValueError):
+    """A requested report kind is not one of the four ADR-0053 kinds."""
+
+    def __init__(self, kind: str, valid_values: tuple[str, ...]) -> None:
+        self.kind = kind
+        self.valid_values = valid_values
+        super().__init__(f"unknown report kind {kind!r}; valid values: {list(valid_values)}")
+
+
+@dataclass(frozen=True, slots=True)
+class ReportArtifactSnapshot:
+    """Immutable artifact metadata (sha256 for citation; never content bytes)."""
+
+    id: UUID
+    format: str
+    sha256: str
+    size_bytes: int
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ReportRunSnapshot:
+    """Immutable plain-data projection of one report run."""
+
+    id: UUID
+    kind: str
+    trigger: str
+    period_start: datetime
+    period_end: datetime
+    status: str
+    error_class: str | None
+    regime_tags: tuple[str, ...]
+    finished_at: datetime | None
+    artifacts: tuple[ReportArtifactSnapshot, ...]
+
+
+def _resolve_report_kind(kind: str) -> ReportKind:
+    from app.models.reports import ReportKind
+
+    try:
+        return ReportKind(kind)
+    except ValueError as exc:
+        raise UnknownReportKind(kind, tuple(k.value for k in ReportKind)) from exc
+
+
+def ensure_report_access(role: Role | None, kind: str) -> None:
+    """Raise unless *role* (a :class:`~app.core.security.Role` or ``None``)
+    meets the ADR-0053 §3 floor for *kind* (deny-by-default on ``None``)."""
+    from app.engines.reports import required_role, role_meets_floor
+
+    resolved = _resolve_report_kind(kind)
+    if not role_meets_floor(role, resolved):
+        raise ReportAccessDeniedError(resolved.value, required_role(resolved).value)
+
+
+def _run_snapshot(row: Any, artifacts: list[Any]) -> ReportRunSnapshot:
+    return ReportRunSnapshot(
+        id=row.id,
+        kind=row.kind,
+        trigger=row.trigger,
+        period_start=row.period_start,
+        period_end=row.period_end,
+        status=row.status,
+        error_class=row.error_class,
+        regime_tags=tuple(row.regime_tags),
+        finished_at=row.finished_at,
+        artifacts=tuple(
+            ReportArtifactSnapshot(
+                id=a.id,
+                format=a.format,
+                sha256=a.sha256,
+                size_bytes=a.size_bytes,
+                expires_at=a.expires_at,
+            )
+            for a in artifacts
+        ),
+    )
+
+
+async def list_report_runs(
+    *, role: Role | None, kind: str | None, limit: int
+) -> list[ReportRunSnapshot]:
+    """List report runs (newest first) scoped to kinds *role* may see.
+
+    With an explicit *kind* the floor is enforced (raises
+    :class:`ReportAccessDeniedError`); without one, kinds above the invoking
+    role's floor are silently excluded (the run's existence is itself
+    RBAC-scoped metadata, ADR-0053 §3).
+    """
+    from sqlalchemy import select
+
+    import app.db as db
+    from app.engines.reports import kinds_visible_to
+    from app.models.reports import ReportArtifact, ReportRun
+
+    if kind is not None:
+        ensure_report_access(role, kind)
+        kinds = [_resolve_report_kind(kind).value]
+    else:
+        kinds = sorted(k.value for k in kinds_visible_to(role))
+    if not kinds:
+        return []
+    async with db.get_sessionmaker()() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ReportRun)
+                    .where(ReportRun.kind.in_(kinds))
+                    .order_by(ReportRun.created_at.desc(), ReportRun.id)
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # Two plain SELECTs instead of a relationship eager-load: the facade's
+        # AST purity guard permits only bare ``select`` from SQLAlchemy.
+        artifacts_by_run: dict[UUID, list[Any]] = {}
+        if rows:
+            artifact_rows = (
+                (
+                    await session.execute(
+                        select(ReportArtifact).where(
+                            ReportArtifact.run_id.in_([row.id for row in rows])
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for artifact in artifact_rows:
+                artifacts_by_run.setdefault(artifact.run_id, []).append(artifact)
+        return [_run_snapshot(row, artifacts_by_run.get(row.id, [])) for row in rows]
+
+
+async def get_report_run(*, role: Role | None, run_id: UUID) -> ReportRunSnapshot | None:
+    """One run's metadata + artifact metadata; per-kind floor enforced.
+
+    Raises :class:`ReportAccessDeniedError` when the run exists but its kind is
+    above the invoking role's floor.
+    """
+    from sqlalchemy import select
+
+    import app.db as db
+    from app.models.reports import ReportArtifact, ReportRun
+
+    async with db.get_sessionmaker()() as session:
+        row = (
+            await session.execute(select(ReportRun).where(ReportRun.id == run_id))
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        ensure_report_access(role, row.kind)
+        artifact_rows = (
+            (await session.execute(select(ReportArtifact).where(ReportArtifact.run_id == row.id)))
+            .scalars()
+            .all()
+        )
+        return _run_snapshot(row, list(artifact_rows))
+
+
+def report_generation_args(
+    *, kind: str, period_start: datetime, period_end: datetime
+) -> tuple[UUID, list[str]]:
+    """Validate a generation request and return ``(run_id, task args)``.
+
+    The deterministic run id + the exact ``reports.generate`` Celery argument
+    vector (kind, period ISO strings, trigger) — the tool layer appends the
+    invoking user id and enqueues (it owns the Celery seam; ADR-0053 §2).
+    """
+    from app.engines.reports import deterministic_run_id
+
+    resolved = _resolve_report_kind(kind)
+    if period_end <= period_start:
+        raise ValueError("period_end must be after period_start")
+    run_id = deterministic_run_id(resolved, period_start, period_end)
+    return run_id, [
+        resolved.value,
+        period_start.isoformat(),
+        period_end.isoformat(),
+        "on_demand",
+    ]

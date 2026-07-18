@@ -337,6 +337,37 @@ class Settings(BaseSettings):
     raw_artifact_retention_hour: int = 4
     raw_artifact_retention_minute: int = 0
 
+    # -- Compliance & audit reporting engine (P4 W3-T1, ADR-0053) ---------------
+    #: Per-kind report cadence (Celery beat, ADR-0053 §2). PROPOSED defaults:
+    #: change + compliance posture weekly; access review + audit integrity
+    #: monthly (§7 "monthly, for periodic access reviews"). ``weekly`` fires
+    #: Sunday, ``monthly`` fires on the 1st, at the shared UTC time below.
+    report_change_cadence: Literal["daily", "weekly", "monthly"] = "weekly"
+    report_compliance_posture_cadence: Literal["daily", "weekly", "monthly"] = "weekly"
+    report_access_review_cadence: Literal["daily", "weekly", "monthly"] = "monthly"
+    report_audit_integrity_cadence: Literal["daily", "weekly", "monthly"] = "monthly"
+    #: Shared UTC fire time for scheduled report generation (ADR-0053 §2).
+    #: Default 05:00 UTC — after the nightly backup + retention sweeps.
+    report_generation_hour: int = 5
+    report_generation_minute: int = 0
+    #: Default artifact retention before the daily ``reports.purge_expired``
+    #: sweep hard-deletes an artifact (ADR-0053 §4). 7 years PROPOSED (the
+    #: PRODUCTION.md §12 audit-retention default; a Consultant data-retention
+    #: answer rebases it). Per-kind overrides below; ``None`` inherits this.
+    report_retention_days: int = 2557
+    report_change_retention_days: int | None = None
+    report_compliance_posture_retention_days: int | None = None
+    report_access_review_retention_days: int | None = None
+    report_audit_integrity_retention_days: int | None = None
+    #: Daily UTC schedule of the report-artifact retention purge (ADR-0053 §4).
+    report_purge_hour: int = 5
+    report_purge_minute: int = 30
+    #: Daily UTC schedule of the compliance evaluation sweep
+    #: (``reports.compliance_sweep``, ADR-0053 §2) that persists the §7.2 trend
+    #: history (status/severity only — secret-free by construction).
+    compliance_sweep_hour: int = 1
+    compliance_sweep_minute: int = 45
+
     # -- Audit -> SIEM export pipeline (P3 W3-T1, ADR-0045) ---------------------
     # The export streams every committed audit_log row to the customer SIEM
     # at-least-once, in seq order, over a vendor-neutral transport (syslog/CEF over

@@ -58,6 +58,27 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN groupadd --gid 10001 netops \
     && useradd --uid 10001 --gid netops --create-home --shell /usr/sbin/nologin netops
 
+# WeasyPrint PDF rendering system libraries + bundled fonts (P4 W3-T1,
+# ADR-0053 §5): Pango/HarfBuzz text shaping + fontconfig + DejaVu fonts so the
+# report engine renders evidence PDFs with ZERO network egress — no fontconfig
+# network fallback exists, rendering is byte-stable across hosts. ~35 MB layer,
+# accepted and re-measured at land time (ADR-0053 "Negative"; the packet-
+# analysis split-image precedent is the named escalation if the Trivy CVE load
+# ever demands it). cache-bust: 2026-07-17 — bump this date to re-run the
+# install when a fixable CVE lands in these packages (GHA layer-cache would
+# otherwise re-ship the pre-patch layer; see docs/roadmap/LESSONS.md L-IMG-1).
+RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        libpango-1.0-0 \
+        libpangoft2-1.0-0 \
+        libharfbuzz0b \
+        libharfbuzz-subset0 \
+        fontconfig \
+        fonts-dejavu-core; \
+    rm -rf /var/lib/apt/lists/*
+
 # The venv already contains the installed `app` package and all entrypoints
 # (uvicorn, celery, alembic).
 COPY --from=builder /opt/venv /opt/venv

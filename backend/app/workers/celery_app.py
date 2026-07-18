@@ -33,7 +33,7 @@ from celery.schedules import crontab
 from celery.signals import worker_init
 from kombu import Queue
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 
 _logger = get_logger(__name__)
@@ -113,10 +113,15 @@ QUEUE_REDELIVERY_RATIONALE: dict[str, str] = {
         "deterministic findings for the same immutable pcap (safe overwrite)."
     ),
     QUEUE_DOCS: (
-        "Generated documents are content-addressed / keyed to their source "
-        "(config snapshot, run) the same way as config snapshots; a re-run "
-        "regenerates the same artifact rather than appending a duplicate. (No "
-        "docs Celery task is wired yet — the include list reserves ``.docs``.)"
+        "Idempotent by deterministic claim row (P4 W3-T1, ADR-0053 §2). "
+        "``reports.generate`` / ``reports.generate_scheduled`` derive the run PK "
+        "from ``(kind, period)`` and INSERT it ON CONFLICT DO NOTHING before any "
+        "render or audit emit — a redelivered (or beat+on-demand colliding) task "
+        "finds the row and skips/resumes instead of double-generating. "
+        "``reports.purge_expired`` is a cutoff-driven retention sweep (re-run "
+        "deletes nothing already deleted); ``reports.compliance_sweep`` claims a "
+        "deterministic per-UTC-date run row the same way, so a redelivery "
+        "persists no duplicate trend history."
     ),
     QUEUE_TOPOLOGY: (
         "``topology.sync_after_run`` is a full projection of current inventory into "
@@ -131,6 +136,25 @@ QUEUE_REDELIVERY_RATIONALE: dict[str, str] = {
         "``system.ensure_partitions`` is idempotent DDL (CREATE TABLE IF NOT EXISTS)."
     ),
 }
+
+
+def _report_crontab(settings: Settings, cadence: str) -> crontab:
+    """Map a per-kind report cadence to its beat crontab (ADR-0053 §2).
+
+    ``daily`` fires every day, ``weekly`` on Sunday, ``monthly`` on the 1st —
+    always at the shared ``report_generation_hour``/``minute`` UTC time. The
+    cadence values are ``Literal``-typed in :class:`~app.core.config.Settings`,
+    so an unknown token can only be a programming error.
+    """
+    hour = str(settings.report_generation_hour)
+    minute = str(settings.report_generation_minute)
+    if cadence == "daily":
+        return crontab(hour=hour, minute=minute)
+    if cadence == "weekly":
+        return crontab(hour=hour, minute=minute, day_of_week="0")
+    if cadence == "monthly":
+        return crontab(hour=hour, minute=minute, day_of_month="1")
+    raise ValueError(f"unknown report cadence {cadence!r}; expected daily|weekly|monthly")
 
 
 def create_celery_app() -> Celery:
@@ -148,8 +172,8 @@ def create_celery_app() -> Celery:
             "app.workers.tasks.packet",
             "app.workers.tasks.credentials",
             "app.workers.tasks.maintenance",
+            "app.workers.tasks.reports",
         ],
-        # M5+: ".docs"
     )
     if settings.redis_url.startswith("sentinel://"):
         # Kombu's Sentinel transport requires the master name (and the Sentinel
@@ -193,6 +217,9 @@ def create_celery_app() -> Celery:
             "packet.purge_*": {"queue": QUEUE_PACKET_CAPTURE},
             "packet.analyze_*": {"queue": QUEUE_PACKET_ANALYSIS},
             "docs.*": {"queue": QUEUE_DOCS},
+            # Report generation is the document-generation workload class
+            # (ADR-0053 §2, D8): no new queue, no new worker Deployment.
+            "reports.*": {"queue": QUEUE_DOCS},
             "topology.*": {"queue": QUEUE_TOPOLOGY},
             "system.*": {"queue": QUEUE_SYSTEM},
             # KEK rotation re-wrap (W6-T3): an operator/KMS-triggered operational
@@ -246,6 +273,49 @@ def create_celery_app() -> Celery:
             "queue-depth-sample": {
                 "task": "system.sample_queue_depths",
                 "schedule": settings.queue_depth_sample_seconds,
+            },
+            # Compliance/audit report generation (P4 W3-T1, ADR-0053 §2): one
+            # beat entry per kind at the operator-configurable cadence (weekly
+            # fires Sunday, monthly fires the 1st, at the shared UTC time).
+            # Generation is idempotent per (kind, period) via the claim row, so
+            # beat loss / redelivery re-fires safely (PRODUCTION.md §3.2).
+            "report-generate-change": {
+                "task": "reports.generate_scheduled",
+                "args": ("change",),
+                "schedule": _report_crontab(settings, settings.report_change_cadence),
+            },
+            "report-generate-compliance-posture": {
+                "task": "reports.generate_scheduled",
+                "args": ("compliance_posture",),
+                "schedule": _report_crontab(settings, settings.report_compliance_posture_cadence),
+            },
+            "report-generate-access-review": {
+                "task": "reports.generate_scheduled",
+                "args": ("access_review",),
+                "schedule": _report_crontab(settings, settings.report_access_review_cadence),
+            },
+            "report-generate-audit-integrity": {
+                "task": "reports.generate_scheduled",
+                "args": ("audit_integrity",),
+                "schedule": _report_crontab(settings, settings.report_audit_integrity_cadence),
+            },
+            # Report-artifact retention purge (ADR-0053 §4): daily hard-delete
+            # of artifacts past their expiry (7-year PROPOSED default).
+            "report-retention-purge": {
+                "task": "reports.purge_expired",
+                "schedule": crontab(
+                    hour=str(settings.report_purge_hour),
+                    minute=str(settings.report_purge_minute),
+                ),
+            },
+            # Daily compliance evaluation sweep (ADR-0053 §2) feeding the §7.2
+            # trend history — without it the posture report has no time series.
+            "compliance-daily-sweep": {
+                "task": "reports.compliance_sweep",
+                "schedule": crontab(
+                    hour=str(settings.compliance_sweep_hour),
+                    minute=str(settings.compliance_sweep_minute),
+                ),
             },
         },
     )

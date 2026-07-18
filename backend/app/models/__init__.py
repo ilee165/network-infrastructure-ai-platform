@@ -29,6 +29,11 @@ from app.models.change_requests import (
     ChangeRequestKind,
     ChangeRequestState,
 )
+from app.models.compliance_history import (
+    ComplianceRun,
+    ComplianceRunFinding,
+    ComplianceSweepTrigger,
+)
 from app.models.config_mgmt import (
     EMBEDDING_DIM,
     CompliancePolicy,
@@ -56,6 +61,14 @@ from app.models.inventory import (
 )
 from app.models.mixins import TimestampMixin, UuidPkMixin
 from app.models.pcap_metadata import PcapMetadata
+from app.models.reports import (
+    ReportArtifact,
+    ReportFormat,
+    ReportKind,
+    ReportRun,
+    ReportRunStatus,
+    ReportTrigger,
+)
 from app.models.topology import TopologySnapshot
 from app.models.virtualization import (
     NormalizedComputeClusterRow,
@@ -81,6 +94,9 @@ __all__ = [
     "ChangeRequestKind",
     "ChangeRequestState",
     "CompliancePolicy",
+    "ComplianceRun",
+    "ComplianceRunFinding",
+    "ComplianceSweepTrigger",
     "ConfigArchive",
     "ConfigBackupRun",
     "ConfigSnapshot",
@@ -109,6 +125,12 @@ __all__ = [
     "PcapMetadata",
     "RawArtifact",
     "ReasoningTraceRow",
+    "ReportArtifact",
+    "ReportFormat",
+    "ReportKind",
+    "ReportRun",
+    "ReportRunStatus",
+    "ReportTrigger",
     "ReasoningTraceStep",
     "RefreshSession",
     "Role",

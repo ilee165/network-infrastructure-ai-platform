@@ -1585,6 +1585,84 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/reports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Runs
+         * @description List report runs, newest first — RBAC-scoped to kinds the caller may see.
+         *
+         *     A run of a kind above the caller's floor is never listed (an engineer does
+         *     not learn access-review runs exist); explicitly requesting such a kind is a
+         *     403, not an empty page.
+         */
+        get: operations["list_runs_api_v1_reports_get"];
+        put?: never;
+        /**
+         * Request Generation
+         * @description Enqueue an on-demand generation for ``(kind, period)`` (ADR-0053 §2).
+         *
+         *     202: the render happens asynchronously on the ``docs`` queue. The returned
+         *     ``run_id`` is DETERMINISTIC for the period — a beat run or a second request
+         *     for the same ``(kind, period)`` resolves to the same run (claim-row guard;
+         *     no double generation). Audited under the requesting user.
+         */
+        post: operations["request_generation_api_v1_reports_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/reports/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Run
+         * @description One run's metadata + artifact metadata (per-kind floor enforced).
+         */
+        get: operations["get_run_api_v1_reports__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/reports/{run_id}/artifacts/{artifact_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Artifact
+         * @description Download one artifact's bytes — the RBAC'd, audited evidence exit point.
+         *
+         *     The per-kind floor is re-evaluated HERE against the caller's current role
+         *     (ADR-0053 §3): an artifact is never world-readable once generated, and a
+         *     role revoked between generation and download denies the download. Every
+         *     download writes an audit entry carrying the artifact sha256.
+         */
+        get: operations["download_artifact_api_v1_reports__run_id__artifacts__artifact_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/topology/diff": {
         parameters: {
             query?: never;
@@ -3597,6 +3675,173 @@ export interface components {
              * @enum {string}
              */
             status: "ok" | "degraded";
+        };
+        /**
+         * ReportArtifactRead
+         * @description Artifact metadata (bytes live behind the download endpoint only).
+         */
+        ReportArtifactRead: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Format */
+            format: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Sha256 */
+            sha256: string;
+            /** Size Bytes */
+            size_bytes: number;
+        };
+        /**
+         * ReportGenerationQueued
+         * @description 202 response: the deterministic run id for the requested period.
+         */
+        ReportGenerationQueued: {
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Status */
+            status: string;
+        };
+        /**
+         * ReportGenerationRequest
+         * @description Body of ``POST /api/v1/reports`` — one on-demand ``(kind, period)``.
+         */
+        ReportGenerationRequest: {
+            kind: components["schemas"]["ReportKind"];
+            /**
+             * Period End
+             * Format: date-time
+             */
+            period_end: string;
+            /**
+             * Period Start
+             * Format: date-time
+             */
+            period_start: string;
+        };
+        /**
+         * ReportKind
+         * @description The four PRODUCTION.md §7 report kinds (ADR-0053 §7).
+         * @enum {string}
+         */
+        ReportKind: "change" | "compliance_posture" | "access_review" | "audit_integrity";
+        /**
+         * ReportRunDetail
+         * @description Run metadata plus its artifact metadata (still no content bytes).
+         */
+        ReportRunDetail: {
+            /**
+             * Artifacts
+             * @default []
+             */
+            artifacts: components["schemas"]["ReportArtifactRead"][];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error Class */
+            error_class: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Period End
+             * Format: date-time
+             */
+            period_end: string;
+            /**
+             * Period Start
+             * Format: date-time
+             */
+            period_start: string;
+            /** Regime Tags */
+            regime_tags: string[];
+            /** Requested By */
+            requested_by: string | null;
+            /** Status */
+            status: string;
+            /** Trigger */
+            trigger: string;
+        };
+        /**
+         * ReportRunListResponse
+         * @description Paginated run listing (RBAC-scoped to kinds the caller may see).
+         */
+        ReportRunListResponse: {
+            /** Items */
+            items: components["schemas"]["ReportRunRead"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
+        };
+        /**
+         * ReportRunRead
+         * @description One report run's metadata.
+         */
+        ReportRunRead: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error Class */
+            error_class: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Period End
+             * Format: date-time
+             */
+            period_end: string;
+            /**
+             * Period Start
+             * Format: date-time
+             */
+            period_start: string;
+            /** Regime Tags */
+            regime_tags: string[];
+            /** Requested By */
+            requested_by: string | null;
+            /** Status */
+            status: string;
+            /** Trigger */
+            trigger: string;
         };
         /**
          * ResetPasswordRequest
@@ -6401,6 +6646,135 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["IntegrationsReport"];
+                };
+            };
+        };
+    };
+    list_runs_api_v1_reports_get: {
+        parameters: {
+            query?: {
+                kind?: components["schemas"]["ReportKind"] | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReportRunListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    request_generation_api_v1_reports_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReportGenerationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReportGenerationQueued"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_run_api_v1_reports__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReportRunDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_artifact_api_v1_reports__run_id__artifacts__artifact_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+                artifact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

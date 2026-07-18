@@ -75,13 +75,19 @@ __all__ = [
     "LLM_TOKENS_TOTAL",
     "PROVIDER_HEALTHY",
     "PROVIDER_PRODUCTION_GRADE",
+    "REPORT_FAILURES_TOTAL",
+    "REPORT_GENERATION_SECONDS",
+    "REPORT_LAST_SUCCESS_TIMESTAMP",
     "observe_agent_first_token",
     "observe_discovery_run",
     "observe_http_request",
     "observe_llm_request",
+    "observe_report_generation",
     "record_change_request_transition",
+    "record_report_failure",
     "set_audit_export_lag",
     "set_celery_queue_depth",
+    "set_report_last_success",
     "set_provider_healthy",
     "set_provider_production_grade",
     "status_class_for",
@@ -199,6 +205,30 @@ try:  # Optional observability dependency (D15) — degrade to no-ops if absent.
         "this up (no audit row is lost), a recovered sink drains it.",
     )
 
+    # --- Report engine (P4 W3-T1, ADR-0053 §9) — bounded label: four kinds ---
+    REPORT_GENERATION_SECONDS: Any = Histogram(
+        "netops_report_generation_seconds",
+        "Wall-clock duration of one compliance/audit report generation per kind "
+        "(claim -> payload -> redaction -> CSV+PDF render -> persist; ADR-0053 §9).",
+        ["report_kind"],
+        buckets=_RUN_BUCKETS,
+    )
+    REPORT_FAILURES_TOTAL: Any = Counter(
+        "netops_report_failures_total",
+        "Failed report generations by kind and TYPED error class (ADR-0053 §9). "
+        "error_class is a bounded token (redaction_violation|builder_error|"
+        "render_error) — redaction_violation is the distinguished class the "
+        "redaction-trip alert pages on; never free-form (no secret surface).",
+        ["report_kind", "error_class"],
+    )
+    REPORT_LAST_SUCCESS_TIMESTAMP: Any = Gauge(
+        "netops_report_last_success_timestamp",
+        "Unix timestamp of the last SUCCESSFUL report generation per kind — the "
+        "staleness-alert source (last success older than cadence + grace pages; "
+        "ADR-0053 §9, the scheduled-backup-completeness pattern).",
+        ["report_kind"],
+    )
+
     _PROM_ENABLED = True
 except ImportError:  # pragma: no cover - exercised only on a slim install
     # No prometheus_client: keep the symbols present (callers reference them) but
@@ -220,6 +250,9 @@ except ImportError:  # pragma: no cover - exercised only on a slim install
     CHANGE_REQUEST_APPROVAL_LATENCY_SECONDS = None
     CELERY_QUEUE_DEPTH = None
     AUDIT_EXPORT_LAG_SECONDS = None
+    REPORT_GENERATION_SECONDS = None
+    REPORT_FAILURES_TOTAL = None
+    REPORT_LAST_SUCCESS_TIMESTAMP = None
     _PROM_ENABLED = False
 
 
@@ -346,6 +379,41 @@ def set_celery_queue_depth(*, queue: str, depth: int) -> None:
     if not _PROM_ENABLED:
         return
     CELERY_QUEUE_DEPTH.labels(queue=queue).set(depth)
+
+
+def observe_report_generation(*, report_kind: str, duration_seconds: float) -> None:
+    """Record one successful report generation's wall-clock duration per kind.
+
+    ``report_kind`` is the bounded four-value ADR-0053 kind enum; no run id,
+    user, or payload detail is recorded. No-op without ``prometheus_client``.
+    """
+    if not _PROM_ENABLED:
+        return
+    REPORT_GENERATION_SECONDS.labels(report_kind=report_kind).observe(duration_seconds)
+
+
+def record_report_failure(*, report_kind: str, error_class: str) -> None:
+    """Count one failed report generation by kind and TYPED error class.
+
+    ``error_class`` must be a bounded token (``redaction_violation`` |
+    ``builder_error`` | ``render_error``) — never free-form text, so no secret
+    (or cardinality bomb) can ride this label (ADR-0053 §9). No-op without
+    ``prometheus_client``.
+    """
+    if not _PROM_ENABLED:
+        return
+    REPORT_FAILURES_TOTAL.labels(report_kind=report_kind, error_class=error_class).inc()
+
+
+def set_report_last_success(*, report_kind: str, timestamp: float) -> None:
+    """Set the last-successful-generation gauge for *report_kind* (staleness SLI).
+
+    *timestamp* is the Unix epoch seconds of the successful run's completion.
+    No-op without ``prometheus_client``.
+    """
+    if not _PROM_ENABLED:
+        return
+    REPORT_LAST_SUCCESS_TIMESTAMP.labels(report_kind=report_kind).set(timestamp)
 
 
 def set_audit_export_lag(*, lag_seconds: float) -> None:

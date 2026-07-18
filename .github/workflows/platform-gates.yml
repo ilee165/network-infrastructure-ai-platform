@@ -665,7 +665,8 @@ jobs:
           promtool check rules \
             deploy/observability/slo-recording.rules.yaml \
             deploy/observability/api-request-rate.rules.yaml \
-            deploy/observability/slo-burn-rate.alerts.yaml | tee /tmp/promtool-check.out
+            deploy/observability/slo-burn-rate.alerts.yaml \
+            deploy/observability/report-engine.alerts.yaml | tee /tmp/promtool-check.out
           test -s /tmp/promtool-check.out
 
       # `promtool test rules` runs the semantic cases: the W3-T2 recording-rule
@@ -680,6 +681,11 @@ jobs:
           test -s /tmp/promtool-rec.out
           promtool test rules deploy/observability/slo-burn-rate.alerts.test.yaml | tee /tmp/promtool-alert.out
           test -s /tmp/promtool-alert.out
+          # Report-engine alert set (P4 W3-T1, ADR-0053 §9): staleness per
+          # scheduled cadence class + redaction-trip page + failure burn, each
+          # with a firing AND a healthy case (ADR-0046 §6).
+          promtool test rules deploy/observability/report-engine.alerts.test.yaml | tee /tmp/promtool-report.out
+          test -s /tmp/promtool-report.out
 
       # BITE proof: the clean rules pass AND a MUTED (never-firing) alert fails its
       # firing test — proves the alert-as-test gate actually catches a false-green
@@ -687,6 +693,12 @@ jobs:
       # rule). The mutation is on a temp copy; committed rules are untouched.
       - name: promtool alert-as-test bite proof
         run: bash deploy/observability/run-promtool-bite.sh
+
+      # Report-engine bite proof (P4 W3-T1, ADR-0053 §9): the clean report
+      # alerts pass AND a MUTED (never-firing) staleness alert fails its firing
+      # test — the same run-and-bite discipline as the SLO alert gate above.
+      - name: report-engine promtool alert-as-test bite proof
+        run: bash deploy/observability/run-report-promtool-bite.sh
 
       # W3-T5 fault-injection MTTD harness (ADR-0046 §5; §386). Drives the three
       # synthetic §386 faults (DB down -> 5xx spike, queue stall -> discovery
