@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.engines.reports import deterministic_run_id, scheduled_period
 from app.engines.reports.payloads import ReportPayload, ReportSection
+from app.engines.reports.regime_mapping import MAPPING_VERSION_TAG
 from app.models import AuditLog, Base, Device, DeviceStatus
 from app.models.compliance_history import ComplianceRun, ComplianceRunFinding
 from app.models.config_mgmt import ConfigSnapshot, ConfigSource
@@ -124,7 +125,7 @@ def test_generate_succeeds_and_persists_artifacts(
     run = runs[0]
     assert run.status == ReportRunStatus.SUCCEEDED.value
     assert run.kind == "change"
-    assert run.regime_tags == ["soc2:CC8.1"]
+    assert run.regime_tags == ["soc2:CC8.1", MAPPING_VERSION_TAG]
     assert run.finished_at is not None
 
     artifacts = _query_all(db_url, select(ReportArtifact))

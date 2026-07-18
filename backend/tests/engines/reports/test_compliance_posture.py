@@ -56,6 +56,7 @@ from app.engines.reports.compliance_posture import (
     build_compliance_posture_sections,
 )
 from app.engines.reports.payloads import ReportSection
+from app.engines.reports.regime_mapping import MAPPING_VERSION_TAG
 from app.models import Base, Device, DeviceStatus
 from app.models.compliance_history import ComplianceRun, ComplianceRunFinding
 from app.models.reports import ReportKind
@@ -428,7 +429,7 @@ async def test_build_payload_wires_compliance_posture_off_the_skeleton(
     )
 
     assert payload.kind == "compliance_posture"
-    assert payload.regime_tags == ("soc2:CC7.1", "soc2:CC4.1")
+    assert payload.regime_tags == ("soc2:CC7.1", "soc2:CC4.1", MAPPING_VERSION_TAG)
     titles = [s.title for s in payload.sections]
     assert SECTION_TREND in titles
     assert not any("skeleton" in note for note in payload.notes)

@@ -4,6 +4,16 @@
 `NetopsReportRedactionViolation`, `NetopsReportFailureBurn`
 (`deploy/observability/report-engine.alerts.yaml`; P4 W3-T1, ADR-0053 §9).
 
+**Regime mapping (SOC 2 CC-series, PROPOSED default):** every run's
+`regime_tags` (below, and each report-contents section) point into
+[`docs/compliance/soc2-cc-mapping.md`](../compliance/soc2-cc-mapping.md) —
+the authoritative doc mapping each report kind to the CC-series controls it
+evidences, which artifact fields satisfy each one, and the named limits
+(P4 W3-T6, ADR-0053 §8). Tags are metadata only: report content stays
+regime-neutral, and the mapping doc's own PROPOSED status + rebase path cover
+what happens if the Consultant's Q7 "compliance regimes" item is answered with
+a different framework.
+
 The report engine (ADR-0053) renders the four PRODUCTION.md §7 evidence
 reports (change, compliance posture, access review, audit integrity) on the
 `docs` Celery queue: beat-scheduled per kind (weekly/monthly defaults) plus

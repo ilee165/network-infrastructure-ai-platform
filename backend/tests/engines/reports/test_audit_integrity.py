@@ -63,6 +63,7 @@ from app.engines.reports.audit_integrity import (
 )
 from app.engines.reports.payloads import ReportSection
 from app.engines.reports.redaction import RedactionViolationError, enforce_redaction
+from app.engines.reports.regime_mapping import MAPPING_VERSION_TAG
 from app.models import Base
 from app.models.audit import (
     AuditChainVerificationRun,
@@ -410,7 +411,7 @@ async def test_build_payload_dispatches_the_live_builder(session: AsyncSession) 
     )
 
     assert payload.kind == "audit_integrity"
-    assert payload.regime_tags == ("soc2:CC7.2",)
+    assert payload.regime_tags == ("soc2:CC7.2", MAPPING_VERSION_TAG)
     titles = [s.title for s in payload.sections]
     assert SECTION_RUNS in titles
     assert SECTION_ATTESTATION in titles

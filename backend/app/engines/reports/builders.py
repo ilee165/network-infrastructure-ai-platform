@@ -31,6 +31,7 @@ from app.engines.reports.audit_integrity import build_audit_integrity_sections
 from app.engines.reports.change_report import build_change_sections
 from app.engines.reports.compliance_posture import build_compliance_posture_sections
 from app.engines.reports.payloads import ReportPayload, ReportSection
+from app.engines.reports.regime_mapping import MAPPING_VERSION_TAG
 from app.models.reports import ReportKind
 
 __all__ = ["ENGINE_VERSION", "REGIME_TAG_DEFAULTS", "REPORT_TITLES", "build_payload"]
@@ -39,14 +40,22 @@ __all__ = ["ENGINE_VERSION", "REGIME_TAG_DEFAULTS", "REPORT_TITLES", "build_payl
 #: changes so evidence provenance is reconstructible (ADR-0053 §1).
 ENGINE_VERSION: Final = "reports-engine/1.0.0"
 
-#: SOC 2 CC-series PROPOSED default regime tags per kind (ADR-0053 §8). Tags are
-#: metadata only: the authoritative report↔control mapping is the W3-T6 doc, and
-#: a future ISO/NIST answer re-tags without redesigning reports.
+#: SOC 2 CC-series PROPOSED default regime tags per kind (ADR-0053 §8; mapping
+#: doc `docs/compliance/soc2-cc-mapping.md`, P4 W3-T6). Tags are metadata only:
+#: the authoritative report↔control mapping is the W3-T6 doc, and a future
+#: ISO/NIST answer re-tags without redesigning reports. Every kind's tuple ends
+#: with MAPPING_VERSION_TAG, snapshotting which doc revision was in force at
+#: generation (`app.engines.reports.regime_mapping`).
 REGIME_TAG_DEFAULTS: Final[dict[ReportKind, tuple[str, ...]]] = {
-    ReportKind.CHANGE: ("soc2:CC8.1",),
-    ReportKind.COMPLIANCE_POSTURE: ("soc2:CC7.1", "soc2:CC4.1"),
-    ReportKind.ACCESS_REVIEW: ("soc2:CC6.1", "soc2:CC6.2", "soc2:CC6.3"),
-    ReportKind.AUDIT_INTEGRITY: ("soc2:CC7.2",),
+    ReportKind.CHANGE: ("soc2:CC8.1", MAPPING_VERSION_TAG),
+    ReportKind.COMPLIANCE_POSTURE: ("soc2:CC7.1", "soc2:CC4.1", MAPPING_VERSION_TAG),
+    ReportKind.ACCESS_REVIEW: (
+        "soc2:CC6.1",
+        "soc2:CC6.2",
+        "soc2:CC6.3",
+        MAPPING_VERSION_TAG,
+    ),
+    ReportKind.AUDIT_INTEGRITY: ("soc2:CC7.2", MAPPING_VERSION_TAG),
 }
 
 REPORT_TITLES: Final[dict[ReportKind, str]] = {

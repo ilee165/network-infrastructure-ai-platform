@@ -68,6 +68,7 @@ from app.engines.reports.access_review import (
     build_access_review_sections,
 )
 from app.engines.reports.payloads import ReportSection
+from app.engines.reports.regime_mapping import MAPPING_VERSION_TAG
 from app.models import AuditLog, Base, Role, User
 from app.models.reports import ReportKind
 
@@ -625,7 +626,12 @@ async def test_build_payload_wires_access_review_off_the_skeleton(
     )
 
     assert payload.kind == "access_review"
-    assert payload.regime_tags == ("soc2:CC6.1", "soc2:CC6.2", "soc2:CC6.3")
+    assert payload.regime_tags == (
+        "soc2:CC6.1",
+        "soc2:CC6.2",
+        "soc2:CC6.3",
+        MAPPING_VERSION_TAG,
+    )
     titles = [s.title for s in payload.sections]
     assert SECTION_USERS in titles
     assert SECTION_BREAK_GLASS in titles

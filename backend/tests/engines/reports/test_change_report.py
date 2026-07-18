@@ -52,6 +52,7 @@ from app.engines.reports.change_report import (
 )
 from app.engines.reports.payloads import ReportSection
 from app.engines.reports.redaction import RedactionViolationError
+from app.engines.reports.regime_mapping import MAPPING_VERSION_TAG
 from app.models import AuditLog, Base
 from app.models.agents import AgentSession
 from app.models.change_requests import (
@@ -680,7 +681,7 @@ async def test_build_payload_wires_change_kind_off_the_skeleton(session: AsyncSe
     )
 
     assert payload.kind == "change"
-    assert payload.regime_tags == ("soc2:CC8.1",)
+    assert payload.regime_tags == ("soc2:CC8.1", MAPPING_VERSION_TAG)
     titles = [s.title for s in payload.sections]
     assert SECTION_CHANGE_REQUESTS in titles
     assert not any("skeleton" in note for note in payload.notes)
