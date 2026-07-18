@@ -10,12 +10,15 @@ The ONE query implementation both attestation sites share:
   time — never cached (a cached result would let a granted ``UPDATE`` slip a
   period, the named W3-T5 risk).
 
-The check walks the PostgreSQL catalog (``pg_class.relacl`` via
-``aclexplode``) for the ``audit_log`` parent **and every partition**
-(``pg_inherits``): the table is range-partitioned, a partition does not
-inherit the parent's ACL, and a direct ``UPDATE`` grant on a child would
-bypass a parent-only check. Any ``UPDATE``/``DELETE`` ACL entry whose grantee
-is not the relation OWNER is a violation (PUBLIC included). The owner's
+The check walks the PostgreSQL catalog for the ``audit_log`` parent **and
+every partition** (``pg_inherits``): the table is range-partitioned, a
+partition does not inherit the parent's ACL, and a direct ``UPDATE`` grant on
+a child would bypass a parent-only check. BOTH ACL surfaces are exploded —
+table-level (``pg_class.relacl``) and COLUMN-level (``pg_attribute.attacl``):
+``GRANT UPDATE (col) ON audit_log`` is stored only in ``attacl`` yet confers a
+working UPDATE path, so a relacl-only walk would attest a false ``clean``. Any
+``UPDATE``/``DELETE`` ACL entry whose grantee is not the relation OWNER is a
+violation (PUBLIC included). The owner's
 implicit privileges are deliberately out of scope: a ``REVOKE`` cannot bind
 the owner or a superuser (the migration 0001 caveat) — the hash chain
 (ADR-0038) is the tamper-evidence backstop for privileged actors, and this
@@ -46,8 +49,12 @@ AUDIT_GRANT_PRIVILEGES: tuple[str, ...] = ("UPDATE", "DELETE")
 
 #: Parent + every partition (pg_inherits): partitions do NOT inherit the
 #: parent ACL, so a direct child grant must not hide from the attestation.
-#: ``aclexplode`` of a NULL ``relacl`` yields no rows — correct: a NULL ACL is
-#: the owner-only default, i.e. no explicit grant exists.
+#: TWO ACL legs over the same target set — table-level (``pg_class.relacl``)
+#: and column-level (``pg_attribute.attacl``, where ``GRANT UPDATE (col)``
+#: lives; it NEVER appears in ``relacl``). ``aclexplode`` of a NULL ACL yields
+#: no rows — correct: a NULL ACL is the owner-only default, i.e. no explicit
+#: grant exists. ``DISTINCT`` collapses multiple granted columns on one
+#: relation to a single (relation, grantee, privilege) entry.
 _GRANTS_SQL = text(
     """
     WITH targets AS (
@@ -59,15 +66,27 @@ _GRANTS_SQL = text(
         FROM pg_inherits i
         JOIN pg_class ch ON ch.oid = i.inhrelid
         WHERE i.inhparent = 'audit_log'::regclass
+    ),
+    acl_entries AS (
+        SELECT t.oid, t.relowner, a.grantee, a.privilege_type
+        FROM targets t
+        CROSS JOIN LATERAL aclexplode(t.relacl) AS a
+        UNION ALL
+        SELECT t.oid, t.relowner, a.grantee, a.privilege_type
+        FROM targets t
+        JOIN pg_attribute att
+          ON att.attrelid = t.oid
+         AND att.attnum > 0
+         AND NOT att.attisdropped
+        CROSS JOIN LATERAL aclexplode(att.attacl) AS a
     )
-    SELECT t.oid::regclass::text AS relation,
+    SELECT DISTINCT e.oid::regclass::text AS relation,
            COALESCE(r.rolname, 'PUBLIC') AS grantee,
-           a.privilege_type AS privilege
-    FROM targets t
-    CROSS JOIN LATERAL aclexplode(t.relacl) AS a
-    LEFT JOIN pg_roles r ON r.oid = a.grantee
-    WHERE a.privilege_type IN ('UPDATE', 'DELETE')
-      AND a.grantee <> t.relowner
+           e.privilege_type AS privilege
+    FROM acl_entries e
+    LEFT JOIN pg_roles r ON r.oid = e.grantee
+    WHERE e.privilege_type IN ('UPDATE', 'DELETE')
+      AND e.grantee <> e.relowner
     ORDER BY relation, grantee, privilege
     """
 )

@@ -14,6 +14,10 @@ schema (partitioned ``audit_log`` + the migration 0001 REVOKE posture):
   the REVOKE disagree);
 * a grant planted DIRECTLY on a child partition (which does NOT inherit the
   parent ACL) is still detected — the pg_inherits walk bites;
+* a COLUMN-level ``GRANT UPDATE (col)`` — stored in ``pg_attribute.attacl``,
+  never ``pg_class.relacl`` — is detected on the parent and on a child
+  partition (a relacl-only walk would attest a false ``clean`` while the
+  grantee holds a working UPDATE path);
 * gap days and break outcomes render as findings from the persisted history;
 * the tamper failure path persists ``break`` while still exiting non-zero.
 """
@@ -219,6 +223,42 @@ async def test_grant_on_a_child_partition_is_detected(
         result = await check_audit_log_grants(pg_session)
         assert result.outcome == GrantCheckOutcome.VIOLATION.value
         assert (child, _PROBE_ROLE, "DELETE") in result.grants
+    finally:
+        await _drop_probe_role(pg_engine)
+
+
+async def test_column_level_update_grant_is_detected(
+    pg_engine: AsyncEngine, pg_session: AsyncSession
+) -> None:
+    """``GRANT UPDATE (col)`` lives in ``pg_attribute.attacl``, NEVER in
+    ``pg_class.relacl`` — yet it confers a working UPDATE path on the granted
+    columns. A relacl-only walk attests a false ``clean`` (the W3-T5 review
+    finding). Planted on the parent (two columns: the attestation must dedupe
+    to ONE entry, not one per column) AND directly on a child partition."""
+    child = (
+        await pg_session.execute(
+            text(
+                "SELECT i.inhrelid::regclass::text FROM pg_inherits i "
+                "WHERE i.inhparent = 'audit_log'::regclass ORDER BY 1 LIMIT 1"
+            )
+        )
+    ).scalar_one_or_none()
+    assert child is not None, "the migrated schema must carry audit_log partitions"
+
+    await _drop_probe_role(pg_engine)
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f"CREATE ROLE {_PROBE_ROLE}"))
+        await conn.execute(text(f"GRANT UPDATE (actor, action) ON audit_log TO {_PROBE_ROLE}"))
+        await conn.execute(text(f"GRANT UPDATE (actor) ON {child} TO {_PROBE_ROLE}"))
+    try:
+        result = await check_audit_log_grants(pg_session)
+        assert result.outcome == GrantCheckOutcome.VIOLATION.value
+        assert ("audit_log", _PROBE_ROLE, "UPDATE") in result.grants
+        assert (child, _PROBE_ROLE, "UPDATE") in result.grants
+        # Two granted columns on the parent still attest as ONE offending
+        # (relation, grantee, privilege) entry — per-column duplicates would
+        # bloat the rendered compliance artifact.
+        assert result.grants.count(("audit_log", _PROBE_ROLE, "UPDATE")) == 1
     finally:
         await _drop_probe_role(pg_engine)
 
