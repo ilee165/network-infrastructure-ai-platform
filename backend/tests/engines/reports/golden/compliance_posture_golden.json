@@ -1,0 +1,339 @@
+{
+  "_comment": "Golden CSV/PDF structure fixture for the W3-T3 compliance posture report (ADR-0053 SS7.2). Regenerate ONLY via the scenario in tests/engines/reports/test_compliance_posture.py; W4-T3 conformance checks assert against this same structure.",
+  "csv_rows": [
+    [
+      "report",
+      "Compliance Posture Report"
+    ],
+    [
+      "kind",
+      "compliance_posture"
+    ],
+    [
+      "period_start",
+      "2026-07-01T00:00:00+00:00"
+    ],
+    [
+      "period_end",
+      "2026-07-08T00:00:00+00:00"
+    ],
+    [
+      "generated_at",
+      "2026-07-08T00:05:00+00:00"
+    ],
+    [
+      "regime_tags",
+      "soc2:CC7.1 soc2:CC4.1"
+    ],
+    [],
+    [
+      "Report provenance"
+    ],
+    [
+      "Field",
+      "Value"
+    ],
+    [
+      "Engine version",
+      "reports-engine/1.0.0"
+    ],
+    [
+      "Report kind",
+      "compliance_posture"
+    ],
+    [
+      "Period start (UTC)",
+      "2026-07-01T00:00:00+00:00"
+    ],
+    [
+      "Period end (UTC)",
+      "2026-07-08T00:00:00+00:00"
+    ],
+    [],
+    [
+      "Compliance evaluation runs"
+    ],
+    [
+      "Run id",
+      "Executed (UTC)",
+      "Trigger",
+      "Policy id",
+      "Policy version",
+      "Engine version",
+      "Devices in scope"
+    ],
+    [
+      "00000000-0000-0000-0000-00000000aa01",
+      "2026-07-01T04:30:00+00:00",
+      "sweep",
+      "baseline-security",
+      "3",
+      "reports-engine/1.0.0",
+      "2"
+    ],
+    [
+      "00000000-0000-0000-0000-00000000bb01",
+      "2026-07-03T04:00:00+00:00",
+      "on_demand",
+      "baseline-security",
+      "4",
+      "reports-engine/1.0.0",
+      "1"
+    ],
+    [
+      "00000000-0000-0000-0000-00000000cc01",
+      "2026-07-03T05:00:00+00:00",
+      "sweep",
+      "baseline-security",
+      "4",
+      "reports-engine/1.0.0",
+      "2"
+    ],
+    [],
+    [
+      "Latest posture by policy"
+    ],
+    [
+      "Policy id",
+      "Pass",
+      "Violation",
+      "Skipped"
+    ],
+    [
+      "baseline-security",
+      "1",
+      "2",
+      "1"
+    ],
+    [],
+    [
+      "Latest posture by device"
+    ],
+    [
+      "Device",
+      "Vendor",
+      "Pass",
+      "Violation",
+      "Skipped"
+    ],
+    [
+      "core-sw-01",
+      "cisco_ios",
+      "1",
+      "1",
+      "0"
+    ],
+    [
+      "edge-sw-01",
+      "eos",
+      "0",
+      "1",
+      "1"
+    ],
+    [],
+    [
+      "Latest posture by severity"
+    ],
+    [
+      "Severity",
+      "Pass",
+      "Violation",
+      "Skipped"
+    ],
+    [
+      "info",
+      "0",
+      "0",
+      "1"
+    ],
+    [
+      "warn",
+      "0",
+      "1",
+      "0"
+    ],
+    [
+      "violation",
+      "1",
+      "1",
+      "0"
+    ],
+    [],
+    [
+      "Daily posture trend"
+    ],
+    [
+      "Date (UTC)",
+      "Runs recorded",
+      "Devices evaluated",
+      "Pass",
+      "Violation",
+      "Skipped"
+    ],
+    [
+      "2026-07-01",
+      "1",
+      "2",
+      "2",
+      "1",
+      "1"
+    ],
+    [
+      "2026-07-02",
+      "0",
+      "gap",
+      "gap",
+      "gap",
+      "gap"
+    ],
+    [
+      "2026-07-03",
+      "2",
+      "2",
+      "1",
+      "2",
+      "1"
+    ],
+    [
+      "2026-07-04",
+      "0",
+      "gap",
+      "gap",
+      "gap",
+      "gap"
+    ],
+    [
+      "2026-07-05",
+      "0",
+      "gap",
+      "gap",
+      "gap",
+      "gap"
+    ],
+    [
+      "2026-07-06",
+      "0",
+      "gap",
+      "gap",
+      "gap",
+      "gap"
+    ],
+    [
+      "2026-07-07",
+      "0",
+      "gap",
+      "gap",
+      "gap",
+      "gap"
+    ],
+    [],
+    [
+      "Out-of-scope vendors (no config-compliance surface)"
+    ],
+    [
+      "Vendor",
+      "Devices",
+      "Posture"
+    ],
+    [
+      "f5_bigip",
+      "1",
+      "out-of-scope: no text-config surface in P4 (ADR-0050 \u00a77.6 named deferral)"
+    ],
+    [
+      "vmware",
+      "1",
+      "out-of-scope: no config backup/drift surface in P4 (ADR-0051 \u00a73 named deferral)"
+    ],
+    [],
+    [
+      "note",
+      "Latest-posture sections reflect the most recent compliance run in the period; counts are per rule-device evaluation (pass/violation/skipped, ADR-0018 \u00a75), and every run row stamps the policy-pack and engine version in force (ADR-0053 \u00a77.2)."
+    ],
+    [],
+    [
+      "note",
+      "Trend semantics: one row per UTC day in the period; a day's posture comes from its most recent recorded run. A day with no recorded run renders the explicit 'gap' marker \u2014 posture values are never interpolated, smoothed, or carried forward across missing sweeps."
+    ],
+    [],
+    [
+      "note",
+      "F5 BIG-IP and VMware vSphere have no text-configuration compliance surface in P4 (ADR-0050 \u00a77.6, ADR-0051 \u00a73 \u2014 named deferrals): their devices are out of scope for config compliance and are reported as uncovered, never as passing."
+    ],
+    [],
+    [
+      "note",
+      "Persisted history carries status/severity only (ADR-0053 \u00a76 layer 3): evidence excerpts are never stored and cannot appear in this report; live excerpt drill-down remains on the on-demand compliance endpoint under its own RBAC."
+    ]
+  ],
+  "pdf_structure": {
+    "sections": [
+      {
+        "title": "Report provenance",
+        "columns": [
+          "Field",
+          "Value"
+        ]
+      },
+      {
+        "title": "Compliance evaluation runs",
+        "columns": [
+          "Run id",
+          "Executed (UTC)",
+          "Trigger",
+          "Policy id",
+          "Policy version",
+          "Engine version",
+          "Devices in scope"
+        ]
+      },
+      {
+        "title": "Latest posture by policy",
+        "columns": [
+          "Policy id",
+          "Pass",
+          "Violation",
+          "Skipped"
+        ]
+      },
+      {
+        "title": "Latest posture by device",
+        "columns": [
+          "Device",
+          "Vendor",
+          "Pass",
+          "Violation",
+          "Skipped"
+        ]
+      },
+      {
+        "title": "Latest posture by severity",
+        "columns": [
+          "Severity",
+          "Pass",
+          "Violation",
+          "Skipped"
+        ]
+      },
+      {
+        "title": "Daily posture trend",
+        "columns": [
+          "Date (UTC)",
+          "Runs recorded",
+          "Devices evaluated",
+          "Pass",
+          "Violation",
+          "Skipped"
+        ]
+      },
+      {
+        "title": "Out-of-scope vendors (no config-compliance surface)",
+        "columns": [
+          "Vendor",
+          "Devices",
+          "Posture"
+        ]
+      }
+    ]
+  }
+}

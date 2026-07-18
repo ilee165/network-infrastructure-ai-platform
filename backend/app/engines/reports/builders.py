@@ -3,10 +3,11 @@
 Maps every :class:`~app.models.reports.ReportKind` to an async builder that
 assembles its typed payload from the ALLOWLISTED sources only (ADR-0053 §6
 layer 1). The change report (§7.1) is LIVE — the W3-T2 CR lifecycle roll-up in
-:mod:`app.engines.reports.change_report`; the remaining three kinds render the
-W3-T1 deterministic skeleton until their wave tasks land: W3-T3 (compliance
-posture over the §7.2 history), W3-T4 (access review), W3-T5 (audit
-integrity).
+:mod:`app.engines.reports.change_report` — as is the compliance posture report
+(§7.2) — the W3-T3 history roll-up in
+:mod:`app.engines.reports.compliance_posture`; the remaining two kinds render
+the W3-T1 deterministic skeleton until their wave tasks land: W3-T4 (access
+review), W3-T5 (audit integrity).
 
 Source allowlist (layer 1): builders may read ONLY secret-free sources — CR
 metadata, approvals, audit columns, users/roles/mappings, the §7.2/§7.4 history
@@ -26,6 +27,7 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engines.reports.change_report import build_change_sections
+from app.engines.reports.compliance_posture import build_compliance_posture_sections
 from app.engines.reports.payloads import ReportPayload, ReportSection
 from app.models.reports import ReportKind
 
@@ -53,9 +55,9 @@ REPORT_TITLES: Final[dict[ReportKind, str]] = {
 }
 
 #: The wave task that lands each REMAINING kind's full payload on this engine
-#: (the change report landed in W3-T2 — see the dispatch in :func:`build_payload`).
+#: (change landed in W3-T2, compliance posture in W3-T3 — see the dispatch in
+#: :func:`build_payload`).
 _PAYLOAD_TASKS: Final[dict[ReportKind, str]] = {
-    ReportKind.COMPLIANCE_POSTURE: "W3-T3",
     ReportKind.ACCESS_REVIEW: "W3-T4",
     ReportKind.AUDIT_INTEGRITY: "W3-T5",
 }
@@ -103,7 +105,21 @@ async def build_payload(
             sections=(provenance, *change_sections),
             notes=change_notes,
         )
-    del session  # The remaining W3-T3..T5 skeleton kinds read nothing yet.
+    if kind is ReportKind.COMPLIANCE_POSTURE:
+        posture_sections, posture_notes = await build_compliance_posture_sections(
+            session, period_start=period_start, period_end=period_end
+        )
+        return ReportPayload(
+            kind=kind.value,
+            title=REPORT_TITLES[kind],
+            period_start=period_start,
+            period_end=period_end,
+            generated_at=generated_at,
+            regime_tags=REGIME_TAG_DEFAULTS[kind],
+            sections=(provenance, *posture_sections),
+            notes=posture_notes,
+        )
+    del session  # The remaining W3-T4..T5 skeleton kinds read nothing yet.
     return ReportPayload(
         kind=kind.value,
         title=REPORT_TITLES[kind],

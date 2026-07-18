@@ -99,3 +99,39 @@ it for the W4-T3 conformance checks):
    (`sha256:<hash>`). Statistics and references only (ADR-0021 posture):
    **config text never enters this report** — every JSONB-derived cell is a
    validated token, bool, count, or SHA-256 hex reference.
+
+## Report contents — compliance posture report (`kind=compliance_posture`; ADR-0053 §7.2, W3-T3)
+
+API note for consumers of `POST/GET /api/v1/reports` with
+`kind=compliance_posture` (engineer+ floor, weekly beat cadence, regime tags
+`soc2:CC7.1` + `soc2:CC4.1`): the artifact rolls the M4 compliance engine up
+from the **persisted run history** (`compliance_runs` /
+`compliance_run_findings`), populated by the daily `reports.compliance_sweep`
+beat task (`compliance_sweep_hour/minute` settings). The history persists
+**status/severity only — no evidence-excerpt column exists** (ADR-0053 §6
+layer 3); live excerpt drill-down stays on the on-demand engineer+ endpoint
+`GET /config-snapshots/{device_id}/compliance`.
+
+Six sections per artifact (CSV and PDF carry the same structure; the golden
+fixture `backend/tests/engines/reports/golden/compliance_posture_golden.json`
+pins it for the W4-T3 conformance checks):
+
+1. **Compliance evaluation runs** — every run in the CLOSED-OPEN UTC period
+   with trigger (`sweep`/`on_demand`), **policy-pack id + version, and engine
+   version stamped per run** (evidence provenance).
+2. **Latest posture by policy** — pass/violation/skipped counts from the most
+   recent run in the period.
+3. **Latest posture by device** — hostname + vendor per device (a deleted
+   device renders `device:<uuid>`).
+4. **Latest posture by severity** — the full ADR-0018 vocabulary
+   (`info`/`warn`/`violation`), zeros are measured.
+5. **Daily posture trend** — one row per UTC day; a day's posture comes from
+   its most recent run. **A day with no recorded sweep renders the explicit
+   `gap` marker — never an interpolated or carried-forward value** (a run of
+   gap days means the daily sweep is not firing: check the
+   `compliance-daily-sweep` beat entry and the docs-queue worker, then the
+   staleness flow above).
+6. **Out-of-scope vendors** — F5 BIG-IP and VMware vSphere have **no
+   text-config compliance surface in P4** (ADR-0050 §7.6 / ADR-0051 §3 named
+   deferrals): their devices are reported as uncovered — out-of-scope is
+   **not** passing.
