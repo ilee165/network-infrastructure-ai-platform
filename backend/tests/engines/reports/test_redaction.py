@@ -111,9 +111,7 @@ def test_deny_class_is_case_insensitive_substring() -> None:
 # repo secret scanners (GitHub push protection, gitleaks) never see a literal
 # token-shaped string in the blob; the redaction engine still receives the full
 # assembled value.
-_PEM = (
-    "-----BEGIN RSA " + "PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA " + "PRIVATE KEY-----"
-)
+_PEM = "-----BEGIN RSA " + "PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA " + "PRIVATE KEY-----"
 _JWT = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
     + "eyJzdWIiOiIxMjM0NTY3ODkwIn0."

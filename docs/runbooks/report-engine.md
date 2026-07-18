@@ -71,3 +71,31 @@ step 2 of the staleness flow (pivot on `error_class`, then worker logs by
 - `GET /api/v1/reports?kind=<kind>` shows a `succeeded` run for the period;
 - `netops_report_last_success_timestamp{report_kind="<kind>"}` advanced;
 - the staleness alert resolves within its `for:` hold.
+
+## Report contents — change report (`kind=change`; ADR-0053 §7.1, W3-T2)
+
+API note for consumers of `POST/GET /api/v1/reports` with `kind=change`
+(engineer+ floor, weekly beat cadence, regime tag `soc2:CC8.1`): the artifact
+is the CR lifecycle roll-up for the CLOSED-OPEN UTC period `[start, end)` —
+a CR appears when any `change_request.*` audit event falls in the period
+(start instant included, end instant excluded), and appears with its
+**complete** transition history, which may extend beyond the period.
+
+Four sections per artifact (CSV and PDF carry the same structure; the golden
+fixture `backend/tests/engines/reports/golden/change_report_golden.json` pins
+it for the W4-T3 conformance checks):
+
+1. **Change requests** — CR id, kind, state, requester, executor (human or
+   agent, from the `approved_to_executing` audit actor), created (UTC), and
+   the reasoning-trace LINK (`trace:<id> via /api/v1/agents/<session>` — an
+   id/URL resolved under the *viewer's* RBAC at view time, never trace
+   content).
+2. **Approvals (four-eyes evidence)** — approver identity with IdP subject for
+   federated accounts (`name [idp:<subject>]`, D11), decision, timestamp.
+3. **Lifecycle transitions** — every `change_request.*` audit event (creation,
+   four-eyes waivers, each state edge) with actor and UTC timestamp.
+4. **Diff statistics and snapshot references** — outcome token, verified flag,
+   `applied_diff` LINE COUNT, and the baseline snapshot reference
+   (`sha256:<hash>`). Statistics and references only (ADR-0021 posture):
+   **config text never enters this report** — every JSONB-derived cell is a
+   validated token, bool, count, or SHA-256 hex reference.
