@@ -16,7 +16,20 @@ from uuid import UUID
 
 from app.models.reports import ReportKind
 
-__all__ = ["deterministic_run_id", "scheduled_period"]
+__all__ = ["coerce_utc", "deterministic_run_id", "scheduled_period"]
+
+
+def coerce_utc(value: datetime) -> datetime:
+    """Pin a naive datetime as UTC; convert an aware one to UTC.
+
+    A naive value is ALWAYS interpreted as UTC (mirroring the worker's
+    ``_parse_utc``), never as host-local time: the run id derived at the
+    API/agent boundary and the one the worker derives from the serialized task
+    args must agree for the same wall-clock period on any host timezone.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def deterministic_run_id(
@@ -26,11 +39,13 @@ def deterministic_run_id(
 
     SHA-256 over the canonical token; first 16 bytes as an opaque UUID (not
     RFC-4122 — a name-derived claim token, same as the backup slot UUID).
+    Naive datetimes are pinned as UTC (:func:`coerce_utc`) so every derivation
+    site maps the same wall-clock period to the same id.
     """
     kind_value = kind.value if isinstance(kind, ReportKind) else kind
     token = (
         f"reports.generate:{kind_value}:"
-        f"{period_start.astimezone(UTC).isoformat()}:{period_end.astimezone(UTC).isoformat()}"
+        f"{coerce_utc(period_start).isoformat()}:{coerce_utc(period_end).isoformat()}"
     )
     return UUID(bytes=hashlib.sha256(token.encode()).digest()[:16])
 
@@ -50,7 +65,7 @@ def scheduled_period(cadence: str, now: datetime) -> tuple[datetime, datetime]:
         ValueError: on an unknown cadence token (settings are ``Literal``-typed,
             so this only trips on a programming error).
     """
-    at = now.astimezone(UTC)
+    at = coerce_utc(now)
     midnight = at.replace(hour=0, minute=0, second=0, microsecond=0)
     if cadence == "daily":
         return midnight - timedelta(days=1), midnight

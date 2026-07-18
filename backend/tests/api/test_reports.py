@@ -153,6 +153,80 @@ async def test_generation_rejects_inverted_period(
     assert sent_tasks == []
 
 
+async def test_generation_pins_naive_period_as_utc(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    sent_tasks: list[dict[str, Any]],
+) -> None:
+    """Naive timestamps are pinned as UTC — the run id matches the worker's.
+
+    Regression: ``deterministic_run_id`` interpreted naive datetimes as
+    host-local time while the worker's ``_parse_utc`` pins them as UTC, so on
+    any non-UTC API host the 202 returned (and audited) a run id the worker
+    never creates — clients polled a phantom run.
+    """
+    body = {
+        "kind": "change",
+        # Naive ISO strings: no offset suffix.
+        "period_start": "2026-07-01T00:00:00",
+        "period_end": "2026-07-08T00:00:00",
+    }
+    response = await client.post("/api/v1/reports", json=body, headers=auth_headers("engineer"))
+    assert response.status_code == 202
+    assert response.json()["run_id"] == str(deterministic_run_id(ReportKind.CHANGE, _START, _END))
+    # The serialized task args are aware-UTC, so the worker's _parse_utc
+    # round-trips to the identical period (and therefore the identical id).
+    args = sent_tasks[-1]["args"]
+    assert args[1] == _START.isoformat()
+    assert args[2] == _END.isoformat()
+
+
+async def test_generation_mixed_naive_and_aware_is_not_a_500(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    sent_tasks: list[dict[str, Any]],
+) -> None:
+    """A mixed naive/aware body must validate, not TypeError into a 500."""
+    body = {
+        "kind": "change",
+        "period_start": "2026-07-01T00:00:00",
+        "period_end": _END.isoformat(),
+    }
+    response = await client.post("/api/v1/reports", json=body, headers=auth_headers("engineer"))
+    assert response.status_code == 202
+    assert response.json()["run_id"] == str(deterministic_run_id(ReportKind.CHANGE, _START, _END))
+
+    inverted = {
+        "kind": "change",
+        "period_start": _END.isoformat(),
+        "period_end": "2026-07-01T00:00:00",
+    }
+    response = await client.post("/api/v1/reports", json=inverted, headers=auth_headers("engineer"))
+    assert response.status_code == 422
+
+
+async def test_generation_rejects_future_period_end(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    sent_tasks: list[dict[str, Any]],
+) -> None:
+    """A not-yet-complete period is a 422, never a PARTIAL evidence artifact.
+
+    Regression: a premature request succeeded with partial data and the claim
+    guard then returned "skipped" for the SUCCEEDED run forever, so the later
+    scheduled run for the completed period could never regenerate it.
+    """
+    now = datetime.now(UTC)
+    body = {
+        "kind": "change",
+        "period_start": (now - timedelta(days=1)).isoformat(),
+        "period_end": (now + timedelta(days=1)).isoformat(),
+    }
+    response = await client.post("/api/v1/reports", json=body, headers=auth_headers("engineer"))
+    assert response.status_code == 422
+    assert sent_tasks == []  # a rejected period must never enqueue
+
+
 # ---------------------------------------------------------------------------
 # Listing + detail — RBAC-scoped visibility
 # ---------------------------------------------------------------------------

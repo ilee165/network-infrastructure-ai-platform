@@ -464,12 +464,24 @@ def report_generation_args(
     The deterministic run id + the exact ``reports.generate`` Celery argument
     vector (kind, period ISO strings, trigger) — the tool layer appends the
     invoking user id and enqueues (it owns the Celery seam; ADR-0053 §2).
+
+    Naive datetimes are pinned as UTC (``coerce_utc``) so the id returned to
+    the agent matches the one the worker derives from the serialized args; a
+    ``period_end`` in the future is refused — a premature generation would
+    permanently claim the period with PARTIAL data (the claim guard never
+    re-attempts a SUCCEEDED run).
     """
-    from app.engines.reports import deterministic_run_id
+    from datetime import UTC
+
+    from app.engines.reports import coerce_utc, deterministic_run_id
 
     resolved = _resolve_report_kind(kind)
+    period_start = coerce_utc(period_start)
+    period_end = coerce_utc(period_end)
     if period_end <= period_start:
         raise ValueError("period_end must be after period_start")
+    if period_end > datetime.now(UTC):
+        raise ValueError("period_end must not be in the future")
     run_id = deterministic_run_id(resolved, period_start, period_end)
     return run_id, [
         resolved.value,

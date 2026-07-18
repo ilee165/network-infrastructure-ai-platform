@@ -8,9 +8,9 @@ typed token — no free-form failure text crosses the API (ADR-0053 §6).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from app.models.reports import ReportKind
 
@@ -22,10 +22,29 @@ class ReportGenerationRequest(BaseModel):
     period_start: datetime
     period_end: datetime
 
+    @field_validator("period_start", "period_end", mode="after")
+    @classmethod
+    def _pin_utc(cls, value: datetime) -> datetime:
+        # Naive timestamps are pinned as UTC — NEVER host-local time — so the
+        # run id derived here matches the worker's (``_parse_utc``) for the
+        # same wall-clock period, and mixed naive/aware bodies stay comparable
+        # in ``_period_ordered`` (422, not a TypeError 500). Duplicates
+        # ``app.engines.reports.coerce_utc`` because schemas sit below engines
+        # in the layers contract.
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
     @model_validator(mode="after")
     def _period_ordered(self) -> ReportGenerationRequest:
         if self.period_end <= self.period_start:
             raise ValueError("period_end must be after period_start")
+        if self.period_end > datetime.now(UTC):
+            # A premature request would SUCCEED with partial data and the
+            # claim-row guard would then block the completed period's scheduled
+            # run forever ("skipped" for SUCCEEDED runs) — a silent compliance
+            # gap. The period must be complete before generation.
+            raise ValueError("period_end must not be in the future")
         return self
 
 

@@ -162,6 +162,66 @@ async def test_request_generation_enqueues_under_invoking_user(
     ]
 
 
+async def test_request_generation_pins_naive_period_as_utc(
+    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Naive ISO periods are pinned as UTC — the run id matches the worker's.
+
+    Regression: the tool derived the run id via host-local interpretation of
+    naive datetimes while the worker pins them as UTC, so the agent cited (and
+    polled) a run id the worker never creates on any non-UTC host.
+    """
+    from app.workers import celery_app as celery_module
+
+    calls: list[dict[str, Any]] = []
+
+    def _record(name: str, args: list[Any] | None = None, **kwargs: Any) -> None:
+        calls.append({"name": name, "args": list(args or []), **kwargs})
+
+    monkeypatch.setattr(celery_module.celery_app, "send_task", _record)
+
+    with agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()):
+        result = json.loads(
+            await request_report_generation.ainvoke(
+                {
+                    "kind": "change",
+                    "period_start": "2026-07-01T00:00:00",  # naive: no offset
+                    "period_end": "2026-07-08T00:00:00",
+                }
+            )
+        )
+
+    assert result["run_id"] == str(deterministic_run_id(ReportKind.CHANGE, _START, _END))
+    # Serialized aware-UTC, so the worker's _parse_utc derives the SAME id.
+    assert calls[0]["args"][1] == _START.isoformat()
+    assert calls[0]["args"][2] == _END.isoformat()
+
+
+async def test_request_generation_rejects_future_period_end(
+    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A not-yet-complete period is refused before anything is enqueued."""
+    from datetime import timedelta
+
+    from app.workers import celery_app as celery_module
+
+    calls: list[Any] = []
+    monkeypatch.setattr(celery_module.celery_app, "send_task", lambda *a, **k: calls.append(1))
+    now = datetime.now(UTC)
+    with (
+        agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()),
+        pytest.raises(ValueError, match="future"),
+    ):
+        await request_report_generation.ainvoke(
+            {
+                "kind": "change",
+                "period_start": (now - timedelta(days=1)).isoformat(),
+                "period_end": (now + timedelta(days=1)).isoformat(),
+            }
+        )
+    assert calls == []  # a rejected period never reaches the broker
+
+
 async def test_request_generation_denied_below_floor(
     seeded_db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

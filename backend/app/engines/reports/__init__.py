@@ -18,7 +18,7 @@ from app.engines.reports.access import (
     role_meets_floor,
 )
 from app.engines.reports.builders import ENGINE_VERSION, build_payload
-from app.engines.reports.idempotency import deterministic_run_id, scheduled_period
+from app.engines.reports.idempotency import coerce_utc, deterministic_run_id, scheduled_period
 from app.engines.reports.payloads import ReportPayload, ReportSection
 from app.engines.reports.redaction import RedactionViolationError, enforce_redaction
 from app.engines.reports.render import (
@@ -36,6 +36,7 @@ __all__ = [
     "ReportPayload",
     "ReportSection",
     "build_payload",
+    "coerce_utc",
     "deterministic_run_id",
     "enforce_redaction",
     "kinds_visible_to",
