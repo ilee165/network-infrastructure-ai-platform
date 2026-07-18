@@ -20,7 +20,14 @@ from app.models.applications import (
     DependencySource,
     DependencyTargetKind,
 )
-from app.models.audit import AuditChainCheckpoint, AuditExportCursor, AuditLog
+from app.models.audit import (
+    AuditChainCheckpoint,
+    AuditChainVerificationRun,
+    AuditExportCursor,
+    AuditLog,
+    ChainVerificationOutcome,
+    GrantCheckOutcome,
+)
 from app.models.base import Base
 from app.models.change_requests import (
     Approval,
@@ -87,8 +94,10 @@ __all__ = [
     "Approval",
     "ApprovalDecision",
     "AuditChainCheckpoint",
+    "AuditChainVerificationRun",
     "AuditExportCursor",
     "AuditLog",
+    "ChainVerificationOutcome",
     "Base",
     "ChangeRequest",
     "ChangeRequestKind",
@@ -113,6 +122,7 @@ __all__ = [
     "DocumentFormat",
     "DocumentKind",
     "Embedding",
+    "GrantCheckOutcome",
     "NormalizedComputeClusterRow",
     "NormalizedHypervisorHostRow",
     "NormalizedInterfaceRow",

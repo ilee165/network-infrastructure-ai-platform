@@ -82,6 +82,8 @@ _RESET_TABLES = (
     "report_runs",
     "compliance_run_findings",
     "compliance_runs",
+    # P4 W3-T5 audit chain verification history (ADR-0053 §7.4).
+    "audit_chain_verification_runs",
 )
 
 

@@ -2,14 +2,12 @@
 
 Maps every :class:`~app.models.reports.ReportKind` to an async builder that
 assembles its typed payload from the ALLOWLISTED sources only (ADR-0053 §6
-layer 1). The change report (§7.1) is LIVE — the W3-T2 CR lifecycle roll-up in
-:mod:`app.engines.reports.change_report` — as are the compliance posture
-report (§7.2) — the W3-T3 history roll-up in
-:mod:`app.engines.reports.compliance_posture` — and the access review report
-(§7.3) — the W3-T4 users/roles/mappings/break-glass roll-up in
-:mod:`app.engines.reports.access_review`; the remaining kind renders the
-W3-T1 deterministic skeleton until its wave task lands: W3-T5 (audit
-integrity).
+layer 1). All four kinds are LIVE: the change report (§7.1, W3-T2,
+:mod:`app.engines.reports.change_report`), the compliance posture report
+(§7.2, W3-T3, :mod:`app.engines.reports.compliance_posture`), the access
+review report (§7.3, W3-T4, :mod:`app.engines.reports.access_review`), and
+the audit-integrity report (§7.4, W3-T5,
+:mod:`app.engines.reports.audit_integrity`).
 
 Source allowlist (layer 1): builders may read ONLY secret-free sources — CR
 metadata, approvals, audit columns, users/roles/mappings, the §7.2/§7.4 history
@@ -29,6 +27,7 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engines.reports.access_review import build_access_review_sections
+from app.engines.reports.audit_integrity import build_audit_integrity_sections
 from app.engines.reports.change_report import build_change_sections
 from app.engines.reports.compliance_posture import build_compliance_posture_sections
 from app.engines.reports.payloads import ReportPayload, ReportSection
@@ -55,13 +54,6 @@ REPORT_TITLES: Final[dict[ReportKind, str]] = {
     ReportKind.COMPLIANCE_POSTURE: "Compliance Posture Report",
     ReportKind.ACCESS_REVIEW: "Access Review Report",
     ReportKind.AUDIT_INTEGRITY: "Audit Integrity Report",
-}
-
-#: The wave task that lands each REMAINING kind's full payload on this engine
-#: (change landed in W3-T2, compliance posture in W3-T3, access review in
-#: W3-T4 — see the dispatch in :func:`build_payload`).
-_PAYLOAD_TASKS: Final[dict[ReportKind, str]] = {
-    ReportKind.AUDIT_INTEGRITY: "W3-T5",
 }
 
 
@@ -135,7 +127,12 @@ async def build_payload(
             sections=(provenance, *access_sections),
             notes=access_notes,
         )
-    del session  # The remaining W3-T5 skeleton kind reads nothing yet.
+    # The one remaining kind (W3-T5): the ADR-0038 spine as evidence, with the
+    # LIVE generation-time grant attestation recorded at the injected instant.
+    assert kind is ReportKind.AUDIT_INTEGRITY
+    integrity_sections, integrity_notes = await build_audit_integrity_sections(
+        session, period_start=period_start, period_end=period_end, generated_at=generated_at
+    )
     return ReportPayload(
         kind=kind.value,
         title=REPORT_TITLES[kind],
@@ -143,9 +140,6 @@ async def build_payload(
         period_end=period_end,
         generated_at=generated_at,
         regime_tags=REGIME_TAG_DEFAULTS[kind],
-        sections=(provenance,),
-        notes=(
-            f"Engine skeleton artifact (P4 W3-T1): the full {kind.value} payload "
-            f"lands in {_PAYLOAD_TASKS[kind]} on this render path.",
-        ),
+        sections=(provenance, *integrity_sections),
+        notes=integrity_notes,
     )

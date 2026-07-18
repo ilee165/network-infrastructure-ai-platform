@@ -56,10 +56,18 @@ def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def test_single_head_is_0020() -> None:
+def test_single_head_no_branch() -> None:
+    """`alembic heads` resolves to exactly one head (no branch).
+
+    0020 was the head when W3-T1 landed; P4 W3-T5's 0021 now extends the same
+    linear chain. Current-head assertion lives in
+    ``test_0021_audit_chain_verification_runs.test_single_head_is_0021``.
+    """
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert heads == ["0020"], f"expected single head 0020, got {heads}"
+    assert len(heads) == 1, f"expected a single head (no branch), got {heads}"
+    ancestry = {rev.revision for rev in script.iterate_revisions(heads[0], "base")}
+    assert "0020" in ancestry, f"0020 must be on the line to the head, got {ancestry}"
 
 
 def test_0020_revises_0019() -> None:

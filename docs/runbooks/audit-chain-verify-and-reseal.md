@@ -29,6 +29,7 @@ Continuously prove the append-only `audit_log` has not been mutated or deleted b
 3. Walks every entry after the checkpoint in append order (the monotonic `seq` column), checking BOTH directions of each link: the stored `entry_hash` must equal the recompute, and the stored `prev_hash` must equal the predecessor's `entry_hash`.
 4. **Clean** → advances the checkpoint over the verified-clean segment, writes `audit_chain_verified 1`, exits 0.
 5. **Break** → does NOT advance the checkpoint, writes `audit_chain_verified 0` + the break's position/entry-id/reason, exits **non-zero** (the Job is Failed — the alert). It never silently passes.
+6. **History row (P4 W3-T5, ADR-0053 §7.4)** — every run (clean OR break, incremental OR full) additionally persists one `audit_chain_verification_runs` row: started/finished, outcome (`clean`/`break`), entries checked, the walked range, the checkpoint watermark hex before/after, and the daily **append-only grant attestation** (whether any `UPDATE`/`DELETE` grant existed on `audit_log`, parent + partitions, from the PG catalog). This is purely **additive**: the metric and exit-code behavior above are unchanged, and a row-write failure is logged (`audit.chain.verification_run_write_failed`) without flipping either — the audit-integrity report then surfaces the missing day as an explicit `verification-gap` finding (metrics retention cannot back a 7-year evidence trail; this table can — see `docs/runbooks/report-engine.md`, `kind=audit_integrity`).
 
 ## The weekly FULL scan — why the daily run is not enough
 

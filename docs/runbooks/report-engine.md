@@ -184,3 +184,45 @@ explicit secret-free columns only — `users.password_hash` and the
 (`backend/tests/engines/reports/test_boundary.py`) asserts are never queried.
 Roster/role/mapping state is generation-time state (the platform keeps no
 role-assignment history); login-derived columns are anchored at the period end.
+
+## Report contents — audit-integrity report (`kind=audit_integrity`; ADR-0053 §7.4, W3-T5)
+
+API note for consumers of `POST/GET /api/v1/reports` with
+`kind=audit_integrity` (**admin floor at BOTH generation and artifact
+download**; monthly beat cadence; regime tag `soc2:CC7.2`): the artifact
+surfaces the ADR-0038 audit spine as evidence for the CLOSED-OPEN UTC period
+`[start, end)`. It reads the **persisted verification history**
+(`audit_chain_verification_runs`, written by the daily chain-verification
+CronJob as the ADR-0053 §7.4 additive change — the CronJob's metric and
+exit-code behavior are unchanged); **generation never re-verifies the chain
+inline**, so report latency is independent of chain length.
+
+Four sections per artifact (CSV and PDF carry the same structure; the golden
+fixture `backend/tests/engines/reports/golden/audit_integrity_golden.json`
+pins it for the W4-T3 conformance checks):
+
+1. **Chain verification runs** — every persisted run in the period: started/
+   finished, chain outcome (`clean`/`break`), entries verified, the walked
+   range (exclusive lower bound = the checkpoint anchor, `genesis` on a first
+   run or full scan; upper bound = the verified head entry id), the checkpoint
+   watermark **SHA-256 hex digests before/after** (digest presentations are
+   tamper evidence — the format-anchored redaction contract deliberately does
+   not flag them, ADR-0053 §6 alt 5), and that run's append-only grant check.
+2. **Daily verification outcomes** — one row per UTC day. **A day with no
+   persisted run renders the explicit `gap` marker AND raises a
+   `verification-gap` finding** — a verification that never ran is a finding,
+   not a blank (check the `audit-chain-verify` CronJob and its logs; a row of
+   gap days means the daily job is not running or not persisting).
+3. **Integrity findings** — explicit rows per `verification-gap` day,
+   `chain-break` day (a break day is an incident: see the audit-chain
+   runbook), and `append-only-grant` day (an `UPDATE`/`DELETE` grant existed
+   on `audit_log` during that day's attestation), plus a generation-time
+   grant finding when the live check below trips.
+4. **Append-only grant attestation (generation time)** — the generator
+   re-queries the PostgreSQL catalog (`pg_class.relacl` via `aclexplode`,
+   parent **and every partition** via `pg_inherits`) **live at every
+   generation — never cached** — and records the result + timestamp (the
+   G-SEC "append-only attested" criterion). Caveat: a `REVOKE` cannot bind
+   the table owner or a superuser (migration 0001); the hash chain is the
+   tamper-evidence backstop for privileged actors — which is exactly what the
+   daily verification above proves.
