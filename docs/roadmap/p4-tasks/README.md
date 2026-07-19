@@ -85,6 +85,12 @@ strong bar; ADR-0052 escalated whole (amendment above).
 
 ## W3 — Compliance & audit reporting suite (ADR-0053, PRODUCTION.md §7). **Concurrent with W2.**
 
+> **Current state:** Implemented on PR #166, but review remediation is pending.
+> Independent review graded the wave **D+ (58/100)** with 11 inline findings;
+> focused verification passed 207 tests with 1 skipped, while three required CI
+> jobs remain red. The wave is not merge-ready. See the
+> [PR #166 review report](../../reviews/P4-W3-PR166-REVIEW.md).
+
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
 | [W3-T1](W3-T1-report-engine.md) | Report engine: PG report model + beat scheduling + CSV/PDF renderers (air-gap) + retention + RBAC + **fail-closed redaction contract** | `wf-implementer` | **strong** spec + quality (escalated: audit spine + exports) | W0-T4 |
