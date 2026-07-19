@@ -9387,9 +9387,21 @@
             "content": {
               "application/json": {
                 "schema": {}
+              },
+              "application/pdf": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
               }
             },
-            "description": "Successful Response"
+            "description": "The artifact bytes (CSV or PDF, per its ``format``)."
           },
           "422": {
             "content": {

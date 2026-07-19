@@ -28,12 +28,14 @@ second write that bypasses approval.
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
+from typing import Any
 
 from celery import Celery
 from celery.beat import BeatLazyFunc
 from celery.schedules import crontab
-from celery.signals import worker_init
+from celery.signals import worker_init, worker_process_shutdown
 from kombu import Queue
 
 from app.core.config import Settings, get_settings
@@ -354,6 +356,38 @@ def create_celery_app() -> Celery:
     return celery
 
 
+def _multiprocess_registry() -> Any | None:
+    """Build a ``MultiProcessCollector``-backed registry, or ``None`` (PR #166 F4).
+
+    Celery's prefork pool runs task BODIES in CHILD processes; every metric
+    setter a task calls (``observe_report_generation``, ``set_report_last_
+    success``, ...) therefore mutates that CHILD's own per-process
+    ``prometheus_client`` value — never the parent's in-memory default
+    ``REGISTRY`` the ``/metrics`` HTTP server (started once in the PARENT at
+    ``worker_init``, before any child forks) was serving. Scraping the default
+    ``REGISTRY`` in that parent forever reads the metrics' zero/unset initial
+    state, no matter how many tasks the children complete (compose ``-c 2``+).
+
+    When ``PROMETHEUS_MULTIPROC_DIR`` is set (the standard ``prometheus_client``
+    multiprocess-mode contract — every ``Counter``/``Gauge``/``Histogram``
+    created anywhere in the process already writes to that directory's mmap
+    files once the env var is present at import time), this returns a fresh
+    ``CollectorRegistry`` wired to a ``MultiProcessCollector`` over that
+    directory, which aggregates every process's file into one scrape. Returns
+    ``None`` (caller falls back to the default ``REGISTRY``) when the dir is
+    unset — the existing single-process dev/test behavior is unchanged.
+    """
+    directory = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if not directory:
+        return None
+    from prometheus_client import CollectorRegistry, multiprocess
+
+    os.makedirs(directory, exist_ok=True)
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry, path=directory)
+    return registry
+
+
 def start_worker_metrics_server(port: int) -> bool:
     """Start the worker's Prometheus ``/metrics`` HTTP server on *port* (W3-T0).
 
@@ -362,6 +396,11 @@ def start_worker_metrics_server(port: int) -> bool:
     ``netops_*`` discovery/LLM/CR/queue series this worker emits (ADR-0015 §2) —
     are exposed by a tiny ``prometheus_client`` HTTP server started once in the
     worker main process. The K8s worker Deployments scrape this port.
+
+    PR #166 F4: when ``PROMETHEUS_MULTIPROC_DIR`` is set, the server instead
+    serves a :func:`_multiprocess_registry` — a ``MultiProcessCollector`` over
+    every prefork child's own mmap files — so task-body metric mutations
+    (which happen in the children, never the parent) are actually visible here.
 
     Graceful by design (mirrors :mod:`app.core.metrics`): returns ``False`` (and
     logs, never raises) when ``prometheus_client`` is absent or the port is
@@ -373,8 +412,12 @@ def start_worker_metrics_server(port: int) -> bool:
     except ImportError:
         _logger.info("worker.metrics_server_skipped", reason="prometheus_client_absent")
         return False
+    registry = _multiprocess_registry()
     try:
-        start_http_server(port)
+        if registry is not None:
+            start_http_server(port, registry=registry)
+        else:
+            start_http_server(port)
     except OSError as exc:
         # Port already bound (e.g. a co-located second worker, or a re-init) must
         # not crash the worker; the first server keeps serving the shared REGISTRY.
@@ -382,7 +425,7 @@ def start_worker_metrics_server(port: int) -> bool:
             "worker.metrics_server_unavailable", port=port, reason_class=type(exc).__name__
         )
         return False
-    _logger.info("worker.metrics_server_started", port=port)
+    _logger.info("worker.metrics_server_started", port=port, multiprocess=registry is not None)
     return True
 
 
@@ -392,8 +435,41 @@ def _start_metrics_on_worker_init(**_kwargs: object) -> None:
 
     ``worker_init`` fires once in the worker MAIN process (before prefork children),
     so the HTTP server binds the configured port exactly once per worker.
+
+    PR #166 F6: also re-hydrates the report-engine staleness gauge for all
+    four kinds from durable history (or the worker's boot timestamp, for a
+    kind that has never once succeeded) — see
+    :func:`app.workers.tasks.reports.seed_last_success_gauges`. Imported here
+    (not at module level) to avoid a celery_app <-> tasks.reports import cycle;
+    by the time this signal fires the task modules are already imported.
     """
     start_worker_metrics_server(get_settings().worker_metrics_port)
+    from app.workers.tasks.reports import seed_last_success_gauges
+
+    seed_last_success_gauges()
+
+
+@worker_process_shutdown.connect
+def _mark_prefork_child_dead(pid: int | None = None, **_kwargs: object) -> None:
+    """Retire a prefork child's multiprocess-mode mmap files on exit (PR #166 F4).
+
+    Without this, a child that exits (worker restart, ``--max-tasks-per-child``
+    churn) leaves its per-process gauge/counter/histogram files in
+    ``PROMETHEUS_MULTIPROC_DIR`` forever — unbounded directory growth, and a
+    dead child's stale last-write competing in the ``mostrecent`` gauge
+    aggregation. ``multiprocess.mark_process_dead`` (the documented
+    ``prometheus_client`` cleanup hook, mirroring the gunicorn ``child_exit``
+    pattern) deletes that pid's files. No-op when this worker is not running
+    in multiprocess mode, or ``prometheus_client`` is absent.
+    """
+    directory = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if not directory or pid is None:
+        return
+    try:
+        from prometheus_client import multiprocess
+    except ImportError:
+        return
+    multiprocess.mark_process_dead(pid)
 
 
 #: Worker entrypoint: ``celery -A app.workers.celery_app worker -Q <queue>``.

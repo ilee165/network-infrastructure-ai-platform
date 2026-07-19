@@ -5,6 +5,7 @@ download-time role-revocation regression (no stale-authz caching).
 
 from __future__ import annotations
 
+import threading
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -12,8 +13,10 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 import app.api.v1.reports as reports_module
 from app.engines.reports import deterministic_run_id
@@ -113,6 +116,31 @@ async def test_generation_floor_per_kind(
         assert sent_tasks and sent_tasks[-1]["name"] == "reports.generate"
     else:
         assert sent_tasks == []  # a denied request must never enqueue
+
+
+async def test_generation_dispatch_runs_off_the_event_loop_thread(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #166 F4: ``celery_app.send_task`` is dispatched via
+    ``loop.run_in_executor`` (the D2 async-first pattern) so the synchronous
+    broker I/O never blocks the request-handling event loop. A regression to
+    a bare inline ``send_task`` call would execute ON the same thread as the
+    awaiting coroutine; wrapped in ``run_in_executor`` it runs on a distinct
+    executor thread."""
+    seen_thread_ids: list[int] = []
+
+    def _record(name: str, args: list[Any] | None = None, **kwargs: Any) -> None:
+        seen_thread_ids.append(threading.get_ident())
+
+    monkeypatch.setattr(reports_module.celery_app, "send_task", _record)
+    response = await client.post(
+        "/api/v1/reports", json=_body("change"), headers=auth_headers("engineer")
+    )
+    assert response.status_code == 202
+    assert seen_thread_ids
+    assert seen_thread_ids[0] != threading.get_ident()
 
 
 async def test_generation_request_is_audited(
@@ -348,6 +376,30 @@ async def test_unknown_run_and_artifact_are_404(
             f"/api/v1/reports/{run.id}/artifacts/{missing}", headers=auth_headers("engineer")
         )
     ).status_code == 404
+
+
+async def test_metadata_query_does_not_load_artifact_content(
+    session: AsyncSession,
+) -> None:
+    """PR #166 F4: ``ReportArtifact.content`` is a DEFERRED column — the exact
+    ``selectinload(ReportRun.artifacts)`` query ``_get_visible_run_or_404``
+    (the shared path behind ``GET /reports/{run_id}`` and the download route's
+    existence/RBAC check) uses must NOT pull the artifact bytes for its
+    ``GET /reports/{run_id}`` metadata use. Metadata reads never touch bytes;
+    a plain non-deferred column would load every sibling artifact's content
+    on this query, regardless of whether any of it is ever used."""
+    run, artifact = await _seed_run(session)
+    assert artifact is not None
+    await session.commit()
+    run_id = run.id
+    session.expire_all()
+
+    stmt = (
+        select(ReportRun).options(selectinload(ReportRun.artifacts)).where(ReportRun.id == run_id)
+    )
+    fetched_run = (await session.execute(stmt)).scalar_one()
+    fetched_artifact = fetched_run.artifacts[0]
+    assert "content" in sa_inspect(fetched_artifact).unloaded
 
 
 # ---------------------------------------------------------------------------

@@ -34,10 +34,21 @@ groups:
   # gap an auditor discovers months later unless it pages now.
   #   weekly  (change, compliance_posture): 7d cadence + 1d grace  = 8d
   #   monthly (access_review, audit_integrity): 31d cadence + 2d grace = 33d
-  # NOTE: a fresh deployment has no gauge sample until the first success, and
-  # a never-set gauge cannot alert — the runbook's first check is "has this
-  # kind ever succeeded?" (absent() is unusable per-kind without per-kind
-  # rules; the beat schedule makes the first sample land within one cadence).
+  # NOTE (PR #166 F6, "never-succeeded silence" — CLOSED): a kind whose gauge
+  # was never SET (set_report_last_success only ever runs on the SUCCESS path)
+  # used to leave this expression with NO series to evaluate — a fresh
+  # deployment, or a kind failing on every attempt, could never page, which is
+  # exactly the worst case this alert exists to catch. The worker now SEEDS
+  # the gauge for all four kinds at boot (app.workers.tasks.reports.
+  # seed_last_success_gauges): re-hydrated from the durable last-SUCCEEDED
+  # ReportRun.finished_at when one exists (so a real, already-stale condition
+  # SURVIVES a routine worker restart instead of resetting to "fresh"), else
+  # the worker's own boot timestamp (so a kind that has NEVER succeeded gets a
+  # series immediately and fires on schedule instead of staying silent
+  # forever). A never-succeeded scenario is therefore just a gauge pinned at
+  # one old timestamp with no later write — the SAME shape the FIRING cases
+  # below already exercise; see the two "seeded at boot" test cases for the
+  # explicit not-yet-stale / eventually-fires proof (ADR-0053 §9).
   # ===========================================================================
   - name: netops-report-staleness
     rules:

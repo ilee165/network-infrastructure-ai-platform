@@ -227,6 +227,18 @@ try:  # Optional observability dependency (D15) — degrade to no-ops if absent.
         "staleness-alert source (last success older than cadence + grace pages; "
         "ADR-0053 §9, the scheduled-backup-completeness pattern).",
         ["report_kind"],
+        # PR #166 F4: the ``reports.generate*`` tasks execute in Celery PREFORK
+        # CHILD processes, each with its own prometheus_client multiprocess-mode
+        # mmap file — the default multiprocess aggregation (sum across files)
+        # would ADD every child's timestamp together into a meaningless number.
+        # ``mostrecent`` is prometheus_client's purpose-built mode for exactly
+        # this "gauge tracks the last time X happened" shape: across all
+        # per-process files for a given ``report_kind`` label set, the sample
+        # with the latest WRITE (not value) timestamp wins — so whichever
+        # process (a prefork child's real success, or the worker_init seed —
+        # PR #166 F6) wrote MOST RECENTLY is authoritative. A no-op outside
+        # multiprocess mode (no ``PROMETHEUS_MULTIPROC_DIR``).
+        multiprocess_mode="mostrecent",
     )
 
     _PROM_ENABLED = True

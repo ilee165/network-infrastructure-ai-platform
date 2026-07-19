@@ -137,7 +137,21 @@ class ReportArtifact(UuidPkMixin, TimestampMixin, Base):
     format: Mapped[str] = mapped_column(String(8), nullable=False)
     #: The artifact bytes themselves — PG ``bytea``, covered by the PG backup/DR
     #: path (ADR-0030); the MinIO object-store escalation is named, not built.
-    content: Mapped[bytes] = mapped_column(LargeBinary(), nullable=False)
+    #: DEFERRED (PR #166 F4): a plain (non-deferred) LargeBinary column loads
+    #: EVERY sibling artifact's bytes on any query that selects the entity —
+    #: metadata reads (``GET /reports/{run_id}``, the read facade) and even the
+    #: download route's own ``ReportRun.artifacts`` selectinload only need
+    #: ``sha256``/``size_bytes``/``format`` to answer, never the blob. Deferring
+    #: keeps the column out of the default SELECT; the download route explicitly
+    #: re-selects the ONE requested artifact's bytes with its own statement.
+    #: ``deferred_raiseload=True`` turns any OTHER accidental touch of
+    #: ``.content`` (e.g. via the audit-detail serializer) into an explicit,
+    #: immediate ``InvalidRequestError`` instead of an implicit lazy-load —
+    #: which, off the request's async greenlet, would surface as an opaque
+    #: ``MissingGreenlet`` crash rather than a clear programming-error signal.
+    content: Mapped[bytes] = mapped_column(
+        LargeBinary(), nullable=False, deferred=True, deferred_raiseload=True
+    )
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger(), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)

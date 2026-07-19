@@ -17,9 +17,13 @@ fixed values no matter how late the worker executes it).
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import pytest
 from celery.beat import BeatLazyFunc, _evaluate_entry_kwargs
+from prometheus_client import CollectorRegistry
+from prometheus_client.multiprocess import MultiProcessCollector
 
 from app.core.config import get_settings
 from app.engines.reports.idempotency import scheduled_period
@@ -100,3 +104,123 @@ def test_lazy_bounds_track_each_dispatch_instant_not_a_frozen_startup_value(
     assert first != second
     assert first["period_end"] == scheduled_period(cadence, first_instant)[1].isoformat()
     assert second["period_end"] == scheduled_period(cadence, second_instant)[1].isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Worker metrics-server multiprocess mode (PR #166 F4)
+# ---------------------------------------------------------------------------
+
+
+def test_multiprocess_registry_is_none_without_the_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``PROMETHEUS_MULTIPROC_DIR`` -> the caller falls back to the default
+    ``REGISTRY`` (the existing single-process dev/test behavior)."""
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+    assert celery_app_module._multiprocess_registry() is None
+
+
+def test_multiprocess_registry_builds_a_multiprocess_collector_when_dir_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #166 F4 minimum test: the metrics-server registry uses
+    ``MultiProcessCollector`` (never the default single-process ``REGISTRY``)
+    when ``PROMETHEUS_MULTIPROC_DIR`` is set — this is what makes prefork
+    CHILD-process metric mutations visible to the parent's ``/metrics`` server."""
+    directory = tmp_path / "multiproc"
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(directory))
+
+    registry = celery_app_module._multiprocess_registry()
+
+    assert isinstance(registry, CollectorRegistry)
+    assert directory.is_dir()  # created eagerly so a scrape never 404s on it
+    collectors = list(registry._collector_to_names)
+    assert len(collectors) == 1
+    assert isinstance(collectors[0], MultiProcessCollector)
+
+
+def test_start_worker_metrics_server_passes_the_multiprocess_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the dir is set, ``start_http_server`` is called WITH the
+    multiprocess registry — not the implicit default ``REGISTRY``."""
+    directory = tmp_path / "multiproc"
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(directory))
+    calls: list[dict[str, Any]] = []
+
+    def _fake_start_http_server(port: int, registry: Any = None, **kwargs: Any) -> None:
+        calls.append({"port": port, "registry": registry})
+
+    monkeypatch.setattr("prometheus_client.start_http_server", _fake_start_http_server)
+
+    result = celery_app_module.start_worker_metrics_server(9999)
+
+    assert result is True
+    assert len(calls) == 1
+    assert calls[0]["port"] == 9999
+    assert isinstance(calls[0]["registry"], CollectorRegistry)
+
+
+def test_start_worker_metrics_server_uses_default_registry_without_the_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the env var, ``start_http_server`` is called with NO registry
+    kwarg — the existing single-process default-``REGISTRY`` behavior."""
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+    calls: list[dict[str, Any]] = []
+
+    def _fake_start_http_server(port: int, **kwargs: Any) -> None:
+        calls.append({"port": port, "kwargs": kwargs})
+
+    monkeypatch.setattr("prometheus_client.start_http_server", _fake_start_http_server)
+
+    result = celery_app_module.start_worker_metrics_server(9998)
+
+    assert result is True
+    assert len(calls) == 1
+    assert calls[0]["kwargs"] == {}
+
+
+def test_worker_init_seeds_last_success_gauges(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``worker_init`` also re-hydrates the report-engine staleness gauges
+    (PR #166 F6) — the worker boots BOTH the metrics server AND the seed."""
+    monkeypatch.setattr(celery_app_module, "start_worker_metrics_server", lambda port: True)
+    calls: list[bool] = []
+
+    import app.workers.tasks.reports as tasks_reports_module
+
+    monkeypatch.setattr(
+        tasks_reports_module, "seed_last_success_gauges", lambda: calls.append(True)
+    )
+
+    celery_app_module._start_metrics_on_worker_init()
+
+    assert calls == [True]
+
+
+# ---------------------------------------------------------------------------
+# Prefork-child mmap cleanup on exit (PR #166 F4)
+# ---------------------------------------------------------------------------
+
+
+def test_mark_prefork_child_dead_calls_multiprocess_cleanup_when_dir_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "multiproc"
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(directory))
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "prometheus_client.multiprocess.mark_process_dead", lambda pid: calls.append(pid)
+    )
+
+    celery_app_module._mark_prefork_child_dead(pid=1234)
+
+    assert calls == [1234]
+
+
+def test_mark_prefork_child_dead_is_a_noop_without_the_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+    # Must not raise even though no multiprocess cleanup is possible.
+    celery_app_module._mark_prefork_child_dead(pid=1234)

@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import undefer
 
 from app.engines.reports import deterministic_run_id, scheduled_period
 from app.engines.reports.payloads import ReportPayload, ReportSection
@@ -128,7 +129,10 @@ def test_generate_succeeds_and_persists_artifacts(
     assert run.regime_tags == ["soc2:CC8.1", MAPPING_VERSION_TAG]
     assert run.finished_at is not None
 
-    artifacts = _query_all(db_url, select(ReportArtifact))
+    # PR #166 F4: ``content`` is a deferred column — explicitly undefer it here
+    # since this test (unlike production's metadata-only reads) checks the
+    # persisted bytes themselves.
+    artifacts = _query_all(db_url, select(ReportArtifact).options(undefer(ReportArtifact.content)))
     assert sorted(a.format for a in artifacts) == ["csv", "pdf"]
     for artifact in artifacts:
         assert artifact.run_id == _RUN_ID
@@ -589,3 +593,173 @@ def test_mixed_evaluated_unevaluated_and_out_of_scope_estate(
     run = _query_all(db_url, select(ComplianceRun))[0]
     assert sorted(run.device_scope) == sorted([str(evaluated_id), str(unevaluated.id)])
     assert str(out_of_scope.id) not in run.device_scope
+
+
+# ---------------------------------------------------------------------------
+# Sweep N+1 fix — one bulk bounded query, not one per device (PR #166 F4)
+# ---------------------------------------------------------------------------
+
+
+def test_latest_snapshots_by_device_picks_the_newest_row(eager_celery: None, db_url: str) -> None:
+    """Direct coverage of the bulk window-function query: a device with
+    MULTIPLE snapshots resolves to its NEWEST one — the same
+    ``ORDER BY captured_at DESC, created_at DESC`` semantics the prior
+    per-device query used, now evaluated in one bulk statement."""
+    device = Device(
+        id=uuid4(),
+        hostname="multi-snap",
+        mgmt_ip="10.0.0.9",
+        vendor_id="cisco_ios",
+        status=DeviceStatus.REACHABLE,
+    )
+    old = ConfigSnapshot(
+        device_id=device.id,
+        captured_at=datetime.now(UTC) - timedelta(days=1),
+        source=ConfigSource.ON_DEMAND,
+        content="old",
+        content_hash="a" * 64,
+    )
+    new = ConfigSnapshot(
+        device_id=device.id,
+        captured_at=datetime.now(UTC),
+        source=ConfigSource.ON_DEMAND,
+        content="new",
+        content_hash="b" * 64,
+    )
+    _seed(db_url, device, old, new)
+
+    async def _go() -> dict[UUID, ConfigSnapshot]:
+        engine = create_async_engine(db_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            result = await tasks._latest_snapshots_by_device(session)
+        await engine.dispose()
+        return result
+
+    latest = asyncio.run(_go())
+    assert set(latest) == {device.id}
+    assert latest[device.id].content == "new"
+
+
+def test_compliance_sweep_issues_one_bulk_query_not_one_per_device(
+    eager_celery: None, db_url: str
+) -> None:
+    """PR #166 F4 N+1 regression bite: five devices with snapshots must cost
+    exactly ONE query against ``config_snapshots`` for the whole sweep, never
+    one per device (a revert to the per-device loop query would make this
+    grow linearly with the device count)."""
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+
+    for i in range(5):
+        device = Device(
+            id=uuid4(),
+            hostname=f"dev-{i}",
+            mgmt_ip=f"10.0.0.{i + 1}",
+            vendor_id="cisco_ios",
+            status=DeviceStatus.REACHABLE,
+        )
+        snapshot = ConfigSnapshot(
+            device_id=device.id,
+            captured_at=datetime.now(UTC),
+            source=ConfigSource.ON_DEMAND,
+            content="hostname x\nend\n",
+            content_hash=f"{i}" * 64,
+        )
+        _seed(db_url, device, snapshot)
+
+    statements: list[str] = []
+
+    def _capture(
+        conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, executemany: bool
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(Engine, "before_cursor_execute", _capture)
+    try:
+        result = tasks.compliance_sweep.run()
+    finally:
+        event.remove(Engine, "before_cursor_execute", _capture)
+
+    assert result["status"] == "succeeded"
+    assert result["devices"] == 5
+    snapshot_selects = [
+        s for s in statements if "config_snapshots" in s and s.strip().upper().startswith("SELECT")
+    ]
+    assert len(snapshot_selects) == 1, (
+        f"expected exactly one bulk SELECT against config_snapshots for 5 "
+        f"devices, got {len(snapshot_selects)}: {snapshot_selects}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Startup gauge seeding — "never-succeeded silence" fix (PR #166 F6)
+# ---------------------------------------------------------------------------
+
+
+def test_seed_last_success_gauges_uses_boot_timestamp_when_never_succeeded(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kind with no SUCCEEDED ``ReportRun`` at all gets seeded to (about) the
+    boot instant — a series now exists so the staleness alert's cadence+grace
+    expression starts counting instead of staying silent forever."""
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(tasks, "set_report_last_success", lambda **kw: calls.append(kw))
+
+    tasks.seed_last_success_gauges()
+
+    assert {c["report_kind"] for c in calls} == {k.value for k in ReportKind}
+    now = datetime.now(UTC).timestamp()
+    for c in calls:
+        assert abs(c["timestamp"] - now) < 5
+
+
+def test_seed_last_success_gauges_rehydrates_a_real_prior_success(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kind that HAS succeeded before re-hydrates its TRUE last-success
+    timestamp from the durable ReportRun history — never "now". This is the
+    mask-on-restart guard: a real, already-stale condition must survive a
+    routine worker restart instead of resetting to fresh."""
+    real_success = datetime(2020, 1, 1, tzinfo=UTC)
+    run = ReportRun(
+        id=uuid4(),
+        kind=ReportKind.CHANGE.value,
+        trigger="on_demand",
+        requested_by=None,
+        period_start=real_success - timedelta(days=7),
+        period_end=real_success,
+        status=ReportRunStatus.SUCCEEDED.value,
+        regime_tags=[],
+        finished_at=real_success,
+    )
+    _seed(db_url, run)
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(tasks, "set_report_last_success", lambda **kw: calls.append(kw))
+
+    tasks.seed_last_success_gauges()
+
+    change_call = next(c for c in calls if c["report_kind"] == "change")
+    assert change_call["timestamp"] == real_success.timestamp()
+    now = datetime.now(UTC).timestamp()
+    assert now - change_call["timestamp"] > 1000  # unmistakably NOT "now"
+
+    # The other three kinds have never succeeded -> boot-timestamp fallback.
+    for c in calls:
+        if c["report_kind"] != "change":
+            assert abs(c["timestamp"] - now) < 5
+
+
+def test_seed_last_success_gauges_swallows_a_db_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A boot-time seeding failure (DB unreachable) must never crash the
+    worker — graceful by design, mirroring start_worker_metrics_server."""
+
+    def _boom() -> Any:
+        raise RuntimeError("db unreachable")
+
+    monkeypatch.setattr(tasks, "_make_engine", _boom)
+
+    tasks.seed_last_success_gauges()  # must not raise

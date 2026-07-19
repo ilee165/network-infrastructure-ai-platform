@@ -32,6 +32,7 @@ classification).
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Annotated
 
@@ -45,7 +46,7 @@ from app.core.errors import ForbiddenError, NotFoundError
 from app.core.security import Role
 from app.engines.reports import deterministic_run_id, kinds_visible_to, required_role
 from app.models import User
-from app.models.reports import ReportFormat, ReportKind, ReportRun
+from app.models.reports import ReportArtifact, ReportFormat, ReportKind, ReportRun
 from app.schemas.reports_api import (
     ReportGenerationQueued,
     ReportGenerationRequest,
@@ -135,16 +136,23 @@ async def request_generation(
         },
     )
     await session.commit()
-    celery_app.send_task(
-        "reports.generate",
-        args=[
-            body.kind.value,
-            body.period_start.isoformat(),
-            body.period_end.isoformat(),
-            "on_demand",
-            str(user.id),
-        ],
-        queue=QUEUE_DOCS,
+    # send_task performs synchronous broker I/O; run_in_executor keeps the
+    # event loop unblocked (D2 async-first, the trigger_discovery_run /
+    # request_report_generation agent-tool pattern — PR #166 F4).
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: celery_app.send_task(
+            "reports.generate",
+            args=[
+                body.kind.value,
+                body.period_start.isoformat(),
+                body.period_end.isoformat(),
+                "on_demand",
+                str(user.id),
+            ],
+            queue=QUEUE_DOCS,
+        ),
     )
     return ReportGenerationQueued(run_id=run_id, status="queued")
 
@@ -201,7 +209,18 @@ async def get_run(
     return ReportRunDetail.model_validate(run)
 
 
-@router.get("/{run_id}/artifacts/{artifact_id}")
+@router.get(
+    "/{run_id}/artifacts/{artifact_id}",
+    responses={
+        200: {
+            "content": {
+                "text/csv": {"schema": {"type": "string", "format": "binary"}},
+                "application/pdf": {"schema": {"type": "string", "format": "binary"}},
+            },
+            "description": "The artifact bytes (CSV or PDF, per its ``format``).",
+        },
+    },
+)
 async def download_artifact(
     run_id: uuid.UUID,
     artifact_id: uuid.UUID,
@@ -220,6 +239,15 @@ async def download_artifact(
     artifact = next((a for a in run.artifacts if a.id == artifact_id), None)
     if artifact is None:
         raise NotFoundError(f"report artifact {artifact_id} does not exist on run {run_id}")
+    # ``ReportArtifact.content`` is a deferred column (PR #166 F4): the
+    # ``_get_visible_run_or_404`` selectinload above never loaded it (a
+    # metadata GET, and every OTHER sibling artifact on this run, would
+    # otherwise pull every artifact's bytes). Explicitly select the bytes for
+    # ONLY the one requested artifact — an ordinary awaited statement, never
+    # an implicit lazy-load off a deferred attribute (which would raise
+    # ``MissingGreenlet`` on this async session).
+    content_stmt = select(ReportArtifact.content).where(ReportArtifact.id == artifact.id)
+    content = (await session.execute(content_stmt)).scalar_one()
     await audit.record(
         session,
         actor=f"user:{user.username}",
@@ -236,7 +264,7 @@ async def download_artifact(
     await session.commit()
     filename = f"{run.kind}-{run.period_end.date().isoformat()}.{artifact.format}"
     return Response(
-        content=artifact.content,
+        content=content,
         media_type=_MEDIA_TYPES.get(artifact.format, "application/octet-stream"),
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

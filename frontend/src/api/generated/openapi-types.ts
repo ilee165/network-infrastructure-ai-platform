@@ -6760,13 +6760,15 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
+            /** @description The artifact bytes (CSV or PDF, per its ``format``). */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": unknown;
+                    "application/pdf": string;
+                    "text/csv": string;
                 };
             };
             /** @description Validation Error */

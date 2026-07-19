@@ -98,6 +98,18 @@ services:
       - -c
       - celery -A app.workers.celery_app worker -Q discovery,config,docs,system -c $${NETOPS_CELERY_WORKER_CONCURRENCY:-2}
     env_file: ../../.env
+    # prometheus_client multiprocess mode (PR #166 F4): with -c 2+ the prefork
+    # POOL runs task bodies in CHILD processes, each with its own mmap-backed
+    # metric values; without this the /metrics server (bound once in the
+    # PARENT at worker_init) forever serves the parent's untouched default
+    # REGISTRY. celery_app.start_worker_metrics_server switches to a
+    # MultiProcessCollector over this directory whenever the env var is
+    # present — must be a real OS env var (not routed through NETOPS_* /
+    # Settings) because prometheus_client reads it via os.environ at the
+    # MODULE IMPORT of prometheus_client.values, which happens well before any
+    # Settings-driven setup could run.
+    environment:
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus-multiproc-worker
     depends_on:
       postgres:
         condition: service_healthy

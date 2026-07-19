@@ -47,11 +47,12 @@ from typing import Any, Final
 from uuid import UUID
 
 import structlog
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.orm import aliased
 
 from app import db
 from app.core.config import Settings, get_settings
@@ -90,7 +91,13 @@ from app.models.reports import (
 from app.services import audit
 from app.workers.celery_app import celery_app
 
-__all__ = ["compliance_sweep", "generate", "generate_scheduled", "purge_expired"]
+__all__ = [
+    "compliance_sweep",
+    "generate",
+    "generate_scheduled",
+    "purge_expired",
+    "seed_last_success_gauges",
+]
 
 logger = structlog.get_logger(__name__)
 
@@ -593,6 +600,30 @@ _OUT_OF_SCOPE_VENDOR_IDS: Final[frozenset[str]] = frozenset(
 )
 
 
+async def _latest_snapshots_by_device(session: AsyncSession) -> dict[UUID, ConfigSnapshot]:
+    """One bounded query for every device's latest ``ConfigSnapshot`` (PR #166 F4).
+
+    The sweep previously issued one ``SELECT ... LIMIT 1`` per device inside
+    the fan-out loop — an N+1 that scales linearly with the estate size on
+    every daily run. A ``ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY
+    captured_at DESC, created_at DESC)`` window, filtered to ``rn = 1``, is the
+    dialect-portable equivalent of Postgres ``DISTINCT ON`` (SQLite — the unit
+    suite's engine — has supported window functions since 3.25) and returns
+    AT MOST one row per device in a single round trip. A device with no
+    snapshot simply has no row here — the caller's ``dict.get`` returns
+    ``None`` for it, preserving the existing "unevaluated coverage gap"
+    behavior (PR #166 F2) exactly.
+    """
+    row_number = func.row_number().over(
+        partition_by=ConfigSnapshot.device_id,
+        order_by=(ConfigSnapshot.captured_at.desc(), ConfigSnapshot.created_at.desc()),
+    )
+    ranked = select(ConfigSnapshot, row_number.label("rn")).subquery()
+    latest_snapshot = aliased(ConfigSnapshot, ranked)
+    rows = (await session.execute(select(latest_snapshot).where(ranked.c.rn == 1))).scalars().all()
+    return {row.device_id: row for row in rows}
+
+
 async def _compliance_sweep_core(run_id: str | None = None) -> dict[str, Any]:
     """Evaluate the default policy pack across devices; persist secret-free history.
 
@@ -633,6 +664,9 @@ async def _compliance_sweep_core(run_id: str | None = None) -> dict[str, Any]:
             return {"run_id": str(run_uuid), "status": "skipped"}
 
         devices = list((await session.execute(select(Device))).scalars())
+        # One bulk, bounded query for every device's latest snapshot (PR #166
+        # F4) instead of a per-device round trip inside the fan-out below.
+        latest_by_device = await _latest_snapshots_by_device(session)
         evaluated_ids: list[str] = []
         unevaluated_ids: list[str] = []
         finding_count = 0
@@ -642,14 +676,7 @@ async def _compliance_sweep_core(run_id: str | None = None) -> dict[str, Any]:
                 # ADR-0051 §3 named deferrals) — surfaced via the dedicated
                 # out-of-scope vendor section, never as a coverage gap here.
                 continue
-            latest = (
-                await session.execute(
-                    select(ConfigSnapshot)
-                    .where(ConfigSnapshot.device_id == device.id)
-                    .order_by(ConfigSnapshot.captured_at.desc(), ConfigSnapshot.created_at.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
+            latest = latest_by_device.get(device.id)
             if latest is None:
                 # Supported but UNEVALUATED (PR #166 F2): still recorded in
                 # device_scope so the posture report can surface it as an
@@ -720,3 +747,72 @@ async def _compliance_sweep_core(run_id: str | None = None) -> dict[str, Any]:
 def compliance_sweep(run_id: str | None = None) -> dict[str, Any]:
     """Daily compliance evaluation sweep feeding the §7.2 trend history."""
     return dict(asyncio.run(_compliance_sweep_core(run_id)))
+
+
+# ---------------------------------------------------------------------------
+# Startup gauge seeding (ADR-0053 §9 — PR #166 F6 "never-succeeded silence")
+# ---------------------------------------------------------------------------
+
+
+async def _seed_last_success_gauges_core(boot_timestamp: float) -> None:
+    """Re-hydrate the staleness gauge for all four report kinds at worker boot.
+
+    The staleness alerts (``time() - netops_report_last_success_timestamp >
+    cadence + grace``) return NO SERIES for a kind whose gauge was never SET —
+    ``set_report_last_success`` is only ever called from the SUCCESS path, so
+    a kind that has never once generated successfully (a fresh deployment, or
+    one whose every attempt has failed) never gets a sample, and its
+    staleness alert stays silently unreachable forever — even though "never
+    succeeded" is the worst case the alert exists to catch.
+
+    Seeding at worker boot closes the gap WITHOUT masking a genuine existing
+    staleness: this reads the DURABLE last-SUCCEEDED ``ReportRun.finished_at``
+    per kind from Postgres (never the ephemeral in-memory gauge, which is
+    per-process and reset on restart), so:
+
+    * a kind that HAS succeeded before re-hydrates to its TRUE last success
+      timestamp — a real, already-stale condition survives a worker restart
+      instead of resetting to "fresh" every time an operator restarts the
+      worker for an unrelated reason;
+    * a kind that has NEVER succeeded gets *boot_timestamp* — a series now
+      exists, so the existing cadence+grace expression starts counting and
+      fires on schedule instead of staying silent forever.
+
+    Coordinates with the PR #166 F4 ``mostrecent`` multiprocess gauge mode:
+    this write's VALUE is the historical timestamp (never "now"), so even
+    though the WRITE itself happens at boot, a later real success — written
+    from a different prefork-child process — always carries a later write
+    timestamp and correctly wins the ``mostrecent`` aggregation; a boot-time
+    reseed can never mask or roll back a real success already on record.
+    """
+    async with _session() as session:
+        for kind in ReportKind:
+            latest_finished_at = (
+                await session.execute(
+                    select(ReportRun.finished_at)
+                    .where(
+                        ReportRun.kind == kind.value,
+                        ReportRun.status == ReportRunStatus.SUCCEEDED.value,
+                    )
+                    .order_by(ReportRun.finished_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            timestamp = (
+                latest_finished_at.timestamp() if latest_finished_at is not None else boot_timestamp
+            )
+            set_report_last_success(report_kind=kind.value, timestamp=timestamp)
+
+
+def seed_last_success_gauges() -> None:
+    """Sync entrypoint for the ``worker_init`` signal (PR #166 F4/F6).
+
+    Graceful by design (mirrors ``app.workers.celery_app.start_worker_metrics_
+    server``): a DB hiccup at worker boot is logged and swallowed, never
+    raised — a staleness-gauge seeding failure must not crash the worker or
+    block it from draining its queue.
+    """
+    try:
+        asyncio.run(_seed_last_success_gauges_core(datetime.now(UTC).timestamp()))
+    except Exception:
+        logger.exception("reports.seed_last_success_gauges_failed")
