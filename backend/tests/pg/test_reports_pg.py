@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import undefer
 
 from app.engines.reports import deterministic_run_id
 from app.models import AuditLog
@@ -230,7 +231,15 @@ async def test_full_generation_and_artifact_bytea_round_trip(
 
     maker = async_sessionmaker(pg_engine, expire_on_commit=False)
     async with maker() as session:
-        artifacts = list((await session.execute(select(ReportArtifact))).scalars())
+        # content is deferred with raiseload (PR #166 F4) — this test verifies the
+        # bytea round-trip, so it must opt in explicitly.
+        artifacts = list(
+            (
+                await session.execute(
+                    select(ReportArtifact).options(undefer(ReportArtifact.content))
+                )
+            ).scalars()
+        )
     assert sorted(a.format for a in artifacts) == ["csv", "pdf"]
     for artifact in artifacts:
         assert hashlib.sha256(artifact.content).hexdigest() == artifact.sha256

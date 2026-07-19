@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import undefer
 
 from app.engines.reports.change_report import (
     NOTE_EMPTY_PERIOD,
@@ -394,7 +395,15 @@ async def test_full_change_generation_runs_the_rollup_on_pg(
     )
 
     assert result["status"] == "succeeded"
-    artifacts = list((await pg_session.execute(select(ReportArtifact))).scalars())
+    # content is deferred with raiseload (PR #166 F4) — this rollup test reads the
+    # CSV bytes, so it must opt in explicitly.
+    artifacts = list(
+        (
+            await pg_session.execute(
+                select(ReportArtifact).options(undefer(ReportArtifact.content))
+            )
+        ).scalars()
+    )
     assert sorted(a.format for a in artifacts) == ["csv", "pdf"]
     csv_text = next(a for a in artifacts if a.format == "csv").content.decode("utf-8")
     assert str(cr.id) in csv_text
