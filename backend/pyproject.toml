@@ -76,6 +76,23 @@ dependencies = [
     "pyvmomi>=8.0,<9",
     # Declarative compliance policies (M4, ADR-0018): YAML rule documents
     "pyyaml",
+    # Report engine templating + PDF rendering (P4 W3-T1, ADR-0053 §5).
+    # Jinja2 renders the evidence-report HTML templates (security floor:
+    # GHSA-cpwx-vrp4-4pq7 sandbox escapes; re-review 2026-09-23). WeasyPrint
+    # (BSD-3-Clause) converts them to PDF behind a deny-all url_fetcher —
+    # zero network egress at render time; its Pango/HarfBuzz system libraries
+    # + bundled DejaVu fonts land in deploy/docker/backend.Dockerfile. Major
+    # cap: WeasyPrint majors routinely change layout output, and evidence
+    # artifacts must not silently re-render differently under an unreviewed
+    # bump; exact version resolved in requirements.lock.txt. Floor 69:
+    # PYSEC-2026-2034 + CVE-2025-68616 (SSRF) fixed in 68.0, and
+    # PYSEC-2026-3412 / CVE-2026-49452 (presentational-hints CSS injection)
+    # fixed in 69.0 (the release notes name it; the OSV record lacks a fixed
+    # event, so pip-audit shows no fix version — do not allowlist it). Our
+    # deny-first url_fetcher stays as defense in depth upstream of the
+    # library's own fixes.
+    "jinja2>=3.1.6",
+    "weasyprint>=69,<70",
     # Packet-analysis self-confining executor (ADR-0049): libseccomp Python
     # binding. A Linux-marker RUNTIME dep — the pure-python wheel installs into
     # the shared venv on any Linux image (it is NOT image-scoped); the import is
@@ -223,6 +240,9 @@ module = [
     "pyseccomp.*",
     "textfsm.*",
     "yaml.*",
+    # WeasyPrint (ADR-0053 §5) ships no type stubs; imported lazily in
+    # app.engines.reports.render (needs Pango system libs absent on some hosts).
+    "weasyprint.*",
 ]
 ignore_missing_imports = true
 
@@ -397,6 +417,23 @@ source_modules = ["app.agents.framework"]
 forbidden_modules = ["app.plugins"]
 
 [[tool.importlinter.contracts]]
+# ADR-0053 §6 layer 1 — the report engine's source allowlist is STRUCTURAL: the
+# deny-set (credential vault/KMS surfaces, secret-bearing capture paths, the
+# LLM layer — LLM output never enters an artifact) is unreachable from
+# app.engines.reports. What is never imported can never be queried; the
+# companion runtime proof (no SELECT against deny-set tables during a real
+# generation) lives in tests/engines/reports/test_boundary.py.
+name = "app.engines.reports cannot reach secret-bearing or LLM surfaces (ADR-0053 §6 layer 1)"
+type = "forbidden"
+source_modules = ["app.engines.reports"]
+forbidden_modules = [
+    "app.core.crypto",
+    "app.knowledge",
+    "app.llm",
+    "app.services.credentials",
+]
+
+[[tool.importlinter.contracts]]
 name = "app.plugins.vendors.* packages are mutually independent (REPO-STRUCTURE §3.3 contract 5, §3.2 row 7, D6)"
 type = "independence"
 modules = [
@@ -467,6 +504,14 @@ ignore_imports = [
     # Discovery job dispatch remains at its established Celery signature seam;
     # owner: future discovery-dispatch framework port (not the read facade).
     "app.agents.discovery.tools -> app.workers.celery_app",
+    # Report generation dispatch (P4 W3-T1, ADR-0053 §1): the Documentation
+    # Agent's request_report_generation tool enqueues the SAME engine task the
+    # scheduler uses, by Celery signature only — the established discovery
+    # dispatch seam above; owner: the same future framework dispatch port.
+    "app.agents.documentation.tools -> app.workers.celery_app",
+    # Report API schema reuses the ReportKind model enum (P4 W3-T1) — the same
+    # pre-existing schemas -> models enum-reuse edge class as the entries below.
+    "app.schemas.reports_api -> app.models.reports",
     # Pre-existing bidirectional models<->schemas cross-import: Normalized*
     # Pydantic schemas (app.schemas.normalized) are reused as ORM row
     # projections in app.models.adc/virtualization/inventory, and several API

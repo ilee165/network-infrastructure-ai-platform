@@ -1,0 +1,240 @@
+# promtool test rules — ALERT-AS-TEST cases for report-engine.alerts.yaml
+# (P4 W3-T1, ADR-0053 §9; ADR-0046 §6).
+#
+# Every report-engine alert ships BOTH a FIRING case (a perturbed series that
+# breaches the condition — the should-fire control; a green-at-setup rule that
+# never fires FAILS here) and a HEALTHY case (a within-objective series that
+# stays silent — no false positive). The mute-mutation BITE proof lives in
+# run-report-promtool-bite.sh (a muted staleness alert MUST turn its firing
+# case red), wired as a blocking step in the CI observability job.
+#
+# TIME NOTE: promtool test time starts at the Unix epoch, so `time()` at
+# eval_time T equals T in seconds. The staleness gauges are written as
+#   * FIRING  — a constant 0 ("last success at epoch"), evaluated past the
+#     cadence + grace threshold, and
+#   * HEALTHY — a per-minute series tracking time() (value = 60 * minute), so
+#     "now - last success" stays ~0.
+#
+# Run:  promtool test rules deploy/observability/report-engine.alerts.test.yaml
+
+rule_files:
+  - report-engine.alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ===========================================================================
+  # Weekly staleness — FIRING: last success pinned at epoch, evaluated at 8d+2h
+  # (> 8d threshold, and the for:1h hold is cleared). 8d = 192h.
+  # ===========================================================================
+  # Sample spacing note (all four staleness cases): the gauge is sampled every
+  # 4m — INSIDE Prometheus's 5m instant-vector lookback — so the series never
+  # goes stale between samples and the for:1h hold accumulates continuously
+  # (a 30m spacing would reset the pending state every gap).
+  - interval: 4m
+    name: report weekly staleness — FIRES when change report success is older than 8d
+    input_series:
+      - series: 'netops_report_last_success_timestamp{report_kind="change"}'
+        values: '0x3000'
+    alert_rule_test:
+      - eval_time: 194h
+        alertname: NetopsReportWeeklyStale
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: report_staleness
+              tier: weekly
+              report_kind: change
+            exp_annotations:
+              summary: "A weekly compliance/audit report has not succeeded within cadence + grace (8d)"
+              description: "netops_report_last_success_timestamp for a weekly-scheduled report kind (change | compliance_posture) is older than 8 days (7d cadence + 1d grace). The scheduled evidence report is not being produced — beat, the docs-queue worker, or the generation itself is failing (ADR-0053 §9)."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-engine.md"
+
+  # HEALTHY: the gauge tracks time() (a success every scrape) -> lag ~0 -> silent.
+  - interval: 4m
+    name: report weekly staleness — fresh successes stay silent
+    input_series:
+      - series: 'netops_report_last_success_timestamp{report_kind="change"}'
+        values: '0+240x3000'
+    alert_rule_test:
+      - eval_time: 194h
+        alertname: NetopsReportWeeklyStale
+        exp_alerts: []
+
+  # ===========================================================================
+  # Never-succeeded silence (PR #166 F6): a kind that has NEVER succeeded gets
+  # its gauge SEEDED to the worker's boot timestamp at startup
+  # (seed_last_success_gauges) rather than left unset — mathematically a
+  # constant-value series pinned at that one boot write, with no later
+  # success ever recorded. Proves BOTH halves: silent immediately after boot
+  # (no false positive on a fresh deploy) and firing once cadence+grace has
+  # elapsed with still no real success (the gap this fix closes).
+  # ===========================================================================
+  - interval: 4m
+    name: report weekly staleness — a NEVER-succeeded kind seeded at boot stays silent right after boot
+    input_series:
+      - series: 'netops_report_last_success_timestamp{report_kind="change"}'
+        values: '5000x3000'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: NetopsReportWeeklyStale
+        exp_alerts: []
+
+  - interval: 4m
+    name: report weekly staleness — a NEVER-succeeded kind seeded at boot FIRES once cadence+grace elapses
+    input_series:
+      - series: 'netops_report_last_success_timestamp{report_kind="change"}'
+        values: '5000x3000'
+    alert_rule_test:
+      - eval_time: 195h
+        alertname: NetopsReportWeeklyStale
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: report_staleness
+              tier: weekly
+              report_kind: change
+            exp_annotations:
+              summary: "A weekly compliance/audit report has not succeeded within cadence + grace (8d)"
+              description: "netops_report_last_success_timestamp for a weekly-scheduled report kind (change | compliance_posture) is older than 8 days (7d cadence + 1d grace). The scheduled evidence report is not being produced — beat, the docs-queue worker, or the generation itself is failing (ADR-0053 §9)."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-engine.md"
+
+  # ===========================================================================
+  # Monthly staleness — FIRING: last success at epoch, evaluated at 33d+2h
+  # (33d = 792h). HEALTHY: gauge tracks time().
+  # ===========================================================================
+  - interval: 4m
+    name: report monthly staleness — FIRES when access review success is older than 33d
+    input_series:
+      - series: 'netops_report_last_success_timestamp{report_kind="access_review"}'
+        values: '0x12000'
+    alert_rule_test:
+      - eval_time: 794h
+        alertname: NetopsReportMonthlyStale
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: report_staleness
+              tier: monthly
+              report_kind: access_review
+            exp_annotations:
+              summary: "A monthly compliance/audit report has not succeeded within cadence + grace (33d)"
+              description: "netops_report_last_success_timestamp for a monthly-scheduled report kind (access_review | audit_integrity) is older than 33 days (31d cadence + 2d grace). The scheduled evidence report is not being produced (ADR-0053 §9)."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-engine.md"
+
+  - interval: 4m
+    name: report monthly staleness — fresh successes stay silent
+    input_series:
+      - series: 'netops_report_last_success_timestamp{report_kind="access_review"}'
+        values: '0+240x12000'
+    alert_rule_test:
+      - eval_time: 794h
+        alertname: NetopsReportMonthlyStale
+        exp_alerts: []
+      # A 20-day-old monthly success is WITHIN cadence + grace -> still silent.
+      - eval_time: 480h
+        alertname: NetopsReportMonthlyStale
+        exp_alerts: []
+
+  # Never-succeeded silence (PR #166 F6), monthly tier — the same seeded-at-
+  # boot proof as the weekly tier above: silent right after boot, fires once
+  # cadence+grace elapses with no real success ever recorded.
+  - interval: 4m
+    name: report monthly staleness — a NEVER-succeeded kind seeded at boot stays silent right after boot
+    input_series:
+      - series: 'netops_report_last_success_timestamp{report_kind="access_review"}'
+        values: '5000x12000'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: NetopsReportMonthlyStale
+        exp_alerts: []
+
+  - interval: 4m
+    name: report monthly staleness — a NEVER-succeeded kind seeded at boot FIRES once cadence+grace elapses
+    input_series:
+      - series: 'netops_report_last_success_timestamp{report_kind="access_review"}'
+        values: '5000x12000'
+    alert_rule_test:
+      - eval_time: 795h
+        alertname: NetopsReportMonthlyStale
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: report_staleness
+              tier: monthly
+              report_kind: access_review
+            exp_annotations:
+              summary: "A monthly compliance/audit report has not succeeded within cadence + grace (33d)"
+              description: "netops_report_last_success_timestamp for a monthly-scheduled report kind (access_review | audit_integrity) is older than 33 days (31d cadence + 2d grace). The scheduled evidence report is not being produced (ADR-0053 §9)."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-engine.md"
+
+  # ===========================================================================
+  # Redaction-violation page — FIRING: one redaction_violation failure inside
+  # the 1h window (increase > 0, for:5m cleared). HEALTHY: a builder_error
+  # failure does NOT page this alert (the error-class filter is load-bearing:
+  # the distinguished class, ADR-0053 §9).
+  # ===========================================================================
+  - interval: 1m
+    name: report redaction violation — FIRES on a redaction trip
+    input_series:
+      - series: 'netops_report_failures_total{report_kind="change", error_class="redaction_violation"}'
+        values: '0x30 1x60'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: NetopsReportRedactionViolation
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: report_failures
+              tier: fast
+              report_kind: change
+            exp_annotations:
+              summary: "Report generation tripped the fail-closed redaction filter"
+              description: "netops_report_failures_total{error_class=\"redaction_violation\"} increased in the last hour: enforce_redaction rejected a payload headed for an exported evidence artifact and generation failed CLOSED (no artifact was written). Either a real secret reached a report source (investigate immediately) or a legitimate field matches a deny pattern and must be renamed (ADR-0053 §6). The run's failure record names the field path only — never the value."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-engine.md"
+
+  - interval: 1m
+    name: report redaction violation — a builder_error failure does NOT page
+    input_series:
+      - series: 'netops_report_failures_total{report_kind="change", error_class="builder_error"}'
+        values: '0x30 1x60'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: NetopsReportRedactionViolation
+        exp_alerts: []
+
+  # ===========================================================================
+  # Failure burn (slow/ticket) — FIRING: two failures of one kind within 6h
+  # (increase >= 2, for:30m cleared). HEALTHY: a single failure stays silent.
+  # ===========================================================================
+  - interval: 1m
+    name: report failure burn — FIRES on repeated failures of one kind
+    input_series:
+      # The 0->2 jump sits at minute 61 — INSIDE the 6h lookback at eval 390m
+      # (range selectors are open on the left; a jump at the window edge would
+      # be excluded and the increase would read 0).
+      - series: 'netops_report_failures_total{report_kind="compliance_posture", error_class="render_error"}'
+        values: '0x60 2x400'
+    alert_rule_test:
+      - eval_time: 390m
+        alertname: NetopsReportFailureBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: report_failures
+              tier: slow
+              report_kind: compliance_posture
+            exp_annotations:
+              summary: "Repeated report generation failures for one kind (>=2 in 6h)"
+              description: "netops_report_failures_total for one report kind increased by 2 or more within 6 hours — generation for that kind is persistently failing (builder, render, or redaction), and the kind's staleness page will follow at cadence + grace if not fixed (ADR-0053 §9)."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-engine.md"
+
+  - interval: 1m
+    name: report failure burn — a single failure stays silent
+    input_series:
+      - series: 'netops_report_failures_total{report_kind="compliance_posture", error_class="render_error"}'
+        values: '0x30 1x400'
+    alert_rule_test:
+      - eval_time: 390m
+        alertname: NetopsReportFailureBurn
+        exp_alerts: []

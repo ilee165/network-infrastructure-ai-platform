@@ -76,6 +76,14 @@ _RESET_TABLES = (
     # dependency rows with their applications.
     "application_dependencies",
     "applications",
+    # P4 W3-T1 report engine + compliance trend history (ADR-0053 §1/§7.2):
+    # CASCADE removes artifacts/findings with their runs.
+    "report_artifacts",
+    "report_runs",
+    "compliance_run_findings",
+    "compliance_runs",
+    # P4 W3-T5 audit chain verification history (ADR-0053 §7.4).
+    "audit_chain_verification_runs",
 )
 
 

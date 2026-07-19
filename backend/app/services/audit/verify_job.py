@@ -35,14 +35,25 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import uuid
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db import create_engine, create_sessionmaker
+from app.models.audit import (
+    AuditChainCheckpoint,
+    AuditChainVerificationRun,
+    ChainVerificationOutcome,
+    GrantCheckOutcome,
+)
+from app.models.mixins import utcnow
+from app.services.audit.grants import GrantCheckResult, check_audit_log_grants
 from app.services.audit.verify import VerifyResult, count_pre_chain_rows, verify_chain
 
 _logger = get_logger(__name__)
@@ -186,6 +197,90 @@ def _emit_log(result: VerifyResult, *, pre_chain_rows: int, pre_chain_suspicious
     print("AUDIT_CHAIN_VERIFY " + " ".join(fields), flush=True)
 
 
+async def _checkpoint_state(session: AsyncSession) -> tuple[uuid.UUID, str] | None:
+    """Return ``(entry_id, entry_hash hex)`` of the watermark, or ``None`` if unset.
+
+    The hex digest is a PRESENTATION of the checkpoint entry hash — tamper
+    evidence the ADR-0053 §6 redaction contract deliberately permits, never
+    secret material.
+    """
+    checkpoint = (
+        await session.execute(
+            select(AuditChainCheckpoint).where(
+                AuditChainCheckpoint.id == AuditChainCheckpoint.SINGLETON_ID
+            )
+        )
+    ).scalar_one_or_none()
+    if checkpoint is None:
+        return None
+    return checkpoint.entry_id, checkpoint.entry_hash.hex()
+
+
+async def _persist_verification_run(
+    session: AsyncSession,
+    *,
+    result: VerifyResult,
+    healthy: bool,
+    full: bool,
+    started_at: datetime,
+    finished_at: datetime,
+    checkpoint_before: tuple[uuid.UUID, str] | None,
+) -> None:
+    """Persist one ``audit_chain_verification_runs`` row (ADR-0053 §7.4).
+
+    The SMALL ADDITIVE change ADR-0053 names: called AFTER the commit/rollback
+    decision so a break run persists its ``break`` row without ever advancing
+    the checkpoint (the rollback already happened), and a clean run records
+    the advanced watermark. The daily append-only grant attestation runs here
+    too (:func:`~app.services.audit.grants.check_audit_log_grants`) and is
+    persisted with the row — the historical half of the G-SEC attestation.
+
+    ``outcome`` derives from *healthy* (chain clean AND no suspicious
+    pre-chain row), not ``result.ok`` alone: a run the job reports as FAILED
+    must never persist as ``clean`` history (fail toward false-positive,
+    ADR-0038 §4).
+    """
+    try:
+        # PR #166 F2 (grant-check transaction poison): the check runs inside
+        # a SAVEPOINT. PostgreSQL aborts the WHOLE enclosing transaction on a
+        # failed statement — without a savepoint, the checkpoint SELECT and
+        # history INSERT below would ALSO raise on the poisoned transaction,
+        # and the caller's outer try/except (see :func:`run`) only logs and
+        # swallows that failure, silently losing the honest ``unavailable``
+        # row. Rolling back to the savepoint on failure restores the
+        # transaction to a healthy state so the rest of this function still
+        # executes and persists.
+        async with session.begin_nested():
+            grant = await check_audit_log_grants(session)
+    except Exception:
+        # The attestation must be honest, never silently clean: a failed
+        # catalog query persists the explicit ``unavailable`` token.
+        _logger.error("audit.chain.grant_check_failed", exc_info=True)
+        grant = GrantCheckResult(outcome=GrantCheckOutcome.UNAVAILABLE.value, grants=())
+    checkpoint_after = await _checkpoint_state(session)
+    outcome = ChainVerificationOutcome.CLEAN if healthy else ChainVerificationOutcome.BREAK
+    session.add(
+        AuditChainVerificationRun(
+            started_at=started_at,
+            finished_at=finished_at,
+            outcome=outcome.value,
+            entries_checked=result.checked,
+            # Exclusive lower bound of the walked segment: the checkpoint
+            # anchor on an incremental pass; NULL = genesis (first run / full).
+            range_from_entry_id=(
+                checkpoint_before[0] if (checkpoint_before is not None and not full) else None
+            ),
+            range_to_entry_id=(
+                uuid.UUID(result.head_entry_id) if result.head_entry_id is not None else None
+            ),
+            checkpoint_before_hash=checkpoint_before[1] if checkpoint_before else None,
+            checkpoint_after_hash=checkpoint_after[1] if checkpoint_after else None,
+            grant_check_outcome=grant.outcome,
+        )
+    )
+    await session.commit()
+
+
 async def run(
     *,
     sessionmaker: Callable[[], AsyncSession] | async_sessionmaker[AsyncSession],
@@ -212,7 +307,11 @@ async def run(
     must never suppress the alert log or flip the exit code (the alert signal is
     needed exactly when the job is failing).
     """
+    started_at = utcnow()
     async with sessionmaker() as session:
+        # Watermark state BEFORE the walk — recorded on the ADR-0053 §7.4 history
+        # row (checkpoint before/after + the walked range's exclusive lower bound).
+        checkpoint_before = await _checkpoint_state(session)
         result = await verify_chain(session, advance_checkpoint=True, full=full)
         # Pre-chain accounting (round-4 #01) — read in-session, BEFORE the commit/
         # rollback decision, so NULL-seq rows are surfaced explicitly and a suspicious
@@ -231,6 +330,27 @@ async def run(
             await session.commit()
         else:
             await session.rollback()
+
+        # ADR-0053 §7.4 ADDITIVE history write (P4 W3-T5): persist one outcome row
+        # per run (incl. the daily grant attestation) AFTER the commit/rollback
+        # decision, so a break run records `break` without the rolled-back
+        # checkpoint advance ever landing. Metric + exit-code behavior are
+        # UNCHANGED by contract: a row-write failure is logged loudly but never
+        # flips the exit code or suppresses the alert path — the missing row then
+        # self-surfaces as a verification-gap FINDING in the audit-integrity
+        # report (a day with no persisted run is a finding, not a blank).
+        try:
+            await _persist_verification_run(
+                session,
+                result=result,
+                healthy=healthy,
+                full=full,
+                started_at=started_at,
+                finished_at=utcnow(),
+                checkpoint_before=checkpoint_before,
+            )
+        except Exception:
+            _logger.error("audit.chain.verification_run_write_failed", exc_info=True)
 
     # A8: emit the alert log line + decide the exit code FIRST, so a metric-write
     # failure below can never swallow the alert signal or the non-zero exit.

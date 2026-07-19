@@ -18,7 +18,13 @@ import pytest
 from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from app.models import AuditChainCheckpoint, AuditLog
+from app.models import (
+    AuditChainCheckpoint,
+    AuditChainVerificationRun,
+    AuditLog,
+    ChainVerificationOutcome,
+    GrantCheckOutcome,
+)
 from app.models.mixins import utcnow
 from app.services.audit import service as audit_service
 from app.services.audit import verify_job
@@ -236,6 +242,164 @@ async def test_main_reads_full_scan_env_flag(monkeypatch: pytest.MonkeyPatch) ->
     for falsy in ("0", "false", "no", "", "off"):
         monkeypatch.setenv(verify_job._FULL_SCAN_ENV, falsy)
         assert verify_job._env_full_scan() is False
+
+
+# ---------------------------------------------------------------------------
+# P4 W3-T5 (ADR-0053 §7.4) — the ADDITIVE verification-run history write:
+# exactly one row per run, break persisted on the failure path, and a
+# row-write failure NEVER flips the exit code or the metric (the alert path
+# and exit behavior are unchanged by contract; a missing row self-surfaces as
+# a verification-gap finding in the audit-integrity report).
+# ---------------------------------------------------------------------------
+
+
+async def _verification_rows(maker: async_sessionmaker) -> list[AuditChainVerificationRun]:
+    async with maker() as session:
+        return list(
+            (
+                await session.execute(
+                    select(AuditChainVerificationRun).order_by(AuditChainVerificationRun.started_at)
+                )
+            ).scalars()
+        )
+
+
+async def test_clean_run_persists_exactly_one_verification_row(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """A clean pass writes ONE history row: clean outcome, advanced watermark,
+    genesis lower bound, and the honest `unavailable` grant token on SQLite."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    entries = await _seed(maker, 4)
+
+    code = await verify_job.run(sessionmaker=maker, textfile_dir=tmp_path)
+
+    assert code == 0
+    rows = await _verification_rows(maker)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.outcome == ChainVerificationOutcome.CLEAN.value
+    assert row.entries_checked == 4
+    assert row.range_from_entry_id is None  # first run: walked from genesis
+    assert row.range_to_entry_id == entries[-1].id
+    assert row.checkpoint_before_hash is None  # no watermark existed before
+    assert row.checkpoint_after_hash == entries[-1].entry_hash.hex()
+    # SQLite has no grant catalog: the honest token, never a silent clean.
+    assert row.grant_check_outcome == GrantCheckOutcome.UNAVAILABLE.value
+    assert row.started_at <= row.finished_at
+
+
+async def test_second_run_anchors_range_at_the_checkpoint(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """Each run writes its own row; an incremental pass records the checkpoint
+    anchor as the exclusive lower bound of the walked range."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    first = await _seed(maker, 2)
+    assert await verify_job.run(sessionmaker=maker, textfile_dir=tmp_path) == 0
+    second = await _seed(maker, 3)
+    assert await verify_job.run(sessionmaker=maker, textfile_dir=tmp_path) == 0
+
+    rows = await _verification_rows(maker)
+    assert len(rows) == 2
+    incremental = rows[1]
+    assert incremental.outcome == ChainVerificationOutcome.CLEAN.value
+    assert incremental.entries_checked == 3
+    assert incremental.range_from_entry_id == first[-1].id  # the prior watermark
+    assert incremental.range_to_entry_id == second[-1].id
+    assert incremental.checkpoint_before_hash == first[-1].entry_hash.hex()
+    assert incremental.checkpoint_after_hash == second[-1].entry_hash.hex()
+
+
+async def test_full_scan_row_records_a_genesis_lower_bound(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """A full scan re-walks from genesis: its row must not claim the checkpoint
+    as the lower bound even though one exists."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    entries = await _seed(maker, 3)
+    assert await verify_job.run(sessionmaker=maker, textfile_dir=tmp_path) == 0
+    assert await verify_job.run(sessionmaker=maker, textfile_dir=tmp_path, full=True) == 0
+
+    rows = await _verification_rows(maker)
+    assert len(rows) == 2
+    full_row = rows[1]
+    assert full_row.range_from_entry_id is None  # genesis walk
+    assert full_row.entries_checked == 3
+    assert full_row.checkpoint_before_hash == entries[-1].entry_hash.hex()
+
+
+async def test_tampered_run_persists_break_row_without_checkpoint_advance(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """The failure path still exits non-zero AND persists `break` (spec): the
+    row records the failed outcome while the watermark stays un-advanced."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    entries = await _seed(maker, 5)
+    target = entries[2]
+    async with maker() as session:
+        await session.execute(
+            update(AuditLog)
+            .where(AuditLog.id == target.id, AuditLog.created_at == target.created_at)
+            .values(action="device.deleted")
+        )
+        await session.commit()
+
+    code = await verify_job.run(sessionmaker=maker, textfile_dir=tmp_path)
+
+    assert code == 1  # exit behavior unchanged (loud failure)
+    rows = await _verification_rows(maker)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.outcome == ChainVerificationOutcome.BREAK.value
+    # The rollback kept the watermark un-advanced: no checkpoint exists after
+    # a first-run break, and the row honestly records that.
+    assert row.checkpoint_after_hash is None
+    async with maker() as session:
+        checkpoint = (await session.execute(select(AuditChainCheckpoint))).scalar_one_or_none()
+    assert checkpoint is None
+
+
+async def test_suspicious_pre_chain_row_persists_break_not_clean(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """A run the job reports FAILED must never persist as `clean` history:
+    the suspicious-pre-chain failure mode classifies as `break` too."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    await _seed(maker, 4)
+    await _insert_pre_chain_row(maker, entry_hash=_NON_GENESIS_HASH)
+
+    code = await verify_job.run(sessionmaker=maker, textfile_dir=tmp_path)
+
+    assert code == 1
+    rows = await _verification_rows(maker)
+    assert len(rows) == 1
+    assert rows[0].outcome == ChainVerificationOutcome.BREAK.value
+
+
+async def test_row_write_failure_never_flips_exit_code_or_metric(
+    engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """The history write is ADDITIVE by contract: its failure is logged loudly
+    but the metric and exit code are UNCHANGED — the missing row then
+    self-surfaces as a verification-gap finding in the audit-integrity report."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    await _seed(maker, 3)
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("verification-run table unavailable")
+
+    monkeypatch.setattr(verify_job, "_persist_verification_run", _boom)
+
+    code = await verify_job.run(sessionmaker=maker, textfile_dir=tmp_path)
+
+    assert code == 0  # a clean chain still exits 0
+    out = capsys.readouterr().out
+    assert "AUDIT_CHAIN_VERIFY OUTCOME=PASS" in out
+    metric = (tmp_path / "audit_chain_verify.prom").read_text(encoding="utf-8")
+    assert "audit_chain_verified 1" in metric
+    rows = await _verification_rows(maker)
+    assert rows == []  # nothing persisted — the gap is the report's finding
 
 
 # ---------------------------------------------------------------------------

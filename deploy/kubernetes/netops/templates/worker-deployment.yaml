@@ -123,6 +123,7 @@ spec:
             PASSWORD) dependent-env reference resolves (K8s expands $(VAR) in env
             VALUES — distinct from the exec-argv case L3 warns about). */ -}}
             {{- include "netops.dbClientTlsEnv" . | nindent 12 }}
+            {{- include "netops.workerMetricsMultiprocessEnv" . | nindent 12 }}
           resources:
             {{- toYaml .Values.services.worker.resources | nindent 12 }}
           # startupProbe: generous window for broker connection on first boot.

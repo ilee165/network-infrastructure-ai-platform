@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+{#-
+  Base evidence-report template (ADR-0053 §5). AIR-GAP CONTRACT: this template
+  (and every template that extends it) may reference ONLY inline CSS, data:
+  URIs, and file: assets inside this directory — any remote URL (CDN font,
+  stylesheet, image, telemetry pixel) is hard-failed by the deny-all
+  url_fetcher at render time, which makes it a CI error (the templates are
+  rendered in tests), not a silent hang in an air-gapped deployment.
+
+  Fonts: DejaVu is bundled in the backend image (fonts-dejavu-core); the
+  font-family below resolves locally with no fontconfig network fallback.
+
+  Determinism: the dcterms meta tags pin the PDF metadata dates from
+  payload.generated_at — the renderer never reads the clock.
+-#}
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ payload.title }}</title>
+    <meta name="dcterms.created" content="{{ payload.generated_at.isoformat() }}" />
+    <meta name="dcterms.modified" content="{{ payload.generated_at.isoformat() }}" />
+    <meta name="generator" content="netops-report-engine" />
+    <style>
+      @page {
+        size: A4;
+        margin: 2cm 1.6cm;
+      }
+      body {
+        font-family: "DejaVu Sans", sans-serif;
+        font-size: 9.5pt;
+        color: #1a1a1a;
+      }
+      h1 {
+        font-size: 16pt;
+        margin-bottom: 0.2em;
+      }
+      h2 {
+        font-size: 12pt;
+        margin-top: 1.2em;
+        border-bottom: 1pt solid #444;
+        padding-bottom: 0.15em;
+      }
+      table.meta,
+      table.section {
+        border-collapse: collapse;
+        width: 100%;
+        margin-top: 0.5em;
+      }
+      table.section th {
+        text-align: left;
+        background: #eceff1;
+        border: 0.5pt solid #90a4ae;
+        padding: 3pt 5pt;
+      }
+      table.section td,
+      table.meta td {
+        border: 0.5pt solid #b0bec5;
+        padding: 3pt 5pt;
+        vertical-align: top;
+      }
+      table.meta td.k {
+        font-weight: bold;
+        width: 28%;
+        background: #f5f5f5;
+      }
+      p.note {
+        margin: 0.6em 0 0;
+        font-style: italic;
+        color: #37474f;
+      }
+      p.tags {
+        color: #37474f;
+        margin: 0.1em 0 0.8em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>{{ payload.title }}</h1>
+    <p class="tags">
+      Regime tags:
+      {%- for tag in payload.regime_tags %} {{ tag }}{% if not loop.last %},{% endif %}{% endfor %}
+    </p>
+    <table class="meta">
+      <tbody>
+        <tr><td class="k">Report kind</td><td>{{ payload.kind }}</td></tr>
+        <tr><td class="k">Period start (UTC)</td><td>{{ payload.period_start.isoformat() }}</td></tr>
+        <tr><td class="k">Period end (UTC)</td><td>{{ payload.period_end.isoformat() }}</td></tr>
+        <tr><td class="k">Generated at (UTC)</td><td>{{ payload.generated_at.isoformat() }}</td></tr>
+      </tbody>
+    </table>
+    {% for section in payload.sections %}
+      <h2>{{ section.title }}</h2>
+      <table class="section">
+        <thead>
+          <tr>
+            {% for column in section.columns %}<th>{{ column }}</th>{% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in section.rows %}
+            <tr>
+              {% for cell in row %}<td>{{ cell }}</td>{% endfor %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endfor %}
+    {% for note in payload.notes %}
+      <p class="note">{{ note }}</p>
+    {% endfor %}
+  </body>
+</html>

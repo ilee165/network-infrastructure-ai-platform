@@ -1122,11 +1122,171 @@ async def generate_incident_report(
 
 #: All Documentation Agent tools registered for M4 (T10 inventory, T11 diagram,
 #: T12 runbook) and M5 T12 (incident report).
+# ---------------------------------------------------------------------------
+# Report engine read/trigger tools (P4 W3-T1, ADR-0053 §1 "Documentation Agent
+# alignment"): the agent TRIGGERS and CITES compliance/audit reports; it never
+# authors artifact content (LLM output has no path into an artifact). All three
+# run under the INVOKING user's RBAC: the framework read facade enforces the
+# per-kind ADR-0053 §3 floor against the bound role, so an agent can never see
+# or generate a report its user could not.
+# ---------------------------------------------------------------------------
+
+
+def _report_run_json(run: Any) -> dict[str, Any]:
+    """Serialize a facade ReportRunSnapshot to a citation-ready plain dict."""
+    return {
+        "run_id": str(run.id),
+        "kind": run.kind,
+        "trigger": run.trigger,
+        "period_start": run.period_start.isoformat(),
+        "period_end": run.period_end.isoformat(),
+        "status": run.status,
+        "error_class": run.error_class,
+        "regime_tags": list(run.regime_tags),
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "artifacts": [
+            {
+                "artifact_id": str(a.id),
+                "format": a.format,
+                "sha256": a.sha256,
+                "size_bytes": a.size_bytes,
+            }
+            for a in run.artifacts
+        ],
+    }
+
+
+@netops_tool(classification=ToolClassification.READ_ONLY)
+async def list_report_runs(
+    kind: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional report kind filter: change | compliance_posture | "
+                "access_review | audit_integrity."
+            ),
+        ),
+    ] = None,
+    limit: Annotated[
+        int, Field(default=20, ge=1, le=100, description="Maximum runs to return.")
+    ] = 20,
+) -> str:
+    """List compliance/audit report runs (newest first) with artifact metadata.
+
+    Read-only evidence lookup: run status, period, regime tags, and artifact
+    sha256 digests for citation — never artifact content. Kinds above the
+    invoking user's role floor are excluded (access-review and audit-integrity
+    reports are admin-only).
+    """
+    from app.agents.framework.read_facade import list_report_runs as facade_list
+    from app.agents.framework.tools import current_invoking_role
+
+    runs = await facade_list(role=current_invoking_role(), kind=kind, limit=limit)
+    return json.dumps({"runs": [_report_run_json(run) for run in runs]})
+
+
+@netops_tool(classification=ToolClassification.READ_ONLY)
+async def get_report_run(
+    run_id: Annotated[str, Field(description="UUID of the report run to fetch.")],
+) -> str:
+    """Fetch one report run's metadata + artifact metadata (sha256 digests).
+
+    Use the returned run id / artifact sha256 to cite a report as evidence.
+    Artifact bytes are only available through the RBAC'd download API — this
+    tool never returns report content. A run whose kind is above the invoking
+    user's role floor resolves exactly like a missing run (existence is
+    RBAC-scoped, ADR-0053 §3).
+    """
+    from uuid import UUID
+
+    from app.agents.framework.read_facade import get_report_run as facade_get
+    from app.agents.framework.tools import current_invoking_role
+
+    run = await facade_get(role=current_invoking_role(), run_id=UUID(run_id))
+    if run is None:
+        return json.dumps({"error": f"report run {run_id} does not exist"})
+    return json.dumps(_report_run_json(run))
+
+
+@netops_tool(classification=ToolClassification.READ_ONLY)
+async def request_report_generation(
+    kind: Annotated[
+        str,
+        Field(
+            description=(
+                "Report kind to generate: change | compliance_posture | "
+                "access_review | audit_integrity."
+            ),
+        ),
+    ],
+    period_start: Annotated[
+        str, Field(description="Reporting period start, ISO-8601 UTC timestamp.")
+    ],
+    period_end: Annotated[str, Field(description="Reporting period end, ISO-8601 UTC timestamp.")],
+) -> str:
+    """Request an on-demand compliance/audit report generation for a period.
+
+    Enqueues the SAME deterministic engine task the scheduler uses, recorded
+    under the invoking user (ADR-0053 §3) — the per-kind role floor applies
+    exactly as it does on the API. Returns the deterministic run id
+    immediately; generation happens asynchronously (use ``get_report_run`` to
+    poll). Classified READ_ONLY because this is a job launch that renders
+    evidence from platform data — no device or network state is modified.
+    """
+    from datetime import datetime
+
+    from app.agents.framework.read_facade import (
+        ensure_report_access,
+        report_generation_args,
+    )
+    from app.agents.framework.tools import current_invoking_identity, current_invoking_role
+    from app.workers.celery_app import QUEUE_DOCS, celery_app
+
+    ensure_report_access(current_invoking_role(), kind)
+    run_id, task_args = report_generation_args(
+        kind=kind,
+        period_start=datetime.fromisoformat(period_start),
+        period_end=datetime.fromisoformat(period_end),
+    )
+    identity = current_invoking_identity()
+    user_id = identity.user_id if identity is not None else None
+    args: list[str | None] = [*task_args, str(user_id) if user_id is not None else None]
+
+    from app.agents.framework.report_requests import record_generation_requested
+
+    # Durable-audit parity with POST /api/v1/reports (PR #166 F3): the agent
+    # path records the SAME ``report.generation_requested`` event, attributed
+    # to the requesting principal and COMMITTED BEFORE the dispatch so a
+    # broker failure can never lose the evidence generation was requested.
+    await record_generation_requested(
+        actor=f"user:{user_id}" if user_id is not None else "agent:documentation",
+        run_id=run_id,
+        kind=task_args[0],
+        period_start=task_args[1],
+        period_end=task_args[2],
+    )
+
+    import asyncio
+
+    # send_task performs synchronous broker I/O; run_in_executor keeps the
+    # event loop unblocked (D2 async-first, the trigger_discovery_run pattern).
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: celery_app.send_task("reports.generate", args=args, queue=QUEUE_DOCS),
+    )
+    return json.dumps({"run_id": str(run_id), "status": "queued"})
+
+
 DOCUMENTATION_TOOLS = [
     generate_inventory,
     generate_diagram,
     generate_runbook,
     generate_incident_report,
+    list_report_runs,
+    get_report_run,
+    request_report_generation,
 ]
 
 __all__ = [
@@ -1135,6 +1295,9 @@ __all__ = [
     "generate_incident_report",
     "generate_inventory",
     "generate_runbook",
+    "get_report_run",
+    "list_report_runs",
     "render_incident_report",
     "render_runbook",
+    "request_report_generation",
 ]

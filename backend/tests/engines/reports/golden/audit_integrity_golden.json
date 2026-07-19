@@ -1,0 +1,316 @@
+{
+  "_comment": "Golden CSV/PDF structure fixture for the W3-T5 audit-integrity report (ADR-0053 SS7.4). Regenerate ONLY via the scenario in tests/engines/reports/test_audit_integrity.py; W4-T3 conformance checks assert against this same structure. Hex values are SHA-256 digest PRESENTATIONS of hash-chain watermarks (tamper evidence, not secrets).",
+  "csv_rows": [
+    [
+      "report",
+      "Audit Integrity Report"
+    ],
+    [
+      "kind",
+      "audit_integrity"
+    ],
+    [
+      "period_start",
+      "2026-07-01T00:00:00+00:00"
+    ],
+    [
+      "period_end",
+      "2026-07-08T00:00:00+00:00"
+    ],
+    [
+      "generated_at",
+      "2026-07-08T00:05:00+00:00"
+    ],
+    [
+      "regime_tags",
+      "soc2:CC7.2 mapping-version:1"
+    ],
+    [],
+    [
+      "Report provenance"
+    ],
+    [
+      "Field",
+      "Value"
+    ],
+    [
+      "Engine version",
+      "reports-engine/1.0.0"
+    ],
+    [
+      "Report kind",
+      "audit_integrity"
+    ],
+    [
+      "Period start (UTC)",
+      "2026-07-01T00:00:00+00:00"
+    ],
+    [
+      "Period end (UTC)",
+      "2026-07-08T00:00:00+00:00"
+    ],
+    [],
+    [
+      "Chain verification runs"
+    ],
+    [
+      "Started (UTC)",
+      "Finished (UTC)",
+      "Chain outcome",
+      "Entries verified",
+      "Verified from (entry id)",
+      "Verified to (entry id)",
+      "Checkpoint before (SHA-256)",
+      "Checkpoint after (SHA-256)",
+      "Append-only grant check"
+    ],
+    [
+      "2026-07-01T01:00:00+00:00",
+      "2026-07-01T01:01:00+00:00",
+      "clean",
+      "4",
+      "genesis",
+      "00000000-0000-0000-0000-00000000e001",
+      "none",
+      "3c50f2632ba96c445048f5a76d638cccc64ec5a55dc222750da71e60ddf5a1ce",
+      "clean"
+    ],
+    [
+      "2026-07-02T01:00:00+00:00",
+      "2026-07-02T01:01:00+00:00",
+      "clean",
+      "2",
+      "00000000-0000-0000-0000-00000000e001",
+      "00000000-0000-0000-0000-00000000e002",
+      "3c50f2632ba96c445048f5a76d638cccc64ec5a55dc222750da71e60ddf5a1ce",
+      "f83925a3924d831c0f9203f1746bec9278b6429f448d5c5c1065602375383da8",
+      "clean"
+    ],
+    [
+      "2026-07-04T01:00:00+00:00",
+      "2026-07-04T01:01:00+00:00",
+      "clean",
+      "0",
+      "00000000-0000-0000-0000-00000000e002",
+      "00000000-0000-0000-0000-00000000e002",
+      "f83925a3924d831c0f9203f1746bec9278b6429f448d5c5c1065602375383da8",
+      "f83925a3924d831c0f9203f1746bec9278b6429f448d5c5c1065602375383da8",
+      "clean"
+    ],
+    [
+      "2026-07-05T01:00:00+00:00",
+      "2026-07-05T01:01:00+00:00",
+      "break",
+      "1",
+      "00000000-0000-0000-0000-00000000e002",
+      "00000000-0000-0000-0000-00000000e002",
+      "f83925a3924d831c0f9203f1746bec9278b6429f448d5c5c1065602375383da8",
+      "f83925a3924d831c0f9203f1746bec9278b6429f448d5c5c1065602375383da8",
+      "clean"
+    ],
+    [
+      "2026-07-06T01:00:00+00:00",
+      "2026-07-06T01:01:00+00:00",
+      "clean",
+      "3",
+      "00000000-0000-0000-0000-00000000e002",
+      "00000000-0000-0000-0000-00000000e003",
+      "f83925a3924d831c0f9203f1746bec9278b6429f448d5c5c1065602375383da8",
+      "493c0be40371d2faff372e85e7b1ce2855b67b66d1b3997283042c7ff2ae2fa9",
+      "violation"
+    ],
+    [
+      "2026-07-07T01:00:00+00:00",
+      "2026-07-07T01:01:00+00:00",
+      "clean",
+      "0",
+      "00000000-0000-0000-0000-00000000e003",
+      "00000000-0000-0000-0000-00000000e003",
+      "493c0be40371d2faff372e85e7b1ce2855b67b66d1b3997283042c7ff2ae2fa9",
+      "493c0be40371d2faff372e85e7b1ce2855b67b66d1b3997283042c7ff2ae2fa9",
+      "clean"
+    ],
+    [],
+    [
+      "Daily verification outcomes"
+    ],
+    [
+      "Date (UTC)",
+      "Runs recorded",
+      "Chain outcome",
+      "Append-only grant check"
+    ],
+    [
+      "2026-07-01",
+      "1",
+      "clean",
+      "clean"
+    ],
+    [
+      "2026-07-02",
+      "1",
+      "clean",
+      "clean"
+    ],
+    [
+      "2026-07-03",
+      "0",
+      "gap",
+      "gap"
+    ],
+    [
+      "2026-07-04",
+      "1",
+      "clean",
+      "clean"
+    ],
+    [
+      "2026-07-05",
+      "1",
+      "break",
+      "clean"
+    ],
+    [
+      "2026-07-06",
+      "1",
+      "clean",
+      "violation"
+    ],
+    [
+      "2026-07-07",
+      "1",
+      "clean",
+      "clean"
+    ],
+    [],
+    [
+      "Integrity findings"
+    ],
+    [
+      "Finding",
+      "Scope",
+      "Detail"
+    ],
+    [
+      "verification-gap",
+      "2026-07-03",
+      "no hash-chain verification run was persisted for this day \u2014 the ADR-0038 daily verification did not run or did not record an outcome"
+    ],
+    [
+      "chain-break",
+      "2026-07-05",
+      "a hash-chain verification run detected a break on this day"
+    ],
+    [
+      "append-only-grant",
+      "2026-07-06",
+      "the daily attestation found an UPDATE/DELETE grant on audit_log on this day"
+    ],
+    [],
+    [
+      "Append-only grant attestation (generation time)"
+    ],
+    [
+      "Field",
+      "Value"
+    ],
+    [
+      "Table",
+      "audit_log (parent and every partition)"
+    ],
+    [
+      "Attested at (UTC)",
+      "2026-07-08T00:05:00+00:00"
+    ],
+    [
+      "Method",
+      "live PostgreSQL catalog query (pg_class relacl via aclexplode) at generation time; never cached"
+    ],
+    [
+      "UPDATE/DELETE grants found",
+      "unavailable"
+    ],
+    [
+      "Grants",
+      "none"
+    ],
+    [
+      "Attestation",
+      "unavailable: this database backend exposes no grant catalog (non-PostgreSQL)"
+    ],
+    [],
+    [
+      "note",
+      "Verification outcomes are read from the persisted audit_chain_verification_runs history written by the daily ADR-0038 verification job; generation never re-verifies the chain inline, so report latency is independent of chain length."
+    ],
+    [],
+    [
+      "note",
+      "Gap semantics: one row per UTC day in the period; a day with no persisted verification run renders the explicit 'gap' marker AND raises a 'verification-gap' finding \u2014 a verification that never ran is a finding, not a blank. Nothing is interpolated or carried forward."
+    ],
+    [],
+    [
+      "note",
+      "The append-only grant attestation runs LIVE against the PostgreSQL catalog at every generation (never cached) and covers the audit_log parent and every partition; the persisted daily outcomes attest the same posture across the reporting window, so a transient grant mid-period surfaces as a failed day, never a clean report."
+    ],
+    [],
+    [
+      "note",
+      "A REVOKE cannot bind the table owner or a superuser (the migration 0001 caveat): the attestation covers grantable UPDATE/DELETE privileges; the ADR-0038 hash chain \u2014 verified daily above \u2014 remains the tamper-evidence backstop for privileged actors."
+    ],
+    [],
+    [
+      "note",
+      "Checkpoint values are SHA-256 hex digest presentations of the hash-chain watermark \u2014 tamper evidence by design. The redaction contract (ADR-0053 \u00a76) uses format-anchored secret patterns, deliberately not entropy detection, precisely so the platform's own integrity digests render unredacted."
+    ]
+  ],
+  "pdf_structure": {
+    "sections": [
+      {
+        "title": "Report provenance",
+        "columns": [
+          "Field",
+          "Value"
+        ]
+      },
+      {
+        "title": "Chain verification runs",
+        "columns": [
+          "Started (UTC)",
+          "Finished (UTC)",
+          "Chain outcome",
+          "Entries verified",
+          "Verified from (entry id)",
+          "Verified to (entry id)",
+          "Checkpoint before (SHA-256)",
+          "Checkpoint after (SHA-256)",
+          "Append-only grant check"
+        ]
+      },
+      {
+        "title": "Daily verification outcomes",
+        "columns": [
+          "Date (UTC)",
+          "Runs recorded",
+          "Chain outcome",
+          "Append-only grant check"
+        ]
+      },
+      {
+        "title": "Integrity findings",
+        "columns": [
+          "Finding",
+          "Scope",
+          "Detail"
+        ]
+      },
+      {
+        "title": "Append-only grant attestation (generation time)",
+        "columns": [
+          "Field",
+          "Value"
+        ]
+      }
+    ]
+  }
+}

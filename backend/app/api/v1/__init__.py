@@ -24,6 +24,7 @@ from app.api.v1 import (
     docs,
     health,
     integrations,
+    reports,
     topology,
     virtualization,
 )
@@ -56,6 +57,7 @@ api_router.include_router(discovery.router, dependencies=_api_rate_limit)
 api_router.include_router(docs.router, dependencies=_api_rate_limit)
 api_router.include_router(health.router)
 api_router.include_router(integrations.router)
+api_router.include_router(reports.router, dependencies=_api_rate_limit)
 api_router.include_router(topology.router, dependencies=_api_rate_limit)
 api_router.include_router(virtualization.router, dependencies=_api_rate_limit)
 

@@ -445,6 +445,29 @@ spec:
 {{- end -}}
 
 {{/*
+netops.workerMetricsMultiprocessEnv — PROMETHEUS_MULTIPROC_DIR for every Celery
+worker Deployment (PR #166 F4). The prefork POOL runs task bodies in CHILD
+processes; each mutates its OWN prometheus_client mmap-backed metric value,
+never the parent's in-memory default REGISTRY the /metrics HTTP server (bound
+once at worker_init, before any child forks) serves. app.workers.celery_app's
+start_worker_metrics_server switches to a MultiProcessCollector over this
+directory whenever the env var is present.
+
+A raw literal env var, NOT a NETOPS_*-prefixed Settings field: prometheus_client
+reads PROMETHEUS_MULTIPROC_DIR via os.environ at the MODULE IMPORT of
+prometheus_client.values (before any Settings-driven setup could run), and it
+is not one of this chart's own NETOPS_* keys (config-drift gate scope). Points
+at the container's existing /tmp emptyDir (worker-deployment.yaml /
+worker-queue-deployments.yaml already mount one for Python/Celery tempfiles) —
+no new volume needed; the directory itself is created at worker_init.
+Usage: {{- include "netops.workerMetricsMultiprocessEnv" . | nindent 12 }}
+*/}}
+{{- define "netops.workerMetricsMultiprocessEnv" -}}
+- name: PROMETHEUS_MULTIPROC_DIR
+  value: /tmp/prometheus-multiproc-worker
+{{- end -}}
+
+{{/*
 netops.dbClientTlsEnv — the api/worker in-cluster DB env (W4-T4 ADR-0039 §4 /
 W1-T2 ADR-0042 §4). Authored ONCE so the api + worker cannot drift. Sets
 NETOPS_DATABASE_URL to the in-cluster DSN (the app default DSN points at the

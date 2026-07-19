@@ -28,13 +28,19 @@ second write that bypasses approval.
 
 from __future__ import annotations
 
+import os
+from datetime import UTC, datetime
+from typing import Any
+
 from celery import Celery
+from celery.beat import BeatLazyFunc
 from celery.schedules import crontab
-from celery.signals import worker_init
+from celery.signals import worker_init, worker_process_shutdown
 from kombu import Queue
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
+from app.engines.reports.idempotency import scheduled_period
 
 _logger = get_logger(__name__)
 
@@ -113,10 +119,15 @@ QUEUE_REDELIVERY_RATIONALE: dict[str, str] = {
         "deterministic findings for the same immutable pcap (safe overwrite)."
     ),
     QUEUE_DOCS: (
-        "Generated documents are content-addressed / keyed to their source "
-        "(config snapshot, run) the same way as config snapshots; a re-run "
-        "regenerates the same artifact rather than appending a duplicate. (No "
-        "docs Celery task is wired yet — the include list reserves ``.docs``.)"
+        "Idempotent by deterministic claim row (P4 W3-T1, ADR-0053 §2). "
+        "``reports.generate`` / ``reports.generate_scheduled`` derive the run PK "
+        "from ``(kind, period)`` and INSERT it ON CONFLICT DO NOTHING before any "
+        "render or audit emit — a redelivered (or beat+on-demand colliding) task "
+        "finds the row and skips/resumes instead of double-generating. "
+        "``reports.purge_expired`` is a cutoff-driven retention sweep (re-run "
+        "deletes nothing already deleted); ``reports.compliance_sweep`` claims a "
+        "deterministic per-UTC-date run row the same way, so a redelivery "
+        "persists no duplicate trend history."
     ),
     QUEUE_TOPOLOGY: (
         "``topology.sync_after_run`` is a full projection of current inventory into "
@@ -131,6 +142,49 @@ QUEUE_REDELIVERY_RATIONALE: dict[str, str] = {
         "``system.ensure_partitions`` is idempotent DDL (CREATE TABLE IF NOT EXISTS)."
     ),
 }
+
+
+def _report_crontab(settings: Settings, cadence: str) -> crontab:
+    """Map a per-kind report cadence to its beat crontab (ADR-0053 §2).
+
+    ``daily`` fires every day, ``weekly`` on Sunday, ``monthly`` on the 1st —
+    always at the shared ``report_generation_hour``/``minute`` UTC time. The
+    cadence values are ``Literal``-typed in :class:`~app.core.config.Settings`,
+    so an unknown token can only be a programming error.
+    """
+    hour = str(settings.report_generation_hour)
+    minute = str(settings.report_generation_minute)
+    if cadence == "daily":
+        return crontab(hour=hour, minute=minute)
+    if cadence == "weekly":
+        return crontab(hour=hour, minute=minute, day_of_week="0")
+    if cadence == "monthly":
+        return crontab(hour=hour, minute=minute, day_of_month="1")
+    raise ValueError(f"unknown report cadence {cadence!r}; expected daily|weekly|monthly")
+
+
+def _scheduled_period_bound(cadence: str, index: int) -> str:
+    """``BeatLazyFunc`` target: one bound of the CURRENT cadence period.
+
+    PR #166 F2 (beat-slot identity): Celery beat evaluates ``BeatLazyFunc``
+    entries in ``Scheduler.apply_async`` — i.e. AT DISPATCH TIME, right when
+    beat decides to fire the task — not when the worker later executes it.
+    Embedding the computed bound in the outgoing message means a redelivered
+    or delayed-past-midnight tick still carries the period beat actually
+    meant; the worker (:func:`app.workers.tasks.reports.generate_scheduled`)
+    never re-derives it from its own execution-time clock. Returns an ISO
+    string (JSON-serializable task arg), *index* selects start (``0``) or
+    end (``1``) of the ``(start, end)`` pair :func:`scheduled_period` returns.
+    """
+    return scheduled_period(cadence, datetime.now(UTC))[index].isoformat()
+
+
+def _report_schedule_kwargs(cadence: str) -> dict[str, BeatLazyFunc]:
+    """The lazy ``period_start``/``period_end`` kwargs for one report beat entry."""
+    return {
+        "period_start": BeatLazyFunc(_scheduled_period_bound, cadence, 0),
+        "period_end": BeatLazyFunc(_scheduled_period_bound, cadence, 1),
+    }
 
 
 def create_celery_app() -> Celery:
@@ -148,8 +202,8 @@ def create_celery_app() -> Celery:
             "app.workers.tasks.packet",
             "app.workers.tasks.credentials",
             "app.workers.tasks.maintenance",
+            "app.workers.tasks.reports",
         ],
-        # M5+: ".docs"
     )
     if settings.redis_url.startswith("sentinel://"):
         # Kombu's Sentinel transport requires the master name (and the Sentinel
@@ -193,6 +247,9 @@ def create_celery_app() -> Celery:
             "packet.purge_*": {"queue": QUEUE_PACKET_CAPTURE},
             "packet.analyze_*": {"queue": QUEUE_PACKET_ANALYSIS},
             "docs.*": {"queue": QUEUE_DOCS},
+            # Report generation is the document-generation workload class
+            # (ADR-0053 §2, D8): no new queue, no new worker Deployment.
+            "reports.*": {"queue": QUEUE_DOCS},
             "topology.*": {"queue": QUEUE_TOPOLOGY},
             "system.*": {"queue": QUEUE_SYSTEM},
             # KEK rotation re-wrap (W6-T3): an operator/KMS-triggered operational
@@ -247,9 +304,88 @@ def create_celery_app() -> Celery:
                 "task": "system.sample_queue_depths",
                 "schedule": settings.queue_depth_sample_seconds,
             },
+            # Compliance/audit report generation (P4 W3-T1, ADR-0053 §2): one
+            # beat entry per kind at the operator-configurable cadence (weekly
+            # fires Sunday, monthly fires the 1st, at the shared UTC time).
+            # Generation is idempotent per (kind, period) via the claim row, so
+            # beat loss / redelivery re-fires safely (PRODUCTION.md §3.2).
+            "report-generate-change": {
+                "task": "reports.generate_scheduled",
+                "args": ("change",),
+                "kwargs": _report_schedule_kwargs(settings.report_change_cadence),
+                "schedule": _report_crontab(settings, settings.report_change_cadence),
+            },
+            "report-generate-compliance-posture": {
+                "task": "reports.generate_scheduled",
+                "args": ("compliance_posture",),
+                "kwargs": _report_schedule_kwargs(settings.report_compliance_posture_cadence),
+                "schedule": _report_crontab(settings, settings.report_compliance_posture_cadence),
+            },
+            "report-generate-access-review": {
+                "task": "reports.generate_scheduled",
+                "args": ("access_review",),
+                "kwargs": _report_schedule_kwargs(settings.report_access_review_cadence),
+                "schedule": _report_crontab(settings, settings.report_access_review_cadence),
+            },
+            "report-generate-audit-integrity": {
+                "task": "reports.generate_scheduled",
+                "args": ("audit_integrity",),
+                "kwargs": _report_schedule_kwargs(settings.report_audit_integrity_cadence),
+                "schedule": _report_crontab(settings, settings.report_audit_integrity_cadence),
+            },
+            # Report-artifact retention purge (ADR-0053 §4): daily hard-delete
+            # of artifacts past their expiry (7-year PROPOSED default).
+            "report-retention-purge": {
+                "task": "reports.purge_expired",
+                "schedule": crontab(
+                    hour=str(settings.report_purge_hour),
+                    minute=str(settings.report_purge_minute),
+                ),
+            },
+            # Daily compliance evaluation sweep (ADR-0053 §2) feeding the §7.2
+            # trend history — without it the posture report has no time series.
+            "compliance-daily-sweep": {
+                "task": "reports.compliance_sweep",
+                "schedule": crontab(
+                    hour=str(settings.compliance_sweep_hour),
+                    minute=str(settings.compliance_sweep_minute),
+                ),
+            },
         },
     )
     return celery
+
+
+def _multiprocess_registry() -> Any | None:
+    """Build a ``MultiProcessCollector``-backed registry, or ``None`` (PR #166 F4).
+
+    Celery's prefork pool runs task BODIES in CHILD processes; every metric
+    setter a task calls (``observe_report_generation``, ``set_report_last_
+    success``, ...) therefore mutates that CHILD's own per-process
+    ``prometheus_client`` value — never the parent's in-memory default
+    ``REGISTRY`` the ``/metrics`` HTTP server (started once in the PARENT at
+    ``worker_init``, before any child forks) was serving. Scraping the default
+    ``REGISTRY`` in that parent forever reads the metrics' zero/unset initial
+    state, no matter how many tasks the children complete (compose ``-c 2``+).
+
+    When ``PROMETHEUS_MULTIPROC_DIR`` is set (the standard ``prometheus_client``
+    multiprocess-mode contract — every ``Counter``/``Gauge``/``Histogram``
+    created anywhere in the process already writes to that directory's mmap
+    files once the env var is present at import time), this returns a fresh
+    ``CollectorRegistry`` wired to a ``MultiProcessCollector`` over that
+    directory, which aggregates every process's file into one scrape. Returns
+    ``None`` (caller falls back to the default ``REGISTRY``) when the dir is
+    unset — the existing single-process dev/test behavior is unchanged.
+    """
+    directory = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if not directory:
+        return None
+    from prometheus_client import CollectorRegistry, multiprocess
+
+    os.makedirs(directory, exist_ok=True)
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry, path=directory)
+    return registry
 
 
 def start_worker_metrics_server(port: int) -> bool:
@@ -261,6 +397,11 @@ def start_worker_metrics_server(port: int) -> bool:
     are exposed by a tiny ``prometheus_client`` HTTP server started once in the
     worker main process. The K8s worker Deployments scrape this port.
 
+    PR #166 F4: when ``PROMETHEUS_MULTIPROC_DIR`` is set, the server instead
+    serves a :func:`_multiprocess_registry` — a ``MultiProcessCollector`` over
+    every prefork child's own mmap files — so task-body metric mutations
+    (which happen in the children, never the parent) are actually visible here.
+
     Graceful by design (mirrors :mod:`app.core.metrics`): returns ``False`` (and
     logs, never raises) when ``prometheus_client`` is absent or the port is
     already bound — a metrics-server failure must never take a worker down or
@@ -271,8 +412,12 @@ def start_worker_metrics_server(port: int) -> bool:
     except ImportError:
         _logger.info("worker.metrics_server_skipped", reason="prometheus_client_absent")
         return False
+    registry = _multiprocess_registry()
     try:
-        start_http_server(port)
+        if registry is not None:
+            start_http_server(port, registry=registry)
+        else:
+            start_http_server(port)
     except OSError as exc:
         # Port already bound (e.g. a co-located second worker, or a re-init) must
         # not crash the worker; the first server keeps serving the shared REGISTRY.
@@ -280,7 +425,7 @@ def start_worker_metrics_server(port: int) -> bool:
             "worker.metrics_server_unavailable", port=port, reason_class=type(exc).__name__
         )
         return False
-    _logger.info("worker.metrics_server_started", port=port)
+    _logger.info("worker.metrics_server_started", port=port, multiprocess=registry is not None)
     return True
 
 
@@ -290,8 +435,41 @@ def _start_metrics_on_worker_init(**_kwargs: object) -> None:
 
     ``worker_init`` fires once in the worker MAIN process (before prefork children),
     so the HTTP server binds the configured port exactly once per worker.
+
+    PR #166 F6: also re-hydrates the report-engine staleness gauge for all
+    four kinds from durable history (or the worker's boot timestamp, for a
+    kind that has never once succeeded) — see
+    :func:`app.workers.tasks.reports.seed_last_success_gauges`. Imported here
+    (not at module level) to avoid a celery_app <-> tasks.reports import cycle;
+    by the time this signal fires the task modules are already imported.
     """
     start_worker_metrics_server(get_settings().worker_metrics_port)
+    from app.workers.tasks.reports import seed_last_success_gauges
+
+    seed_last_success_gauges()
+
+
+@worker_process_shutdown.connect
+def _mark_prefork_child_dead(pid: int | None = None, **_kwargs: object) -> None:
+    """Retire a prefork child's multiprocess-mode mmap files on exit (PR #166 F4).
+
+    Without this, a child that exits (worker restart, ``--max-tasks-per-child``
+    churn) leaves its per-process gauge/counter/histogram files in
+    ``PROMETHEUS_MULTIPROC_DIR`` forever — unbounded directory growth, and a
+    dead child's stale last-write competing in the ``mostrecent`` gauge
+    aggregation. ``multiprocess.mark_process_dead`` (the documented
+    ``prometheus_client`` cleanup hook, mirroring the gunicorn ``child_exit``
+    pattern) deletes that pid's files. No-op when this worker is not running
+    in multiprocess mode, or ``prometheus_client`` is absent.
+    """
+    directory = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if not directory or pid is None:
+        return
+    try:
+        from prometheus_client import multiprocess
+    except ImportError:
+        return
+    multiprocess.mark_process_dead(pid)
 
 
 #: Worker entrypoint: ``celery -A app.workers.celery_app worker -Q <queue>``.

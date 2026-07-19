@@ -1,9 +1,25 @@
 # P4 Build Plan — Vendor Wave 3 (F5 BIG-IP + VMware) + Application-Dependency Topology + Compliance & Audit Reporting
 
 **Project:** AI Network Operations Platform
-**Status:** PLANNED — design (this doc). W0 not started. Entry condition satisfied: **P3-Platform COMPLETE** (`docs/roadmap/P3-RELEASE-READINESS.md` — all five §11 gates PASS on release HEAD `8e11b9b`, CI run 28745257330; ADRs 0042–0047 Accepted, 0048 Rejected).
+**Status:** **IN PROGRESS.** W0–W2 are merged (PRs #117–#119; W2 optimistic-concurrency follow-up #123). W3 is implemented on PR #166 and independently reviewed **D+ (58/100), not merge-ready**; remediation is pending. W4 has not started. Entry condition was satisfied by **P3-Platform COMPLETE** (`docs/roadmap/P3-RELEASE-READINESS.md` — all five §11 gates PASS; ADRs 0042–0047 Accepted, 0048 Rejected).
 **Authority:** Bound by `CLAUDE.md`, `docs/architecture/DECISIONS-BRIEF.md` (D1–D16), and `docs/roadmap/PRODUCTION.md` §1 (phase table), §2.4 (Wave 3), §2.6 (per-wave exit criteria), §7 (compliance & audit reporting), §11 (gates).
 **Scope source:** `PRODUCTION.md` Phase **P4** = Wave 3 vendors **F5 BIG-IP + VMware**; **application-dependency topology** (per MVP traceability); the **compliance & audit reporting suite** (§7). This is the recorded P4 inheritance from the P3 exit marker (PRODUCTION.md §1 "P4 inheritance" + `P3-RELEASE-READINESS.md` §4) — nothing else rides in.
+
+---
+
+## Current delivery status
+
+| Wave | State | Evidence / next action |
+|---|---|---|
+| **W0 — design gate** | **Merged** | PR #117: ADRs 0050–0053, P4 marker, Consultant re-check, per-task specs |
+| **W1 — F5 + VMware** | **Merged** | PR #118: both plugins and inventory surfacing; live-lab validation remains deferred as planned |
+| **W2 — application dependencies** | **Merged** | PR #119 plus optimistic-concurrency follow-up PR #123: schema/projection, derivation, tagging, impact reads |
+| **W3 — compliance/audit reporting** | **Implemented; review remediation pending** | PR #166 contains T1–T6. Focused suite: 207 passed / 1 skipped. Independent review: **D+ 58/100**, 11 inline findings, three required CI jobs red. See [`docs/reviews/P4-W3-PR166-REVIEW.md`](../reviews/P4-W3-PR166-REVIEW.md). |
+| **W4 — evals + phase exit** | **Not started** | Blocked on a merge-ready W3 head; then run the conformance/evidence wave and phase-exit audit |
+
+The W3 implementation is not counted as complete until its PostgreSQL,
+supply-chain, evidence-integrity, scalability, and observability blockers are
+remediated and all required gates pass on one reviewed head.
 
 ---
 

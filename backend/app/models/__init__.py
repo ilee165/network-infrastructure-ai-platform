@@ -20,7 +20,14 @@ from app.models.applications import (
     DependencySource,
     DependencyTargetKind,
 )
-from app.models.audit import AuditChainCheckpoint, AuditExportCursor, AuditLog
+from app.models.audit import (
+    AuditChainCheckpoint,
+    AuditChainVerificationRun,
+    AuditExportCursor,
+    AuditLog,
+    ChainVerificationOutcome,
+    GrantCheckOutcome,
+)
 from app.models.base import Base
 from app.models.change_requests import (
     Approval,
@@ -28,6 +35,11 @@ from app.models.change_requests import (
     ChangeRequest,
     ChangeRequestKind,
     ChangeRequestState,
+)
+from app.models.compliance_history import (
+    ComplianceRun,
+    ComplianceRunFinding,
+    ComplianceSweepTrigger,
 )
 from app.models.config_mgmt import (
     EMBEDDING_DIM,
@@ -56,6 +68,14 @@ from app.models.inventory import (
 )
 from app.models.mixins import TimestampMixin, UuidPkMixin
 from app.models.pcap_metadata import PcapMetadata
+from app.models.reports import (
+    ReportArtifact,
+    ReportFormat,
+    ReportKind,
+    ReportRun,
+    ReportRunStatus,
+    ReportTrigger,
+)
 from app.models.topology import TopologySnapshot
 from app.models.virtualization import (
     NormalizedComputeClusterRow,
@@ -74,13 +94,18 @@ __all__ = [
     "Approval",
     "ApprovalDecision",
     "AuditChainCheckpoint",
+    "AuditChainVerificationRun",
     "AuditExportCursor",
     "AuditLog",
+    "ChainVerificationOutcome",
     "Base",
     "ChangeRequest",
     "ChangeRequestKind",
     "ChangeRequestState",
     "CompliancePolicy",
+    "ComplianceRun",
+    "ComplianceRunFinding",
+    "ComplianceSweepTrigger",
     "ConfigArchive",
     "ConfigBackupRun",
     "ConfigSnapshot",
@@ -97,6 +122,7 @@ __all__ = [
     "DocumentFormat",
     "DocumentKind",
     "Embedding",
+    "GrantCheckOutcome",
     "NormalizedComputeClusterRow",
     "NormalizedHypervisorHostRow",
     "NormalizedInterfaceRow",
@@ -109,6 +135,12 @@ __all__ = [
     "PcapMetadata",
     "RawArtifact",
     "ReasoningTraceRow",
+    "ReportArtifact",
+    "ReportFormat",
+    "ReportKind",
+    "ReportRun",
+    "ReportRunStatus",
+    "ReportTrigger",
     "ReasoningTraceStep",
     "RefreshSession",
     "Role",

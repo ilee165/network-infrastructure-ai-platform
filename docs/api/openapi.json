@@ -3868,6 +3868,338 @@
         "title": "ReadinessReport",
         "type": "object"
       },
+      "ReportArtifactRead": {
+        "description": "Artifact metadata (bytes live behind the download endpoint only).",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "run_id",
+          "format",
+          "sha256",
+          "size_bytes",
+          "expires_at",
+          "created_at"
+        ],
+        "title": "ReportArtifactRead",
+        "type": "object"
+      },
+      "ReportGenerationQueued": {
+        "description": "202 response: the deterministic run id for the requested period.",
+        "properties": {
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "status"
+        ],
+        "title": "ReportGenerationQueued",
+        "type": "object"
+      },
+      "ReportGenerationRequest": {
+        "description": "Body of ``POST /api/v1/reports`` \u2014 one on-demand ``(kind, period)``.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ReportKind"
+          },
+          "period_end": {
+            "format": "date-time",
+            "title": "Period End",
+            "type": "string"
+          },
+          "period_start": {
+            "format": "date-time",
+            "title": "Period Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "period_start",
+          "period_end"
+        ],
+        "title": "ReportGenerationRequest",
+        "type": "object"
+      },
+      "ReportKind": {
+        "description": "The four PRODUCTION.md \u00a77 report kinds (ADR-0053 \u00a77).",
+        "enum": [
+          "change",
+          "compliance_posture",
+          "access_review",
+          "audit_integrity"
+        ],
+        "title": "ReportKind",
+        "type": "string"
+      },
+      "ReportRunDetail": {
+        "description": "Run metadata plus its artifact metadata (still no content bytes).",
+        "properties": {
+          "artifacts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ReportArtifactRead"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Class"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "period_end": {
+            "format": "date-time",
+            "title": "Period End",
+            "type": "string"
+          },
+          "period_start": {
+            "format": "date-time",
+            "title": "Period Start",
+            "type": "string"
+          },
+          "regime_tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Regime Tags",
+            "type": "array"
+          },
+          "requested_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested By"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "trigger": {
+            "title": "Trigger",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "trigger",
+          "requested_by",
+          "period_start",
+          "period_end",
+          "status",
+          "error_class",
+          "regime_tags",
+          "finished_at",
+          "created_at"
+        ],
+        "title": "ReportRunDetail",
+        "type": "object"
+      },
+      "ReportRunListResponse": {
+        "description": "Paginated run listing (RBAC-scoped to kinds the caller may see).",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReportRunRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "ReportRunListResponse",
+        "type": "object"
+      },
+      "ReportRunRead": {
+        "description": "One report run's metadata.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Class"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "period_end": {
+            "format": "date-time",
+            "title": "Period End",
+            "type": "string"
+          },
+          "period_start": {
+            "format": "date-time",
+            "title": "Period Start",
+            "type": "string"
+          },
+          "regime_tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Regime Tags",
+            "type": "array"
+          },
+          "requested_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested By"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "trigger": {
+            "title": "Trigger",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "trigger",
+          "requested_by",
+          "period_start",
+          "period_end",
+          "status",
+          "error_class",
+          "regime_tags",
+          "finished_at",
+          "created_at"
+        ],
+        "title": "ReportRunRead",
+        "type": "object"
+      },
       "ResetPasswordRequest": {
         "description": "Body for ``POST /users/{id}/reset-password`` \u2014 optional explicit secret.",
         "properties": {
@@ -8849,6 +9181,247 @@
         "summary": "List Integrations",
         "tags": [
           "integrations"
+        ]
+      }
+    },
+    "/api/v1/reports": {
+      "get": {
+        "description": "List report runs, newest first \u2014 RBAC-scoped to kinds the caller may see.\n\nA run of a kind above the caller's floor is never listed (an engineer does\nnot learn access-review runs exist); explicitly requesting such a kind is a\n403, not an empty page.",
+        "operationId": "list_runs_api_v1_reports_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ReportKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportRunListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Runs",
+        "tags": [
+          "reports"
+        ]
+      },
+      "post": {
+        "description": "Enqueue an on-demand generation for ``(kind, period)`` (ADR-0053 \u00a72).\n\n202: the render happens asynchronously on the ``docs`` queue. The returned\n``run_id`` is DETERMINISTIC for the period \u2014 a beat run or a second request\nfor the same ``(kind, period)`` resolves to the same run (claim-row guard;\nno double generation). Audited under the requesting user.",
+        "operationId": "request_generation_api_v1_reports_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportGenerationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportGenerationQueued"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Request Generation",
+        "tags": [
+          "reports"
+        ]
+      }
+    },
+    "/api/v1/reports/{run_id}": {
+      "get": {
+        "description": "One run's metadata + artifact metadata (visible kinds only; 404 seam).",
+        "operationId": "get_run_api_v1_reports__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportRunDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Run",
+        "tags": [
+          "reports"
+        ]
+      }
+    },
+    "/api/v1/reports/{run_id}/artifacts/{artifact_id}": {
+      "get": {
+        "description": "Download one artifact's bytes \u2014 the RBAC'd, audited evidence exit point.\n\nThe per-kind floor is re-evaluated HERE against the caller's current role\n(ADR-0053 \u00a73): an artifact is never world-readable once generated, and a\nrole revoked between generation and download denies the download \u2014 as a\n404 identical to a missing run (the PR #166 F3 existence seam). Every\ndownload writes an audit entry carrying the artifact sha256.",
+        "operationId": "download_artifact_api_v1_reports__run_id__artifacts__artifact_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "application/pdf": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The artifact bytes (CSV or PDF, per its ``format``)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Artifact",
+        "tags": [
+          "reports"
         ]
       }
     },

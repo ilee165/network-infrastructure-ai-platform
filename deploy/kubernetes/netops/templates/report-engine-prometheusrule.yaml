@@ -1,0 +1,143 @@
+{{- /*
+REPORT-ENGINE ALERTS — PrometheusRule (P4 W3-T1 / PR #166 F5, ADR-0053 §9;
+ADR-0046 conformant).
+
+The compliance/audit report engine's alert set — staleness per scheduled
+cadence class (weekly / monthly) over netops_report_last_success_timestamp,
+plus the two-tier failure pair (fast page on any redaction trip, slow ticket
+on repeated failures) over netops_report_failures_total. See
+deploy/observability/report-engine.alerts.yaml for the full per-alert
+rationale (kept there as the promtool-gated source).
+
+SINGLE SOURCE OF TRUTH + promtool GATE (the slo-burn-rate-prometheusrule.yaml
+convention)
+  The rule BODY below is identical to deploy/observability/report-engine.alerts.yaml,
+  which is what `promtool check rules` + `promtool test rules`
+  (report-engine.alerts.test.yaml) + the mute-mutation bite proof
+  (run-report-promtool-bite.sh) validate in the CI observability job. This
+  template renders that SAME group set as an operator object; a renamed base
+  `netops_report_*` metric or a muted alert breaks the promtool gate FIRST, by
+  design — keep the two files in lockstep on every edit to either.
+
+EXPOSE-DON'T-BUNDLE (ADR-0015 alt.1 / ADR-0046 §4)
+  Renders ONLY when observability.prometheusRule.enabled (the SAME opt-in flag
+  the SLO recording/burn-rate PrometheusRules use, PR #166 F5) — a default
+  install exposes the base series on /metrics but does NOT bundle a
+  Prometheus/operator/alertmanager stack. Before this template the alerts file
+  was promtool-validated in CI but nothing in the chart actually deployed it
+  to a live cluster; running the monitoring stack stays the operator's choice,
+  but choosing to run it now gets these alerts for free, in lockstep with the
+  SLO rule set.
+*/ -}}
+{{- if .Values.observability.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "netops.fullname" . }}-report-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "netops.labels" . | nindent 4 }}
+    netops.ai/slo-rules: report-engine
+    {{- with .Values.observability.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    # =========================================================================
+    # Staleness per scheduled cadence class (ADR-0053 §9). The gauge is set on
+    # every SUCCESSFUL generation; "now - last success > cadence + grace" means
+    # a scheduled evidence report silently stopped being produced — a
+    # compliance gap an auditor discovers months later unless it pages now.
+    #   weekly  (change, compliance_posture): 7d cadence + 1d grace  = 8d
+    #   monthly (access_review, audit_integrity): 31d cadence + 2d grace = 33d
+    # NOTE (PR #166 F6, "never-succeeded silence" — CLOSED): the worker SEEDS
+    # this gauge for all four kinds at boot (app.workers.tasks.reports.
+    # seed_last_success_gauges) — the durable last-SUCCEEDED ReportRun.
+    # finished_at when one exists, else the worker's own boot timestamp — so a
+    # kind that has never once succeeded still gets a series and fires on
+    # schedule instead of staying silent forever (see report-engine.alerts.yaml
+    # for the full rationale + the promtool "seeded at boot" test cases).
+    # =========================================================================
+    - name: netops-report-staleness
+      rules:
+        - alert: NetopsReportWeeklyStale
+          expr: |
+            (time() - netops_report_last_success_timestamp{report_kind=~"change|compliance_posture"})
+            > (8 * 86400)
+          for: 1h
+          labels:
+            severity: page
+            slo: report_staleness
+            tier: weekly
+          annotations:
+            summary: "A weekly compliance/audit report has not succeeded within cadence + grace (8d)"
+            description: >-
+              netops_report_last_success_timestamp for a weekly-scheduled report
+              kind (change | compliance_posture) is older than 8 days (7d cadence
+              + 1d grace). The scheduled evidence report is not being produced —
+              beat, the docs-queue worker, or the generation itself is failing
+              (ADR-0053 §9).
+            runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-engine.md"
+        - alert: NetopsReportMonthlyStale
+          expr: |
+            (time() - netops_report_last_success_timestamp{report_kind=~"access_review|audit_integrity"})
+            > (33 * 86400)
+          for: 1h
+          labels:
+            severity: page
+            slo: report_staleness
+            tier: monthly
+          annotations:
+            summary: "A monthly compliance/audit report has not succeeded within cadence + grace (33d)"
+            description: >-
+              netops_report_last_success_timestamp for a monthly-scheduled report
+              kind (access_review | audit_integrity) is older than 33 days (31d
+              cadence + 2d grace). The scheduled evidence report is not being
+              produced (ADR-0053 §9).
+            runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-engine.md"
+
+    # =========================================================================
+    # Failure burn (ADR-0053 §9): FAST pages on any redaction trip (the
+    # distinguished error class — fail-closed caught secret-shaped material
+    # headed for an exported artifact); SLOW tickets repeated failures of any
+    # class (a report kind that cannot generate is a pending staleness page).
+    # =========================================================================
+    - name: netops-report-failures
+      rules:
+        - alert: NetopsReportRedactionViolation
+          expr: |
+            sum by (report_kind)
+            (increase(netops_report_failures_total{error_class="redaction_violation"}[1h])) > 0
+          for: 5m
+          labels:
+            severity: page
+            slo: report_failures
+            tier: fast
+          annotations:
+            summary: "Report generation tripped the fail-closed redaction filter"
+            description: >-
+              netops_report_failures_total{error_class="redaction_violation"}
+              increased in the last hour: enforce_redaction rejected a payload
+              headed for an exported evidence artifact and generation failed
+              CLOSED (no artifact was written). Either a real secret reached a
+              report source (investigate immediately) or a legitimate field
+              matches a deny pattern and must be renamed (ADR-0053 §6). The run's
+              failure record names the field path only — never the value.
+            runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-engine.md"
+        - alert: NetopsReportFailureBurn
+          expr: |
+            sum by (report_kind) (increase(netops_report_failures_total[6h])) >= 2
+          for: 30m
+          labels:
+            severity: ticket
+            slo: report_failures
+            tier: slow
+          annotations:
+            summary: "Repeated report generation failures for one kind (>=2 in 6h)"
+            description: >-
+              netops_report_failures_total for one report kind increased by 2 or
+              more within 6 hours — generation for that kind is persistently
+              failing (builder, render, or redaction), and the kind's staleness
+              page will follow at cadence + grace if not fixed (ADR-0053 §9).
+            runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-engine.md"
+{{- end }}

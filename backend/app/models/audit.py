@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import BigInteger, Index, LargeBinary, String, func, select
@@ -191,6 +192,75 @@ class AuditChainCheckpoint(Base):
     entry_created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     entry_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     verified_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False, default=utcnow)
+
+
+class ChainVerificationOutcome(StrEnum):
+    """Outcome of one persisted chain-verification run (ADR-0053 §7.4).
+
+    ``BREAK`` covers every failing run — a detected chain break AND the
+    suspicious-pre-chain-row failure mode — mirroring the job's loud gate
+    (fail toward false-positive, ADR-0038 §4): a run the job reported as
+    failed must never persist as ``clean`` history.
+    """
+
+    CLEAN = "clean"
+    BREAK = "break"
+
+
+class GrantCheckOutcome(StrEnum):
+    """Outcome of one append-only grant attestation (ADR-0053 §7.4).
+
+    ``UNAVAILABLE`` is the honest token for a backend with no grant catalog
+    (the SQLite unit harness) — never silently ``clean``.
+    """
+
+    CLEAN = "clean"
+    VIOLATION = "violation"
+    UNAVAILABLE = "unavailable"
+
+
+class AuditChainVerificationRun(Base):
+    """One persisted outcome of the daily chain-verification CronJob (ADR-0053 §7.4).
+
+    Written by :mod:`app.services.audit.verify_job` as the SMALL ADDITIVE change
+    ADR-0053 §7.4 names: the job's metric and exit-code behavior are unchanged —
+    this row converts the metric-only signal into a 7-year-capable evidence
+    trail the audit-integrity report reads (metrics retention cannot back an
+    evidence trail). The report treats a MISSING day as a finding, so a failed
+    row write self-surfaces as a verification gap rather than silently passing.
+
+    ``checkpoint_before_hash``/``checkpoint_after_hash`` are hex SHA-256 digest
+    presentations of the watermark entry hash — tamper-evidence values, not
+    secret material (the redaction contract deliberately permits digests,
+    ADR-0053 §6). ``range_from_entry_id`` is the EXCLUSIVE lower bound of the
+    walked segment (the checkpoint anchor; ``NULL`` = walked from genesis);
+    ``range_to_entry_id`` is the verified head. ``grant_check_outcome`` persists
+    whether any ``UPDATE``/``DELETE`` grant existed on ``audit_log`` at run time
+    (the daily half of the G-SEC append-only attestation).
+    """
+
+    __tablename__ = "audit_chain_verification_runs"
+    # The audit-integrity report selects the CLOSED-OPEN period over started_at.
+    __table_args__ = (Index("ix_audit_chain_verification_runs_started_at", "started_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    #: ``clean`` | ``break`` (:class:`ChainVerificationOutcome`).
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: Entries recomputed this pass (0 on a clean no-op incremental pass).
+    entries_checked: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    #: Exclusive lower bound of the walked segment (checkpoint anchor entry id);
+    #: ``NULL`` = the walk started at genesis (first run or a full scan).
+    range_from_entry_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    #: The verified head entry id; ``NULL`` when the log was empty.
+    range_to_entry_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    #: Hex SHA-256 of the watermark entry hash before/after the run (digest
+    #: presentation, ADR-0038 §1 / ADR-0053 §6); ``NULL`` = no checkpoint.
+    checkpoint_before_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    checkpoint_after_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: ``clean`` | ``violation`` | ``unavailable`` (:class:`GrantCheckOutcome`).
+    grant_check_outcome: Mapped[str] = mapped_column(String(16), nullable=False)
 
 
 class AuditExportCursor(Base):

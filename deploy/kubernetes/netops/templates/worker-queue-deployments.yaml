@@ -107,6 +107,7 @@ spec:
                   key: {{ $root.Values.secrets.keys.redisPassword }}
             {{- end }}
             {{- include "netops.dbClientTlsEnv" $root | nindent 12 }}
+            {{- include "netops.workerMetricsMultiprocessEnv" $root | nindent 12 }}
           resources:
             {{- toYaml $root.Values.services.worker.resources | nindent 12 }}
           startupProbe:

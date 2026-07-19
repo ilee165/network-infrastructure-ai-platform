@@ -1,0 +1,303 @@
+{
+  "csv_rows": [
+    [
+      "report",
+      "Access Review Report"
+    ],
+    [
+      "kind",
+      "access_review"
+    ],
+    [
+      "period_start",
+      "2026-07-01T00:00:00+00:00"
+    ],
+    [
+      "period_end",
+      "2026-08-01T00:00:00+00:00"
+    ],
+    [
+      "generated_at",
+      "2026-08-01T00:05:00+00:00"
+    ],
+    [
+      "regime_tags",
+      "soc2:CC6.1 soc2:CC6.2 soc2:CC6.3 mapping-version:1"
+    ],
+    [],
+    [
+      "Report provenance"
+    ],
+    [
+      "Field",
+      "Value"
+    ],
+    [
+      "Engine version",
+      "reports-engine/1.0.0"
+    ],
+    [
+      "Report kind",
+      "access_review"
+    ],
+    [
+      "Period start (UTC)",
+      "2026-07-01T00:00:00+00:00"
+    ],
+    [
+      "Period end (UTC)",
+      "2026-08-01T00:00:00+00:00"
+    ],
+    [],
+    [
+      "User accounts and role assignments"
+    ],
+    [
+      "Username",
+      "Role",
+      "Provider",
+      "Status",
+      "Created (UTC)",
+      "Last login (UTC)",
+      "Classification"
+    ],
+    [
+      "alice.admin",
+      "admin",
+      "local (break-glass)",
+      "enabled",
+      "2026-01-05T08:00:00+00:00",
+      "2026-07-15T11:30:00+00:00",
+      "active"
+    ],
+    [
+      "bob-engineer",
+      "engineer",
+      "oidc",
+      "enabled",
+      "2026-03-10T12:00:00+00:00",
+      "2026-07-06T10:15:00+00:00",
+      "active"
+    ],
+    [
+      "carol-operator",
+      "operator",
+      "oidc",
+      "enabled",
+      "2026-01-20T09:30:00+00:00",
+      "2026-04-15T08:00:00+00:00",
+      "dormant"
+    ],
+    [
+      "dave-new",
+      "engineer",
+      "local (fenced while OIDC enabled)",
+      "enabled",
+      "2026-07-20T14:00:00+00:00",
+      "never",
+      "never-logged-in (new account)"
+    ],
+    [
+      "eve-disabled",
+      "viewer",
+      "local (fenced while OIDC enabled)",
+      "disabled",
+      "2026-02-14T10:00:00+00:00",
+      "2026-06-30T16:00:00+00:00",
+      "active"
+    ],
+    [
+      "svc-scanner",
+      "viewer",
+      "local (fenced while OIDC enabled)",
+      "enabled",
+      "2025-12-01T00:00:00+00:00",
+      "never",
+      "never-logged-in (dormant)"
+    ],
+    [],
+    [
+      "Role assignment summary"
+    ],
+    [
+      "Role",
+      "Accounts",
+      "Enabled",
+      "Disabled"
+    ],
+    [
+      "viewer",
+      "2",
+      "1",
+      "1"
+    ],
+    [
+      "operator",
+      "1",
+      "1",
+      "0"
+    ],
+    [
+      "engineer",
+      "2",
+      "2",
+      "0"
+    ],
+    [
+      "admin",
+      "1",
+      "1",
+      "0"
+    ],
+    [],
+    [
+      "OIDC federation posture"
+    ],
+    [
+      "Field",
+      "Value"
+    ],
+    [
+      "OIDC federation",
+      "enabled"
+    ],
+    [
+      "Groups claim",
+      "groups"
+    ],
+    [
+      "Admin via OIDC",
+      "not permitted (capped at engineer)"
+    ],
+    [
+      "Local login while OIDC enabled",
+      "break-glass admin only"
+    ],
+    [
+      "Dormancy window (days)",
+      "90"
+    ],
+    [],
+    [
+      "IdP group-to-role assignments"
+    ],
+    [
+      "IdP group",
+      "Mapped role",
+      "Effective role"
+    ],
+    [
+      "netops-admins",
+      "admin",
+      "engineer (capped: admin via OIDC not enabled)"
+    ],
+    [
+      "netops-engineers",
+      "engineer",
+      "engineer"
+    ],
+    [],
+    [
+      "Break-glass local logins in period"
+    ],
+    [
+      "Time (UTC)",
+      "Actor",
+      "User id",
+      "Request id"
+    ],
+    [
+      "2026-07-03T09:00:00+00:00",
+      "user:alice.admin",
+      "00000000-0000-0000-0000-00000000ee01",
+      "none"
+    ],
+    [
+      "2026-07-15T11:30:00+00:00",
+      "user:alice.admin",
+      "00000000-0000-0000-0000-00000000ee01",
+      "00000000-0000-0000-0000-00000000fe01"
+    ],
+    [],
+    [
+      "note",
+      "Roster, role assignments, and IdP group-to-role assignments reflect platform state at generation time (the platform keeps no role-assignment history); login-derived columns are anchored at the period end for reproducible review evidence."
+    ],
+    [],
+    [
+      "note",
+      "Last login is derived from the platform's own audit login events (auth.login, auth.local.breakglass_login, auth.oidc.login_succeeded) strictly before the period end; 'never' means no such event exists for the account."
+    ],
+    [],
+    [
+      "note",
+      "Dormancy window: 90 days ending at the period end. Accounts with no recorded login inside the window classify as dormant; accounts that never logged in (including service/bootstrap accounts) carry an explicit never-logged-in classification and are never silently excluded; accounts created inside the window with no login yet classify as new accounts, not dormant; accounts created AFTER the period end (e.g. a roster generated for a past period) classify distinctly as post-period accounts, never as new accounts of this period."
+    ],
+    [],
+    [
+      "note",
+      "Break-glass completeness (ADR-0028 \u00a75): every auth.local.breakglass_login audit entry in the period appears in this report \u2014 the alerted, audited local-admin recovery path; this report is its periodic review surface."
+    ],
+    [],
+    [
+      "note",
+      "Data minimization (ADR-0053 \u00a76 layer 1): this report carries account names, role assignments, mapping configuration, and timestamps only \u2014 no authentication material of any kind is readable from the report engine's allowlisted sources."
+    ]
+  ],
+  "pdf_structure": {
+    "sections": [
+      {
+        "title": "Report provenance",
+        "columns": [
+          "Field",
+          "Value"
+        ]
+      },
+      {
+        "title": "User accounts and role assignments",
+        "columns": [
+          "Username",
+          "Role",
+          "Provider",
+          "Status",
+          "Created (UTC)",
+          "Last login (UTC)",
+          "Classification"
+        ]
+      },
+      {
+        "title": "Role assignment summary",
+        "columns": [
+          "Role",
+          "Accounts",
+          "Enabled",
+          "Disabled"
+        ]
+      },
+      {
+        "title": "OIDC federation posture",
+        "columns": [
+          "Field",
+          "Value"
+        ]
+      },
+      {
+        "title": "IdP group-to-role assignments",
+        "columns": [
+          "IdP group",
+          "Mapped role",
+          "Effective role"
+        ]
+      },
+      {
+        "title": "Break-glass local logins in period",
+        "columns": [
+          "Time (UTC)",
+          "Actor",
+          "User id",
+          "Request id"
+        ]
+      }
+    ]
+  }
+}

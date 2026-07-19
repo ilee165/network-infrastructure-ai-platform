@@ -28,7 +28,7 @@ from app.agents import build_default_registry
 from app.agents.framework import read_facade
 from app.agents.framework.credential_access import acquire_troubleshooting_ssh
 from app.agents.framework.discovery_jobs import create_discovery_run, mark_discovery_run_failed
-from app.agents.framework.tools import ToolClassification, netops_tool
+from app.agents.framework.tools import ToolClassification, agent_run_context, netops_tool
 from app.core.crypto import FakeKmsKeyProvider, KeyProviderUnavailable, envelope_encrypt
 from app.models import (
     AuditLog,
@@ -39,6 +39,8 @@ from app.models import (
     DiscoveryRunStatus,
     NormalizedNeighborRow,
     NormalizedRouteRow,
+    ReportArtifact,
+    ReportRun,
 )
 from app.schemas.normalized import NeighborProtocol, RouteProtocol
 from app.services import audit
@@ -151,6 +153,10 @@ async def engine(key_provider: FakeKmsKeyProvider) -> AsyncIterator[AsyncEngine]
                 NormalizedNeighborRow.__table__,
                 NormalizedRouteRow.__table__,
                 AuditLog.__table__,
+                # P4 W3-T1 report surface (ADR-0053 §1): the documentation
+                # report tools issue SELECTs over these two tables.
+                ReportRun.__table__,
+                ReportArtifact.__table__,
             ],
         )
         await conn.run_sync(lambda sync_conn: Device.metadata.create_all(sync_conn, tables=tables))
@@ -613,6 +619,16 @@ def _invocation_fixtures() -> dict[str, dict[str, Any]]:
         "read_live_ospf_neighbors": {"device_id": _UNKNOWN_DEVICE_ID},
         "read_live_acls": {"device_id": _UNKNOWN_DEVICE_ID},
         "get_application_impact": {"target": "device:missing"},
+        # P4 W3-T1 documentation report tools (ADR-0053 §1): pure reads over
+        # the report tables (SELECT-only) + a Celery job launch (send_task is
+        # stubbed); none may issue relational writes.
+        "list_report_runs": {},
+        "get_report_run": {"run_id": _UNKNOWN_DEVICE_ID},
+        "request_report_generation": {
+            "kind": "change",
+            "period_start": "2026-07-01T00:00:00+00:00",
+            "period_end": "2026-07-08T00:00:00+00:00",
+        },
     }
 
 
@@ -684,22 +700,33 @@ async def test_every_default_read_only_tool_obeys_relational_write_boundary(
         if tool.classification is ToolClassification.READ_ONLY
     ]
     names = [tool.name for tool in read_only_tool_list]
-    assert len(names) == len(set(names)) == 27, (
-        "default registry must expose exactly 27 uniquely named READ_ONLY tools"
+    assert len(names) == len(set(names)) == 30, (
+        "default registry must expose exactly 30 uniquely named READ_ONLY tools"
     )
     read_only_tools = {tool.name: tool for tool in read_only_tool_list}
     invocations = _invocation_fixtures()
     assert invocations.keys() == read_only_tools.keys()
 
-    for name, tool in read_only_tools.items():
-        await tool.ainvoke(invocations[name])
+    # The P4 W3-T1 report tools enforce the ADR-0053 §3 per-kind RBAC floor
+    # against the role bound by agent_run_context (deny-by-default unbound), so
+    # the census drives every tool under an admin invoking identity; the
+    # relational write boundary under test is identity-independent.
+    from app.core.security import Role as _Role
+
+    with agent_run_context(role=_Role.ADMIN):
+        for name, tool in read_only_tools.items():
+            await tool.ainvoke(invocations[name])
 
     async with maker() as session:
         assert await session.scalar(select(func.count()).select_from(DiscoveryRun)) == 1
         actions = list((await session.scalars(select(AuditLog.action))).all())
-        assert len(actions) == 6
+        assert len(actions) == 7
         assert actions.count(audit.KEK_UNWRAP) == 3
         assert actions.count(audit.CREDENTIAL_DECRYPTED) == 3
+        # PR #166 F3: the agent generation trigger now records the same durable
+        # report.generation_requested evidence the HTTP path writes — an
+        # append-only audit_log INSERT, permitted by _ALLOWED_WRITES.
+        assert actions.count("report.generation_requested") == 1
 
 
 @pytest.mark.asyncio
