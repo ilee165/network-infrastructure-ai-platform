@@ -227,6 +227,57 @@ async def test_generation_rejects_future_period_end(
     assert sent_tasks == []  # a rejected period must never enqueue
 
 
+async def test_generation_rejects_over_cap_span(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    sent_tasks: list[dict[str, Any]],
+) -> None:
+    """A span above 400 days is a 422 (PR #166 F3): builders materialize one
+    tuple per period day (daily trend, per-gap-day findings), so an unbounded
+    span — e.g. year 1 → today, ~739K days — is a worker-memory DoS vector."""
+    body = {
+        "kind": "change",
+        "period_start": (_END - timedelta(days=401)).isoformat(),
+        "period_end": _END.isoformat(),
+    }
+    response = await client.post("/api/v1/reports", json=body, headers=auth_headers("engineer"))
+    assert response.status_code == 422
+    assert sent_tasks == []
+
+
+async def test_generation_accepts_at_cap_span(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    sent_tasks: list[dict[str, Any]],
+) -> None:
+    """Exactly 400 days (annual report + slack) is allowed — boundary, not
+    off-by-one."""
+    body = {
+        "kind": "change",
+        "period_start": (_END - timedelta(days=400)).isoformat(),
+        "period_end": _END.isoformat(),
+    }
+    response = await client.post("/api/v1/reports", json=body, headers=auth_headers("engineer"))
+    assert response.status_code == 202
+    assert sent_tasks and sent_tasks[-1]["name"] == "reports.generate"
+
+
+async def test_generation_rejects_pre_floor_period_start(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    sent_tasks: list[dict[str, Any]],
+) -> None:
+    """A period_start before the platform-epoch floor (2020-01-01) is a 422."""
+    body = {
+        "kind": "change",
+        "period_start": "2019-12-31T00:00:00+00:00",
+        "period_end": "2020-01-05T00:00:00+00:00",
+    }
+    response = await client.post("/api/v1/reports", json=body, headers=auth_headers("engineer"))
+    assert response.status_code == 422
+    assert sent_tasks == []
+
+
 # ---------------------------------------------------------------------------
 # Listing + detail — RBAC-scoped visibility
 # ---------------------------------------------------------------------------
@@ -255,14 +306,25 @@ async def test_listing_is_scoped_to_visible_kinds(
     assert denied.status_code == 403
 
 
-async def test_run_detail_enforces_kind_floor(
+async def test_run_detail_above_floor_is_indistinguishable_from_missing(
     client: httpx.AsyncClient,
     auth_headers: Callable[[str], dict[str, str]],
     session: AsyncSession,
 ) -> None:
+    """Existence is RBAC-scoped (ADR-0053 §3): run ids are computable OFFLINE
+    (deterministic for ``(kind, period)``), so a 403-on-existing seam would let
+    a sub-floor caller confirm which admin-only report runs exist. An
+    above-floor run is a 404 identical to a truly missing one (PR #166 F3)."""
     run, _ = await _seed_run(session, kind=ReportKind.ACCESS_REVIEW)
     denied = await client.get(f"/api/v1/reports/{run.id}", headers=auth_headers("engineer"))
-    assert denied.status_code == 403
+    missing_id = uuid.uuid4()
+    missing = await client.get(f"/api/v1/reports/{missing_id}", headers=auth_headers("engineer"))
+    assert denied.status_code == missing.status_code == 404
+    # Identical body modulo the probed id — nothing to distinguish.
+    assert denied.json()["detail"].replace(str(run.id), "<id>") == missing.json()["detail"].replace(
+        str(missing_id), "<id>"
+    )
+
     allowed = await client.get(f"/api/v1/reports/{run.id}", headers=auth_headers("admin"))
     assert allowed.status_code == 200
     detail = allowed.json()
@@ -330,7 +392,8 @@ async def test_role_revoked_between_generation_and_download_is_denied(
 
     The SAME bearer token that could download while the user held engineer is
     denied after the role is revoked to viewer: authorization is resolved from
-    the database on every request, never cached from generation time.
+    the database on every request, never cached from generation time. The
+    denial is a 404 (not 403): existence itself is RBAC-scoped (PR #166 F3).
     """
     run, artifact = await _seed_run(session)
     assert artifact is not None
@@ -344,7 +407,7 @@ async def test_role_revoked_between_generation_and_download_is_denied(
     users["engineer"].role = viewer_role
     await session.flush()
 
-    assert (await client.get(url, headers=headers)).status_code == 403
+    assert (await client.get(url, headers=headers)).status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -358,15 +421,17 @@ async def test_access_review_download_denied_below_admin_and_never_audited(
     auth_headers: Callable[[str], dict[str, str]],
     session: AsyncSession,
 ) -> None:
-    """Every role below admin is denied the artifact bytes — and a DENIED
-    attempt writes no download audit entry (the audit trail records evidence
-    egress, not refusals; refusals stay visible as 403s in access logs)."""
+    """Every role below admin is denied the artifact bytes — as a 404
+    indistinguishable from a missing run (existence is RBAC-scoped, PR #166
+    F3) — and a DENIED attempt writes no download audit entry (the audit trail
+    records evidence egress, not refusals; refusals stay visible in access
+    logs)."""
     run, artifact = await _seed_run(session, kind=ReportKind.ACCESS_REVIEW)
     assert artifact is not None
     url = f"/api/v1/reports/{run.id}/artifacts/{artifact.id}"
 
     for role in ("viewer", "operator", "engineer"):
-        assert (await client.get(url, headers=auth_headers(role))).status_code == 403
+        assert (await client.get(url, headers=auth_headers(role))).status_code == 404
 
     downloads = [
         row
@@ -411,10 +476,11 @@ async def test_access_review_demotion_after_generation_denies_download(
     users: dict[str, User],
 ) -> None:
     """W3-T4 exit criterion: a report generated by an admin, the admin demoted
-    to ENGINEER before download → the download is denied. Engineer meets the
-    floor of every other kind, so this proves the PER-KIND floor is
-    re-evaluated from the database at download time — no cached/stale authz
-    decision from generation time is honored."""
+    to ENGINEER before download → the download is denied (as a 404 — existence
+    is RBAC-scoped, PR #166 F3). Engineer meets the floor of every other kind,
+    so this proves the PER-KIND floor is re-evaluated from the database at
+    download time — no cached/stale authz decision from generation time is
+    honored."""
     run, artifact = await _seed_run(session, kind=ReportKind.ACCESS_REVIEW)
     assert artifact is not None
     url = f"/api/v1/reports/{run.id}/artifacts/{artifact.id}"
@@ -428,4 +494,4 @@ async def test_access_review_demotion_after_generation_denies_download(
     users["admin"].role = engineer_role
     await session.flush()
 
-    assert (await client.get(url, headers=headers)).status_code == 403
+    assert (await client.get(url, headers=headers)).status_code == 404

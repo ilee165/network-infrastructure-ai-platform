@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.db as db
@@ -28,8 +29,16 @@ from app.agents.framework.read_facade import ReportAccessDeniedError
 from app.agents.framework.tools import agent_run_context
 from app.core.security import Role
 from app.engines.reports import deterministic_run_id
-from app.models import Base
+from app.models import AuditLog, Base
 from app.models.reports import ReportArtifact, ReportKind, ReportRun, ReportRunStatus
+
+
+async def _generation_audit_rows() -> list[AuditLog]:
+    """The committed ``report.generation_requested`` rows in the wired test DB."""
+    async with db.get_sessionmaker()() as session:
+        rows = (await session.execute(select(AuditLog))).scalars().all()
+    return [row for row in rows if row.action == "report.generation_requested"]
+
 
 _START = datetime(2026, 7, 1, tzinfo=UTC)
 _END = datetime(2026, 7, 8, tzinfo=UTC)
@@ -110,14 +119,33 @@ async def test_explicit_above_floor_kind_is_denied(
         await list_report_runs.ainvoke({"kind": "access_review"})
 
 
-async def test_get_run_enforces_the_kind_floor(seeded_db: None, engineer_identity: None) -> None:
+async def test_get_run_above_floor_is_indistinguishable_from_missing(
+    seeded_db: None, engineer_identity: None
+) -> None:
+    """Existence is RBAC-scoped (ADR-0053 §3): run ids are computable OFFLINE
+    (``deterministic_run_id``), so an above-floor run must resolve exactly like
+    a missing one — a distinct denial would confirm which admin-only report
+    periods exist to a sub-floor caller (PR #166 F3)."""
     allowed_id = deterministic_run_id(ReportKind.CHANGE, _START, _END)
     fetched = json.loads(await get_report_run.ainvoke({"run_id": str(allowed_id)}))
     assert fetched["run_id"] == str(allowed_id)
 
     denied_id = deterministic_run_id(ReportKind.ACCESS_REVIEW, _START, _END)
-    with pytest.raises(ReportAccessDeniedError):
-        await get_report_run.ainvoke({"run_id": str(denied_id)})
+    missing_id = uuid.uuid4()
+    denied = json.loads(await get_report_run.ainvoke({"run_id": str(denied_id)}))
+    missing = json.loads(await get_report_run.ainvoke({"run_id": str(missing_id)}))
+    assert set(denied) == set(missing) == {"error"}
+    # Identical response shape modulo the probed id — nothing to distinguish.
+    assert denied["error"].replace(str(denied_id), "<id>") == missing["error"].replace(
+        str(missing_id), "<id>"
+    )
+
+
+async def test_get_run_admin_still_sees_above_floor_kinds(seeded_db: None) -> None:
+    run_id = deterministic_run_id(ReportKind.ACCESS_REVIEW, _START, _END)
+    with agent_run_context(role=Role.ADMIN):
+        fetched = json.loads(await get_report_run.ainvoke({"run_id": str(run_id)}))
+    assert fetched["run_id"] == str(run_id)
 
 
 async def test_request_generation_enqueues_under_invoking_user(
@@ -160,6 +188,47 @@ async def test_request_generation_enqueues_under_invoking_user(
         "on_demand",
         str(user_id),
     ]
+    # Durable-audit parity with POST /api/v1/reports (PR #166 F3): the agent
+    # path records the same committed generation_requested event, attributed
+    # to the requesting principal.
+    rows = await _generation_audit_rows()
+    assert len(rows) == 1
+    assert rows[0].actor == f"user:{user_id}"
+    assert rows[0].target_type == "report_run"
+    assert rows[0].target_id == str(deterministic_run_id(ReportKind.CHANGE, _START, _END))
+    assert rows[0].detail == {
+        "kind": "change",
+        "period_start": _START.isoformat(),
+        "period_end": _END.isoformat(),
+    }
+
+
+async def test_request_generation_audit_is_committed_before_dispatch(
+    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The audit row is durable BEFORE the broker call: a dispatch failure can
+    never lose the evidence that the generation was requested (PR #166 F3)."""
+    from app.workers import celery_app as celery_module
+
+    def _broker_down(*_a: Any, **_kw: Any) -> None:
+        raise RuntimeError("broker unreachable")
+
+    monkeypatch.setattr(celery_module.celery_app, "send_task", _broker_down)
+    user_id = uuid.uuid4()
+    with (
+        agent_run_context(role=Role.ENGINEER, user_id=user_id),
+        pytest.raises(RuntimeError, match="broker unreachable"),
+    ):
+        await request_report_generation.ainvoke(
+            {
+                "kind": "change",
+                "period_start": _START.isoformat(),
+                "period_end": _END.isoformat(),
+            }
+        )
+    rows = await _generation_audit_rows()
+    assert len(rows) == 1  # committed despite the failed dispatch
+    assert rows[0].actor == f"user:{user_id}"
 
 
 async def test_request_generation_pins_naive_period_as_utc(
@@ -238,6 +307,80 @@ async def test_request_generation_denied_below_floor(
             }
         )
     assert calls == []  # a denied request never reaches the broker
+    assert await _generation_audit_rows() == []  # ...and is never audited
+
+
+async def test_request_generation_rejects_over_cap_span(
+    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The facade path enforces the same span cap as the API schema (PR #166
+    F3): builders materialize one tuple per period day, so an unbounded span
+    is an unbounded-memory vector on the worker."""
+    from datetime import timedelta
+
+    from app.workers import celery_app as celery_module
+
+    calls: list[Any] = []
+    monkeypatch.setattr(celery_module.celery_app, "send_task", lambda *a, **k: calls.append(1))
+    with (
+        agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()),
+        pytest.raises(ValueError, match="span"),
+    ):
+        await request_report_generation.ainvoke(
+            {
+                "kind": "change",
+                "period_start": (_END - timedelta(days=401)).isoformat(),
+                "period_end": _END.isoformat(),
+            }
+        )
+    assert calls == []  # a rejected span never reaches the broker
+
+
+async def test_request_generation_accepts_at_cap_span(
+    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exactly 400 days (annual report + slack) is allowed — the cap is a
+    boundary, not an off-by-one."""
+    from datetime import timedelta
+
+    from app.workers import celery_app as celery_module
+
+    calls: list[Any] = []
+    monkeypatch.setattr(celery_module.celery_app, "send_task", lambda *a, **k: calls.append(1))
+    with agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()):
+        result = json.loads(
+            await request_report_generation.ainvoke(
+                {
+                    "kind": "change",
+                    "period_start": (_END - timedelta(days=400)).isoformat(),
+                    "period_end": _END.isoformat(),
+                }
+            )
+        )
+    assert result["status"] == "queued"
+    assert calls == [1]
+
+
+async def test_request_generation_rejects_pre_floor_period_start(
+    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A period_start before the platform-epoch floor is refused."""
+    from app.workers import celery_app as celery_module
+
+    calls: list[Any] = []
+    monkeypatch.setattr(celery_module.celery_app, "send_task", lambda *a, **k: calls.append(1))
+    with (
+        agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()),
+        pytest.raises(ValueError, match="period_start"),
+    ):
+        await request_report_generation.ainvoke(
+            {
+                "kind": "change",
+                "period_start": "2019-12-31T00:00:00+00:00",
+                "period_end": "2020-01-05T00:00:00+00:00",
+            }
+        )
+    assert calls == []
 
 
 async def test_unbound_identity_is_denied_by_default(seeded_db: None) -> None:

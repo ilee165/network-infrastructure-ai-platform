@@ -365,6 +365,15 @@ class Settings(BaseSettings):
     #: never logged in (service/bootstrap) carry their own explicit
     #: classification — surfaced, never silently excluded. Floor 1 day.
     report_access_review_dormant_days: int = Field(default=90, ge=1)
+    #: Stale-claim takeover window for report generation (PR #166 F2): a
+    #: non-terminal ``report_runs`` claim whose ``updated_at`` heartbeat is
+    #: older than this many seconds is treated as abandoned by a dead worker
+    #: and may be resumed by a new request; a YOUNGER running claim is
+    #: actively owned — a concurrent request returns the non-generating
+    #: ``in_progress`` outcome instead of double-generating (duplicate audit
+    #: entries / interleaved artifact writes). Floor 1s (tests); size it above
+    #: the slowest expected generation in production.
+    report_claim_timeout_seconds: int = Field(default=900, ge=1)
     #: Daily UTC schedule of the report-artifact retention purge (ADR-0053 §4).
     report_purge_hour: int = 5
     report_purge_minute: int = 30

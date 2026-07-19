@@ -9309,7 +9309,7 @@
     },
     "/api/v1/reports/{run_id}": {
       "get": {
-        "description": "One run's metadata + artifact metadata (per-kind floor enforced).",
+        "description": "One run's metadata + artifact metadata (visible kinds only; 404 seam).",
         "operationId": "get_run_api_v1_reports__run_id__get",
         "parameters": [
           {
@@ -9358,7 +9358,7 @@
     },
     "/api/v1/reports/{run_id}/artifacts/{artifact_id}": {
       "get": {
-        "description": "Download one artifact's bytes \u2014 the RBAC'd, audited evidence exit point.\n\nThe per-kind floor is re-evaluated HERE against the caller's current role\n(ADR-0053 \u00a73): an artifact is never world-readable once generated, and a\nrole revoked between generation and download denies the download. Every\ndownload writes an audit entry carrying the artifact sha256.",
+        "description": "Download one artifact's bytes \u2014 the RBAC'd, audited evidence exit point.\n\nThe per-kind floor is re-evaluated HERE against the caller's current role\n(ADR-0053 \u00a73): an artifact is never world-readable once generated, and a\nrole revoked between generation and download denies the download \u2014 as a\n404 identical to a missing run (the PR #166 F3 existence seam). Every\ndownload writes an audit entry carrying the artifact sha256.",
         "operationId": "download_artifact_api_v1_reports__run_id__artifacts__artifact_id__get",
         "parameters": [
           {

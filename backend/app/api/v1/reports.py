@@ -4,8 +4,8 @@ Routes:
 
     POST /reports                                   per-kind floor  request generation (202)
     GET  /reports                                   viewer+ (rows RBAC-filtered per kind)
-    GET  /reports/{run_id}                          per-kind floor  run + artifact metadata
-    GET  /reports/{run_id}/artifacts/{artifact_id}  per-kind floor  artifact bytes download
+    GET  /reports/{run_id}                          visible kinds only  run + artifact metadata
+    GET  /reports/{run_id}/artifacts/{artifact_id}  visible kinds only  artifact bytes download
 
 RBAC (ADR-0053 §3): the per-kind role floor (change/compliance-posture →
 engineer+; access-review/audit-integrity → admin) is enforced at BOTH the
@@ -13,6 +13,14 @@ generation trigger and the artifact download. The floor is evaluated against
 the caller's CURRENT role resolved from the database on every request
 (``get_current_user``) — a role change between generation and download is
 honored at download time; nothing is cached.
+
+403-vs-404 seam (PR #166 F3): run-id-addressed endpoints answer 404 for an
+above-floor run, IDENTICAL to a missing one — run ids are deterministic for
+``(kind, period)`` and computable offline, so a 403-on-existing response would
+disclose which admin-only report runs exist to sub-floor callers (existence is
+RBAC-scoped metadata, ADR-0053 §3). The kind-addressed checks (POST body kind,
+GET ?kind=) stay 403: report kinds are a static, public enum — a kind-level
+denial reveals nothing about any run's existence.
 
 Every generation request and every artifact download writes an audit entry
 (actor, report kind, run id, artifact sha256) — evidence about evidence.
@@ -74,14 +82,26 @@ def _enforce_kind_floor(user: User, kind: ReportKind) -> None:
         )
 
 
-async def _get_run_or_404(session: AsyncSession, run_id: uuid.UUID) -> ReportRun:
-    run = (
-        await session.execute(
-            select(ReportRun)
-            .options(selectinload(ReportRun.artifacts))
-            .where(ReportRun.id == run_id)
-        )
-    ).scalar_one_or_none()
+async def _get_visible_run_or_404(
+    session: AsyncSession, run_id: uuid.UUID, user: User
+) -> ReportRun:
+    """The run, IF its kind is visible to the caller's current role — else 404.
+
+    Missing and above-floor resolve to the SAME 404 (PR #166 F3): run ids are
+    deterministic for ``(kind, period)`` and computable offline, so a
+    distinguishable denial would confirm which admin-only runs exist to a
+    sub-floor caller (existence is RBAC-scoped metadata, ADR-0053 §3).
+    """
+    kinds = sorted(k.value for k in kinds_visible_to(Role.from_name(user.role.name)))
+    run: ReportRun | None = None
+    if kinds:
+        run = (
+            await session.execute(
+                select(ReportRun)
+                .options(selectinload(ReportRun.artifacts))
+                .where(ReportRun.id == run_id, ReportRun.kind.in_(kinds))
+            )
+        ).scalar_one_or_none()
     if run is None:
         raise NotFoundError(f"report run {run_id} does not exist")
     return run
@@ -176,9 +196,8 @@ async def get_run(
     session: DbSession,
     user: AuthedUser,
 ) -> ReportRunDetail:
-    """One run's metadata + artifact metadata (per-kind floor enforced)."""
-    run = await _get_run_or_404(session, run_id)
-    _enforce_kind_floor(user, ReportKind(run.kind))
+    """One run's metadata + artifact metadata (visible kinds only; 404 seam)."""
+    run = await _get_visible_run_or_404(session, run_id, user)
     return ReportRunDetail.model_validate(run)
 
 
@@ -193,11 +212,11 @@ async def download_artifact(
 
     The per-kind floor is re-evaluated HERE against the caller's current role
     (ADR-0053 §3): an artifact is never world-readable once generated, and a
-    role revoked between generation and download denies the download. Every
+    role revoked between generation and download denies the download — as a
+    404 identical to a missing run (the PR #166 F3 existence seam). Every
     download writes an audit entry carrying the artifact sha256.
     """
-    run = await _get_run_or_404(session, run_id)
-    _enforce_kind_floor(user, ReportKind(run.kind))
+    run = await _get_visible_run_or_404(session, run_id, user)
     artifact = next((a for a in run.artifacts if a.id == artifact_id), None)
     if artifact is None:
         raise NotFoundError(f"report artifact {artifact_id} does not exist on run {run_id}")

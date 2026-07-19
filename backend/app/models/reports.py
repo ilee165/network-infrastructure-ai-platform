@@ -21,14 +21,32 @@ free-form text that could carry secret material into the API or logs
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Final
 
 from sqlalchemy import BigInteger, ForeignKey, Index, LargeBinary, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 from app.models.mixins import JSON_VARIANT, TimestampMixin, UtcDateTime, UuidPkMixin
+
+#: Maximum reporting-period span (PR #166 F3). 400 days covers a full annual
+#: report (366 leap-year days) plus fiscal-year-offset/grace slack. The report
+#: builders materialize one tuple per period DAY (the compliance-posture daily
+#: trend; audit-integrity additionally emits per-gap-day findings), so an
+#: unbounded span — e.g. year 1 → today, ~739K days — is an unbounded-memory /
+#: DoS vector on the worker. Enforced at BOTH generation entry points
+#: (``app.schemas.reports_api`` for the API, ``read_facade
+#: .report_generation_args`` for the agent path) — the worker executes
+#: whatever those produce. Lives here (models layer) so both enforcers share
+#: one constant without a layering violation.
+MAX_REPORT_PERIOD_DAYS: Final = 400
+
+#: Floor for ``period_start`` (PR #166 F3): well before the platform's first
+#: deployable release (2026), so any legitimately reportable period is
+#: representable while nonsense spans (year-1 timestamps) are refused outright.
+REPORT_PERIOD_START_FLOOR: Final = datetime(2020, 1, 1, tzinfo=UTC)
 
 
 class ReportKind(StrEnum):

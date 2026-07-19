@@ -155,7 +155,46 @@ def test_duplicate_delivery_skips_without_second_artifact_or_audit(
 def test_stale_running_claim_is_resumed_not_lost(
     eager_celery: None, db_url: str, stub_pdf: None
 ) -> None:
-    """A claim left ``running`` by a dead worker is recovered on redelivery."""
+    """A claim left ``running`` by a DEAD worker is recovered on redelivery.
+
+    Staleness is claim age: ``updated_at`` older than
+    ``report_claim_timeout_seconds`` (PR #166 F2). A YOUNG running claim is
+    actively owned and must NOT be resumed — see the test below.
+    """
+    now = datetime.now(UTC)
+    stale = now - timedelta(hours=2)  # far beyond the 900s default timeout
+    _seed(
+        db_url,
+        ReportRun(
+            id=_RUN_ID,
+            kind="change",
+            trigger="scheduled",
+            requested_by=None,
+            period_start=_START_DT,
+            period_end=_END_DT,
+            status=ReportRunStatus.RUNNING.value,
+            regime_tags=["soc2:CC8.1"],
+            created_at=stale,
+            updated_at=stale,
+        ),
+    )
+    result = tasks.generate.run("change", _START, _END, "scheduled", None)
+    assert result["status"] == "succeeded"
+    runs = _query_all(db_url, select(ReportRun))
+    assert len(runs) == 1
+    assert runs[0].status == ReportRunStatus.SUCCEEDED.value
+
+
+def test_active_running_claim_returns_in_progress_without_generating(
+    eager_celery: None, db_url: str, stub_pdf: None
+) -> None:
+    """A YOUNG ``running`` claim is actively owned by another worker (PR #166 F2).
+
+    The loser must NOT resume it: no second generation, no duplicate
+    ``report.generated`` audit entry, no artifact delete+insert interleaving —
+    it returns the non-generating ``in_progress`` status and leaves the row
+    untouched.
+    """
     now = datetime.now(UTC)
     _seed(
         db_url,
@@ -172,11 +211,13 @@ def test_stale_running_claim_is_resumed_not_lost(
             updated_at=now,
         ),
     )
-    result = tasks.generate.run("change", _START, _END, "scheduled", None)
-    assert result["status"] == "succeeded"
+    result = tasks.generate.run("change", _START, _END, "on_demand", None)
+    assert result["status"] == "in_progress"
     runs = _query_all(db_url, select(ReportRun))
     assert len(runs) == 1
-    assert runs[0].status == ReportRunStatus.SUCCEEDED.value
+    assert runs[0].status == ReportRunStatus.RUNNING.value
+    assert _query_all(db_url, select(ReportArtifact)) == []
+    assert _audit_actions(db_url).count("report.generated") == 0
 
 
 def test_failed_run_is_reclaimed_for_a_fresh_attempt(

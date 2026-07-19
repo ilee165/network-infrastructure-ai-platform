@@ -431,23 +431,31 @@ async def list_report_runs(
 
 
 async def get_report_run(*, role: Role | None, run_id: UUID) -> ReportRunSnapshot | None:
-    """One run's metadata + artifact metadata; per-kind floor enforced.
+    """One run's metadata + artifact metadata; existence itself is RBAC-scoped.
 
-    Raises :class:`ReportAccessDeniedError` when the run exists but its kind is
-    above the invoking role's floor.
+    The query is FILTERED to the kinds *role* may see (ADR-0053 §3): a run of
+    an above-floor kind resolves to ``None`` exactly like a missing run. Run
+    ids are computable OFFLINE (``deterministic_run_id``), so a post-fetch
+    denial would let a sub-floor caller confirm which admin-only report
+    periods exist — None-for-both keeps existence undisclosed (PR #166 F3).
     """
     from sqlalchemy import select
 
     import app.db as db
+    from app.engines.reports import kinds_visible_to
     from app.models.reports import ReportArtifact, ReportRun
 
+    kinds = sorted(k.value for k in kinds_visible_to(role))
+    if not kinds:
+        return None
     async with db.get_sessionmaker()() as session:
         row = (
-            await session.execute(select(ReportRun).where(ReportRun.id == run_id))
+            await session.execute(
+                select(ReportRun).where(ReportRun.id == run_id, ReportRun.kind.in_(kinds))
+            )
         ).scalar_one_or_none()
         if row is None:
             return None
-        ensure_report_access(role, row.kind)
         artifact_rows = (
             (await session.execute(select(ReportArtifact).where(ReportArtifact.run_id == row.id)))
             .scalars()
@@ -469,11 +477,15 @@ def report_generation_args(
     the agent matches the one the worker derives from the serialized args; a
     ``period_end`` in the future is refused — a premature generation would
     permanently claim the period with PARTIAL data (the claim guard never
-    re-attempts a SUCCEEDED run).
+    re-attempts a SUCCEEDED run). The span cap and period_start floor mirror
+    the API schema (``app.schemas.reports_api``; PR #166 F3) — the worker
+    executes whatever this path produces, and builders materialize one tuple
+    per period day, so an unbounded span is an unbounded-memory vector.
     """
-    from datetime import UTC
+    from datetime import UTC, timedelta
 
     from app.engines.reports import coerce_utc, deterministic_run_id
+    from app.models.reports import MAX_REPORT_PERIOD_DAYS, REPORT_PERIOD_START_FLOOR
 
     resolved = _resolve_report_kind(kind)
     period_start = coerce_utc(period_start)
@@ -482,6 +494,12 @@ def report_generation_args(
         raise ValueError("period_end must be after period_start")
     if period_end > datetime.now(UTC):
         raise ValueError("period_end must not be in the future")
+    if period_start < REPORT_PERIOD_START_FLOOR:
+        raise ValueError(
+            f"period_start must not precede {REPORT_PERIOD_START_FLOOR.date().isoformat()}"
+        )
+    if period_end - period_start > timedelta(days=MAX_REPORT_PERIOD_DAYS):
+        raise ValueError(f"period span must not exceed {MAX_REPORT_PERIOD_DAYS} days")
     run_id = deterministic_run_id(resolved, period_start, period_end)
     return run_id, [
         resolved.value,

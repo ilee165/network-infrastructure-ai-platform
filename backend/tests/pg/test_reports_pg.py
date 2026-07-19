@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.engines.reports import deterministic_run_id
+from app.models import AuditLog
 from app.models.reports import ReportArtifact, ReportKind, ReportRun, ReportRunStatus
 from app.workers.tasks import reports as report_tasks
 
@@ -58,22 +59,128 @@ async def test_concurrent_claims_yield_exactly_one_row(
 ) -> None:
     """Beat + on-demand racing the same (kind, period) cannot double-claim.
 
-    Real PG enforcement: two concurrent ``ON CONFLICT DO NOTHING`` INSERTs on
-    distinct connections (NullPool) leave EXACTLY ONE ``report_runs`` row —
-    one caller gets the fresh claim, the other classifies the conflict
-    (``resumed`` for a non-terminal row) instead of erroring or duplicating.
+    Real PG enforcement (PR #166 F1/F2): two concurrent claim INSERTs on
+    distinct connections (NullPool) leave EXACTLY ONE ``report_runs`` row.
+    The loser must survive the sibling unique index
+    (``uq_report_runs_kind_period``) tripping BEFORE the ``(id)`` arbiter —
+    the SAVEPOINT-wrapped claim classifies ANY unique conflict instead of
+    raising ``UniqueViolationError`` — and, because the winner's claim is
+    YOUNG (actively owned), the loser gets the non-generating
+    ``in_progress`` outcome, never ``resumed``.
     """
     _wire_session(pg_engine, monkeypatch)
 
     outcomes = await asyncio.gather(_claim(), _claim())
 
-    assert sorted(outcomes) == ["claimed", "resumed"]
+    assert sorted(outcomes) == ["claimed", "in_progress"]
     maker = async_sessionmaker(pg_engine, expire_on_commit=False)
     async with maker() as session:
         rows = list((await session.execute(select(ReportRun))).scalars())
     assert len(rows) == 1
     assert rows[0].id == _RUN_ID
     assert rows[0].status == ReportRunStatus.RUNNING.value
+
+
+async def test_concurrent_generation_yields_exactly_one_generator(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two simultaneous FULL generations for one (kind, period): exactly one
+    generates (PR #166 F2).
+
+    The winner claims and generates; the active-claim loser returns
+    ``in_progress`` WITHOUT generating — so there is exactly ONE
+    ``report.generated`` audit entry and one csv+pdf artifact pair (no
+    duplicate audit, no interleaved artifact delete+insert).
+    """
+    _wire_session(pg_engine, monkeypatch)
+    from app.engines.reports import render
+
+    monkeypatch.setattr(render, "_render_pdf", lambda payload: b"%PDF-1.7 stub")
+
+    results = await asyncio.gather(
+        report_tasks._generate_report_core(
+            "change", _START.isoformat(), _END.isoformat(), "scheduled", None
+        ),
+        report_tasks._generate_report_core(
+            "change", _START.isoformat(), _END.isoformat(), "on_demand", None
+        ),
+    )
+
+    assert sorted(r["status"] for r in results) == ["in_progress", "succeeded"]
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with maker() as session:
+        runs = list((await session.execute(select(ReportRun))).scalars())
+        artifacts = list((await session.execute(select(ReportArtifact))).scalars())
+        generated_audits = list(
+            (
+                await session.execute(select(AuditLog).where(AuditLog.action == "report.generated"))
+            ).scalars()
+        )
+    assert len(runs) == 1
+    assert runs[0].status == ReportRunStatus.SUCCEEDED.value
+    assert sorted(a.format for a in artifacts) == ["csv", "pdf"]
+    assert len(generated_audits) == 1
+
+
+async def test_sibling_unique_index_conflict_is_classified_not_raised(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DETERMINISTIC bite for the SAVEPOINT claim (PR #166 F1).
+
+    The race test above can be won by the ``(id)`` arbiter suppressing first;
+    here ``uq_report_runs_kind_period`` is FORCED to raise (a pre-existing row
+    with the same natural key under a DIFFERENT id — no arbiter conflict, so
+    PG must error on the sibling index). The claim must classify — never leak
+    ``UniqueViolationError`` — and must NOT generate on a row it cannot own.
+    """
+    _wire_session(pg_engine, monkeypatch)
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with maker() as session:
+        session.add(
+            ReportRun(
+                id=deterministic_run_id(ReportKind.CHANGE, _START, _END + timedelta(days=1)),
+                kind=ReportKind.CHANGE.value,
+                trigger="scheduled",
+                requested_by=None,
+                period_start=_START,
+                period_end=_END,
+                status=ReportRunStatus.RUNNING.value,
+                regime_tags=["soc2:CC8.1"],
+            )
+        )
+        await session.commit()
+
+    outcome = await _claim()  # arbiter (id) clean; sibling unique index raises
+
+    assert outcome == "in_progress"  # non-generating: never claim a foreign row
+    async with maker() as session:
+        rows = list((await session.execute(select(ReportRun))).scalars())
+    assert len(rows) == 1  # no second row, no error escaped
+
+
+async def test_stale_claim_is_resumed_but_active_claim_is_not(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ownership by claim age on real PG (PR #166 F2): a YOUNG ``running``
+    claim is actively owned (``in_progress``); only once ``updated_at`` falls
+    beyond ``report_claim_timeout_seconds`` may a new request resume it."""
+    _wire_session(pg_engine, monkeypatch)
+    assert await _claim() == "claimed"
+    # Fresh claim (updated_at = now) → actively owned, loser does not generate.
+    assert await _claim() == "in_progress"
+
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with maker() as session:
+        run = (await session.execute(select(ReportRun))).scalar_one()
+        stale = datetime.now(UTC) - timedelta(hours=2)
+        run.updated_at = stale  # explicit value wins over the onupdate refresh
+        await session.commit()
+    assert await _claim() == "resumed"
+    async with maker() as session:
+        run = (await session.execute(select(ReportRun))).scalar_one()
+        assert run.status == ReportRunStatus.RUNNING.value
+        # The resumer refreshed the claim heartbeat (took ownership).
+        assert run.updated_at > stale + timedelta(minutes=30)
 
 
 async def test_claim_classifies_terminal_and_failed_rows(

@@ -8,11 +8,15 @@ typed token — no free-form failure text crosses the API (ADR-0053 §6).
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from app.models.reports import ReportKind
+from app.models.reports import (
+    MAX_REPORT_PERIOD_DAYS,
+    REPORT_PERIOD_START_FLOOR,
+    ReportKind,
+)
 
 
 class ReportGenerationRequest(BaseModel):
@@ -45,6 +49,17 @@ class ReportGenerationRequest(BaseModel):
             # run forever ("skipped" for SUCCEEDED runs) — a silent compliance
             # gap. The period must be complete before generation.
             raise ValueError("period_end must not be in the future")
+        if self.period_start < REPORT_PERIOD_START_FLOOR:
+            # Platform-epoch floor (PR #166 F3): nothing reportable predates
+            # the platform; a year-1 period_start is only ever a DoS probe.
+            raise ValueError(
+                f"period_start must not precede {REPORT_PERIOD_START_FLOOR.date().isoformat()}"
+            )
+        if self.period_end - self.period_start > timedelta(days=MAX_REPORT_PERIOD_DAYS):
+            # Span cap (PR #166 F3): builders materialize one tuple per period
+            # day, so an unbounded span is an unbounded-memory vector — 400
+            # days covers an annual report plus fiscal-offset slack.
+            raise ValueError(f"period span must not exceed {MAX_REPORT_PERIOD_DAYS} days")
         return self
 
 

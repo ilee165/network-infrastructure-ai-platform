@@ -1627,7 +1627,7 @@ export interface paths {
         };
         /**
          * Get Run
-         * @description One run's metadata + artifact metadata (per-kind floor enforced).
+         * @description One run's metadata + artifact metadata (visible kinds only; 404 seam).
          */
         get: operations["get_run_api_v1_reports__run_id__get"];
         put?: never;
@@ -1651,7 +1651,8 @@ export interface paths {
          *
          *     The per-kind floor is re-evaluated HERE against the caller's current role
          *     (ADR-0053 §3): an artifact is never world-readable once generated, and a
-         *     role revoked between generation and download denies the download. Every
+         *     role revoked between generation and download denies the download — as a
+         *     404 identical to a missing run (the PR #166 F3 existence seam). Every
          *     download writes an audit entry carrying the artifact sha256.
          */
         get: operations["download_artifact_api_v1_reports__run_id__artifacts__artifact_id__get"];

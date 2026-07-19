@@ -33,7 +33,7 @@ import re
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
-from typing import Final
+from typing import Final, NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -180,7 +180,19 @@ def _trace_link(cr: ChangeRequest) -> str:
     return link
 
 
-def _identity_label(user: User | None, fallback: str) -> str:
+class _IdentityRef(NamedTuple):
+    """Secret-free identity projection: EXACTLY id/username/idp_subject.
+
+    Never the ORM ``User`` entity — selecting it would drag
+    ``users.password_hash`` into the report-engine session (ADR-0053 §6
+    layer 1: what is never queried can never leak; PR #166 F3)."""
+
+    id: uuid.UUID
+    username: str
+    idp_subject: str | None
+
+
+def _identity_label(user: _IdentityRef | None, fallback: str) -> str:
     """D11 identity presentation: username + IdP subject (federated) or local."""
     if user is None:
         return fallback
@@ -199,7 +211,7 @@ def _actor_user_id(actor: str) -> uuid.UUID | None:
         return None
 
 
-def _actor_label(actor: str, users: Mapping[uuid.UUID, User]) -> str:
+def _actor_label(actor: str, users: Mapping[uuid.UUID, _IdentityRef]) -> str:
     """Resolve a ``user:<id>`` actor to its identity label; pass agents through."""
     user_id = _actor_user_id(actor)
     if user_id is None:
@@ -285,12 +297,23 @@ async def _load_approvals(session: AsyncSession, cr_ids: Sequence[uuid.UUID]) ->
 
 async def _load_identities(
     session: AsyncSession, user_ids: Iterable[uuid.UUID]
-) -> dict[uuid.UUID, User]:
+) -> dict[uuid.UUID, _IdentityRef]:
+    """Identity labels for referenced users: explicit secret-free columns ONLY.
+
+    Mirrors ``access_review._load_accounts`` — a full ``select(User)`` would
+    project ``users.password_hash`` into the report engine, contradicting the
+    module's §6 sources contract. Re-asserted by the boundary deny-column
+    capture over a seeded change generation (PR #166 F3).
+    """
     ids = list(set(user_ids))
     if not ids:
         return {}
-    rows = (await session.execute(select(User).where(User.id.in_(ids)))).scalars()
-    return {user.id: user for user in rows}
+    rows = (
+        await session.execute(
+            select(User.id, User.username, User.idp_subject).where(User.id.in_(ids))
+        )
+    ).all()
+    return {row.id: _IdentityRef(row.id, row.username, row.idp_subject) for row in rows}
 
 
 def _executors(lifecycle_rows: Sequence[AuditLog]) -> dict[str, str]:

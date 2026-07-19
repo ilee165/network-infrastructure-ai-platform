@@ -57,10 +57,12 @@ def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def test_single_head_is_0021() -> None:
+def test_single_head() -> None:
+    # The exact-head pin moved to test_0022 (the newest revision's test file);
+    # this keeps the no-branch invariant, matching the 0019/0020 convention.
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert heads == ["0021"], f"expected single head 0021, got {heads}"
+    assert len(heads) == 1, f"expected a single head (no branch), got {heads}"
 
 
 def test_0021_revises_0020() -> None:

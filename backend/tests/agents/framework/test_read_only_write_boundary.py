@@ -720,9 +720,13 @@ async def test_every_default_read_only_tool_obeys_relational_write_boundary(
     async with maker() as session:
         assert await session.scalar(select(func.count()).select_from(DiscoveryRun)) == 1
         actions = list((await session.scalars(select(AuditLog.action))).all())
-        assert len(actions) == 6
+        assert len(actions) == 7
         assert actions.count(audit.KEK_UNWRAP) == 3
         assert actions.count(audit.CREDENTIAL_DECRYPTED) == 3
+        # PR #166 F3: the agent generation trigger now records the same durable
+        # report.generation_requested evidence the HTTP path writes — an
+        # append-only audit_log INSERT, permitted by _ALLOWED_WRITES.
+        assert actions.count("report.generation_requested") == 1
 
 
 @pytest.mark.asyncio

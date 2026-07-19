@@ -8,13 +8,22 @@ construction).
 
 Idempotency under redelivery AND beat/on-demand collision (ADR-0053 §2, the
 ``_claim_backup_run`` precedent): a run's PK is the DETERMINISTIC UUID of its
-``(kind, period)``; :func:`_claim_report_run` INSERTs it ``ON CONFLICT DO
-NOTHING`` and classifies a conflict as
+``(kind, period)``; :func:`_claim_report_run` INSERTs it inside a SAVEPOINT
+(PR #166 F1: PostgreSQL only suppresses conflicts on the ``(id)`` ARBITER —
+under true concurrency the sibling ``uq_report_runs_kind_period`` unique index
+can trip FIRST and raise, so ANY :class:`IntegrityError` is caught and
+classified) and classifies a conflict as
 
 * ``skipped``  — the run already SUCCEEDED (a genuine duplicate: no second
   artifact, no second audit pair);
-* ``resumed``  — the row is stuck non-terminal (a prior claim died with the
-  worker); the generation is recovered, not lost;
+* ``in_progress`` — the row is non-terminal and its ``updated_at`` claim
+  heartbeat is YOUNGER than ``report_claim_timeout_seconds`` (PR #166 F2):
+  another worker actively owns the generation, so the loser returns WITHOUT
+  generating (no duplicate ``report.generated`` audit entry, no interleaved
+  artifact delete+insert);
+* ``resumed``  — the row is stuck non-terminal AND stale (its heartbeat aged
+  past the timeout — the prior claim died with the worker); the generation is
+  recovered, not lost;
 * ``reclaimed`` — the run previously FAILED (e.g. ``redaction_violation``); a
   fresh request re-attempts it, so a fixed payload can regenerate the period —
   fail-closed redaction blocks a report until fixed, never forever.
@@ -41,6 +50,7 @@ import structlog
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app import db
@@ -138,13 +148,27 @@ async def _claim_report_run(
     period_start: datetime,
     period_end: datetime,
 ) -> str:
-    """INSERT the ``report_runs`` claim row ``ON CONFLICT DO NOTHING``.
+    """INSERT the ``report_runs`` claim row; classify ANY unique conflict.
 
     Returns ``"claimed"`` (fresh insert), ``"skipped"`` (already succeeded),
-    ``"resumed"`` (stuck non-terminal claim from a dead worker), or
-    ``"reclaimed"`` (previously failed; reset to ``running`` for a re-attempt).
-    See the module docstring for the semantics of each outcome.
+    ``"in_progress"`` (another worker actively owns a young claim — the caller
+    must NOT generate), ``"resumed"`` (stale non-terminal claim from a dead
+    worker, ownership taken over), or ``"reclaimed"`` (previously failed;
+    reset to ``running`` for a re-attempt). See the module docstring.
+
+    PR #166 F1: the INSERT runs inside a SAVEPOINT catching
+    :class:`IntegrityError` — PostgreSQL only suppresses conflicts on the
+    ``(id)`` arbiter index, and under true concurrency the sibling
+    ``uq_report_runs_kind_period`` unique index can trip first and raise. The
+    deterministic id means id-conflict iff natural-key-conflict, so both
+    manifestations classify against the same existing row.
+
+    PR #166 F2: classification re-selects the row ``FOR UPDATE`` (no-op on
+    SQLite) so reclaim/stale-takeover is an atomic compare-and-swap — two
+    simultaneous resumers serialize, and the second re-reads the refreshed
+    ``updated_at`` heartbeat and backs off with ``in_progress``.
     """
+    settings = get_settings()
     async with _session() as session:
         dialect = session.bind.dialect.name if session.bind is not None else "sqlite"
         values: dict[str, Any] = {
@@ -167,14 +191,32 @@ async def _claim_report_run(
             )
         else:
             stmt = sqlite_insert(ReportRun).values(**values).on_conflict_do_nothing()
-        cursor = await session.execute(stmt)
-        if cursor.rowcount == 1:  # type: ignore[attr-defined]
+        inserted = False
+        try:
+            async with session.begin_nested():
+                cursor = await session.execute(stmt)
+                inserted = cursor.rowcount == 1  # type: ignore[attr-defined]
+        except IntegrityError:
+            # The sibling unique index raised before the arbiter could
+            # suppress: same natural key, same deterministic id — classify
+            # the existing row exactly like an arbiter conflict.
+            inserted = False
+        if inserted:
             await session.commit()
             return "claimed"
-        existing_status = (
-            await session.execute(select(ReportRun.status).where(ReportRun.id == run_id))
+        existing = (
+            await session.execute(select(ReportRun).where(ReportRun.id == run_id).with_for_update())
         ).scalar_one_or_none()
-        if existing_status == ReportRunStatus.FAILED.value:
+        if existing is None:
+            # Conflict raised but the row vanished before re-select (e.g. a
+            # concurrent delete). Never generate on a guess — report the
+            # non-generating outcome; a redelivery re-claims cleanly.
+            await session.commit()
+            return "in_progress"
+        if existing.status == ReportRunStatus.SUCCEEDED.value:
+            await session.commit()
+            return "skipped"
+        if existing.status == ReportRunStatus.FAILED.value:
             # A failed period is re-attemptable (fail-closed redaction must not
             # block a period forever once the payload is fixed): reset the row.
             await session.execute(
@@ -190,10 +232,25 @@ async def _claim_report_run(
             )
             await session.commit()
             return "reclaimed"
+        # Non-terminal (running/queued): resume ONLY a stale claim whose
+        # updated_at heartbeat aged past the takeover timeout (PR #166 F2).
+        age = datetime.now(UTC) - existing.updated_at
+        if age > timedelta(seconds=settings.report_claim_timeout_seconds):
+            await session.execute(
+                update(ReportRun)
+                .where(ReportRun.id == run_id)
+                .values(
+                    status=ReportRunStatus.RUNNING.value,
+                    trigger=trigger,
+                    requested_by=requested_by,
+                    updated_at=datetime.now(UTC),  # take ownership: fresh heartbeat
+                )
+            )
+            await session.commit()
+            return "resumed"
+        # Young claim: another worker is actively generating. Back off.
         await session.commit()
-        if existing_status == ReportRunStatus.SUCCEEDED.value:
-            return "skipped"
-        return "resumed"
+        return "in_progress"
 
 
 async def _fail_run(
@@ -278,6 +335,11 @@ async def _generate_report_core(
     if claim == "skipped":
         logger.info("reports.generate_skipped_duplicate", run_id=run_id_str, kind=kind.value)
         return {"run_id": run_id_str, "status": "skipped"}
+    if claim == "in_progress":
+        # Another worker actively owns the claim (PR #166 F2): do NOT resume —
+        # no duplicate report.generated audit, no interleaved artifact writes.
+        logger.info("reports.generate_claim_active_elsewhere", run_id=run_id_str, kind=kind.value)
+        return {"run_id": run_id_str, "status": "in_progress"}
     logger.info(
         "reports.generate_started",
         run_id=run_id_str,

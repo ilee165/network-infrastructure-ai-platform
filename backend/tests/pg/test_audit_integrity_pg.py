@@ -346,3 +346,50 @@ async def test_gap_and_break_days_render_as_findings_on_pg(pg_session: AsyncSess
     findings = {(row[0], row[1]) for row in _by_title(sections, SECTION_FINDINGS).rows}
     assert (FINDING_GAP, "2026-07-02") in findings
     assert (FINDING_BREAK, "2026-07-03") in findings
+
+
+async def test_verification_history_is_append_only_on_pg(pg_session: AsyncSession) -> None:
+    """Migration 0022 (PR #166 F3): the 7-year verification-history evidence
+    table refuses UPDATE and DELETE at the database, mirroring the ``approvals``
+    trigger (0009) and the ``audit_log`` REVOKE posture (0001).
+
+    The audit-integrity report explicitly TRUSTS these persisted rows — without
+    the trigger, a role holding UPDATE on app tables could rewrite a ``break``
+    outcome to ``clean`` (or delete the row) with nothing detecting it. The
+    refusal must BITE: each tamper statement raises the append-only trigger
+    error, and the original row survives verbatim.
+    """
+    from sqlalchemy.exc import DBAPIError
+
+    started = datetime(2026, 7, 1, 2, 0, tzinfo=UTC)
+    row_id = uuid.uuid4()
+    pg_session.add(
+        AuditChainVerificationRun(
+            id=row_id,
+            started_at=started,
+            finished_at=started + timedelta(minutes=1),
+            outcome=ChainVerificationOutcome.BREAK.value,
+            entries_checked=5,
+            grant_check_outcome=GrantCheckOutcome.CLEAN.value,
+        )
+    )
+    await pg_session.commit()
+
+    # A break→clean rewrite is REFUSED by the trigger (not silently applied).
+    with pytest.raises(DBAPIError, match="append-only"):
+        await pg_session.execute(
+            update(AuditChainVerificationRun)
+            .where(AuditChainVerificationRun.id == row_id)
+            .values(outcome=ChainVerificationOutcome.CLEAN.value)
+        )
+    await pg_session.rollback()
+
+    # Deleting the evidence row is refused the same way.
+    with pytest.raises(DBAPIError, match="append-only"):
+        await pg_session.execute(text("DELETE FROM audit_chain_verification_runs"))
+    await pg_session.rollback()
+
+    persisted = (await pg_session.execute(select(AuditChainVerificationRun))).scalars().all()
+    assert [(r.id, r.outcome) for r in persisted] == [
+        (row_id, ChainVerificationOutcome.BREAK.value)
+    ]

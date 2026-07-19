@@ -1194,8 +1194,9 @@ async def get_report_run(
 
     Use the returned run id / artifact sha256 to cite a report as evidence.
     Artifact bytes are only available through the RBAC'd download API — this
-    tool never returns report content. Denied when the run's kind is above the
-    invoking user's role floor.
+    tool never returns report content. A run whose kind is above the invoking
+    user's role floor resolves exactly like a missing run (existence is
+    RBAC-scoped, ADR-0053 §3).
     """
     from uuid import UUID
 
@@ -1251,6 +1252,20 @@ async def request_report_generation(
     identity = current_invoking_identity()
     user_id = identity.user_id if identity is not None else None
     args: list[str | None] = [*task_args, str(user_id) if user_id is not None else None]
+
+    from app.agents.framework.report_requests import record_generation_requested
+
+    # Durable-audit parity with POST /api/v1/reports (PR #166 F3): the agent
+    # path records the SAME ``report.generation_requested`` event, attributed
+    # to the requesting principal and COMMITTED BEFORE the dispatch so a
+    # broker failure can never lose the evidence generation was requested.
+    await record_generation_requested(
+        actor=f"user:{user_id}" if user_id is not None else "agent:documentation",
+        run_id=run_id,
+        kind=task_args[0],
+        period_start=task_args[1],
+        period_end=task_args[2],
+    )
 
     import asyncio
 
