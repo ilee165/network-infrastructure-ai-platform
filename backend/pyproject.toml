@@ -84,12 +84,15 @@ dependencies = [
     # + bundled DejaVu fonts land in deploy/docker/backend.Dockerfile. Major
     # cap: WeasyPrint majors routinely change layout output, and evidence
     # artifacts must not silently re-render differently under an unreviewed
-    # bump; exact version resolved in requirements.lock.txt. Floor 68:
-    # PYSEC-2026-2034 / PYSEC-2026-3412 + CVE-2025-68616 (SSRF) are fixed in
-    # 68.0 (PR #166 F3) — our deny-first url_fetcher stays as defense in depth
-    # upstream of the library's own fix.
+    # bump; exact version resolved in requirements.lock.txt. Floor 69:
+    # PYSEC-2026-2034 + CVE-2025-68616 (SSRF) fixed in 68.0, and
+    # PYSEC-2026-3412 / CVE-2026-49452 (presentational-hints CSS injection)
+    # fixed in 69.0 (the release notes name it; the OSV record lacks a fixed
+    # event, so pip-audit shows no fix version — do not allowlist it). Our
+    # deny-first url_fetcher stays as defense in depth upstream of the
+    # library's own fixes.
     "jinja2>=3.1.6",
-    "weasyprint>=68,<69",
+    "weasyprint>=69,<70",
     # Packet-analysis self-confining executor (ADR-0049): libseccomp Python
     # binding. A Linux-marker RUNTIME dep — the pure-python wheel installs into
     # the shared venv on any Linux image (it is NOT image-scoped); the import is
