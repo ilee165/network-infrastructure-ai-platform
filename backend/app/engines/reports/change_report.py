@@ -251,7 +251,17 @@ async def _load_crs(session: AsyncSession, cr_ids: Sequence[uuid.UUID]) -> list[
 async def _load_lifecycle_rows(
     session: AsyncSession, cr_ids: Sequence[uuid.UUID]
 ) -> list[AuditLog]:
-    """The FULL lifecycle history of the selected CRs (not window-clipped)."""
+    """The FULL lifecycle history of the selected CRs (not window-clipped).
+
+    Ordered by ``created_at``, then ``seq`` (nulls last — a pre-chain/legacy
+    row without a monotonic sequence sorts after every chained row), and
+    ``id`` only as a final, purely-cosmetic tiebreak for genuinely identical
+    ``(created_at, seq)`` pairs. ``app.models.audit.AuditLog`` documents that
+    the chain's real append ORDER is ``seq``, NOT ``(created_at, id)`` — a
+    random-UUID tiebreak on same-timestamp rows can invert the true order,
+    which would poison :func:`_executors`' "last claim wins" attribution
+    (PR #166 F2).
+    """
     stmt = (
         select(AuditLog)
         .where(
@@ -259,7 +269,7 @@ async def _load_lifecycle_rows(
             AuditLog.action.startswith(CR_LIFECYCLE_ACTION_PREFIX, autoescape=True),
             AuditLog.target_id.in_([str(cr_id) for cr_id in cr_ids]),
         )
-        .order_by(AuditLog.created_at, AuditLog.id)
+        .order_by(AuditLog.created_at, AuditLog.seq.asc().nulls_last(), AuditLog.id)
     )
     return list((await session.execute(stmt)).scalars())
 

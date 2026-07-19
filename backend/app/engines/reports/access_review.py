@@ -16,7 +16,10 @@ Honesty contracts this module owns:
   window), :data:`CLASS_NEVER_LOGGED_IN` (no login ever — the honest surface
   for service/bootstrap accounts, which a reviewer must see, not lose), or
   :data:`CLASS_NEW_ACCOUNT` (created inside the window with no login yet — a
-  new account is not a dormant one).
+  new account is not a dormant one), or :data:`CLASS_POST_PERIOD_ACCOUNT`
+  (created AFTER the period end, e.g. a roster generated for a past period —
+  distinct from a new account created inside the window; it is still listed,
+  never excluded).
 * **Login-derived columns are anchored at the period end** (reproducible
   review evidence): last login is the newest audit login event strictly before
   ``period_end``; roster/role/mapping state is generation-time state — the
@@ -57,6 +60,7 @@ __all__ = [
     "CLASS_DORMANT",
     "CLASS_NEVER_LOGGED_IN",
     "CLASS_NEW_ACCOUNT",
+    "CLASS_POST_PERIOD_ACCOUNT",
     "IDP_MAPPING_COLUMNS",
     "LOGIN_ACTIONS",
     "NEVER_TOKEN",
@@ -114,6 +118,7 @@ CLASS_ACTIVE: Final = "active"
 CLASS_DORMANT: Final = "dormant"
 CLASS_NEVER_LOGGED_IN: Final = "never-logged-in (dormant)"
 CLASS_NEW_ACCOUNT: Final = "never-logged-in (new account)"
+CLASS_POST_PERIOD_ACCOUNT: Final = "never-logged-in (created after period end)"
 
 #: Provider tokens. While OIDC is enabled the local-login path is fenced to
 #: break-glass admin only (ADR-0028 §5) — the roster says so per account
@@ -168,7 +173,9 @@ def _dormancy_note(days: int) -> str:
         "logged in (including service/bootstrap accounts) carry an explicit "
         "never-logged-in classification and are never silently excluded; accounts "
         "created inside the window with no login yet classify as new accounts, not "
-        "dormant."
+        "dormant; accounts created AFTER the period end (e.g. a roster generated for "
+        "a past period) classify distinctly as post-period accounts, never as new "
+        "accounts of this period."
     )
 
 
@@ -251,13 +258,29 @@ async def _break_glass_logins(
 # ---------------------------------------------------------------------------
 
 
-def _classify(last_login: datetime | None, created_at: datetime, *, window_start: datetime) -> str:
-    """The honest activity classification for one account (module docstring)."""
+def _classify(
+    last_login: datetime | None,
+    created_at: datetime,
+    *,
+    window_start: datetime,
+    period_end: datetime,
+) -> str:
+    """The honest activity classification for one account (module docstring).
+
+    *period_end* distinguishes an account created strictly AFTER the
+    reviewed period (e.g. a roster generated for a past period) from one
+    created inside the dormancy window — both have no login yet, but only
+    the latter is honestly "new" relative to THIS review period (PR #166
+    F2). Neither is ever excluded from the roster (module docstring / NOTE_SCOPE).
+    """
     if last_login is not None and last_login >= window_start:
         return CLASS_ACTIVE
     if last_login is not None:
         return CLASS_DORMANT
-    if coerce_utc(created_at) >= window_start:
+    created = coerce_utc(created_at)
+    if created >= period_end:
+        return CLASS_POST_PERIOD_ACCOUNT
+    if created >= window_start:
         return CLASS_NEW_ACCOUNT
     return CLASS_NEVER_LOGGED_IN
 
@@ -335,7 +358,7 @@ async def build_access_review_sections(
             "enabled" if is_active else "disabled",
             coerce_utc(created_at).isoformat(),
             latest.isoformat() if latest is not None else NEVER_TOKEN,
-            _classify(latest, created_at, window_start=window_start),
+            _classify(latest, created_at, window_start=window_start, period_end=end),
         )
         for user_id, username, is_active, created_at, idp_iss, role_name in accounts
         for latest in (last_login.get(str(user_id)),)

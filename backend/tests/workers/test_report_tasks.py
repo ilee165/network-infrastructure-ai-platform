@@ -232,6 +232,8 @@ def test_scheduled_periods_are_deterministic() -> None:
 def test_generate_scheduled_uses_settings_cadence(
     eager_celery: None, db_url: str, stub_pdf: None
 ) -> None:
+    """Legacy fallback: an empty message (no dispatch-supplied bounds) still
+    derives the period from the current wall clock, exactly as before."""
     result = tasks.generate_scheduled.run("change")
     assert result["status"] == "succeeded"
     run = _query_all(db_url, select(ReportRun))[0]
@@ -239,6 +241,31 @@ def test_generate_scheduled_uses_settings_cadence(
     assert run.requested_by is None
     # Default change cadence is weekly: a 7-day period ending at UTC midnight.
     assert run.period_end - run.period_start == timedelta(days=7)
+
+
+def test_generate_scheduled_honors_dispatch_supplied_bounds_across_midnight(
+    eager_celery: None, db_url: str, stub_pdf: None
+) -> None:
+    """PR #166 F2 (beat-slot identity): a redelivered or delayed tick that the
+    worker only executes well AFTER a UTC-midnight/week boundary must still
+    target the period beat actually dispatched — never a period re-derived
+    from the (now much later) execution-time wall clock.
+
+    Celery beat computes ``period_start``/``period_end`` at DISPATCH time
+    (``celery.beat.BeatLazyFunc``, see ``test_celery_app.py``) and ships them
+    as explicit message kwargs; the worker must use them as-is. The dispatched
+    bounds below deliberately do NOT match ``scheduled_period("weekly", now())``
+    for the real "now" the test runs at — proving the worker never recomputes.
+    """
+    dispatched_start = "2020-01-05T00:00:00+00:00"  # an arbitrary past Sunday
+    dispatched_end = "2020-01-12T00:00:00+00:00"
+
+    result = tasks.generate_scheduled.run("change", dispatched_start, dispatched_end)
+
+    assert result["status"] == "succeeded"
+    run = _query_all(db_url, select(ReportRun))[0]
+    assert run.period_start == datetime(2020, 1, 5, tzinfo=UTC)
+    assert run.period_end == datetime(2020, 1, 12, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +345,63 @@ def test_builder_error_is_typed_not_freeform(
         if row.action == "report.generation_failed"
     ]
     assert "hunter2" not in str(failures[0].detail)
+
+
+def test_phase3_persistence_failure_fails_the_run_and_makes_it_reclaimable(
+    eager_celery: None, db_url: str, stub_pdf: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #166 F2 (stranded RUNNING): an exception during Phase 3 (artifact
+    persist / status update / generation audit) must not leave the claim
+    ``running`` forever — it must land FAILED, typed, with no half-written
+    artifact, and be reclaimable by the next request for the same period.
+    """
+    from app.services import audit as audit_service
+
+    real_record = audit_service.record
+
+    async def _boom_on_generated(
+        session: Any, *, actor: str, action: str, target_type: str, target_id: Any, detail: Any
+    ) -> Any:
+        if action == "report.generated":
+            raise RuntimeError("phase3 db exploded")
+        return await real_record(
+            session,
+            actor=actor,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            detail=detail,
+        )
+
+    monkeypatch.setattr(tasks.audit, "record", _boom_on_generated)
+
+    result = tasks.generate.run("change", _START, _END, "on_demand", None)
+
+    assert result == {
+        "run_id": str(_RUN_ID),
+        "status": "failed",
+        "error_class": "persistence_error",
+    }
+    run = _query_all(db_url, select(ReportRun))[0]
+    assert run.status == ReportRunStatus.FAILED.value
+    assert run.error_class == "persistence_error"
+    # No half-written artifact survives (delete+insert rolled back together).
+    assert _query_all(db_url, select(ReportArtifact)) == []
+    failures = [
+        row
+        for row in _query_all(db_url, select(AuditLog))
+        if row.action == "report.generation_failed"
+    ]
+    assert len(failures) == 1
+
+    # RECLAIMABLE: a fresh request (boom removed) succeeds instead of the
+    # claim staying stuck ``running`` forever.
+    monkeypatch.setattr(tasks.audit, "record", real_record)
+    second = tasks.generate.run("change", _START, _END, "on_demand", None)
+    assert second["status"] == "succeeded"
+    run2 = _query_all(db_url, select(ReportRun))[0]
+    assert run2.status == ReportRunStatus.SUCCEEDED.value
+    assert run2.error_class is None
 
 
 # ---------------------------------------------------------------------------
@@ -407,17 +491,60 @@ def test_compliance_sweep_redelivery_is_idempotent(eager_celery: None, db_url: s
     assert len(_query_all(db_url, select(ComplianceRunFinding))) == first["findings"]
 
 
-def test_device_without_snapshot_is_skipped(eager_celery: None, db_url: str) -> None:
-    _seed(
-        db_url,
-        Device(
-            hostname="bare-device",
-            mgmt_ip="10.0.0.2",
-            vendor_id="cisco_ios",
-            status=DeviceStatus.REACHABLE,
-        ),
+def test_device_without_snapshot_is_recorded_as_unevaluated_coverage_gap(
+    eager_celery: None, db_url: str
+) -> None:
+    """A supported device with no snapshot is a coverage GAP, never a silent
+    absence (PR #166 F2): it earns no finding and is not counted as
+    "evaluated", but it DOES enter ``device_scope`` so the posture report can
+    surface it explicitly instead of a mostly-unevaluated estate reading as
+    a small, clean, fully-covered one."""
+    bare = Device(
+        id=uuid4(),
+        hostname="bare-device",
+        mgmt_ip="10.0.0.2",
+        vendor_id="cisco_ios",
+        status=DeviceStatus.REACHABLE,
     )
+    _seed(db_url, bare)
     result = tasks.compliance_sweep.run()
     assert result["status"] == "succeeded"
     assert result["devices"] == 0
+    assert result["unevaluated_devices"] == 1
     assert result["findings"] == 0
+    run = _query_all(db_url, select(ComplianceRun))[0]
+    assert run.device_scope == [str(bare.id)]
+
+
+def test_mixed_evaluated_unevaluated_and_out_of_scope_estate(
+    eager_celery: None, db_url: str
+) -> None:
+    """A mixed estate: one evaluated device, one unevaluated (no snapshot),
+    and one out-of-scope-vendor device (no text-config surface at all,
+    ADR-0050 §7.6). The out-of-scope device must NOT be double-reported as
+    an unevaluated coverage gap — that vendor class is covered separately."""
+    evaluated_id = _seed_device_with_snapshot(db_url)
+    unevaluated = Device(
+        id=uuid4(),
+        hostname="bare-device",
+        mgmt_ip="10.0.0.2",
+        vendor_id="cisco_ios",
+        status=DeviceStatus.REACHABLE,
+    )
+    out_of_scope = Device(
+        id=uuid4(),
+        hostname="lb-01",
+        mgmt_ip="10.0.0.3",
+        vendor_id="f5_bigip",
+        status=DeviceStatus.REACHABLE,
+    )
+    _seed(db_url, unevaluated, out_of_scope)
+
+    result = tasks.compliance_sweep.run()
+
+    assert result["status"] == "succeeded"
+    assert result["devices"] == 1
+    assert result["unevaluated_devices"] == 1
+    run = _query_all(db_url, select(ComplianceRun))[0]
+    assert sorted(run.device_scope) == sorted([str(evaluated_id), str(unevaluated.id)])
+    assert str(out_of_scope.id) not in run.device_scope

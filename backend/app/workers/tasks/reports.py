@@ -62,6 +62,7 @@ from app.engines.reports import (
     scheduled_period,
 )
 from app.engines.reports.builders import REGIME_TAG_DEFAULTS
+from app.engines.reports.compliance_posture import OUT_OF_SCOPE_VENDORS
 from app.models import Device
 from app.models.compliance_history import (
     ComplianceRun,
@@ -99,6 +100,7 @@ _COMPLIANCE_SWEEP_COMPLETED: Final = "compliance.sweep_completed"
 ERROR_CLASS_REDACTION: Final = "redaction_violation"
 ERROR_CLASS_BUILDER: Final = "builder_error"
 ERROR_CLASS_RENDER: Final = "render_error"
+ERROR_CLASS_PERSISTENCE: Final = "persistence_error"
 
 
 # ---------------------------------------------------------------------------
@@ -334,43 +336,67 @@ async def _generate_report_core(
     settings = get_settings()
     expires_at = generated_at + timedelta(days=_retention_days(settings, kind))
     finished_at = datetime.now(UTC)
-    async with _session() as session:
-        # A resumed claim may already carry artifacts from the dead attempt:
-        # replace them so the run's artifacts always match its final render.
-        await session.execute(delete(ReportArtifact).where(ReportArtifact.run_id == run_id))
-        for rendered in artifacts:
-            session.add(
-                ReportArtifact(
-                    run_id=run_id,
-                    format=rendered.format.value,
-                    content=rendered.content,
-                    sha256=rendered.sha256,
-                    size_bytes=rendered.size_bytes,
-                    expires_at=expires_at,
+    try:
+        async with _session() as session:
+            try:
+                # A resumed claim may already carry artifacts from the dead
+                # attempt: replace them so the run's artifacts always match
+                # its final render.
+                await session.execute(delete(ReportArtifact).where(ReportArtifact.run_id == run_id))
+                for rendered in artifacts:
+                    session.add(
+                        ReportArtifact(
+                            run_id=run_id,
+                            format=rendered.format.value,
+                            content=rendered.content,
+                            sha256=rendered.sha256,
+                            size_bytes=rendered.size_bytes,
+                            expires_at=expires_at,
+                        )
+                    )
+                await session.execute(
+                    update(ReportRun)
+                    .where(ReportRun.id == run_id)
+                    .values(status=ReportRunStatus.SUCCEEDED.value, finished_at=finished_at)
                 )
-            )
-        await session.execute(
-            update(ReportRun)
-            .where(ReportRun.id == run_id)
-            .values(status=ReportRunStatus.SUCCEEDED.value, finished_at=finished_at)
-        )
-        await audit.record(
-            session,
-            actor=_ACTOR,
-            action=_REPORT_GENERATED,
-            target_type="report_run",
-            target_id=run_id_str,
-            detail={
-                "kind": kind.value,
-                "trigger": trigger,
-                "requested_by": requested_by,
-                "artifacts": [
-                    {"format": a.format.value, "sha256": a.sha256, "size_bytes": a.size_bytes}
-                    for a in artifacts
-                ],
-            },
-        )
-        await session.commit()
+                await audit.record(
+                    session,
+                    actor=_ACTOR,
+                    action=_REPORT_GENERATED,
+                    target_type="report_run",
+                    target_id=run_id_str,
+                    detail={
+                        "kind": kind.value,
+                        "trigger": trigger,
+                        "requested_by": requested_by,
+                        "artifacts": [
+                            {
+                                "format": a.format.value,
+                                "sha256": a.sha256,
+                                "size_bytes": a.size_bytes,
+                            }
+                            for a in artifacts
+                        ],
+                    },
+                )
+                await session.commit()
+            except Exception:
+                # Roll back the partial delete/insert/update/audit as ONE
+                # unit (artifact-consistency preserved: never a half-swapped
+                # artifact set) before re-raising to the outer handler below.
+                await session.rollback()
+                raise
+    except Exception as exc:
+        # PR #166 F2 (stranded RUNNING): Phases 1-2 already route failures to
+        # _fail_run; Phase 3 must too — an ordinary persistence exception here
+        # (e.g. a constraint violation, a dropped connection mid-commit) would
+        # otherwise propagate out of this task with NO retry configured,
+        # leaving the claim ``running`` forever. Routing to _fail_run marks it
+        # FAILED, which _claim_report_run's "reclaimed" path makes reclaimable
+        # by the next request for this period — never a permanently stuck run.
+        logger.exception("reports.persist_failed", run_id=run_id_str, kind=kind.value)
+        await _fail_run(run_id, kind, ERROR_CLASS_PERSISTENCE, {"exception": type(exc).__name__})
+        return {"run_id": run_id_str, "status": "failed", "error_class": ERROR_CLASS_PERSISTENCE}
 
     duration = time.monotonic() - started
     observe_report_generation(report_kind=kind.value, duration_seconds=duration)
@@ -404,22 +430,42 @@ def generate(
 
 
 @celery_app.task(name="reports.generate_scheduled")
-def generate_scheduled(kind: str) -> dict[str, Any]:
-    """Beat entrypoint: generate *kind* for its preceding full cadence period."""
-    settings = get_settings()
-    cadence = {
-        ReportKind.CHANGE: settings.report_change_cadence,
-        ReportKind.COMPLIANCE_POSTURE: settings.report_compliance_posture_cadence,
-        ReportKind.ACCESS_REVIEW: settings.report_access_review_cadence,
-        ReportKind.AUDIT_INTEGRITY: settings.report_audit_integrity_cadence,
-    }[ReportKind(kind)]
-    period_start, period_end = scheduled_period(cadence, datetime.now(UTC))
+def generate_scheduled(
+    kind: str,
+    period_start: str | None = None,
+    period_end: str | None = None,
+) -> dict[str, Any]:
+    """Beat entrypoint: generate *kind* for its dispatch-computed cadence period.
+
+    PR #166 F2 (beat-slot identity): *period_start*/*period_end* are the
+    cadence period bounds computed by Celery beat AT DISPATCH TIME (via
+    ``celery.beat.BeatLazyFunc`` in ``beat_schedule`` — see
+    :mod:`app.workers.celery_app`), not recomputed here at EXECUTION time —
+    a redelivered task or one delayed past a UTC-midnight boundary would
+    otherwise derive a different (wrong) period from ``datetime.now(UTC)``
+    at whatever moment it happens to run, permanently ungenerating the
+    period beat actually meant. Only a legacy empty message (a pre-fix beat
+    process, or a manual/test invocation with no bounds) falls back to
+    computing the period from the current wall clock — the prior,
+    execution-time-derived behavior.
+    """
+    if period_start is None or period_end is None:
+        settings = get_settings()
+        cadence = {
+            ReportKind.CHANGE: settings.report_change_cadence,
+            ReportKind.COMPLIANCE_POSTURE: settings.report_compliance_posture_cadence,
+            ReportKind.ACCESS_REVIEW: settings.report_access_review_cadence,
+            ReportKind.AUDIT_INTEGRITY: settings.report_audit_integrity_cadence,
+        }[ReportKind(kind)]
+        start_dt, end_dt = scheduled_period(cadence, datetime.now(UTC))
+        period_start = start_dt.isoformat()
+        period_end = end_dt.isoformat()
     return dict(
         asyncio.run(
             _generate_report_core(
                 kind,
-                period_start.isoformat(),
-                period_end.isoformat(),
+                period_start,
+                period_end,
                 ReportTrigger.SCHEDULED.value,
                 None,
             )
@@ -475,6 +521,16 @@ def _sweep_slot_uuid(slot: str) -> UUID:
     return UUID(bytes=digest[:16])
 
 
+#: Vendors with NO text-config compliance surface at all (ADR-0050 §7.6 /
+#: ADR-0051 §3 named deferrals) — reported via the dedicated out-of-scope
+#: vendor section (``app.engines.reports.compliance_posture``), never as an
+#: "unevaluated" coverage gap (PR #166 F2): the two classes are mutually
+#: exclusive so a device is never double-reported.
+_OUT_OF_SCOPE_VENDOR_IDS: Final[frozenset[str]] = frozenset(
+    vendor for vendor, _ in OUT_OF_SCOPE_VENDORS
+)
+
+
 async def _compliance_sweep_core(run_id: str | None = None) -> dict[str, Any]:
     """Evaluate the default policy pack across devices; persist secret-free history.
 
@@ -515,9 +571,15 @@ async def _compliance_sweep_core(run_id: str | None = None) -> dict[str, Any]:
             return {"run_id": str(run_uuid), "status": "skipped"}
 
         devices = list((await session.execute(select(Device))).scalars())
-        device_ids: list[str] = []
+        evaluated_ids: list[str] = []
+        unevaluated_ids: list[str] = []
         finding_count = 0
         for device in devices:
+            if device.vendor_id in _OUT_OF_SCOPE_VENDOR_IDS:
+                # No text-config compliance surface AT ALL (ADR-0050 §7.6 /
+                # ADR-0051 §3 named deferrals) — surfaced via the dedicated
+                # out-of-scope vendor section, never as a coverage gap here.
+                continue
             latest = (
                 await session.execute(
                     select(ConfigSnapshot)
@@ -527,6 +589,12 @@ async def _compliance_sweep_core(run_id: str | None = None) -> dict[str, Any]:
                 )
             ).scalar_one_or_none()
             if latest is None:
+                # Supported but UNEVALUATED (PR #166 F2): still recorded in
+                # device_scope so the posture report can surface it as an
+                # explicit coverage gap — a bare `continue` here would make
+                # the device vanish with no finding and no scope trace,
+                # letting a mostly-unevaluated estate read as a clean one.
+                unevaluated_ids.append(str(device.id))
                 continue
             ctx = DeviceContext(
                 device_id=device.id,
@@ -547,12 +615,12 @@ async def _compliance_sweep_core(run_id: str | None = None) -> dict[str, Any]:
                     )
                 )
                 finding_count += 1
-            device_ids.append(str(device.id))
+            evaluated_ids.append(str(device.id))
 
         await session.execute(
             update(ComplianceRun)
             .where(ComplianceRun.id == run_uuid)
-            .values(device_scope=device_ids)
+            .values(device_scope=evaluated_ids + unevaluated_ids)
         )
         await audit.record(
             session,
@@ -561,7 +629,8 @@ async def _compliance_sweep_core(run_id: str | None = None) -> dict[str, Any]:
             target_type="compliance_run",
             target_id=str(run_uuid),
             detail={
-                "devices": len(device_ids),
+                "devices": len(evaluated_ids),
+                "unevaluated_devices": len(unevaluated_ids),
                 "findings": finding_count,
                 "policy_id": policy.id,
                 "policy_version": policy.version,
@@ -572,13 +641,15 @@ async def _compliance_sweep_core(run_id: str | None = None) -> dict[str, Any]:
     logger.info(
         "reports.compliance_sweep_finished",
         run_id=str(run_uuid),
-        devices=len(device_ids),
+        devices=len(evaluated_ids),
+        unevaluated_devices=len(unevaluated_ids),
         findings=finding_count,
     )
     return {
         "run_id": str(run_uuid),
         "status": "succeeded",
-        "devices": len(device_ids),
+        "devices": len(evaluated_ids),
+        "unevaluated_devices": len(unevaluated_ids),
         "findings": finding_count,
     }
 

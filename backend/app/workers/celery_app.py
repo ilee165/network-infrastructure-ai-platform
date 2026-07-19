@@ -28,13 +28,17 @@ second write that bypasses approval.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from celery import Celery
+from celery.beat import BeatLazyFunc
 from celery.schedules import crontab
 from celery.signals import worker_init
 from kombu import Queue
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
+from app.engines.reports.idempotency import scheduled_period
 
 _logger = get_logger(__name__)
 
@@ -155,6 +159,30 @@ def _report_crontab(settings: Settings, cadence: str) -> crontab:
     if cadence == "monthly":
         return crontab(hour=hour, minute=minute, day_of_month="1")
     raise ValueError(f"unknown report cadence {cadence!r}; expected daily|weekly|monthly")
+
+
+def _scheduled_period_bound(cadence: str, index: int) -> str:
+    """``BeatLazyFunc`` target: one bound of the CURRENT cadence period.
+
+    PR #166 F2 (beat-slot identity): Celery beat evaluates ``BeatLazyFunc``
+    entries in ``Scheduler.apply_async`` — i.e. AT DISPATCH TIME, right when
+    beat decides to fire the task — not when the worker later executes it.
+    Embedding the computed bound in the outgoing message means a redelivered
+    or delayed-past-midnight tick still carries the period beat actually
+    meant; the worker (:func:`app.workers.tasks.reports.generate_scheduled`)
+    never re-derives it from its own execution-time clock. Returns an ISO
+    string (JSON-serializable task arg), *index* selects start (``0``) or
+    end (``1``) of the ``(start, end)`` pair :func:`scheduled_period` returns.
+    """
+    return scheduled_period(cadence, datetime.now(UTC))[index].isoformat()
+
+
+def _report_schedule_kwargs(cadence: str) -> dict[str, BeatLazyFunc]:
+    """The lazy ``period_start``/``period_end`` kwargs for one report beat entry."""
+    return {
+        "period_start": BeatLazyFunc(_scheduled_period_bound, cadence, 0),
+        "period_end": BeatLazyFunc(_scheduled_period_bound, cadence, 1),
+    }
 
 
 def create_celery_app() -> Celery:
@@ -282,21 +310,25 @@ def create_celery_app() -> Celery:
             "report-generate-change": {
                 "task": "reports.generate_scheduled",
                 "args": ("change",),
+                "kwargs": _report_schedule_kwargs(settings.report_change_cadence),
                 "schedule": _report_crontab(settings, settings.report_change_cadence),
             },
             "report-generate-compliance-posture": {
                 "task": "reports.generate_scheduled",
                 "args": ("compliance_posture",),
+                "kwargs": _report_schedule_kwargs(settings.report_compliance_posture_cadence),
                 "schedule": _report_crontab(settings, settings.report_compliance_posture_cadence),
             },
             "report-generate-access-review": {
                 "task": "reports.generate_scheduled",
                 "args": ("access_review",),
+                "kwargs": _report_schedule_kwargs(settings.report_access_review_cadence),
                 "schedule": _report_crontab(settings, settings.report_access_review_cadence),
             },
             "report-generate-audit-integrity": {
                 "task": "reports.generate_scheduled",
                 "args": ("audit_integrity",),
+                "kwargs": _report_schedule_kwargs(settings.report_audit_integrity_cadence),
                 "schedule": _report_crontab(settings, settings.report_audit_integrity_cadence),
             },
             # Report-artifact retention purge (ADR-0053 §4): daily hard-delete

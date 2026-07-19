@@ -465,6 +465,67 @@ async def test_human_executor_resolves_to_identity_label(session: AsyncSession) 
     assert crs.rows[0][4] == "bob [idp:idp-sub-bob]"
 
 
+async def test_same_timestamp_executor_claims_resolve_by_seq_not_id(
+    session: AsyncSession,
+) -> None:
+    """Two ``approved -> executing`` claims stamped at the IDENTICAL timestamp
+    must resolve the executor by append order (``AuditLog.seq``), never a
+    random-UUID id tiebreak (PR #166 F2). ``app.models.audit.AuditLog``
+    documents that the chain's real append order is ``seq``, not
+    ``(created_at, id)`` — an id tiebreak can invert same-timestamp rows and
+    poison :func:`_executors`' "last claim wins" attribution.
+    """
+    cr_id = uuid.UUID("00000000-0000-0000-0000-00000000ec03")
+    same_ts = _ts(2, 12)
+    # This id sorts LAST alphabetically (``ff...``) but is the EARLIER claim
+    # by seq/append order; the other sorts FIRST (``00...``) but is the TRUE
+    # later claim. An ``(created_at, id)`` tiebreak inverts the real order.
+    earlier_claim_id = uuid.UUID("ffffffff-0000-0000-0000-000000000001")
+    later_claim_id = uuid.UUID("00000000-0000-0000-0000-000000000002")
+    rows: list[Any] = _identities()
+    rows.append(
+        ChangeRequest(
+            id=cr_id,
+            state=ChangeRequestState.EXECUTING,
+            kind=ChangeRequestKind.CONFIG,
+            requester_id=_ALICE,
+            four_eyes_required=True,
+            created_at=_ts(2, 10),
+            updated_at=same_ts,
+        )
+    )
+    rows.append(
+        AuditLog(
+            id=earlier_claim_id,
+            actor=f"user:{_ALICE}",
+            action=audit_actions.CHANGE_REQUEST_APPROVED_TO_EXECUTING,
+            target_type="change_request",
+            target_id=str(cr_id),
+            created_at=same_ts,
+            seq=1,
+        )
+    )
+    rows.append(
+        AuditLog(
+            id=later_claim_id,
+            actor=f"user:{_BOB}",
+            action=audit_actions.CHANGE_REQUEST_APPROVED_TO_EXECUTING,
+            target_type="change_request",
+            target_id=str(cr_id),
+            created_at=same_ts,
+            seq=2,
+        )
+    )
+    await _seed(session, rows)
+
+    sections, _ = await _build(session)
+
+    crs = _section(sections, SECTION_CHANGE_REQUESTS)
+    # seq=2 (bob) is the TRUE later claim; an (created_at, id) sort would
+    # instead have picked seq=1 (alice), since earlier_claim_id sorts last.
+    assert crs.rows[0][4] == "bob [idp:idp-sub-bob]"
+
+
 async def test_unknown_actor_id_falls_back_to_raw_actor_string(session: AsyncSession) -> None:
     cr_id = uuid.UUID("00000000-0000-0000-0000-00000000ec02")
     ghost = uuid.UUID("00000000-0000-0000-0000-00000000dead")

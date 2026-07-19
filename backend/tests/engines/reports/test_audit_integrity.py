@@ -398,6 +398,62 @@ async def test_naive_period_inputs_are_pinned_as_utc(session: AsyncSession) -> N
     assert naive_sections == aware_sections
 
 
+async def test_partial_boundary_day_never_renders_a_false_gap(session: AsyncSession) -> None:
+    """PR #166 F2: a non-day-aligned window must not falsely GAP a day whose
+    early hours simply fall outside the requested start (a real verification
+    run at 03:00 UTC does not save the day from a false gap otherwise).
+    """
+    boundary_start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    boundary_end = datetime(2026, 7, 2, 12, 0, tzinfo=UTC)
+    await _seed(
+        session,
+        [
+            _vrun(uuid.uuid4(), datetime(2026, 7, 1, 3, 0, tzinfo=UTC)),  # before start
+            _vrun(uuid.uuid4(), datetime(2026, 7, 1, 18, 0, tzinfo=UTC)),  # inside window
+        ],
+    )
+
+    sections, _ = await build_audit_integrity_sections(
+        session, period_start=boundary_start, period_end=boundary_end, generated_at=_GENERATED_AT
+    )
+
+    # Neither boundary day is COMPLETE within this 24h-but-midnight-straddling
+    # window, so the daily/gap evidence section renders NOTHING for them —
+    # never a false gap finding.
+    assert _by_title(sections, SECTION_DAILY).rows == ()
+    assert _by_title(sections, SECTION_FINDINGS).rows == ()
+    # Run-detail rows still cover the literal requested window (one run).
+    assert len(_by_title(sections, SECTION_RUNS).rows) == 1
+
+
+async def test_only_the_complete_middle_day_of_a_partial_window_is_assessed(
+    session: AsyncSession,
+) -> None:
+    """A window spanning partial-start + one complete day + partial-end
+    assesses ONLY the complete day; the partial boundary days still
+    contribute run-detail rows but no daily/gap row."""
+    start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    end = datetime(2026, 7, 3, 12, 0, tzinfo=UTC)
+    await _seed(
+        session,
+        [
+            _vrun(uuid.uuid4(), datetime(2026, 7, 1, 18, 0, tzinfo=UTC)),
+            _vrun(uuid.uuid4(), datetime(2026, 7, 2, 5, 0, tzinfo=UTC)),
+            _vrun(uuid.uuid4(), datetime(2026, 7, 3, 3, 0, tzinfo=UTC)),
+        ],
+    )
+
+    sections, _ = await build_audit_integrity_sections(
+        session, period_start=start, period_end=end, generated_at=_GENERATED_AT
+    )
+
+    daily = _by_title(sections, SECTION_DAILY).rows
+    assert [row[0] for row in daily] == ["2026-07-02"]
+    assert daily[0][1] == "1"  # one run recorded on the sole complete day
+    assert _by_title(sections, SECTION_FINDINGS).rows == ()
+    assert len(_by_title(sections, SECTION_RUNS).rows) == 3
+
+
 async def test_build_payload_dispatches_the_live_builder(session: AsyncSession) -> None:
     """kind=audit_integrity builds the real payload — the skeleton is gone."""
     await _seed(session, _scenario())

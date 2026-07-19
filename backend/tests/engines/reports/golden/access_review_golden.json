@@ -231,7 +231,7 @@
     [],
     [
       "note",
-      "Dormancy window: 90 days ending at the period end. Accounts with no recorded login inside the window classify as dormant; accounts that never logged in (including service/bootstrap accounts) carry an explicit never-logged-in classification and are never silently excluded; accounts created inside the window with no login yet classify as new accounts, not dormant."
+      "Dormancy window: 90 days ending at the period end. Accounts with no recorded login inside the window classify as dormant; accounts that never logged in (including service/bootstrap accounts) carry an explicit never-logged-in classification and are never silently excluded; accounts created inside the window with no login yet classify as new accounts, not dormant; accounts created AFTER the period end (e.g. a roster generated for a past period) classify distinctly as post-period accounts, never as new accounts of this period."
     ],
     [],
     [

@@ -202,10 +202,24 @@ async def _load_runs(
 
 
 def _period_days(start: datetime, end: datetime) -> list[date]:
-    """Every UTC calendar day whose midnight falls before *end*, from *start*."""
+    """Every UTC calendar day FULLY CONTAINED in ``[start, end)``.
+
+    A partial boundary day (``start``/``end`` not aligned to UTC midnight) is
+    deliberately EXCLUDED here (PR #166 F2): the daily/gap evaluation below
+    reads runs via the same *start*/*end* bounds, so a partial first day would
+    have its early-morning runs excluded from THIS day's evidence purely
+    because they fall before *start* — falsely rendering a real verification
+    day as a gap (e.g. the window ``[07-01T12:00Z, 07-02T12:00Z)`` would
+    otherwise report 2026-07-01 as a gap even though a run happened at
+    07-01T03:00Z). Excluding an incomplete day renders no row for it at all —
+    honest silence, never a false gap. Run-DETAIL rows (:data:`RUN_COLUMNS`)
+    are unaffected: they still cover the full requested window as-is.
+    """
     days: list[date] = []
     cursor = start.date()
-    while datetime(cursor.year, cursor.month, cursor.day, tzinfo=UTC) < end:
+    if datetime(cursor.year, cursor.month, cursor.day, tzinfo=UTC) < start:
+        cursor += timedelta(days=1)
+    while datetime(cursor.year, cursor.month, cursor.day, tzinfo=UTC) + timedelta(days=1) <= end:
         days.append(cursor)
         cursor += timedelta(days=1)
     return days

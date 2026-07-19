@@ -51,8 +51,10 @@ from app.engines.reports.compliance_posture import (
     SECTION_OUT_OF_SCOPE,
     SECTION_RUNS,
     SECTION_TREND,
+    SECTION_UNEVALUATED,
     SEVERITY_COLUMNS,
     TREND_COLUMNS,
+    UNEVALUATED_COLUMNS,
     build_compliance_posture_sections,
 )
 from app.engines.reports.payloads import ReportSection
@@ -211,6 +213,7 @@ async def test_sections_and_columns_are_stable(session: AsyncSession) -> None:
         SECTION_BY_DEVICE,
         SECTION_BY_SEVERITY,
         SECTION_TREND,
+        SECTION_UNEVALUATED,
         SECTION_OUT_OF_SCOPE,
     ]
     assert _section(sections, SECTION_RUNS).columns == RUN_COLUMNS
@@ -218,6 +221,7 @@ async def test_sections_and_columns_are_stable(session: AsyncSession) -> None:
     assert _section(sections, SECTION_BY_DEVICE).columns == DEVICE_COLUMNS
     assert _section(sections, SECTION_BY_SEVERITY).columns == SEVERITY_COLUMNS
     assert _section(sections, SECTION_TREND).columns == TREND_COLUMNS
+    assert _section(sections, SECTION_UNEVALUATED).columns == UNEVALUATED_COLUMNS
     assert _section(sections, SECTION_OUT_OF_SCOPE).columns == OUT_OF_SCOPE_COLUMNS
 
 
@@ -336,6 +340,29 @@ async def test_offset_aware_timestamp_buckets_into_its_utc_day(session: AsyncSes
     assert trend[1][:2] == ("2026-07-02", "0")
 
 
+async def test_partial_boundary_day_never_renders_a_false_gap(session: AsyncSession) -> None:
+    """PR #166 F2 sibling: a non-day-aligned window must not falsely GAP a day
+    whose early hours simply fall outside the requested start (a real sweep
+    at 03:00 UTC does not save the day from a false gap otherwise)."""
+    boundary_start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    boundary_end = datetime(2026, 7, 2, 12, 0, tzinfo=UTC)
+    await _seed(
+        session,
+        [
+            _run(uuid.uuid4(), datetime(2026, 7, 1, 3, 0, tzinfo=UTC), "sweep", 1, []),
+            _run(uuid.uuid4(), datetime(2026, 7, 1, 18, 0, tzinfo=UTC), "sweep", 1, []),
+        ],
+    )
+
+    sections, _ = await _build(session, boundary_start, boundary_end)
+
+    # Neither boundary day is COMPLETE within this window, so the trend
+    # renders NOTHING for them — never a false gap.
+    assert _section(sections, SECTION_TREND).rows == ()
+    # Run-detail rows still cover the literal requested window (one run).
+    assert len(_section(sections, SECTION_RUNS).rows) == 1
+
+
 async def test_naive_period_inputs_are_pinned_as_utc(session: AsyncSession) -> None:
     """W3 sibling bug class: naive bounds mean the same wall-clock UTC period."""
     await _seed(session, _scenario())
@@ -374,6 +401,54 @@ async def test_empty_history_renders_note_and_no_fabricated_posture(
     assert all(row[2:] == (GAP_TOKEN,) * 4 for row in trend)
     # The out-of-scope posture is inventory-driven and still surfaces.
     assert _section(sections, SECTION_OUT_OF_SCOPE).rows != ()
+
+
+# ---------------------------------------------------------------------------
+# Unevaluated devices — a coverage gap, never a silent absence (PR #166 F2)
+# ---------------------------------------------------------------------------
+
+
+async def test_unevaluated_devices_surface_as_explicit_coverage_gap(session: AsyncSession) -> None:
+    """A supported device the sweep considered but never evaluated (no
+    snapshot) renders as an explicit coverage-gap row — never silently
+    absent, so a mostly-unevaluated estate cannot read as a clean one."""
+    ghost = uuid.UUID("00000000-0000-0000-0000-00000000ba57")
+    run_id = uuid.UUID("00000000-0000-0000-0000-00000000dd01")
+    await _seed(
+        session,
+        [
+            _device(_CORE, "core-sw-01", "10.0.0.1", "cisco_ios"),
+            _device(ghost, "bare-sw-01", "10.0.0.9", "cisco_ios"),
+            _run(
+                run_id,
+                datetime(2026, 7, 1, 4, 0, tzinfo=UTC),
+                "sweep",
+                1,
+                [str(_CORE), str(ghost)],
+            ),
+            _finding(run_id, _CORE, "rule-ssh", "pass", "violation"),
+        ],
+    )
+
+    sections, notes = await _build(session)
+
+    unevaluated = _section(sections, SECTION_UNEVALUATED).rows
+    assert len(unevaluated) == 1
+    assert unevaluated[0][0] == "bare-sw-01"
+    assert unevaluated[0][1] == "cisco_ios"
+    # The evaluated device's real posture still renders, unaffected.
+    device_rows = _section(sections, SECTION_BY_DEVICE).rows
+    assert [row[0] for row in device_rows] == ["core-sw-01"]
+    assert any("coverage" in note or "unevaluated" in note.lower() for note in notes)
+
+
+async def test_fully_evaluated_run_has_no_unevaluated_rows(session: AsyncSession) -> None:
+    """A run whose ``device_scope`` matches its finding devices exactly (the
+    ordinary case) has an EMPTY unevaluated section — no false gap."""
+    await _seed(session, _scenario())
+    sections, _ = await _build(session)
+
+    assert _section(sections, SECTION_UNEVALUATED).rows == ()
 
 
 # ---------------------------------------------------------------------------

@@ -154,6 +154,44 @@ async def test_tampered_run_persists_break_row_on_pg(
     assert rows[0].outcome == ChainVerificationOutcome.BREAK.value
 
 
+async def test_grant_check_statement_failure_still_persists_unavailable_row(
+    pg_engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A REAL statement failure inside the grant check must not poison the
+    verification-history write (PR #166 F2, grant-check transaction poison).
+
+    PostgreSQL aborts the WHOLE enclosing transaction on a failed statement —
+    a plain Python-level monkeypatched raise does not reproduce this (SQLite
+    would pass trivially with no fix at all); this plants a genuine SQL error
+    (an undefined relation) so the session is truly poisoned. Without the
+    SAVEPOINT fix, the checkpoint SELECT + history INSERT below also raise on
+    the poisoned transaction, and the outer ``run()`` try/except only logs and
+    swallows it — the honest ``unavailable`` row is silently lost.
+    """
+    from typing import NoReturn
+
+    from sqlalchemy import text as sa_text
+
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    await _seed_audit(maker, 2)
+
+    async def _raising_grant_check(session: AsyncSession) -> NoReturn:
+        # A genuine SQL-level failure — PostgreSQL aborts the transaction.
+        await session.execute(sa_text("SELECT * FROM this_table_does_not_exist"))
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    monkeypatch.setattr(verify_job, "check_audit_log_grants", _raising_grant_check)
+
+    code = await verify_job.run(sessionmaker=maker, textfile_dir=tmp_path)
+
+    assert code == 0  # the chain itself is clean; only the attestation failed
+    async with maker() as session:
+        rows = list((await session.execute(select(AuditChainVerificationRun))).scalars())
+    assert len(rows) == 1
+    assert rows[0].outcome == ChainVerificationOutcome.CLEAN.value
+    assert rows[0].grant_check_outcome == GrantCheckOutcome.UNAVAILABLE.value
+
+
 # ---------------------------------------------------------------------------
 # Grant attestation: REVOKE semantics + liveness (the P2 lesson class)
 # ---------------------------------------------------------------------------

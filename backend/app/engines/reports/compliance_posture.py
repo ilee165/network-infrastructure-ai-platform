@@ -17,6 +17,13 @@ Honesty contracts this module owns:
   text-config surface in P4 (ADR-0050 §7.6 / ADR-0051 §3 named deferrals);
   their devices surface in a dedicated out-of-scope section and never appear
   in posture roll-ups.
+* **Unevaluated ≠ passing (PR #166 F2)** — a supported device the sweep
+  considered but could not evaluate (no configuration snapshot yet) is a
+  coverage GAP, not a clean pass: it is recorded in the run's
+  ``device_scope`` alongside evaluated devices, and any such device with no
+  finding rows for the latest run renders in the dedicated
+  :data:`SECTION_UNEVALUATED` section — never silently absent, so a mostly-
+  unevaluated estate cannot read as a small, clean, fully-covered one.
 * **Secret-free by construction (ADR-0053 §6 layer 3)** — the history tables
   persist status/severity only; no evidence-excerpt column exists to quote
   config text. Live excerpt drill-down stays on the on-demand engineer+
@@ -61,8 +68,10 @@ __all__ = [
     "SECTION_OUT_OF_SCOPE",
     "SECTION_RUNS",
     "SECTION_TREND",
+    "SECTION_UNEVALUATED",
     "SEVERITY_COLUMNS",
     "TREND_COLUMNS",
+    "UNEVALUATED_COLUMNS",
     "build_compliance_posture_sections",
 ]
 
@@ -92,6 +101,7 @@ SECTION_BY_POLICY: Final = "Latest posture by policy"
 SECTION_BY_DEVICE: Final = "Latest posture by device"
 SECTION_BY_SEVERITY: Final = "Latest posture by severity"
 SECTION_TREND: Final = "Daily posture trend"
+SECTION_UNEVALUATED: Final = "Unevaluated devices (coverage gap)"
 SECTION_OUT_OF_SCOPE: Final = "Out-of-scope vendors (no config-compliance surface)"
 
 RUN_COLUMNS: Final = (
@@ -114,7 +124,15 @@ TREND_COLUMNS: Final = (
     "Violation",
     "Skipped",
 )
+UNEVALUATED_COLUMNS: Final = ("Device", "Vendor", "Reason")
 OUT_OF_SCOPE_COLUMNS: Final = ("Vendor", "Devices", "Posture")
+
+#: Reason token for :data:`SECTION_UNEVALUATED` rows — a plain sentence so the
+#: CSV formula-neutralizer leaves it untouched (matches sibling reason cells).
+_REASON_UNEVALUATED: Final = (
+    "supported device with no captured configuration snapshot — never evaluated by the "
+    "compliance sweep; a coverage gap, not a clean pass"
+)
 
 NOTE_EMPTY_HISTORY: Final = "No compliance evaluation runs recorded in this period."
 _NOTE_LATEST: Final = (
@@ -127,6 +145,12 @@ _NOTE_TREND: Final = (
     "most recent recorded run. A day with no recorded run renders the explicit "
     f"'{GAP_TOKEN}' marker — posture values are never interpolated, smoothed, or carried "
     "forward across missing sweeps."
+)
+_NOTE_UNEVALUATED: Final = (
+    "Coverage-gap honesty (PR #166 F2): a device in scope for the latest run with no "
+    "evaluated posture (no configuration snapshot to check) renders in the explicit "
+    "unevaluated-devices section above, never silently absent — a mostly-unevaluated "
+    "estate cannot read as a small, clean, fully-covered one."
 )
 _NOTE_OUT_OF_SCOPE: Final = (
     "F5 BIG-IP and VMware vSphere have no text-configuration compliance surface in P4 "
@@ -223,10 +247,23 @@ def _status_cells(counts: dict[str, int]) -> tuple[str, str, str]:
 
 
 def _period_days(start: datetime, end: datetime) -> list[date]:
-    """Every UTC calendar day whose midnight falls before *end*, from *start*."""
+    """Every UTC calendar day FULLY CONTAINED in ``[start, end)``.
+
+    A partial boundary day (``start``/``end`` not aligned to UTC midnight) is
+    deliberately EXCLUDED here (PR #166 F2, the audit-integrity sibling bug
+    class): the trend loop reads runs via the same *start*/*end* bounds, so a
+    partial first day would have its early-morning runs excluded from THIS
+    day's posture purely because they fall before *start* — falsely rendering
+    a real sweep day as a gap. Excluding an incomplete day renders no trend
+    row for it at all — honest silence, never a false gap. Run-DETAIL rows
+    (:data:`RUN_COLUMNS`) are unaffected: they still cover the full requested
+    window as-is.
+    """
     days: list[date] = []
     cursor = start.date()
-    while datetime(cursor.year, cursor.month, cursor.day, tzinfo=UTC) < end:
+    if datetime(cursor.year, cursor.month, cursor.day, tzinfo=UTC) < start:
+        cursor += timedelta(days=1)
+    while datetime(cursor.year, cursor.month, cursor.day, tzinfo=UTC) + timedelta(days=1) <= end:
         days.append(cursor)
         cursor += timedelta(days=1)
     return days
@@ -247,7 +284,7 @@ async def build_compliance_posture_sections(
     identically regardless of host timezone. Selection is CLOSED-OPEN over
     ``compliance_runs.executed_at``.
 
-    Returns the six sections (stable titles/columns — the golden fixture and
+    Returns the seven sections (stable titles/columns — the golden fixture and
     W4-T3 assert this structure) plus the payload notes.
     """
     start = coerce_utc(period_start)
@@ -274,6 +311,7 @@ async def build_compliance_posture_sections(
     policy_rows: tuple[tuple[str, ...], ...] = ()
     device_rows: tuple[tuple[str, ...], ...] = ()
     severity_rows: tuple[tuple[str, ...], ...] = ()
+    unevaluated_rows: tuple[tuple[str, ...], ...] = ()
     if latest is not None:
         by_policy = await _grouped_status_counts(session, latest.id, ComplianceRunFinding.policy_id)
         policy_rows = tuple(
@@ -281,7 +319,13 @@ async def build_compliance_posture_sections(
         )
 
         by_device = await _grouped_status_counts(session, latest.id, ComplianceRunFinding.device_id)
-        devices = await _load_devices(session, by_device.keys())
+        # ``device_scope`` (PR #166 F2) carries EVERY device the sweep
+        # considered, evaluated or not; any scope id with no finding row for
+        # this run was supported but UNEVALUATED (no snapshot) — a coverage
+        # gap, never a silent absence.
+        scope_ids = {uuid.UUID(raw) for raw in latest.device_scope}
+        unevaluated_ids = scope_ids - set(by_device.keys())
+        devices = await _load_devices(session, set(by_device.keys()) | unevaluated_ids)
         labeled = sorted(
             (
                 (
@@ -304,6 +348,17 @@ async def build_compliance_posture_sections(
         severity_rows = tuple(
             (severity.value, *_status_cells(by_severity.get(severity.value, {})))
             for severity in Severity
+        )
+
+        unevaluated_labeled = sorted(
+            (
+                devices[device_id].hostname if device_id in devices else f"device:{device_id}",
+                (devices[device_id].vendor_id or _NONE) if device_id in devices else _NONE,
+            )
+            for device_id in unevaluated_ids
+        )
+        unevaluated_rows = tuple(
+            (label, vendor, _REASON_UNEVALUATED) for label, vendor in unevaluated_labeled
         )
 
     per_run = await _per_run_status_counts(session, [run.id for run in runs])
@@ -340,10 +395,19 @@ async def build_compliance_posture_sections(
         ReportSection(title=SECTION_BY_SEVERITY, columns=SEVERITY_COLUMNS, rows=severity_rows),
         ReportSection(title=SECTION_TREND, columns=TREND_COLUMNS, rows=tuple(trend_rows)),
         ReportSection(
+            title=SECTION_UNEVALUATED, columns=UNEVALUATED_COLUMNS, rows=unevaluated_rows
+        ),
+        ReportSection(
             title=SECTION_OUT_OF_SCOPE, columns=OUT_OF_SCOPE_COLUMNS, rows=out_of_scope_rows
         ),
     )
-    notes: tuple[str, ...] = (_NOTE_LATEST, _NOTE_TREND, _NOTE_OUT_OF_SCOPE, _NOTE_SECRET_FREE)
+    notes: tuple[str, ...] = (
+        _NOTE_LATEST,
+        _NOTE_TREND,
+        _NOTE_UNEVALUATED,
+        _NOTE_OUT_OF_SCOPE,
+        _NOTE_SECRET_FREE,
+    )
     if latest is None:
         notes = (NOTE_EMPTY_HISTORY, *notes)
     return sections, notes

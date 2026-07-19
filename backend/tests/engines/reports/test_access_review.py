@@ -48,6 +48,7 @@ from app.engines.reports.access_review import (
     CLASS_DORMANT,
     CLASS_NEVER_LOGGED_IN,
     CLASS_NEW_ACCOUNT,
+    CLASS_POST_PERIOD_ACCOUNT,
     IDP_MAPPING_COLUMNS,
     LOGIN_ACTIONS,
     NEVER_TOKEN,
@@ -420,6 +421,32 @@ async def test_login_after_period_end_does_not_count(session: AsyncSession) -> N
     row = _section(sections, SECTION_USERS).rows[0]
     assert row[5] == NEVER_TOKEN
     assert row[6] == CLASS_NEVER_LOGGED_IN
+
+
+async def test_account_created_after_period_end_gets_the_honest_post_period_label(
+    session: AsyncSession,
+) -> None:
+    """An account created AFTER the reviewed period (e.g. a roster generated
+    for a past period) is NOT excluded and is NOT mislabeled as a new account
+    of THIS period — it earns its own honest classification (PR #166 F2)."""
+    await _seed(
+        session,
+        [
+            *_roles(),
+            _user(
+                _ALICE,
+                "future-onboard",
+                "viewer",
+                created_at=datetime(2026, 8, 15, tzinfo=UTC),  # after _PERIOD_END
+            ),
+        ],
+    )
+    sections, _ = await _build(session)
+
+    row = _section(sections, SECTION_USERS).rows[0]
+    assert row[5] == NEVER_TOKEN
+    assert row[6] == CLASS_POST_PERIOD_ACCOUNT
+    assert row[6] != CLASS_NEW_ACCOUNT
 
 
 async def test_dormancy_window_is_configurable(session: AsyncSession) -> None:

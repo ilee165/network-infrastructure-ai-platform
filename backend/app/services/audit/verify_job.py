@@ -241,7 +241,17 @@ async def _persist_verification_run(
     ADR-0038 §4).
     """
     try:
-        grant = await check_audit_log_grants(session)
+        # PR #166 F2 (grant-check transaction poison): the check runs inside
+        # a SAVEPOINT. PostgreSQL aborts the WHOLE enclosing transaction on a
+        # failed statement — without a savepoint, the checkpoint SELECT and
+        # history INSERT below would ALSO raise on the poisoned transaction,
+        # and the caller's outer try/except (see :func:`run`) only logs and
+        # swallows that failure, silently losing the honest ``unavailable``
+        # row. Rolling back to the savepoint on failure restores the
+        # transaction to a healthy state so the rest of this function still
+        # executes and persists.
+        async with session.begin_nested():
+            grant = await check_audit_log_grants(session)
     except Exception:
         # The attestation must be honest, never silently clean: a failed
         # catalog query persists the explicit ``unavailable`` token.

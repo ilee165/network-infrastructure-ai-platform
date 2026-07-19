@@ -228,6 +228,15 @@
     ],
     [],
     [
+      "Unevaluated devices (coverage gap)"
+    ],
+    [
+      "Device",
+      "Vendor",
+      "Reason"
+    ],
+    [],
+    [
       "Out-of-scope vendors (no config-compliance surface)"
     ],
     [
@@ -254,6 +263,11 @@
     [
       "note",
       "Trend semantics: one row per UTC day in the period; a day's posture comes from its most recent recorded run. A day with no recorded run renders the explicit 'gap' marker \u2014 posture values are never interpolated, smoothed, or carried forward across missing sweeps."
+    ],
+    [],
+    [
+      "note",
+      "Coverage-gap honesty (PR #166 F2): a device in scope for the latest run with no evaluated posture (no configuration snapshot to check) renders in the explicit unevaluated-devices section above, never silently absent \u2014 a mostly-unevaluated estate cannot read as a small, clean, fully-covered one."
     ],
     [],
     [
@@ -324,6 +338,14 @@
           "Pass",
           "Violation",
           "Skipped"
+        ]
+      },
+      {
+        "title": "Unevaluated devices (coverage gap)",
+        "columns": [
+          "Device",
+          "Vendor",
+          "Reason"
         ]
       },
       {
