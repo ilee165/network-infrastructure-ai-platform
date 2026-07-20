@@ -72,9 +72,21 @@ def _weasyprint_available() -> bool:
 # ---------------------------------------------------------------------------
 
 
+_DANGEROUS_CSV_CELLS = (
+    '=HYPERLINK("http://evil")',
+    "+1234",
+    "-1234",
+    "@cmd",
+    "\tpayload",
+    "\rpayload",
+    "\npayload",
+)
+_DANGEROUS_CSV_PREFIXES = tuple(value[0] for value in _DANGEROUS_CSV_CELLS)
+
+
 @pytest.mark.parametrize(
     "dangerous",
-    ["=SUM(A1:A9)", "+1234", "-1234", "@cmd", "\tpayload", "\rpayload"],
+    _DANGEROUS_CSV_CELLS,
 )
 def test_neutralize_cell_prefixes_formula_leads(dangerous: str) -> None:
     assert neutralize_cell(dangerous) == f"'{dangerous}"
@@ -86,23 +98,25 @@ def test_neutralize_cell_leaves_safe_cells(safe: str) -> None:
 
 
 def test_csv_render_neutralizes_attacker_controlled_cells() -> None:
-    """A hostname/CR-title cell starting with a formula lead cannot execute."""
+    """Every contracted lead round-trips as one apostrophe-prefixed CSV cell."""
     payload = _payload(
         sections=(
             ReportSection(
                 title="Changes",
-                columns=("CR title", "Requester"),
-                rows=(('=HYPERLINK("http://evil")', "@alice"),),
+                columns=tuple(f"Dangerous {index}" for index in range(len(_DANGEROUS_CSV_CELLS))),
+                rows=(_DANGEROUS_CSV_CELLS,),
             ),
-        )
+        ),
+        notes=(),
     )
     raw = render._render_csv(payload).decode("utf-8")
-    parsed = list(csv.reader(io.StringIO(raw)))
+    parsed = list(csv.reader(io.StringIO(raw, newline="")))
+    expected_row = [f"'{value}" for value in _DANGEROUS_CSV_CELLS]
+    assert [row for row in parsed if row == expected_row] == [expected_row]
+
     flat = [cell for row in parsed for cell in row]
-    assert '\'=HYPERLINK("http://evil")' in flat
-    assert "'@alice" in flat
     # No parsed cell may still START with a formula lead.
-    assert not any(cell.startswith(("=", "+", "@", "\t", "\r")) for cell in flat)
+    assert not any(cell.startswith(_DANGEROUS_CSV_PREFIXES) for cell in flat)
 
 
 def test_csv_render_carries_report_metadata() -> None:

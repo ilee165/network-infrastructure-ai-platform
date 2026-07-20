@@ -7,7 +7,7 @@ there is no second path for report #5 to forget
 (``tests/engines/reports/test_boundary.py`` enforces this structurally).
 
 CSV: stdlib ``csv`` with **formula-injection neutralization** — any cell
-beginning with ``=``, ``+``, ``-``, ``@``, TAB, or CR is prefixed with ``'``
+beginning with ``=``, ``+``, ``-``, ``@``, TAB, CR, or LF is prefixed with ``'``
 (OWASP CSV-injection guidance): auditors open evidence in Excel, and an
 attacker-controlled hostname or CR title must not become an executing formula.
 
@@ -53,7 +53,7 @@ __all__ = [
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 #: Cell prefixes Excel/Sheets interpret as a formula (OWASP CSV injection).
-_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 
 class RenderEgressBlockedError(Exception):
