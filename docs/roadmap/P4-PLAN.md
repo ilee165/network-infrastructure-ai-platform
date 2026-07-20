@@ -1,7 +1,7 @@
 # P4 Build Plan — Vendor Wave 3 (F5 BIG-IP + VMware) + Application-Dependency Topology + Compliance & Audit Reporting
 
 **Project:** AI Network Operations Platform
-**Status:** **IN PROGRESS.** W0–W2 are merged (PRs #117–#119; W2 optimistic-concurrency follow-up #123). W3 is implemented on PR #166 and independently reviewed **D+ (58/100), not merge-ready**; remediation is pending. W4 has not started. Entry condition was satisfied by **P3-Platform COMPLETE** (`docs/roadmap/P3-RELEASE-READINESS.md` — all five §11 gates PASS; ADRs 0042–0047 Accepted, 0048 Rejected).
+**Status:** **IN PROGRESS.** W0–W3 are merged (PRs #117–#119, #123, and #166). W3 merged green after its review findings were remediated; W4 is the remaining eval and phase-exit wave. Entry condition was satisfied by **P3-Platform COMPLETE** (`docs/roadmap/P3-RELEASE-READINESS.md` — all five §11 gates PASS; ADRs 0042–0047 Accepted, 0048 Rejected).
 **Authority:** Bound by `CLAUDE.md`, `docs/architecture/DECISIONS-BRIEF.md` (D1–D16), and `docs/roadmap/PRODUCTION.md` §1 (phase table), §2.4 (Wave 3), §2.6 (per-wave exit criteria), §7 (compliance & audit reporting), §11 (gates).
 **Scope source:** `PRODUCTION.md` Phase **P4** = Wave 3 vendors **F5 BIG-IP + VMware**; **application-dependency topology** (per MVP traceability); the **compliance & audit reporting suite** (§7). This is the recorded P4 inheritance from the P3 exit marker (PRODUCTION.md §1 "P4 inheritance" + `P3-RELEASE-READINESS.md` §4) — nothing else rides in.
 
@@ -14,12 +14,11 @@
 | **W0 — design gate** | **Merged** | PR #117: ADRs 0050–0053, P4 marker, Consultant re-check, per-task specs |
 | **W1 — F5 + VMware** | **Merged** | PR #118: both plugins and inventory surfacing; live-lab validation remains deferred as planned |
 | **W2 — application dependencies** | **Merged** | PR #119 plus optimistic-concurrency follow-up PR #123: schema/projection, derivation, tagging, impact reads |
-| **W3 — compliance/audit reporting** | **Implemented; review remediation pending** | PR #166 contains T1–T6. Focused suite: 207 passed / 1 skipped. Independent review: **D+ 58/100**, 11 inline findings, three required CI jobs red. See [`docs/reviews/P4-W3-PR166-REVIEW.md`](../reviews/P4-W3-PR166-REVIEW.md). |
-| **W4 — evals + phase exit** | **Not started** | Blocked on a merge-ready W3 head; then run the conformance/evidence wave and phase-exit audit |
+| **W3 — compliance/audit reporting** | **Merged** | PR #166, squash `7298f4b8` (2026-07-19): T1–T6, with 27 validated review findings remediated in four fix waves and 18/18 required checks green before merge. The [review report](../reviews/P4-W3-PR166-REVIEW.md) is historical evidence, not open status. |
+| **W4 — evals + phase exit** | **Ready** | Start with W4-T0A/T0B, then run the logically independent T1–T3 sequentially on the shared branch because each records non-self-referential pre-commit evidence in the same ledger; T4 alone owns its final lifecycle/status and records landed task commit SHAs plus revalidation at one combined release HEAD. |
 
-The W3 implementation is not counted as complete until its PostgreSQL,
-supply-chain, evidence-integrity, scalability, and observability blockers are
-remediated and all required gates pass on one reviewed head.
+W3 is complete at its merged head. W4 adds proof and performs the phase-exit
+audit; it does not reopen the historical W3 review state.
 
 ---
 
@@ -50,7 +49,7 @@ Same no-hardware posture as M4/M5/P1/P2/P3 (user-ratified each phase):
 
 | Lesson (source) | How P4 applies it |
 |---|---|
-| **A gate green-at-setup masks findings — confirm it RUNs and BITEs** (P1-W4) | Every new eval/check ships a negative control: a planted wrong `DEPENDS_ON` edge fails the derivation eval; a planted secret in a report fixture fails the redaction check; a planted stale-schema fixture fails conformance. Verify evidence docs + run URLs before trusting promotion commits (2026-07 audit lesson). |
+| **A gate green-at-setup masks findings — confirm it RUNs and BITEs** (P1-W4) | Every new eval/check ships a negative control: a planted wrong `DEPENDS_ON` edge fails the derivation eval; a planted secret in a report fixture fails the redaction check; a monkeypatched missing `_INTERFACE_SPECS` entry fails the plugin-conformance completeness check. Verify evidence docs + run URLs before trusting promotion commits (2026-07 audit lesson). |
 | **Escalate every secret-surface role to the strong model** (P1-W0) | P4 secret surfaces: **report engine on the audit spine** (W3-T1), **access-review report** (W3-T4, users/roles/OIDC/break-glass), **audit-integrity report** (W3-T5, hash-chain), **plugin credential flows** (W1-T1/T2, iControl/vCenter auth via the D11 vault). All escalate reviewers + fixer to the live strong model. Never inline `model:'fable'`. |
 | **Parallel-built siblings share bug classes** (P2/P3 recurring) | F5 + VMware plugins and the four reports are template-siblings: when a review finds a class bug in one (fixture handling, pagination, redaction, empty-result), **sweep every sibling in the same fix commit**, don't wait for the bot to re-find each. |
 | **SQLite hides PG semantics** (P2 recurring major) | Report queries are aggregation/window/trend-heavy and retention-scoped — **every report query + tagging model gets `tests/pg/` coverage** under the blocking `pg-integration` job, not SQLite-only. |
@@ -70,7 +69,7 @@ Same no-hardware posture as M4/M5/P1/P2/P3 (user-ratified each phase):
 | Vendor Wave 3 — VMware (`vmware`) | pyVmomi per D7: `DISCOVERY_API`, virtual interfaces/port groups, **VM inventory, VM-to-host/cluster placement** (new normalized virtualization models — bridges physical L2 to workloads) | §2.4 |
 | Application-dependency topology | `Application` nodes + `DEPENDS_ON` edges in Neo4j, **derived from four sources**: F5 VIP→pool→member chains, VMware VM placement, DNS dependencies (M5), manual application tagging in the UI; PG-backed + projected (D5); impact-analysis query surface + Troubleshooting-Agent tool; app-dependency UI view | §2.4, CLAUDE.md "Topology → Application dependencies" |
 | Compliance & audit reporting suite | Report engine (scheduled weekly/monthly + on-demand, CSV/PDF export, RBAC'd): **change report** (CRs: requester/approver/executor/before-after/trace links), **compliance posture report** (M4 engine roll-up: pass/fail by policy/device/severity + trend), **access review report** (users/roles/OIDC mappings/last login/break-glass usage), **audit-integrity report** (daily hash-chain verification + append-only attestation); SOC 2 CC-series evidence mapping as the PROPOSED default regime | §7 |
-| Evals + exit | Plugin conformance + cross-vendor/routing re-run (no regression, roster extended); app-dependency derivation eval corpus (precision/recall); report conformance/redaction evals; `P4-RELEASE-READINESS.md`; ADRs 0050–0053 flipped on green | §2.6, §11 |
+| Evals + exit | Plugin conformance + cross-vendor/routing re-run (vendor matrix extended; nine-agent routing roster unchanged); app-dependency derivation eval corpus (precision/recall `1.0`/`1.0`); report conformance/redaction evals; continuously biting negative controls; `P4-RELEASE-READINESS.md`; ADRs 0050–0053 flipped on green | §2.6, §11 |
 
 **Out of P4 (→ P5 / GA):** Wave 4 vendors (AWS incl. Route53, Azure) + hybrid-cloud
 topology stitching + scale certification (P5); certified-scale G-SCA/G-REL numbers,
@@ -124,7 +123,7 @@ at W0 after this plan is reviewed**, mirroring the P3 pattern.
 | **W1 — Vendor Wave 3 plugins** | **T1** F5 BIG-IP plugin: new ADC capability interface + normalized models + `f5_bigip` plugin (discovery, interfaces, self-IP routes, virtual-server/pool/member inventory, `HA_STATUS`, UCS backup via CR) + conformance fixtures (`wf-implementer`, **escalated** credential flow); **T2** VMware plugin: virtualization capability + normalized models + `vmware` plugin (pyVmomi; VM/host/cluster/port-group inventory, virtual interfaces) + conformance fixtures (`wf-implementer`, **escalated** credential flow); **T3** inventory surfacing: API endpoints + UI pages for virtual-server/pool and VM/host inventory, mirroring existing device-inventory pages (`wf-implementer-light`) | `wf-implementer` (+ light T3) | strong (T1/T2) / sonnet (T3) | T1 ∥ T2 (disjoint dirs), then T3. **Blocks W2 derivation.** New deps via lockfile |
 | **W2 — Application-dependency topology** | **T1** PG schema + projector: `Application` + `DEPENDS_ON` in Postgres, Alembic migration (expand-only), Neo4j projection via `engines/topology/` (nodes/edges/projector), **auto-rebuild path includes the new kinds — `neo4j-rebuild-bite.sh` stays green** (`wf-implementer`); **T2** derivation pipelines: F5 VIP→pool→member→device/VM chains, VMware VM→host placement, M5 DNS-dependency linkage; deterministic, idempotent, per-source provenance on every edge (`wf-implementer`); **T3** manual application tagging: PG model + API + UI — direct write under RBAC (engineer+) with full audit per the ADR-0052 decision (`wf-implementer-light` UI + `wf-implementer` authz); **T4** impact analysis: "what depends on X" query surface (`knowledge/topology_read.py` extension) + Troubleshooting-Agent tool + app-dependency UI view with source-provenance display (`wf-implementer`) | `wf-implementer` (+ light) | sonnet (strong where authz) | Needs W1 (T2 consumes both plugins' models; T1/T3 can start on W0 ADR). T1→T2→T4; T3 ∥ T2. **Concurrent with W3** (disjoint files). Projection-lag SLO must hold |
 | **W3 — Compliance & audit reporting suite** | **T1** report engine: PG report model + Celery-beat scheduler (weekly/monthly + on-demand), CSV + PDF renderers, retention, RBAC, **redaction contract — no plaintext credential/secret in any artifact** (`wf-implementer`, **escalated**); **T2** change report: CR lifecycle roll-up with requester/approver/executor/before-after/reasoning-trace links, generated via Documentation Agent path (`wf-implementer`); **T3** compliance posture report: M4 `config_mgmt/compliance` engine roll-up — pass/fail by policy/device/severity + **trend over time** (needs result-history persistence — part of this task) (`wf-implementer`); **T4** access review report: users, roles, OIDC group mappings, last login, break-glass usage (`wf-implementer`, **escalated**); **T5** audit-integrity report: daily hash-chain verification results + append-only grant attestation (surfaces the ADR-0038 spine) (`wf-implementer`, **escalated**); **T6** SOC 2 CC-series evidence mapping (PROPOSED default per §7): mapping doc + report-metadata regime tags (`wf-implementer-light`) | `wf-implementer` (+ light T6) | strong (T1/T4/T5) / sonnet | **Concurrent with W2** (disjoint files). T1 first; T2–T5 ∥ after T1; T6 last. All report queries under `tests/pg/` |
-| **W4 — Evals + phase-exit gate** | **T1** plugin conformance + cross-vendor eval re-run: roster extended with `f5_bigip`/`vmware`, M3 agent evals + routing no-regression (`wf-eval-designer`); **T2** app-dependency derivation eval corpus: synthetic estate fixtures → expected `Application`/`DEPENDS_ON` graph, precision/recall thresholds, impact-analysis correctness, **negative control: planted wrong edge fails** (`wf-eval-designer`); **T3** report conformance evals: golden CSV/PDF-structure fixtures, evidence-completeness checks, **redaction eval with planted-secret negative control** (`wf-eval-designer`); **T4** G-* evidence doc `P4-RELEASE-READINESS.md`; flip ADRs 0050–0053 Accepted on green; `PRODUCTION.md` P4 exit marker + P5 inheritance recorded (`wf-release-auditor`) | `wf-eval-designer` + `wf-release-auditor` | strong | Phase-exit gate; mirrors P1-W7/P2-W5/P3-W5. Builds the *proof*, not new features |
+| **W4 — Evals + phase-exit gate** | **T0A** planning/handoff contract; **T0B** LF CSV-prefix fix; then **T1** plugin conformance + cross-vendor eval re-run: vendor matrix extended with `f5_bigip`/`vmware`, unchanged nine-agent routing roster + new vendor-surface cases (`wf-eval-designer`); **T2** app-dependency derivation eval corpus: contract-authored synthetic estate → expected graph, precision/recall `1.0`/`1.0`, impact correctness, assert-red-inside-green wrong-edge and recall-drop controls (`wf-eval-designer`); **T3** report conformance evals: golden CSV/PDF structures, evidence completeness, assert-red-inside-green redaction control (`wf-eval-designer`); **T4** G-* evidence doc `P4-RELEASE-READINESS.md`; flip ADRs 0050–0053 Accepted on green; `PRODUCTION.md` P4 exit marker + P5 inheritance recorded (`wf-release-auditor`) | `wf-eval-designer` + `wf-release-auditor` | strong | T0A/T0B first as separate atomic commits; T1, T2, and T3 are logically independent but execute sequentially and record only task status, focused commands/results, bite test node IDs, and blocking-CI collection paths; T4 owns the final lifecycle/status and records landed task commit SHAs, one final release HEAD, run/job URLs, and results. Builds the *proof*, not new features |
 
 A W3-T7 stretch (promoting the three G-OBS flagged-deferred §6 reconciliation
 rows to backed series + alerts) was considered at plan review and **declined
@@ -194,20 +193,25 @@ published as the PROPOSED default. Audit retention default (7y PROPOSED) recorde
 on the release HEAD —
 - **G-SEC — PASS (continuous):** P1–P3 controls inherited, no regression;
   credential-leak tests extended to report artifacts and plugin fixtures; plugin
-  write paths CR-only; four-eyes + audit invariants hold for tagging and report
-  access.
+  write paths CR-only; four-eyes remains a no-regression invariant for
+  ChangeRequest-governed writes. Manual application tagging and report
+  generation/access are direct RBAC-controlled, fully audited operations and
+  are not four-eyes gated.
 - **G-MNT — PASS:** D16 green (coverage ≥80% incl. both plugins); ADRs 0050–0053
   Accepted on green implementing evidence; docs + API docs per feature;
   new-plugin onboarding validated this wave; lockfile green.
-- **G-OBS — PASS (P4 slice):** report-generation and derivation-pipeline metrics
-  exist with alerts; projection-lag SLO unbroken.
+- **G-OBS — PASS (P4 slice):** report-generation metrics and their biting alert
+  suite are green. The application layer preserves the existing
+  `slo:netops_topology_projection_lag:seconds` recording rule and its biting
+  burn-rate alerts; P4 does not claim derivation-specific metrics or alerts.
 - **G-SCA / G-REL — no new scope, no regression:** the P3 drill suite +
   `drill-bite-proofs` stay green with the application layer present (rebuild
   drill explicitly re-verified); certified-scale numbers remain deferred-accepted
   → GA, unchanged.
-- **Cross-vendor eval + routing:** no regression with the extended roster;
-  derivation precision/recall + report conformance evals green **and biting**
-  (each has its negative control).
+- **Cross-vendor eval + routing:** no regression with the extended vendor/plugin
+  conformance matrix and unchanged nine-agent routing roster; derivation
+  precision/recall + report conformance evals green **and biting** (each has
+  its negative control).
 - Live-lab golden-paths for F5/VMware **named deferred-accepted → live lab**
   (ADR-0033 §1 discipline — named, never silent).
 

@@ -30,7 +30,7 @@ The P4-PLAN.md §0a lessons, mapped to the tasks they bite here:
 
 | Lesson | Rule | Bites which task(s) here |
 |---|---|---|
-| **Gate must RUN and BITE** (P1-W4) | Every new eval/check ships a negative control proven to go red: a planted wrong `DEPENDS_ON` edge fails the derivation eval; a planted secret fails the redaction check; a planted stale-schema fixture fails conformance. Verify evidence docs + run URLs before trusting promotion commits. | **W4-T1/T2/T3** (evals), **W4-T4** (gate evidence) |
+| **Gate must RUN and BITE** (P1-W4) | Every new eval/check ships a negative control proven to go red: a planted wrong `DEPENDS_ON` edge fails the derivation eval; a planted secret fails the redaction check; a monkeypatched missing `_INTERFACE_SPECS` entry fails the plugin-conformance completeness check. Verify evidence docs + run URLs before trusting promotion commits. | **W4-T1/T2/T3** (evals), **W4-T4** (gate evidence) |
 | **Escalate secret-surface roles to strong** (P1-W0) | Reviewers + fixer on the live strong model for the escalation set above. | **W1-T1/T2**, **W3-T1/T4/T5** |
 | **Parallel siblings share bug classes** (P2/P3) | F5 + VMware plugins and the four reports are template-siblings: a class bug found in one (fixture handling, pagination, redaction, empty-result) is swept across every sibling in the same fix commit. | **W1-T1 ∥ W1-T2**, **W3-T2..T5** |
 | **SQLite hides PG semantics** (P2 recurring major) | Idempotency/diff-replace, partial-unique-index, and every report aggregation/trend query run under **real PostgreSQL** (`tests/pg/`, blocking `pg-integration`), never SQLite-only. | **W2-T1/T2/T3**, **W3-T1..T5** |
@@ -85,11 +85,11 @@ strong bar; ADR-0052 escalated whole (amendment above).
 
 ## W3 — Compliance & audit reporting suite (ADR-0053, PRODUCTION.md §7). **Concurrent with W2.**
 
-> **Current state:** Implemented on PR #166, but review remediation is pending.
-> Independent review graded the wave **D+ (58/100)** with 11 inline findings;
-> focused verification passed 207 tests with 1 skipped, while three required CI
-> jobs remain red. The wave is not merge-ready. See the
-> [PR #166 review report](../../reviews/P4-W3-PR166-REVIEW.md).
+> **Current state:** **Merged** in PR #166 (squash `7298f4b8`, 2026-07-19).
+> The 27 validated review findings were remediated in four fix waves and all
+> 18 required CI checks were green before merge. The
+> [PR #166 review report](../../reviews/P4-W3-PR166-REVIEW.md) is historical
+> evidence, not an open remediation queue.
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
@@ -108,9 +108,10 @@ features. **Rebase the W4 branch onto `origin/main` first.**
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
-| [W4-T1](W4-T1-plugin-conformance-cross-vendor-rerun.md) | Plugin conformance + cross-vendor eval re-run: roster extended with `f5_bigip`/`vmware`; routing no-regression | `wf-eval-designer` (strong) | **strong** | W1 |
-| [W4-T2](W4-T2-derivation-eval-corpus.md) | App-dependency derivation eval corpus: synthetic estates → expected graph, precision/recall, **planted wrong-edge negative control** | `wf-eval-designer` (strong) | **strong** | W2 |
-| [W4-T3](W4-T3-report-conformance-evals.md) | Report conformance evals: golden CSV/PDF-structure fixtures, evidence completeness, **planted-secret redaction negative control** | `wf-eval-designer` (strong) | **strong** | W3 |
+| [W4-T0](W4-T0-housekeeping.md) | Execution contract + mandatory LF CSV-prefix closure, split into docs T0A and code/test T0B | implementer | sonnet | W3 |
+| [W4-T1](W4-T1-plugin-conformance-cross-vendor-rerun.md) | Plugin conformance + cross-vendor eval re-run: vendor matrix extended with `f5_bigip`/`vmware`; nine-agent routing roster unchanged | `wf-eval-designer` (strong) | **strong** | W4-T0 |
+| [W4-T2](W4-T2-derivation-eval-corpus.md) | App-dependency derivation eval corpus: contract-authored estates → expected graph, precision/recall `1.0`/`1.0`, **assert-red-inside-green controls** | `wf-eval-designer` (strong) | **strong** | W4-T0 |
+| [W4-T3](W4-T3-report-conformance-evals.md) | Report conformance evals: golden CSV/PDF-structure fixtures, evidence completeness, **planted-secret redaction negative control** | `wf-eval-designer` (strong) | **strong** | W4-T0 |
 | [W4-T4](W4-T4-gate-evidence-readiness.md) | `P4-RELEASE-READINESS.md` G-* evidence; flip ADRs 0050–0053 → Accepted on green; `PRODUCTION.md` P4 exit marker + P5 inheritance | `wf-release-auditor` (strong) | **strong** quality | W4-T1..T3, all waves |
 
 ---
@@ -129,9 +130,14 @@ features. **Rebase the W4 branch onto `origin/main` first.**
   touch disjoint files. W2-T1 and W2-T3 depend only on ADR-0052 + the W2-T1
   tables and can start alongside W1. Within W2: T1 → T2 → T4; T3 ∥ T2. Within
   W3: T1 first; T2–T5 ∥ after T1; T6 last.
-- **W4** last — evals need both plugins, the graph, and the reports in place;
-  the release auditor flips ADRs/roadmap only on green. Rebase onto
-  `origin/main` first.
+- **W4** last — T0A/T0B land first as separate atomic commits. T1/T2/T3 are
+  logically independent, but execute sequentially on the shared branch because
+  each owns one non-self-referential task-local section for status, focused
+  commands/results, bite test node IDs, and the blocking-CI collection path in
+  `P4-W4-evals-evidence.md`; T4 alone owns the ledger's top-level lifecycle and
+  populates its final table with landed task commit SHAs, one final release
+  HEAD, run/job URLs, and results. T4 flips ADRs/roadmap only on green. Rebase
+  onto `origin/main` first.
 - **Both W2 and W3 arm the baseline-relative usage guard** (each is 4–6 tasks).
 
 ## Spec template

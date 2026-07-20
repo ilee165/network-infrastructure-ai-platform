@@ -5,7 +5,7 @@
 | **Wave** | P4 W4 — Evals + phase-exit gate |
 | **Owner** | `wf-eval-designer` (strong) |
 | **Review tier** | **strong** |
-| **Depends on** | **W3** (engine + four reports shipped) |
+| **Depends on** | **W3** (engine + four reports shipped), **W4-T0** |
 | **ADRs** | ADR-0053 §1/§6/§7 (the contracts being proven) |
 | **PRODUCTION.md** | §7, §11 G-SEC (P4-PLAN §5 W3/W4) |
 | **Status** | Proposed |
@@ -27,10 +27,12 @@ break-glass events present; audit-integrity: gap-day findings + attestation
 present); **redaction eval**: a deny-class field AND a PEM-formatted value
 planted in a fixture payload ⇒ generation fails closed
 (`redaction_violation`, field path only, no partial artifact); **bite proof**:
-filter disabled ⇒ the eval goes red (green-at-setup not accepted); extraction
+a checked-in test disables the filter and asserts the independent emitted-text
+scanner rejects the mutation (assert-red-inside-green); extraction
 sweep: no deny-pattern match in any emitted CSV/PDF text; digest-bearing
 audit-integrity fixtures do NOT false-positive (the anti-entropy decision);
-CSV formula-injection cases (hostile hostname/CR-title fixtures neutralized);
+CSV formula-injection cases covering `=`, `+`, `-`, `@`, TAB, CR, and LF
+(hostile hostname/CR-title fixtures neutralized);
 determinism check (same payload ⇒ same artifact content).
 
 **Out** — changes to engine/report logic (findings route back to W3-owned
@@ -39,9 +41,10 @@ authoritative); SIEM/report-distribution surfaces (out of P4).
 
 ## Requirements (grounded in ADR-0053 §6, P4-PLAN §0a)
 
-1. **The planted-secret control RUNS and BITES** — planted ⇒ red at the eval,
-   filter-disabled ⇒ eval red (the double-negative bite proof), both evidenced
-   with run URLs before W4-T4 trusts them.
+1. **The planted-secret control RUNS and BITES continuously** — checked-in
+   tests assert planted secrets fail closed and disabling the filter makes the
+   independent emitted-text scan reject the mutation inside the otherwise-green
+   blocking job. Temporary red commits are not evidence.
 2. **Fail-closed verified end-to-end** — failed run recorded with typed
    `error_class`, failure names the field path only, no artifact row written,
    `netops_report_failures_total{error_class="redaction_violation"}`
@@ -60,7 +63,12 @@ authoritative); SIEM/report-distribution surfaces (out of P4).
 
 - Full gate suite; report evals green in CI at HEAD; `tests/pg/` where the
   checks query run history.
-- Bite proofs recorded (planted-secret red; filter-disabled red). The
+- Bite proofs run as assert-red-inside-green tests. In the ledger's T3 section,
+  record only task status, focused verification commands/results, bite test
+  node IDs, and the blocking-CI collection path. These are non-self-referential
+  pre-commit records. T3 must not add its own commit SHA, a final release HEAD,
+  or a blocking run/job URL; T4 records the landed T3 commit SHA and owns that
+  final revalidation evidence. The
   fail-closed redaction assertion goes beyond the red result: the typed
   `error_class` is asserted, NO artifact row is written, and the failure
   counter increments.
@@ -69,7 +77,7 @@ authoritative); SIEM/report-distribution surfaces (out of P4).
 
 - [ ] Golden structure fixtures green for all four reports (CSV + PDF, extraction-based).
 - [ ] Evidence-completeness checks green per kind.
-- [ ] Planted-secret redaction control + fail-closed path proven to bite (evidence recorded); digest boundary tested both ways.
+- [ ] Planted-secret redaction control + filter-disabled independent-scan mutation assert failure inside green; T3 records only task status, focused commands/results, bite test node IDs, and the blocking-CI collection path, leaving landed-task and final-release evidence to T4; digest boundary tested both ways.
 - [ ] CSV formula-injection cases green; determinism check green.
 - [ ] One atomic commit.
 
