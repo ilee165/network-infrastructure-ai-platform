@@ -33,7 +33,7 @@ gantt
 | **P1** | Wave 1: Cisco NX-OS, Juniper JunOS, BlueCat | Kubernetes/Helm GA, OIDC/SSO, backup/DR baseline, K8s hardening round 1 |
 | **P2-Security** ✅ **EXIT 2026-06-29** | Wave 2: Palo Alto PAN-OS, Fortinet FortiOS; **Security Agent** ships here | Security-hardening subset (all code or kind-validatable, K8s hardening round 2): audit-log hash-chaining, device-credential rotation + per-credential scoping, mTLS (api/worker↔postgres), collector network segmentation |
 | **P3-Platform** ✅ **EXIT 2026-07-05** | — (platform-only; no vendor wave) | HA + scale-out (api HPA, KEDA workers, CloudNativePG, Redis Sentinel, PgBouncer); audit→SIEM export; observability-SLO enforcement (recording rules, burn-rate alerts, dashboards, fault-injection MTTD); live failover/soak/scale DR drills; N-2 upgrade rehearsal |
-| **P4** | Wave 3: F5 BIG-IP, VMware; **application-dependency topology** ships here | Compliance & audit reporting suite |
+| **P4** ✅ **EXIT 2026-07-21** | Wave 3: F5 BIG-IP, VMware; **application-dependency topology** ships here | Compliance & audit reporting suite |
 | **P5** | Wave 4: AWS (incl. **Route53**), Azure | Hybrid on-prem/cloud topology stitching, scale certification |
 
 > **Amendment 2026-06-25 (P2 re-scope; sequencing change, not a decision
@@ -214,6 +214,28 @@ gantt
 >   `engineer` stays the PROPOSED floor). The owner remains offline; no other
 >   answered item to convert, no silent carry. Recorded with the re-check
 >   note in `docs/consultant/QUESTIONS.md` ("P4 kickoff — 2026-07-05").
+
+> **P4 EXIT 2026-07-21 (W4-T4 phase-exit gate).** All P4-scoped §11 gates and
+> the W4 vendor/routing, application-derivation, and report-conformance evals
+> pass simultaneously at CI-evidenced candidate HEAD `71cd249d` (run
+> `29838591933`; required `all-gates` and all blocking jobs success). The T4
+> closeout commit is docs-only and regular CI does not trigger for it, so the
+> candidate HEAD remains the honest code-evidence anchor. **G-SEC PASS
+> (continuous), G-MNT PASS, G-OBS PASS (P4 slice), and G-SCA/G-REL mechanism
+> no-regression PASS**; certified-scale and calendar-time claims remain named
+> deferrals. ADRs **0050–0053** are Accepted on this green, biting evidence.
+> Full evidence and exact report-dispatch guarantee:
+> `docs/roadmap/P4-RELEASE-READINESS.md`.
+>
+> **P5 inheritance (recorded so nothing is silently dropped):** Wave 4 vendors
+> **AWS (including Route53) + Azure**; hybrid on-prem/cloud topology stitching;
+> scale certification; the transactional report outbox plus relay/recovery;
+> the platform-wide bare-`send_task` durable-dispatch sweep; and G-OBS
+> reconciliation rows 5/6/9, unchanged and drift-guarded. Riding to **GA /
+> operational** unchanged: certified-scale G-SCA/G-REL numbers, the 30-day
+> calendar soak, external penetration test, and recurring six-month break-glass
+> drill. Live F5/VMware golden paths promote in a live lab. Every item retains
+> the named promotion path in `P4-RELEASE-READINESS.md`.
 
 ---
 

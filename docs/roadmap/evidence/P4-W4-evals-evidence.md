@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Scope** | W4-T1 vendor/plugin conformance and routing; W4-T2 application-dependency derivation; W4-T3 report conformance and redaction |
-| **Final revalidation lifecycle/status (W4-T4 only)** | **PENDING — T4 has not revalidated all three landed suites at one final release HEAD** |
+| **Final revalidation lifecycle/status (W4-T4 only)** | **PASS — all three landed suites revalidated by blocking CI at the single candidate release HEAD below** |
 
 This ledger is seeded by W4-T0A and intentionally makes no green, passing, or
 bite-proof claim. T1, T2, and T3 are logically independent, but execute
@@ -58,7 +58,7 @@ rewrite the task-owned sections.
 
 | Final revalidation field | T4-owned value |
 |---|---|
-| Final release HEAD | PENDING |
+| Final release HEAD | `71cd249ddf0f9b0526575082d5646473df3ac0ca` — CI-evidenced code candidate; the following T4 closeout commit is docs-only and regular CI does not trigger for it |
 
 The single final release HEAD above governs every row. After the atomic task
 commits land, T4 records each task's now-known commit SHA and a blocking CI
@@ -67,6 +67,6 @@ Task-local focused evidence cannot be copied forward as final evidence.
 
 | Suite | Landed task commit SHA | Blocking run/job URL | Result |
 |---|---|---|---|
-| W4-T1 vendor/plugin conformance + routing | PENDING | PENDING | PENDING |
-| W4-T2 application-dependency derivation | PENDING | PENDING | PENDING |
-| W4-T3 report conformance + redaction | PENDING | PENDING | PENDING |
+| W4-T1 vendor/plugin conformance + routing | `d09dca19` | [`backend` job 88661288726](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288726) | **PASS** |
+| W4-T2 application-dependency derivation | `d6feeb41` | [`backend` 88661288726](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288726); [`pg-integration` 88661288634](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288634); [`graph-integration` 88661288574](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288574) | **PASS** |
+| W4-T3 report conformance + redaction | `cf23cdab` | [`backend` 88661288726](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288726); [`pg-integration` 88661288634](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288634) | **PASS** |

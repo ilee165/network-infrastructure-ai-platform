@@ -8,7 +8,8 @@
 | **Depends on** | W4-T1..T3 + all P4 waves merged; runs on the release HEAD |
 | **ADRs** | ADR-0050…0053 (flipped here on green), ADR-0033 §1 (named-deferral discipline) |
 | **PRODUCTION.md** | §1, §2.6, §11 (the P4-scoped gate slice), §12 |
-| **Status** | Proposed |
+| **Status** | Complete — candidate `71cd249d`, run `29838591933` green |
+| **Candidate composition** | Seven pre-T4 commits: six planned task commits plus bounded dependency-audit remediation `71cd249d`; T4 is eighth/final |
 
 ## Objective
 
@@ -99,11 +100,11 @@ green, biting evidence; un-deferring live-lab items.
 
 ## Exit criteria
 
-- [ ] `P4-RELEASE-READINESS.md` complete: every P4-scoped §11 criterion evidenced (run URLs) or named-deferred with promotion path.
-- [ ] T4 owns and completes the top-level lifecycle/status; its final revalidation table records each landed T1/T2/T3 task commit SHA, one final release HEAD, and a resolving blocking run/job URL and green result for each suite.
-- [ ] ADRs 0050–0053 flipped Accepted on verified green, biting evidence; index updated.
-- [ ] `PRODUCTION.md` P4 EXIT marker + P5 inheritance recorded; marker/plan/readiness agree.
-- [ ] One atomic commit.
+- [x] `P4-RELEASE-READINESS.md` complete: every P4-scoped §11 criterion evidenced (run URLs) or named-deferred with promotion path.
+- [x] T4 owns and completes the top-level lifecycle/status; its final revalidation table records each landed T1/T2/T3 task commit SHA, one final release HEAD, and a resolving blocking run/job URL and green result for each suite.
+- [x] ADRs 0050–0053 flipped Accepted on verified green, biting evidence; index updated.
+- [x] `PRODUCTION.md` P4 EXIT marker + P5 inheritance recorded; marker/plan/readiness agree.
+- [x] One atomic commit.
 
 ## Workflow
 

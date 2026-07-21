@@ -100,12 +100,16 @@ strong bar; ADR-0052 escalated whole (amendment above).
 | [W3-T5](W3-T5-audit-integrity-report.md) | Audit-integrity report: daily hash-chain verification history + append-only grant attestation — admin floor | `wf-implementer` | **strong** spec + quality (escalated) | W3-T1 |
 | [W3-T6](W3-T6-soc2-regime-mapping.md) | SOC 2 CC-series evidence mapping (PROPOSED default): mapping doc + report-metadata regime tags | `wf-implementer-light` | sonnet | W3-T2..T5 |
 
-## W4 — Evals + phase-exit gate (PRODUCTION.md §2.6/§11)
+## W4 — Evals + phase-exit gate (PRODUCTION.md §2.6/§11) — COMPLETE
 
 Owner: **`wf-eval-designer`** (suites) + **`wf-implementer`** (T2A correction)
 and **`wf-release-auditor`** (gate evidence). The LAST P4 wave and the
 phase-exit gate. Apart from the bounded T2A correctness prerequisite, it builds
 the *proof*, not new features. **Rebase the W4 branch onto `origin/main` first.**
+
+**Current state:** all W4 tasks are complete. Candidate `71cd249d` passed run
+`29838591933`; T4 records the docs-only closeout without moving the CI evidence
+anchor.
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
@@ -114,7 +118,7 @@ the *proof*, not new features. **Rebase the W4 branch onto `origin/main` first.*
 | [W4-T2A](W4-T2A-derivation-contract-corrections.md) | Derivation contract corrections: route-domain-safe IP reconciliation and complete VMware provenance | `wf-implementer` | **strong** | W4-T1 |
 | [W4-T2](W4-T2-derivation-eval-corpus.md) | **Eval-only** app-dependency derivation corpus: contract-authored estates → expected graph, precision/recall `1.0`/`1.0`, **assert-red-inside-green controls** | `wf-eval-designer` (strong) | **strong** | W4-T2A |
 | [W4-T3](W4-T3-report-conformance-evals.md) | Report conformance evals: golden CSV/PDF-structure fixtures, evidence completeness, **planted-secret redaction negative control** | `wf-eval-designer` (strong) | **strong** | W4-T2 |
-| [W4-T4](W4-T4-gate-evidence-readiness.md) | `P4-RELEASE-READINESS.md` G-* evidence; flip ADRs 0050–0053 → Accepted on green; `PRODUCTION.md` P4 exit marker + P5 inheritance | `wf-release-auditor` (strong) | **strong** quality | W4-T1, W4-T2A, W4-T2, W4-T3; all waves |
+| [W4-T4](W4-T4-gate-evidence-readiness.md) | `P4-RELEASE-READINESS.md` G-* evidence; ADRs 0050–0053 Accepted; `PRODUCTION.md` P4 exit marker + P5 inheritance — **Complete** | `wf-release-auditor` (strong) | **strong** quality | W4-T1, W4-T2A, W4-T2, W4-T3; all waves |
 
 ---
 
@@ -140,7 +144,8 @@ the *proof*, not new features. **Rebase the W4 branch onto `origin/main` first.*
   blocking-CI collection path in `P4-W4-evals-evidence.md`; T4 alone owns the
   ledger's top-level lifecycle and populates its final table with landed eval
   task commit SHAs, one final release HEAD, run/job URLs, and results. The final
-  branch log contains seven atomic commits. T4 flips ADRs/roadmap only on green.
+  branch log contains eight commits: the six planned pre-T4 task commits, the
+  bounded dependency-audit remediation, and T4. T4 flips ADRs/roadmap only on green.
   Rebase onto `origin/main` first.
 - **Both W2 and W3 arm the baseline-relative usage guard** (each is 4–6 tasks).
 

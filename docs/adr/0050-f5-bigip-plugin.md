@@ -1,6 +1,6 @@
 # ADR-0050: F5 BIG-IP Vendor Plugin (iControl REST) — `ADC_SERVICES` Capability, Normalized ADC Models, UCS Backup
 
-**Status:** Proposed | **Date:** 2026-07-05 | **Milestone:** P4 W0
+**Status:** Accepted | **Date:** 2026-07-05 | **Accepted:** 2026-07-21 | **Milestone:** P4
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR-0051: VMware vSphere Vendor Plugin (pyVmomi) — `VIRTUALIZATION_INVENTORY` Capability, Normalized Virtualization Models, Read-Only vCenter Role
 
-**Status:** Proposed | **Date:** 2026-07-05 | **Milestone:** P4 W0
+**Status:** Accepted | **Date:** 2026-07-05 | **Accepted:** 2026-07-21 | **Milestone:** P4
 
 ## Context
 

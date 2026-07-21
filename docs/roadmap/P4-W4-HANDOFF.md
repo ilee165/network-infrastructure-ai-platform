@@ -75,8 +75,9 @@ omissions. T4 must repeat them in `P4-RELEASE-READINESS.md`.
 
 ## 4. Release-readiness inheritance
 
-T4 audits the six-commit pre-T4 candidate (T0A, T0B, T1, T2A, T2, T3), then
-closes the final branch as commit seven. It fills the ledger's
+T4 audits the seven-commit pre-T4 candidate (T0A, T0B, T1, T2A, T2, T3, plus
+the bounded dependency-audit remediation), then closes the final branch as
+commit eight. It fills the ledger's
 final-release-HEAD revalidation table with each landed T1/T2/T3 eval task
 commit SHA, one final release HEAD, and a blocking run/job URL and result for
 each suite. T2A has no ledger section. T4 also owns the ledger's top-level
