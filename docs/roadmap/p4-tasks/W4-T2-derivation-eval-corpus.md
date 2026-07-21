@@ -5,7 +5,7 @@
 | **Wave** | P4 W4 — Evals + phase-exit gate |
 | **Owner** | `wf-eval-designer` (strong) |
 | **Review tier** | **strong** |
-| **Depends on** | **W2** (derivation + impact surface shipped), **W4-T0** |
+| **Depends on** | **W2** (derivation + impact surface shipped), **W4-T2A** (route-domain/provenance corrections) |
 | **ADRs** | ADR-0052 §2/§4/§6/§8 (the contracts being proven) |
 | **PRODUCTION.md** | §2.4, §11 (P4-PLAN §5 W4: "green and biting") |
 | **Status** | Proposed |
@@ -34,9 +34,10 @@ source + refs + watermark); idempotency eval (derive twice ⇒ identical graph);
 `DEPENDS_ON` edge trips precision and suppressing a source trips recall
 (assert-red-inside-green).
 
-**Out** — changes to derivation logic (evals prove; fixes go back through
-W2-owned files as separate findings); flow-telemetry cases (out of scope);
-real-LLM agent runs (opt-in gate).
+**Out** — changes to derivation logic. T2A is the production-correction
+precondition; T2 remains eval-only, and any later runtime finding lands as a
+separate correction rather than being hidden in the corpus commit;
+flow-telemetry cases (out of scope); real-LLM agent runs (opt-in gate).
 
 ## Requirements (grounded in ADR-0052 §4/§6, P4-PLAN §0a)
 

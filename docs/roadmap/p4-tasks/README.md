@@ -102,17 +102,19 @@ strong bar; ADR-0052 escalated whole (amendment above).
 
 ## W4 — Evals + phase-exit gate (PRODUCTION.md §2.6/§11)
 
-Owner: **`wf-eval-designer`** (suites) + **`wf-release-auditor`** (gate
-evidence). The LAST P4 wave and the phase-exit gate. Builds the *proof*, not new
-features. **Rebase the W4 branch onto `origin/main` first.**
+Owner: **`wf-eval-designer`** (suites) + **`wf-implementer`** (T2A correction)
+and **`wf-release-auditor`** (gate evidence). The LAST P4 wave and the
+phase-exit gate. Apart from the bounded T2A correctness prerequisite, it builds
+the *proof*, not new features. **Rebase the W4 branch onto `origin/main` first.**
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
 | [W4-T0](W4-T0-housekeeping.md) | Execution contract + mandatory LF CSV-prefix closure, split into docs T0A and code/test T0B | implementer | sonnet | W3 |
 | [W4-T1](W4-T1-plugin-conformance-cross-vendor-rerun.md) | Plugin conformance + cross-vendor eval re-run: vendor matrix extended with `f5_bigip`/`vmware`; nine-agent routing roster unchanged | `wf-eval-designer` (strong) | **strong** | W4-T0 |
-| [W4-T2](W4-T2-derivation-eval-corpus.md) | App-dependency derivation eval corpus: contract-authored estates → expected graph, precision/recall `1.0`/`1.0`, **assert-red-inside-green controls** | `wf-eval-designer` (strong) | **strong** | W4-T0 |
-| [W4-T3](W4-T3-report-conformance-evals.md) | Report conformance evals: golden CSV/PDF-structure fixtures, evidence completeness, **planted-secret redaction negative control** | `wf-eval-designer` (strong) | **strong** | W4-T0 |
-| [W4-T4](W4-T4-gate-evidence-readiness.md) | `P4-RELEASE-READINESS.md` G-* evidence; flip ADRs 0050–0053 → Accepted on green; `PRODUCTION.md` P4 exit marker + P5 inheritance | `wf-release-auditor` (strong) | **strong** quality | W4-T1..T3, all waves |
+| [W4-T2A](W4-T2A-derivation-contract-corrections.md) | Derivation contract corrections: route-domain-safe IP reconciliation and complete VMware provenance | `wf-implementer` | **strong** | W4-T1 |
+| [W4-T2](W4-T2-derivation-eval-corpus.md) | **Eval-only** app-dependency derivation corpus: contract-authored estates → expected graph, precision/recall `1.0`/`1.0`, **assert-red-inside-green controls** | `wf-eval-designer` (strong) | **strong** | W4-T2A |
+| [W4-T3](W4-T3-report-conformance-evals.md) | Report conformance evals: golden CSV/PDF-structure fixtures, evidence completeness, **planted-secret redaction negative control** | `wf-eval-designer` (strong) | **strong** | W4-T2 |
+| [W4-T4](W4-T4-gate-evidence-readiness.md) | `P4-RELEASE-READINESS.md` G-* evidence; flip ADRs 0050–0053 → Accepted on green; `PRODUCTION.md` P4 exit marker + P5 inheritance | `wf-release-auditor` (strong) | **strong** quality | W4-T1, W4-T2A, W4-T2, W4-T3; all waves |
 
 ---
 
@@ -130,14 +132,16 @@ features. **Rebase the W4 branch onto `origin/main` first.**
   touch disjoint files. W2-T1 and W2-T3 depend only on ADR-0052 + the W2-T1
   tables and can start alongside W1. Within W2: T1 → T2 → T4; T3 ∥ T2. Within
   W3: T1 first; T2–T5 ∥ after T1; T6 last.
-- **W4** last — T0A/T0B land first as separate atomic commits. T1/T2/T3 are
-  logically independent, but execute sequentially on the shared branch because
-  each owns one non-self-referential task-local section for status, focused
-  commands/results, bite test node IDs, and the blocking-CI collection path in
-  `P4-W4-evals-evidence.md`; T4 alone owns the ledger's top-level lifecycle and
-  populates its final table with landed task commit SHAs, one final release
-  HEAD, run/job URLs, and results. T4 flips ADRs/roadmap only on green. Rebase
-  onto `origin/main` first.
+- **W4** last — T0A/T0B land first as separate atomic commits, followed by
+  T1 → T2A → T2 → T3 and then T4. W4-T2 preflight after T1 identified T2A as
+  the bounded runtime-correction prerequisite; it does not edit the evidence
+  ledger, and T2 remains eval-only. T1/T2/T3 each own one non-self-referential
+  section for status, focused commands/results, bite test node IDs, and the
+  blocking-CI collection path in `P4-W4-evals-evidence.md`; T4 alone owns the
+  ledger's top-level lifecycle and populates its final table with landed eval
+  task commit SHAs, one final release HEAD, run/job URLs, and results. The final
+  branch log contains seven atomic commits. T4 flips ADRs/roadmap only on green.
+  Rebase onto `origin/main` first.
 - **Both W2 and W3 arm the baseline-relative usage guard** (each is 4–6 tasks).
 
 ## Spec template

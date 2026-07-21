@@ -12,7 +12,7 @@
 | W1 — F5 BIG-IP + VMware | Merged | PR #118 |
 | W2 — application dependencies | Merged | PRs #119 and #123 |
 | W3 — compliance/audit reports | Merged | PR #166, squash `7298f4b8` (2026-07-19); 27 validated findings remediated in four fix waves; 18/18 required checks green before merge |
-| W4 — evals + phase exit | Ready | T0A/T0B first, T1–T3 sequential on the shared evidence ledger, T4 last |
+| W4 — evals + phase exit | In progress | T0A/T0B first, then T1 → T2A → T2 → T3; T4 last |
 
 The W3 review report is historical evidence. Its interim grade and remediation
 queue do not describe the merged state.
@@ -26,12 +26,17 @@ queue do not describe the merged state.
    conformance matrix gains `f5_bigip` and `vmware`. The agent-routing roster
    remains nine with no regression; new ADC- and virtualization-inventory
    questions exercise existing agents. Do not invent agent number ten.
-3. **T2 is exact-match.** The curated contract-authored corpus gates at
+3. **T2A is a correctness precondition for the eval-only T2.** W4-T2 preflight,
+   performed after T1 landed, exposed route-domain and provenance contract
+   defects in the shipped derivation runtime. T2A fixes those defects in one
+   production-plus-regression commit; T2 then authors the independent corpus
+   without changing derivation logic. The required sequence is T1 → T2A → T2.
+4. **T2 is exact-match.** The curated contract-authored corpus gates at
    precision `1.0` and recall `1.0`. Misses are adjudicated, not hidden by
    lowering the threshold. Genuinely ambiguous cases may enter a labeled
    known-hard non-gating partition only with rationale in release readiness;
    contract-defined exclusions are expected exclusions.
-4. **Bite proofs live inside green.** T1's missing `_INTERFACE_SPECS` mutation,
+5. **Bite proofs live inside green.** T1's missing `_INTERFACE_SPECS` mutation,
    T2's wrong-edge and suppressed-source mutations, and T3's filter-disabled
    secret mutation are checked-in assertions that the relevant gate rejects
    mutated input. Blocking CI reruns them at every HEAD. Before their atomic
@@ -41,12 +46,12 @@ queue do not describe the merged state.
    landed task commit SHA, the single final release HEAD, and each suite's
    blocking run/job URL and result. Do not use temporary red commits or
    branches.
-5. **T1, T2, and T3 are logically independent but are sequential writers.**
-   After both T0 commits land, execute them in order on the shared branch
-   because all three update `P4-W4-evals-evidence.md`. Each task owns only its
-   named task-local ledger section. T4 runs last on the combined release HEAD
-   and exclusively owns the ledger's top-level final-revalidation
-   lifecycle/status and final-release-HEAD revalidation table.
+6. **The branch sequence is T1 → T2A → T2 → T3.** T1, T2, and T3 own separate
+   task-local sections of `P4-W4-evals-evidence.md`, so those eval writers stay
+   sequential. T2A is the intervening runtime-correction precondition and does
+   not edit the ledger. T4 runs last on the combined release HEAD and
+   exclusively owns the ledger's top-level final-revalidation lifecycle/status
+   and final-release-HEAD revalidation table.
 
 ## 3. Mandatory closure and named deferrals
 
@@ -70,11 +75,13 @@ omissions. T4 must repeat them in `P4-RELEASE-READINESS.md`.
 
 ## 4. Release-readiness inheritance
 
-T4 fills the ledger's final-release-HEAD revalidation table with each landed
-T1/T2/T3 task commit SHA, one final release HEAD, and a blocking run/job URL
-and result for each suite. T4 also owns the ledger's top-level lifecycle/status
-and names every deferral with a promotion path: the bare `send_task` sweep and
-report outbox → P5; live F5/VMware golden paths → live lab; scale certification
-and the carried GA items (certified scale, 30-day soak, external pentest,
-break-glass cadence) → P5/GA. ADRs 0050–0053 flip to Accepted only after all P4
-gates are green and biting.
+T4 audits the six-commit pre-T4 candidate (T0A, T0B, T1, T2A, T2, T3), then
+closes the final branch as commit seven. It fills the ledger's
+final-release-HEAD revalidation table with each landed T1/T2/T3 eval task
+commit SHA, one final release HEAD, and a blocking run/job URL and result for
+each suite. T2A has no ledger section. T4 also owns the ledger's top-level
+lifecycle/status and names every deferral with a promotion path: the bare
+`send_task` sweep and report outbox → P5; live F5/VMware golden paths → live
+lab; scale certification and the carried GA items (certified scale, 30-day
+soak, external pentest, break-glass cadence) → P5/GA. ADRs 0050–0053 flip to
+Accepted only after all P4 gates are green and biting.
