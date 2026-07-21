@@ -31,6 +31,17 @@ jobs:
       - name: Install backend (editable, dev extras)
         run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install -e "./backend[dev]"
 
+      - name: Install report PDF native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libpango-1.0-0 \
+            libpangoft2-1.0-0 \
+            libharfbuzz0b \
+            libharfbuzz-subset0 \
+            fontconfig \
+            fonts-dejavu-core
+
       # Dependency-vulnerability gate (P1 W6-T4, ADR-0016 §, PRODUCTION.md §5).
       # pip-audit audits the RESOLVED backend environment (the editable install
       # above + dev extras) against the OSV/PyPI advisory DB and FAILS the job on
@@ -102,6 +113,7 @@ jobs:
         env:
           COVERAGE_CONTEXT: unit
           COVERAGE_FILE: .coverage.unit
+          NETOPS_REQUIRE_REPORT_PDF_EVAL: "1"
         run: |
           set -o pipefail
           pytest -n 4 --cov=app --cov-report=term -q | tee pytest-output.txt

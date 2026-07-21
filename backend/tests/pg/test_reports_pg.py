@@ -14,13 +14,16 @@ import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
+from prometheus_client import REGISTRY
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import undefer
 
 from app.engines.reports import deterministic_run_id
+from app.engines.reports.payloads import ReportPayload, ReportSection
 from app.models import AuditLog
 from app.models.reports import ReportArtifact, ReportKind, ReportRun, ReportRunStatus
 from app.workers.tasks import reports as report_tasks
@@ -247,6 +250,148 @@ async def test_full_generation_and_artifact_bytea_round_trip(
         assert artifact.expires_at.tzinfo is not None
     pdf = next(a for a in artifacts if a.format == "pdf")
     assert pdf.content == binary_blob  # bytea round-trip, bit-for-bit
+
+
+def _full_pem_plant() -> str:
+    """Assemble a complete private-key block without a scanner-visible literal."""
+    return "\n".join(
+        (
+            "-----BEGIN RSA " + "PRIVATE KEY-----",
+            "MIIEpAIBAAKCAQEA",
+            "-----END RSA " + "PRIVATE KEY-----",
+        )
+    )
+
+
+def _contains_raw_value(node: Any, planted_value: str) -> bool:
+    """Search persisted/result surfaces without escaping multiline values."""
+    if isinstance(node, str):
+        return planted_value in node
+    if isinstance(node, bytes):
+        return planted_value.encode() in node
+    if isinstance(node, dict):
+        return any(
+            _contains_raw_value(key, planted_value) or _contains_raw_value(value, planted_value)
+            for key, value in node.items()
+        )
+    if isinstance(node, list | tuple | set | frozenset):
+        return any(_contains_raw_value(value, planted_value) for value in node)
+    return planted_value in str(node)
+
+
+@pytest.mark.parametrize(
+    ("plant_location", "expected_field_path", "expected_rule"),
+    [
+        (
+            "authorization_header",
+            "sections[0].columns[0]",
+            "deny_field_name:authorization",
+        ),
+        (
+            "pem_cell",
+            "sections[0].rows[0][1]",
+            "value_pattern:pem_private_key",
+        ),
+    ],
+    ids=("deny-header", "pem-cell"),
+)
+async def test_redaction_failure_is_fail_closed_on_pg(
+    pg_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    plant_location: str,
+    expected_field_path: str,
+    expected_rule: str,
+) -> None:
+    """The real worker persists only bounded failure evidence on PostgreSQL."""
+    _wire_session(pg_engine, monkeypatch)
+    planted_value = (
+        "Authorization" if plant_location == "authorization_header" else _full_pem_plant()
+    )
+
+    async def _build_planted_payload(_session: AsyncSession, **kwargs: Any) -> ReportPayload:
+        columns = (
+            (planted_value, "Value")
+            if plant_location == "authorization_header"
+            else ("Field", "Value")
+        )
+        rows = (
+            (("Device", "core-sw-01"),)
+            if plant_location == "authorization_header"
+            else (("Config excerpt", planted_value),)
+        )
+        return ReportPayload(
+            kind=kwargs["kind"].value,
+            title="Change Report",
+            period_start=kwargs["period_start"],
+            period_end=kwargs["period_end"],
+            generated_at=kwargs["generated_at"],
+            sections=(ReportSection(title="Data", columns=columns, rows=rows),),
+        )
+
+    # Payload injection is the only production-behaviour patch: redaction,
+    # failure persistence, audit recording, and metrics remain real. The
+    # violation occurs before either renderer, so this path needs no PDF stub.
+    monkeypatch.setattr(report_tasks, "build_payload", _build_planted_payload)
+
+    failure_labels = {
+        "report_kind": ReportKind.CHANGE.value,
+        "error_class": report_tasks.ERROR_CLASS_REDACTION,
+    }
+    before = REGISTRY.get_sample_value("netops_report_failures_total", labels=failure_labels) or 0.0
+
+    result = await report_tasks._generate_report_core(
+        ReportKind.CHANGE.value,
+        _START.isoformat(),
+        _END.isoformat(),
+        "on_demand",
+        None,
+    )
+
+    after = REGISTRY.get_sample_value("netops_report_failures_total", labels=failure_labels) or 0.0
+    assert after - before == 1
+    assert result == {
+        "run_id": str(_RUN_ID),
+        "status": ReportRunStatus.FAILED.value,
+        "error_class": report_tasks.ERROR_CLASS_REDACTION,
+    }
+
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with maker() as session:
+        runs = list((await session.execute(select(ReportRun))).scalars())
+        artifacts = list((await session.execute(select(ReportArtifact))).scalars())
+        audits = list((await session.execute(select(AuditLog))).scalars())
+
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.status == ReportRunStatus.FAILED.value
+    assert run.error_class == report_tasks.ERROR_CLASS_REDACTION
+    assert run.finished_at is not None
+    assert artifacts == []
+
+    assert len(audits) == 1
+    failure_audit = audits[0]
+    assert failure_audit.actor == "worker:reports"
+    assert failure_audit.action == "report.generation_failed"
+    assert failure_audit.target_type == "report_run"
+    assert failure_audit.target_id == str(_RUN_ID)
+    assert failure_audit.detail == {
+        "kind": ReportKind.CHANGE.value,
+        "error_class": report_tasks.ERROR_CLASS_REDACTION,
+        "field_path": expected_field_path,
+        "rule": expected_rule,
+    }
+
+    persisted_run_state = {
+        column.key: getattr(run, column.key) for column in ReportRun.__table__.columns
+    }
+    persisted_audit_state = {
+        column.key: getattr(failure_audit, column.key) for column in AuditLog.__table__.columns
+    }
+    assert not _contains_raw_value(result, planted_value)
+    assert not _contains_raw_value(persisted_audit_state, planted_value)
+    assert not _contains_raw_value(
+        {"run": persisted_run_state, "artifacts": artifacts}, planted_value
+    )
 
 
 async def test_purge_deletes_only_expired_on_pg(

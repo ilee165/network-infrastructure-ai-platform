@@ -26,13 +26,15 @@ the period; posture: trend series present incl. gap handling; access review:
 break-glass events present; audit-integrity: gap-day findings + attestation
 present); **redaction eval**: a deny-class field AND a PEM-formatted value
 planted in a fixture payload ⇒ generation fails closed
-(`redaction_violation`, field path only, no partial artifact); **bite proof**:
+(`redaction_violation`, exact field path plus bounded rule/type metadata only —
+never the secret value or a free-form exception — and no partial artifact); **bite proof**:
 a checked-in test disables the filter and asserts the independent emitted-text
 scanner rejects the mutation (assert-red-inside-green); extraction
 sweep: no deny-pattern match in any emitted CSV/PDF text; digest-bearing
 audit-integrity fixtures do NOT false-positive (the anti-entropy decision);
 CSV formula-injection cases covering `=`, `+`, `-`, `@`, TAB, CR, and LF
-(hostile hostname/CR-title fixtures neutralized);
+(hostile hostname/synthetic-cell fixtures neutralized; `ChangeRequest` has no
+title field);
 determinism check (same payload ⇒ same artifact content).
 
 **Out** — changes to engine/report logic (findings route back to W3-owned
@@ -46,7 +48,8 @@ authoritative); SIEM/report-distribution surfaces (out of P4).
    independent emitted-text scan reject the mutation inside the otherwise-green
    blocking job. Temporary red commits are not evidence.
 2. **Fail-closed verified end-to-end** — failed run recorded with typed
-   `error_class`, failure names the field path only, no artifact row written,
+   `error_class`, failure names the exact field path plus a bounded rule/type
+   token only (never the secret value or a free-form exception), no artifact row written,
    `netops_report_failures_total{error_class="redaction_violation"}`
    incremented.
 3. **Structure-stable fixtures** — extraction-based assertions that survive
