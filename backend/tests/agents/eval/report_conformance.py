@@ -519,10 +519,15 @@ def validate_pdf_eval_workflow(workflow_text: str) -> None:
     assert native_index < test_index, "report PDF native install must precede backend pytest"
     native_run = native_step.get("run")
     assert isinstance(native_run, str)
+    apt_commands = [command for command in _executable_commands(native_run) if "apt-get" in command]
+    assert len(apt_commands) == 2, "expected apt-get update and install commands"
+    for command in apt_commands:
+        apt_index = command.index("apt-get")
+        assert "retry-egress.sh" in " ".join(command[:apt_index]), (
+            "native apt-get egress must use retry-egress"
+        )
     install_commands = [
-        command
-        for command in _executable_commands(native_run)
-        if "apt-get" in command and "install" in command
+        command for command in apt_commands if "apt-get" in command and "install" in command
     ]
     assert len(install_commands) == 1, "expected one executable apt-get install command"
     install_tokens = set(install_commands[0])

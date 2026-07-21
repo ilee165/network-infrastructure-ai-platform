@@ -33,8 +33,8 @@ jobs:
 
       - name: Install report PDF native dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
+          bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- sudo apt-get update
+          bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- sudo apt-get install --yes --no-install-recommends \
             libpango-1.0-0 \
             libpangoft2-1.0-0 \
             libharfbuzz0b \

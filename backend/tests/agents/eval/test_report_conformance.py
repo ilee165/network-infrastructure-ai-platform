@@ -413,6 +413,22 @@ def test_workflow_contract_bites_when_each_native_package_is_removed(package: st
         validate_pdf_eval_workflow(yaml.safe_dump(document, sort_keys=False))
 
 
+@pytest.mark.parametrize("command", ("update", "install"))
+def test_workflow_contract_bites_when_native_apt_retry_wrapper_is_removed(command: str) -> None:
+    document = _workflow_document()
+    native = _named_step(document, "Install report PDF native dependencies")
+    original = str(native["run"])
+    wrapper = 'bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- '
+    target = f"{wrapper}sudo apt-get {command}"
+    native["run"], replacements = original.replace(target, f"sudo apt-get {command}", 1), 0
+    if native["run"] != original:
+        replacements = 1
+    assert replacements == 1, f"workflow retry mutation anchor disappeared: apt-get {command}"
+
+    with pytest.raises(AssertionError, match="retry-egress"):
+        validate_pdf_eval_workflow(yaml.safe_dump(document, sort_keys=False))
+
+
 def test_workflow_contract_bites_when_required_flag_is_removed() -> None:
     document = _workflow_document()
     test_step = _named_step(document, "Test (pytest + coverage)")

@@ -4,46 +4,45 @@
 
 **Evidence date:** 2026-07-21
 
-**CI-evidenced candidate HEAD:** `71cd249ddf0f9b0526575082d5646473df3ac0ca`
+**CI-evidenced final HEAD:** `4707f09a260f34ee2126dc59ea8fa7ed7d18667e`
 
-**Blocking run:** [GitHub Actions run 29838591933](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933) — success
+**Blocking run:** [GitHub Actions run 29840145528](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528) — success
 
-**Required-check aggregator:** [`all-gates` job 88663256135](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88663256135) — success
+**Required-check aggregator:** [`all-gates` job 88668711788](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88668711788) — success
 
 **Pull request:** [#167](https://github.com/ilee165/network-infrastructure-ai-platform/pull/167)
 
-The candidate HEAD is the single code release HEAD for this audit. The final
-W4-T4 commit changes readiness, roadmap, evidence-ledger, and ADR-status
-documentation only; regular CI does not trigger for docs-only changes. It must
-therefore not be misrepresented as the CI-evidenced code HEAD. The T4 commit is
-the eighth and final W4 branch commit, after the bounded dependency-audit
-remediation at `71cd249d` became the seventh pre-T4 commit.
+The final HEAD is the single release HEAD for this audit. Although W4-T4 changes
+documentation only, the `pull_request` workflow evaluates path filters against
+the PR's complete changed-file set, so the T4 push triggered the full blocking
+suite. The successful run above therefore covers the T4 evidence and status
+documents as well as the seven preceding implementation commits.
 
 ## 1. Gate evidence
 
-Every P4-scoped §11 gate passed simultaneously at the candidate HEAD. The
+Every P4-scoped §11 gate passed simultaneously at the final HEAD. The
 required aggregator above is the promotion decision; the rows below identify
 the blocking jobs that make each claim inspectable.
 
-| Gate | Result | Blocking evidence at candidate HEAD |
+| Gate | Result | Blocking evidence at final HEAD |
 |---|---|---|
-| **G-SEC** | **PASS (continuous)** | [`security` 88661288674](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288674), [`KMS integration` 88661288661](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288661), and [`packet integration` 88661288815](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288815) succeeded. Credential-leak coverage includes report artifacts and plugin fixtures; F5 device writes remain ChangeRequest-only. Four-eyes remains enforced for ChangeRequest-governed writes. Manual application tagging and report generation/access are direct RBAC-controlled, individually audited operations and are intentionally not four-eyes gated. |
-| **G-MNT** | **PASS** | [`backend` 88661288726](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288726), [`coverage-combined` 88663119451](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88663119451), [`frontend` 88661288525](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288525), [`config drift` 88661288700](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288700), [`contract drift` 88661288677](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288677), and [`lockfile` 88661288781](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288781) succeeded. D16, plugin coverage, docs/API contracts, first-wave plugin onboarding, and dependency lock/audit checks are blocking. |
-| **G-OBS (P4 slice)** | **PASS** | [`observability` 88661288897](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288897) succeeded. Report-generation duration/failure metrics and biting alerts are covered. The application layer preserves the existing topology projection-lag recording rule and burn-rate alerts; this release makes no derivation-specific metric or alert claim. |
-| **G-REL (mechanism/no-regression)** | **PASS** | [`drill-bite-proofs` 88661288780](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288780), [`graph-integration` 88661288574](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288574), [`pg-integration` 88661288634](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288634), and [`infrastructure` 88661288618](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288618) succeeded. The Neo4j rebuild proof ran with the application layer present; certified-scale and calendar-time claims remain named deferrals. |
-| **G-SCA (no-regression)** | **PASS at the previously certified mechanism boundary** | [`drill-bite-proofs` 88661288780](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288780) and [`infrastructure` 88661288618](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288618) succeeded. P4 adds no scale scope and does not claim the deferred certified-scale numbers. |
-| **Packaging/release** | **PASS** | [`docker` 88661288583](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288583) and the dependency/security jobs above succeeded for the shippable artifacts. |
+| **G-SEC** | **PASS (continuous)** | [`security` 88666655401](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655401), [`KMS integration` 88666655552](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655552), and [`packet integration` 88666655690](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655690) succeeded. Credential-leak coverage includes report artifacts and plugin fixtures; F5 device writes remain ChangeRequest-only. Four-eyes remains enforced for ChangeRequest-governed writes. Manual application tagging and report generation/access are direct RBAC-controlled, individually audited operations and are intentionally not four-eyes gated. |
+| **G-MNT** | **PASS** | [`backend` 88666656239](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666656239), [`coverage-combined` 88668593859](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88668593859), [`frontend` 88666655559](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655559), [`config drift` 88666655899](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655899), [`contract drift` 88666655779](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655779), and [`lockfile` 88666655745](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655745) succeeded. D16, plugin coverage, docs/API contracts, first-wave plugin onboarding, and dependency lock/audit checks are blocking. |
+| **G-OBS (P4 slice)** | **PASS** | [`observability` 88666655601](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655601) succeeded. Report-generation duration/failure metrics and biting alerts are covered. The application layer preserves the existing topology projection-lag recording rule and burn-rate alerts; this release makes no derivation-specific metric or alert claim. |
+| **G-REL (mechanism/no-regression)** | **PASS** | [`drill-bite-proofs` 88666655524](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655524), [`graph-integration` 88666655737](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655737), [`pg-integration` 88666655654](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655654), and [`infrastructure` 88666655651](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655651) succeeded. The Neo4j rebuild proof ran with the application layer present; certified-scale and calendar-time claims remain named deferrals. |
+| **G-SCA (no-regression)** | **PASS at the previously certified mechanism boundary** | [`drill-bite-proofs` 88666655524](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655524) and [`infrastructure` 88666655651](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655651) succeeded. P4 adds no scale scope and does not claim the deferred certified-scale numbers. |
+| **Packaging/release** | **PASS** | [`docker` 88666655607](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655607) and the dependency/security jobs above succeeded for the shippable artifacts. |
 
 ## 2. W4 evaluation evidence
 
 The task-local ledger sections were audited and revalidated by the blocking
-jobs at the common candidate HEAD. They are not substituted for final evidence.
+jobs at the common final HEAD. They are not substituted for final evidence.
 
 | Suite | Landed task commit | Final blocking evidence | Result |
 |---|---|---|---|
-| Vendor/plugin conformance and unchanged nine-agent routing | `d09dca19` | [`backend` 88661288726](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288726) | **PASS** |
-| Exact application-dependency derivation corpus, PG round trip, and graph consumer | `d6feeb41` | [`backend` 88661288726](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288726), [`pg-integration` 88661288634](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288634), [`graph-integration` 88661288574](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288574) | **PASS** |
-| Report conformance, real PDF/redaction bite proofs, and PG fail-closed persistence | `cf23cdab` | [`backend` 88661288726](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288726), [`pg-integration` 88661288634](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29838591933/job/88661288634) | **PASS** |
+| Vendor/plugin conformance and unchanged nine-agent routing | `d09dca19` | [`backend` 88666656239](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666656239) | **PASS** |
+| Exact application-dependency derivation corpus, PG round trip, and graph consumer | `d6feeb41` | [`backend` 88666656239](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666656239), [`pg-integration` 88666655654](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655654), [`graph-integration` 88666655737](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655737) | **PASS** |
+| Report conformance, real PDF/redaction bite proofs, and PG fail-closed persistence | `cf23cdab` | [`backend` 88666656239](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666656239), [`pg-integration` 88666655654](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528/job/88666655654) | **PASS** |
 
 ## 3. Report dispatch guarantee
 
@@ -85,8 +84,16 @@ certified-scale numbers, the 30-day soak, external penetration test, and
 six-month break-glass cadence. The named promotion paths in §4 remain binding;
 nothing is silently promoted by this P4 exit.
 
+## 5.1 Upgrade observation
+
+The first application-derivation run against a pre-P4 database will reconcile
+existing VMware/DNS-derived dependency rows to the expanded virtual-server →
+pool → member provenance chain. A one-time increase in `updated` statistics and
+`updated_at` values is expected. Repeated rewrites after that successful run
+are not expected and should be investigated as drift.
+
 ## 6. Promotion decision
 
 The P4-scoped §11 gates and all three W4 evaluation suites are green and biting
-at the one CI-evidenced candidate HEAD. ADRs 0050–0053 are therefore Accepted,
+at the one CI-evidenced final HEAD. ADRs 0050–0053 are therefore Accepted,
 and P4 exits with the explicit deferrals and P5 inheritance above.

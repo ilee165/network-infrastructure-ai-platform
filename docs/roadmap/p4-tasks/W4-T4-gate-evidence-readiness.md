@@ -8,8 +8,8 @@
 | **Depends on** | W4-T1..T3 + all P4 waves merged; runs on the release HEAD |
 | **ADRs** | ADR-0050…0053 (flipped here on green), ADR-0033 §1 (named-deferral discipline) |
 | **PRODUCTION.md** | §1, §2.6, §11 (the P4-scoped gate slice), §12 |
-| **Status** | Complete — candidate `71cd249d`, run `29838591933` green |
-| **Candidate composition** | Seven pre-T4 commits: six planned task commits plus bounded dependency-audit remediation `71cd249d`; T4 is eighth/final |
+| **Status** | Complete — final PR HEAD `4707f09a`, run `29840145528` green |
+| **Candidate composition** | Seven pre-T4 commits: six planned task commits plus bounded dependency-audit remediation `71cd249d`; T4 is the eighth planned commit, followed by an atomic validated review follow-up |
 
 ## Objective
 

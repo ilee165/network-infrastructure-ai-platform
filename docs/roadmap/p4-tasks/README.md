@@ -107,9 +107,9 @@ and **`wf-release-auditor`** (gate evidence). The LAST P4 wave and the
 phase-exit gate. Apart from the bounded T2A correctness prerequisite, it builds
 the *proof*, not new features. **Rebase the W4 branch onto `origin/main` first.**
 
-**Current state:** all W4 tasks are complete. Candidate `71cd249d` passed run
-`29838591933`; T4 records the docs-only closeout without moving the CI evidence
-anchor.
+**Current state:** all W4 tasks are complete. Final PR HEAD `4707f09a` passed
+run `29840145528`, including the docs-only T4 closeout because pull-request path
+filtering evaluated the PR's complete changed-file set.
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
@@ -143,9 +143,10 @@ anchor.
   section for status, focused commands/results, bite test node IDs, and the
   blocking-CI collection path in `P4-W4-evals-evidence.md`; T4 alone owns the
   ledger's top-level lifecycle and populates its final table with landed eval
-  task commit SHAs, one final release HEAD, run/job URLs, and results. The final
-  branch log contains eight commits: the six planned pre-T4 task commits, the
-  bounded dependency-audit remediation, and T4. T4 flips ADRs/roadmap only on green.
+  task commit SHAs, one final release HEAD, run/job URLs, and results. The
+  planned branch log contains eight commits: the six planned pre-T4 task
+  commits, the bounded dependency-audit remediation, and T4; validated review
+  follow-ups land separately. T4 flips ADRs/roadmap only on green.
   Rebase onto `origin/main` first.
 - **Both W2 and W3 arm the baseline-relative usage guard** (each is 4–6 tasks).
 
