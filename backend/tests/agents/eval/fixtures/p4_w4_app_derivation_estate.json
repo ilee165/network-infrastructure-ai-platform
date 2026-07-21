@@ -1,0 +1,575 @@
+{
+    "_meta": {
+        "collected_at": "2026-07-20T10:00:00+00:00",
+        "manual_derived_at": "2026-07-20T11:00:00+00:00",
+        "t0": "2026-07-20T12:00:00+00:00",
+        "t1": "2026-07-20T13:00:00+00:00",
+        "projection_at": "2026-07-20T14:00:00+00:00",
+        "wrong_edge_target": [
+            "Device",
+            "20000000-0000-0000-0000-000000000003"
+        ]
+    },
+    "manual_actor": {
+        "id": "70000000-0000-0000-0000-000000000001",
+        "username": "p4-w4-eval-actor",
+        "email": "p4-w4-eval-actor@example.invalid"
+    },
+    "devices": [
+        {
+            "id": "10000000-0000-0000-0000-000000000001",
+            "hostname": "f5-a",
+            "mgmt_ip": "10.255.0.1",
+            "vendor_id": "f5_bigip"
+        },
+        {
+            "id": "10000000-0000-0000-0000-000000000002",
+            "hostname": "vcenter-a",
+            "mgmt_ip": "10.255.0.2",
+            "vendor_id": "vmware"
+        },
+        {
+            "id": "10000000-0000-0000-0000-000000000003",
+            "hostname": "infoblox-a",
+            "mgmt_ip": "10.255.0.3",
+            "vendor_id": "infoblox"
+        },
+        {
+            "id": "20000000-0000-0000-0000-000000000001",
+            "hostname": "payroll-web",
+            "mgmt_ip": "10.0.10.10",
+            "vendor_id": "cisco_ios"
+        },
+        {
+            "id": "20000000-0000-0000-0000-000000000002",
+            "hostname": "retail-web",
+            "mgmt_ip": "10.0.20.10",
+            "vendor_id": "cisco_ios"
+        },
+        {
+            "id": "20000000-0000-0000-0000-000000000003",
+            "hostname": "route-esx",
+            "mgmt_ip": "10.0.50.5",
+            "vendor_id": "vmware_esxi"
+        },
+        {
+            "id": "20000000-0000-0000-0000-000000000004",
+            "hostname": "main-esx",
+            "mgmt_ip": "10.0.60.5",
+            "vendor_id": "vmware_esxi"
+        },
+        {
+            "id": "20000000-0000-0000-0000-000000000005",
+            "hostname": "manual-only-target",
+            "mgmt_ip": "10.0.70.5",
+            "vendor_id": "arista_eos"
+        },
+        {
+            "id": "20000000-0000-0000-0000-000000000006",
+            "hostname": "dns-target",
+            "mgmt_ip": "10.0.30.10",
+            "vendor_id": "juniper_junos"
+        },
+        {
+            "id": "20000000-0000-0000-0000-000000000007",
+            "hostname": "global-rd0-target",
+            "mgmt_ip": "10.0.40.10",
+            "vendor_id": "cisco_ios"
+        }
+    ],
+    "interfaces": [
+        {
+            "id": "30000000-0000-0000-0000-000000000001",
+            "device_id": "20000000-0000-0000-0000-000000000001",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000001",
+            "name": "Ethernet1",
+            "description": null,
+            "admin_status": "up",
+            "oper_status": "up",
+            "mac_address": null,
+            "ip_address": "10.0.10.11/24",
+            "mtu": null,
+            "speed_mbps": null,
+            "duplex": null,
+            "vlan_id": null,
+            "input_errors": null,
+            "output_errors": null,
+            "source_vendor": "cisco_ios"
+        },
+        {
+            "id": "30000000-0000-0000-0000-000000000002",
+            "device_id": "20000000-0000-0000-0000-000000000002",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000002",
+            "name": "Ethernet1",
+            "description": null,
+            "admin_status": "up",
+            "oper_status": "up",
+            "mac_address": null,
+            "ip_address": "10.0.20.11/24",
+            "mtu": null,
+            "speed_mbps": null,
+            "duplex": null,
+            "vlan_id": null,
+            "input_errors": null,
+            "output_errors": null,
+            "source_vendor": "cisco_ios"
+        },
+        {
+            "id": "30000000-0000-0000-0000-000000000003",
+            "device_id": "20000000-0000-0000-0000-000000000006",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000003",
+            "name": "ge-0/0/0",
+            "description": null,
+            "admin_status": "up",
+            "oper_status": "up",
+            "mac_address": null,
+            "ip_address": "10.0.30.11/24",
+            "mtu": null,
+            "speed_mbps": null,
+            "duplex": null,
+            "vlan_id": null,
+            "input_errors": null,
+            "output_errors": null,
+            "source_vendor": "juniper_junos"
+        },
+        {
+            "id": "30000000-0000-0000-0000-000000000004",
+            "device_id": "20000000-0000-0000-0000-000000000007",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000004",
+            "name": "Ethernet1",
+            "description": null,
+            "admin_status": "up",
+            "oper_status": "up",
+            "mac_address": null,
+            "ip_address": "10.0.40.11/24",
+            "mtu": null,
+            "speed_mbps": null,
+            "duplex": null,
+            "vlan_id": null,
+            "input_errors": null,
+            "output_errors": null,
+            "source_vendor": "cisco_ios"
+        }
+    ],
+    "virtual_servers": [
+        {
+            "id": "40000000-0000-0000-0000-000000000001",
+            "device_id": "10000000-0000-0000-0000-000000000001",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000011",
+            "source_vendor": "f5_bigip",
+            "name": "/Common/payroll.corp.example.com",
+            "vip_address": "192.0.2.10",
+            "port": 443,
+            "protocol": "tcp",
+            "vrf": null,
+            "enabled": true,
+            "availability": "available",
+            "pool_name": "/Common/payroll_pool",
+            "description": "Payroll VIP"
+        },
+        {
+            "id": "40000000-0000-0000-0000-000000000002",
+            "device_id": "10000000-0000-0000-0000-000000000001",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000012",
+            "source_vendor": "f5_bigip",
+            "name": "/Common/retail.corp.example.com",
+            "vip_address": "192.0.2.20",
+            "port": 443,
+            "protocol": "tcp",
+            "vrf": null,
+            "enabled": true,
+            "availability": "available",
+            "pool_name": "/Common/retail_pool",
+            "description": "Derived retail metadata must not win"
+        },
+        {
+            "id": "40000000-0000-0000-0000-000000000003",
+            "device_id": "10000000-0000-0000-0000-000000000001",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000013",
+            "source_vendor": "f5_bigip",
+            "name": "/Common/route.corp.example.com",
+            "vip_address": "192.0.2.30",
+            "port": 443,
+            "protocol": "tcp",
+            "vrf": null,
+            "enabled": true,
+            "availability": "available",
+            "pool_name": "/Common/route_pool",
+            "description": "Route-domain FQDN service"
+        },
+        {
+            "id": "40000000-0000-0000-0000-000000000004",
+            "device_id": "10000000-0000-0000-0000-000000000001",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000014",
+            "source_vendor": "f5_bigip",
+            "name": "/Common/missing_pool",
+            "vip_address": "192.0.2.40",
+            "port": 443,
+            "protocol": "tcp",
+            "vrf": null,
+            "enabled": true,
+            "availability": "available",
+            "pool_name": "/Common/not_collected",
+            "description": "Missing-pool exclusion"
+        },
+        {
+            "id": "40000000-0000-0000-0000-000000000005",
+            "device_id": "10000000-0000-0000-0000-000000000001",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000015",
+            "source_vendor": "f5_bigip",
+            "name": "/Common/exclusions",
+            "vip_address": "192.0.2.50",
+            "port": 443,
+            "protocol": "tcp",
+            "vrf": null,
+            "enabled": true,
+            "availability": "available",
+            "pool_name": "/Common/exclusions_pool",
+            "description": "Exclusion-only service"
+        }
+    ],
+    "pools": [
+        {
+            "id": "41000000-0000-0000-0000-000000000001",
+            "device_id": "10000000-0000-0000-0000-000000000001",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000021",
+            "source_vendor": "f5_bigip",
+            "name": "/Common/payroll_pool",
+            "monitors": [],
+            "availability": "available",
+            "members": [
+                {
+                    "name": "/Common/payroll-web:443",
+                    "address": "10.0.10.11",
+                    "fqdn": null,
+                    "port": 443,
+                    "vrf": null,
+                    "admin_state": "enabled",
+                    "availability": "available"
+                },
+                {
+                    "name": "/Common/payroll-unreconciled:443",
+                    "address": "192.0.2.99",
+                    "fqdn": null,
+                    "port": 443,
+                    "vrf": null,
+                    "admin_state": "enabled",
+                    "availability": "available"
+                }
+            ],
+            "description": null
+        },
+        {
+            "id": "41000000-0000-0000-0000-000000000002",
+            "device_id": "10000000-0000-0000-0000-000000000001",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000022",
+            "source_vendor": "f5_bigip",
+            "name": "/Common/retail_pool",
+            "monitors": [],
+            "availability": "available",
+            "members": [
+                {
+                    "name": "/Common/retail-web:443",
+                    "address": "10.0.20.11",
+                    "fqdn": null,
+                    "port": 443,
+                    "vrf": "0",
+                    "admin_state": "enabled",
+                    "availability": "available"
+                }
+            ],
+            "description": null
+        },
+        {
+            "id": "41000000-0000-0000-0000-000000000003",
+            "device_id": "10000000-0000-0000-0000-000000000001",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000023",
+            "source_vendor": "f5_bigip",
+            "name": "/Common/route_pool",
+            "monitors": [],
+            "availability": "available",
+            "members": [
+                {
+                    "name": "/Common/rd2-routevm:443",
+                    "address": "10.0.40.11",
+                    "fqdn": "routevm.corp.example.com",
+                    "port": 443,
+                    "vrf": "2",
+                    "admin_state": "enabled",
+                    "availability": "available"
+                }
+            ],
+            "description": null
+        },
+        {
+            "id": "41000000-0000-0000-0000-000000000005",
+            "device_id": "10000000-0000-0000-0000-000000000001",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000025",
+            "source_vendor": "f5_bigip",
+            "name": "/Common/exclusions_pool",
+            "monitors": [],
+            "availability": "available",
+            "members": [
+                {
+                    "name": "/Common/template-vm:443",
+                    "address": "198.51.100.21",
+                    "fqdn": null,
+                    "port": 443,
+                    "vrf": null,
+                    "admin_state": "enabled",
+                    "availability": "available"
+                },
+                {
+                    "name": "/Common/toolsless-vm:443",
+                    "address": "198.51.100.22",
+                    "fqdn": null,
+                    "port": 443,
+                    "vrf": null,
+                    "admin_state": "enabled",
+                    "availability": "available"
+                },
+                {
+                    "name": "/Common/orphan-host-vm:443",
+                    "address": "198.51.100.23",
+                    "fqdn": null,
+                    "port": 443,
+                    "vrf": null,
+                    "admin_state": "enabled",
+                    "availability": "available"
+                }
+            ],
+            "description": null
+        }
+    ],
+    "virtual_machines": [
+        {
+            "id": "50000000-0000-0000-0000-000000000001",
+            "device_id": "10000000-0000-0000-0000-000000000002",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000031",
+            "source_vendor": "vmware",
+            "name": "routevm",
+            "moref": "vm-101",
+            "instance_uuid": null,
+            "is_template": false,
+            "power_state": "powered_on",
+            "guest_hostname": "ROUTEVM.CORP.EXAMPLE.COM",
+            "guest_ip_addresses": [
+                "192.0.2.50"
+            ],
+            "host_name": "route-esx.corp.example.com",
+            "cluster_name": "prod",
+            "datacenter": "dc1",
+            "nics": [],
+            "description": null
+        },
+        {
+            "id": "50000000-0000-0000-0000-000000000002",
+            "device_id": "10000000-0000-0000-0000-000000000002",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000032",
+            "source_vendor": "vmware",
+            "name": "template-vm",
+            "moref": "vm-102",
+            "instance_uuid": null,
+            "is_template": true,
+            "power_state": "powered_off",
+            "guest_hostname": null,
+            "guest_ip_addresses": [
+                "198.51.100.21"
+            ],
+            "host_name": "main-esx.corp.example.com",
+            "cluster_name": "prod",
+            "datacenter": "dc1",
+            "nics": [],
+            "description": null
+        },
+        {
+            "id": "50000000-0000-0000-0000-000000000003",
+            "device_id": "10000000-0000-0000-0000-000000000002",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000033",
+            "source_vendor": "vmware",
+            "name": "toolsless-vm",
+            "moref": "vm-103",
+            "instance_uuid": null,
+            "is_template": false,
+            "power_state": "powered_on",
+            "guest_hostname": null,
+            "guest_ip_addresses": [],
+            "host_name": "main-esx.corp.example.com",
+            "cluster_name": "prod",
+            "datacenter": "dc1",
+            "nics": [],
+            "description": null
+        },
+        {
+            "id": "50000000-0000-0000-0000-000000000004",
+            "device_id": "10000000-0000-0000-0000-000000000002",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000034",
+            "source_vendor": "vmware",
+            "name": "orphan-host-vm",
+            "moref": "vm-104",
+            "instance_uuid": null,
+            "is_template": false,
+            "power_state": "powered_on",
+            "guest_hostname": null,
+            "guest_ip_addresses": [
+                "198.51.100.23"
+            ],
+            "host_name": "absent-esx.corp.example.com",
+            "cluster_name": "prod",
+            "datacenter": "dc1",
+            "nics": [],
+            "description": null
+        }
+    ],
+    "hypervisor_hosts": [
+        {
+            "id": "51000000-0000-0000-0000-000000000001",
+            "device_id": "10000000-0000-0000-0000-000000000002",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000041",
+            "source_vendor": "vmware",
+            "name": "route-esx.corp.example.com",
+            "moref": "host-101",
+            "cluster_name": "prod",
+            "datacenter": "dc1",
+            "vendor": "VMware",
+            "model": null,
+            "hypervisor_version": null,
+            "connection_state": "connected",
+            "in_maintenance_mode": false,
+            "management_ip": "10.0.50.5",
+            "pnics": []
+        },
+        {
+            "id": "51000000-0000-0000-0000-000000000002",
+            "device_id": "10000000-0000-0000-0000-000000000002",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000042",
+            "source_vendor": "vmware",
+            "name": "main-esx.corp.example.com",
+            "moref": "host-102",
+            "cluster_name": "prod",
+            "datacenter": "dc1",
+            "vendor": "VMware",
+            "model": null,
+            "hypervisor_version": null,
+            "connection_state": "connected",
+            "in_maintenance_mode": false,
+            "management_ip": "10.0.60.5",
+            "pnics": []
+        },
+        {
+            "id": "51000000-0000-0000-0000-000000000003",
+            "device_id": "10000000-0000-0000-0000-000000000002",
+            "raw_artifact_id": "80000000-0000-0000-0000-000000000043",
+            "source_vendor": "vmware",
+            "name": "absent-esx.corp.example.com",
+            "moref": "host-103",
+            "cluster_name": "prod",
+            "datacenter": "dc1",
+            "vendor": "VMware",
+            "model": null,
+            "hypervisor_version": null,
+            "connection_state": "connected",
+            "in_maintenance_mode": false,
+            "management_ip": "10.0.99.5",
+            "pnics": []
+        }
+    ],
+    "dns_records": [
+        {
+            "device_id": "10000000-0000-0000-0000-000000000003",
+            "source_vendor": "infoblox",
+            "name": "payroll.corp.example.com",
+            "record_type": "cname",
+            "value": "payroll.service.example.net",
+            "zone": "corp.example.com"
+        },
+        {
+            "device_id": "10000000-0000-0000-0000-000000000003",
+            "source_vendor": "infoblox",
+            "name": "payroll.service.example.net",
+            "record_type": "a",
+            "value": "10.0.30.11",
+            "zone": "example.net"
+        },
+        {
+            "device_id": "10000000-0000-0000-0000-000000000003",
+            "source_vendor": "infoblox",
+            "name": "retail-manual.example.com",
+            "record_type": "a",
+            "value": "10.0.20.11",
+            "zone": "example.com"
+        },
+        {
+            "device_id": "10000000-0000-0000-0000-000000000003",
+            "source_vendor": "infoblox",
+            "name": "loop.example.com",
+            "record_type": "cname",
+            "value": "loop-two.example.com",
+            "zone": "example.com"
+        },
+        {
+            "device_id": "10000000-0000-0000-0000-000000000003",
+            "source_vendor": "infoblox",
+            "name": "loop-two.example.com",
+            "record_type": "cname",
+            "value": "loop.example.com",
+            "zone": "example.com"
+        }
+    ],
+    "applications": [
+        {
+            "id": "60000000-0000-0000-0000-000000000001",
+            "name": "Retail.CORP.example.com",
+            "description": "Operator-owned retail service",
+            "fqdns": [
+                "loop.example.com",
+                "retail-manual.example.com",
+                "unresolved.example.com"
+            ],
+            "origin": "manual",
+            "origin_ref": null,
+            "owner": "payments-platform",
+            "created_by": "70000000-0000-0000-0000-000000000001"
+        },
+        {
+            "id": "60000000-0000-0000-0000-000000000002",
+            "name": "Billing Manual",
+            "description": "User-curated billing dependency",
+            "fqdns": [],
+            "origin": "manual",
+            "origin_ref": null,
+            "owner": "finance-platform",
+            "created_by": "70000000-0000-0000-0000-000000000001"
+        }
+    ],
+    "manual_dependencies": [
+        {
+            "id": "61000000-0000-0000-0000-000000000001",
+            "application_id": "60000000-0000-0000-0000-000000000001",
+            "target_kind": "ip_address",
+            "target_ref": "30000000-0000-0000-0000-000000000002",
+            "source": "manual",
+            "provenance": [
+                {
+                    "kind": "user",
+                    "ref": "70000000-0000-0000-0000-000000000001"
+                }
+            ],
+            "created_by": "70000000-0000-0000-0000-000000000001"
+        },
+        {
+            "id": "61000000-0000-0000-0000-000000000002",
+            "application_id": "60000000-0000-0000-0000-000000000002",
+            "target_kind": "device",
+            "target_ref": "20000000-0000-0000-0000-000000000005",
+            "source": "manual",
+            "provenance": [
+                {
+                    "kind": "user",
+                    "ref": "70000000-0000-0000-0000-000000000001"
+                }
+            ],
+            "created_by": "70000000-0000-0000-0000-000000000001"
+        }
+    ]
+}
