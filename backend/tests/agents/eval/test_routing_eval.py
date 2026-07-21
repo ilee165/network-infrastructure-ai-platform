@@ -82,6 +82,16 @@ sibling ``test_p1_cross_vendor_routing.py`` (runs without a local model); the
 live re-run here is **deferred-accepted** when no local model is available (no
 hardware, same posture as W1/W2).
 
+P4 W4-T1 Vendor-Wave-3 re-run
+-----------------------------
+The same manual harness now consumes two held-out inventory prompts from
+``fixtures/p4_vendor_conformance_matrix.json``: F5 BIG-IP ADC services and
+VMware virtualization inventory both route to the existing ``discovery``
+specialist.  The sibling ``test_p4_vendor_conformance.py`` is the blocking,
+model-free layer: it pins those cases to real registered capabilities, proves
+the nine-agent roster and allow-lists match the recorded P3 baseline, and runs
+conformance for the complete installed-plugin matrix.
+
 Non-deterministic + needs a running Ollama, so — like provider parity and the
 M1/M2 live-lab gates — it is opt-in and skipped in CI:
 
@@ -93,7 +103,9 @@ M1/M2 live-lab gates — it is opt-in and skipped in CI:
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -113,6 +125,12 @@ if not os.environ.get(_FLAG):
         f"routing eval is a manual gate; set {_FLAG}=1 (needs a local Ollama) to run it.",
         allow_module_level=True,
     )
+
+_P4_VENDOR_MATRIX_PATH = Path(__file__).parent / "fixtures" / "p4_vendor_conformance_matrix.json"
+_P4_VENDOR_CASES = [
+    (case["prompt"], case["expected_specialist"])
+    for case in json.loads(_P4_VENDOR_MATRIX_PATH.read_text(encoding="utf-8"))["routing_cases"]
+]
 
 # (intent, expected specialist). Each must route correctly for the eval to pass.
 #
@@ -315,6 +333,12 @@ _CASES = [
         "baseline we signed off last quarter?",
         "configuration",
     ),
+    # ------------------------------------------------------------------ #
+    # P4 W4-T1 — Vendor Wave 3 (F5 BIG-IP / VMware). These plugins are
+    # vendor drivers, not new routing targets. Their held-out inventory
+    # questions route to the existing Discovery Agent; the shared fixture is
+    # also validated by the deterministic CI suite without loading a model.
+    *_P4_VENDOR_CASES,
 ]
 
 #: The nine specialists the supervisor routes over after P2 W3 (every routable

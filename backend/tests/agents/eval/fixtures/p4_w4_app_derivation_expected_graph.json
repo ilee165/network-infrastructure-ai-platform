@@ -1,0 +1,323 @@
+{
+    "_meta": {
+        "basis": "Hand-authored from ADR-0052 sections 2, 3, 4, 6, and 8 plus ADR-0050 section 5; never serialized from runtime output.",
+        "expected_stats": {
+            "f5_applications": 5,
+            "f5_edges": 2,
+            "f5_members_unreconciled": 5,
+            "f5_pools_missing": 1,
+            "vmware_edges": 1,
+            "vmware_hosts_unmatched": 1,
+            "dns_edges": 2,
+            "dns_names_unreconciled": 3,
+            "dns_skipped": false
+        },
+        "retail_app_key": "id:60000000-0000-0000-0000-000000000001",
+        "retail_manual_wins_payload": {
+            "key": "id:60000000-0000-0000-0000-000000000001",
+            "name": "Retail.CORP.example.com",
+            "description": "Operator-owned retail service",
+            "fqdns": [
+                "loop.example.com",
+                "retail-manual.example.com",
+                "unresolved.example.com"
+            ],
+            "origin": "manual",
+            "origin_ref": null,
+            "owner": "payments-platform"
+        },
+        "shared_edge_key": [
+            "id:60000000-0000-0000-0000-000000000001",
+            "IPAddress",
+            "30000000-0000-0000-0000-000000000002"
+        ],
+        "route_fqdn_vmware_edge_key": [
+            "origin:f5:10000000-0000-0000-0000-000000000001:/Common/route.corp.example.com",
+            "Device",
+            "20000000-0000-0000-0000-000000000003"
+        ],
+        "route_domain_forbidden_edge_key": [
+            "origin:f5:10000000-0000-0000-0000-000000000001:/Common/route.corp.example.com",
+            "IPAddress",
+            "30000000-0000-0000-0000-000000000004"
+        ],
+        "edge_free_exclusion_app_keys": [
+            "origin:f5:10000000-0000-0000-0000-000000000001:/Common/exclusions",
+            "origin:f5:10000000-0000-0000-0000-000000000001:/Common/missing_pool"
+        ],
+        "source_exclusive_edge_keys": {
+            "f5": [
+                "origin:f5:10000000-0000-0000-0000-000000000001:/Common/payroll.corp.example.com",
+                "IPAddress",
+                "30000000-0000-0000-0000-000000000001"
+            ],
+            "vmware": [
+                "origin:f5:10000000-0000-0000-0000-000000000001:/Common/route.corp.example.com",
+                "Device",
+                "20000000-0000-0000-0000-000000000003"
+            ],
+            "dns": [
+                "origin:f5:10000000-0000-0000-0000-000000000001:/Common/payroll.corp.example.com",
+                "IPAddress",
+                "30000000-0000-0000-0000-000000000003"
+            ],
+            "manual": [
+                "id:60000000-0000-0000-0000-000000000002",
+                "Device",
+                "20000000-0000-0000-0000-000000000005"
+            ]
+        }
+    },
+    "applications": [
+        {
+            "key": "id:60000000-0000-0000-0000-000000000001",
+            "name": "Retail.CORP.example.com",
+            "description": "Operator-owned retail service",
+            "fqdns": [
+                "loop.example.com",
+                "retail-manual.example.com",
+                "unresolved.example.com"
+            ],
+            "origin": "manual",
+            "origin_ref": null,
+            "owner": "payments-platform"
+        },
+        {
+            "key": "id:60000000-0000-0000-0000-000000000002",
+            "name": "Billing Manual",
+            "description": "User-curated billing dependency",
+            "fqdns": [],
+            "origin": "manual",
+            "origin_ref": null,
+            "owner": "finance-platform"
+        },
+        {
+            "key": "origin:f5:10000000-0000-0000-0000-000000000001:/Common/exclusions",
+            "name": "exclusions",
+            "description": "Exclusion-only service",
+            "fqdns": [],
+            "origin": "derived",
+            "origin_ref": "f5:10000000-0000-0000-0000-000000000001:/Common/exclusions",
+            "owner": null
+        },
+        {
+            "key": "origin:f5:10000000-0000-0000-0000-000000000001:/Common/missing_pool",
+            "name": "missing_pool",
+            "description": "Missing-pool exclusion",
+            "fqdns": [],
+            "origin": "derived",
+            "origin_ref": "f5:10000000-0000-0000-0000-000000000001:/Common/missing_pool",
+            "owner": null
+        },
+        {
+            "key": "origin:f5:10000000-0000-0000-0000-000000000001:/Common/payroll.corp.example.com",
+            "name": "payroll.corp.example.com",
+            "description": "Payroll VIP",
+            "fqdns": [
+                "payroll.corp.example.com"
+            ],
+            "origin": "derived",
+            "origin_ref": "f5:10000000-0000-0000-0000-000000000001:/Common/payroll.corp.example.com",
+            "owner": null
+        },
+        {
+            "key": "origin:f5:10000000-0000-0000-0000-000000000001:/Common/route.corp.example.com",
+            "name": "route.corp.example.com",
+            "description": "Route-domain FQDN service",
+            "fqdns": [
+                "route.corp.example.com"
+            ],
+            "origin": "derived",
+            "origin_ref": "f5:10000000-0000-0000-0000-000000000001:/Common/route.corp.example.com",
+            "owner": null
+        }
+    ],
+    "edges": [
+        {
+            "app_key": "id:60000000-0000-0000-0000-000000000001",
+            "target_label": "IPAddress",
+            "target_key": "30000000-0000-0000-0000-000000000002",
+            "sources": [
+                "dns",
+                "f5",
+                "manual"
+            ],
+            "provenance_by_source": {
+                "dns": [
+                    {
+                        "kind": "dns_record",
+                        "ref": "retail-manual.example.com|a|10.0.20.11"
+                    },
+                    {
+                        "kind": "interface",
+                        "ref": "30000000-0000-0000-0000-000000000002"
+                    }
+                ],
+                "f5": [
+                    {
+                        "kind": "virtual_server",
+                        "ref": "40000000-0000-0000-0000-000000000002"
+                    },
+                    {
+                        "kind": "pool",
+                        "ref": "41000000-0000-0000-0000-000000000002"
+                    },
+                    {
+                        "kind": "member",
+                        "ref": "/Common/retail-web:443"
+                    },
+                    {
+                        "kind": "interface",
+                        "ref": "30000000-0000-0000-0000-000000000002"
+                    }
+                ],
+                "manual": [
+                    {
+                        "kind": "user",
+                        "ref": "70000000-0000-0000-0000-000000000001"
+                    }
+                ]
+            },
+            "compact_provenance": [
+                "dns:dns_record:retail-manual.example.com|a|10.0.20.11",
+                "dns:interface:30000000-0000-0000-0000-000000000002",
+                "f5:virtual_server:40000000-0000-0000-0000-000000000002",
+                "f5:pool:41000000-0000-0000-0000-000000000002",
+                "f5:member:/Common/retail-web:443",
+                "f5:interface:30000000-0000-0000-0000-000000000002",
+                "manual:user:70000000-0000-0000-0000-000000000001"
+            ],
+            "derived_at": "2026-07-20T12:00:00+00:00"
+        },
+        {
+            "app_key": "id:60000000-0000-0000-0000-000000000002",
+            "target_label": "Device",
+            "target_key": "20000000-0000-0000-0000-000000000005",
+            "sources": [
+                "manual"
+            ],
+            "provenance_by_source": {
+                "manual": [
+                    {
+                        "kind": "user",
+                        "ref": "70000000-0000-0000-0000-000000000001"
+                    }
+                ]
+            },
+            "compact_provenance": [
+                "manual:user:70000000-0000-0000-0000-000000000001"
+            ],
+            "derived_at": "2026-07-20T11:00:00+00:00"
+        },
+        {
+            "app_key": "origin:f5:10000000-0000-0000-0000-000000000001:/Common/payroll.corp.example.com",
+            "target_label": "IPAddress",
+            "target_key": "30000000-0000-0000-0000-000000000001",
+            "sources": [
+                "f5"
+            ],
+            "provenance_by_source": {
+                "f5": [
+                    {
+                        "kind": "virtual_server",
+                        "ref": "40000000-0000-0000-0000-000000000001"
+                    },
+                    {
+                        "kind": "pool",
+                        "ref": "41000000-0000-0000-0000-000000000001"
+                    },
+                    {
+                        "kind": "member",
+                        "ref": "/Common/payroll-web:443"
+                    },
+                    {
+                        "kind": "interface",
+                        "ref": "30000000-0000-0000-0000-000000000001"
+                    }
+                ]
+            },
+            "compact_provenance": [
+                "f5:virtual_server:40000000-0000-0000-0000-000000000001",
+                "f5:pool:41000000-0000-0000-0000-000000000001",
+                "f5:member:/Common/payroll-web:443",
+                "f5:interface:30000000-0000-0000-0000-000000000001"
+            ],
+            "derived_at": "2026-07-20T12:00:00+00:00"
+        },
+        {
+            "app_key": "origin:f5:10000000-0000-0000-0000-000000000001:/Common/payroll.corp.example.com",
+            "target_label": "IPAddress",
+            "target_key": "30000000-0000-0000-0000-000000000003",
+            "sources": [
+                "dns"
+            ],
+            "provenance_by_source": {
+                "dns": [
+                    {
+                        "kind": "dns_record",
+                        "ref": "payroll.corp.example.com|cname|payroll.service.example.net"
+                    },
+                    {
+                        "kind": "dns_record",
+                        "ref": "payroll.service.example.net|a|10.0.30.11"
+                    },
+                    {
+                        "kind": "interface",
+                        "ref": "30000000-0000-0000-0000-000000000003"
+                    }
+                ]
+            },
+            "compact_provenance": [
+                "dns:dns_record:payroll.corp.example.com|cname|payroll.service.example.net",
+                "dns:dns_record:payroll.service.example.net|a|10.0.30.11",
+                "dns:interface:30000000-0000-0000-0000-000000000003"
+            ],
+            "derived_at": "2026-07-20T12:00:00+00:00"
+        },
+        {
+            "app_key": "origin:f5:10000000-0000-0000-0000-000000000001:/Common/route.corp.example.com",
+            "target_label": "Device",
+            "target_key": "20000000-0000-0000-0000-000000000003",
+            "sources": [
+                "vmware"
+            ],
+            "provenance_by_source": {
+                "vmware": [
+                    {
+                        "kind": "virtual_server",
+                        "ref": "40000000-0000-0000-0000-000000000003"
+                    },
+                    {
+                        "kind": "pool",
+                        "ref": "41000000-0000-0000-0000-000000000003"
+                    },
+                    {
+                        "kind": "member",
+                        "ref": "/Common/rd2-routevm:443"
+                    },
+                    {
+                        "kind": "virtual_machine",
+                        "ref": "50000000-0000-0000-0000-000000000001"
+                    },
+                    {
+                        "kind": "hypervisor_host",
+                        "ref": "51000000-0000-0000-0000-000000000001"
+                    },
+                    {
+                        "kind": "device",
+                        "ref": "20000000-0000-0000-0000-000000000003"
+                    }
+                ]
+            },
+            "compact_provenance": [
+                "vmware:virtual_server:40000000-0000-0000-0000-000000000003",
+                "vmware:pool:41000000-0000-0000-0000-000000000003",
+                "vmware:member:/Common/rd2-routevm:443",
+                "vmware:virtual_machine:50000000-0000-0000-0000-000000000001",
+                "vmware:hypervisor_host:51000000-0000-0000-0000-000000000001",
+                "vmware:device:20000000-0000-0000-0000-000000000003"
+            ],
+            "derived_at": "2026-07-20T12:00:00+00:00"
+        }
+    ]
+}

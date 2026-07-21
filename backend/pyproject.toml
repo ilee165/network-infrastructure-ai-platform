@@ -119,6 +119,8 @@ dev = [
     # In-memory async SQLite for DB-backed unit tests (Postgres-only DDL is
     # exercised by `integration`-marked tests against compose Postgres).
     "aiosqlite",
+    # W4-T3 report conformance extracts real emitted PDF text in the test layer.
+    "pypdf>=6.14,<7",
 ]
 
 # Production KMS backends (W6-T2, ADR-0032 §2). OPTIONAL by design: a deployment

@@ -1,0 +1,88 @@
+{
+  "_meta": {
+    "task": "P4 W4-T1 — plugin conformance and cross-vendor routing no-regression",
+    "description": "Pinned P3 vendor/capability conformance result set plus the two P4 Vendor-Wave-3 additions. The deterministic P4 eval compares the live registry and real conformance cases with this artifact; routing roster and allow-list comparison remains anchored to p3_routing_baseline_matrix.json.",
+    "p3_routing_baseline": "p3_routing_baseline_matrix.json",
+    "expected_routing_roster_count": 9
+  },
+  "p3_baseline": {
+    "bluecat": {
+      "capabilities": ["ddi_dhcp", "ddi_dns", "ddi_ipam", "discovery_api"],
+      "conformance_module": "tests.plugins.test_bluecat_conformance",
+      "result": "passed"
+    },
+    "cisco_ios": {
+      "capabilities": ["acl", "bgp", "config_backup", "config_deploy", "config_restore", "discovery_snmp", "discovery_ssh", "interfaces", "neighbors_cdp", "neighbors_lldp", "ospf", "routes"],
+      "conformance_module": "tests.plugins.test_cisco_ios_conformance",
+      "result": "passed"
+    },
+    "cisco_iosxe": {
+      "capabilities": ["acl", "bgp", "config_backup", "config_deploy", "config_restore", "discovery_snmp", "discovery_ssh", "interfaces", "neighbors_cdp", "neighbors_lldp", "ospf", "routes"],
+      "conformance_module": "tests.plugins.test_cisco_iosxe_conformance",
+      "result": "passed"
+    },
+    "cisco_nxos": {
+      "capabilities": ["acl", "bgp", "config_backup", "config_deploy", "config_restore", "discovery_snmp", "discovery_ssh", "ha_status", "interfaces", "neighbors_cdp", "neighbors_lldp", "ospf", "routes"],
+      "conformance_module": "tests.plugins.test_cisco_nxos_conformance",
+      "result": "passed"
+    },
+    "eos": {
+      "capabilities": ["acl", "bgp", "config_backup", "config_deploy", "config_restore", "discovery_snmp", "discovery_ssh", "interfaces", "neighbors_lldp", "ospf", "routes"],
+      "conformance_module": "tests.plugins.test_eos_conformance",
+      "result": "passed"
+    },
+    "fortios": {
+      "capabilities": ["config_backup", "discovery_api", "firewall_policy", "ha_status", "interfaces", "routes"],
+      "conformance_module": "tests.plugins.test_fortios_conformance",
+      "result": "passed"
+    },
+    "infoblox": {
+      "capabilities": ["ddi_dhcp", "ddi_dns", "ddi_ipam", "discovery_api"],
+      "conformance_module": "tests.plugins.test_infoblox_conformance",
+      "result": "passed"
+    },
+    "junos": {
+      "capabilities": ["acl", "bgp", "config_backup", "config_deploy", "config_restore", "discovery_snmp", "discovery_ssh", "interfaces", "neighbors_lldp", "ospf", "routes"],
+      "conformance_module": "tests.plugins.test_junos_conformance",
+      "result": "passed"
+    },
+    "panos": {
+      "capabilities": ["config_backup", "discovery_api", "firewall_policy", "ha_status", "interfaces", "routes"],
+      "conformance_module": "tests.plugins.test_panos_conformance",
+      "result": "passed"
+    },
+    "spatiumddi": {
+      "capabilities": ["ddi_dhcp", "ddi_dns", "ddi_ipam", "discovery_api"],
+      "conformance_module": "tests.plugins.test_spatiumddi_conformance",
+      "result": "passed"
+    }
+  },
+  "p4_additions": {
+    "f5_bigip": {
+      "capabilities": ["adc_services", "config_backup_archive", "config_restore_archive", "discovery_api", "ha_status", "interfaces", "routes"],
+      "conformance_module": "tests.plugins.test_f5_bigip_conformance",
+      "result": "passed"
+    },
+    "vmware": {
+      "capabilities": ["discovery_api", "virtualization_inventory"],
+      "conformance_module": "tests.plugins.test_vmware_conformance",
+      "result": "passed"
+    }
+  },
+  "routing_cases": [
+    {
+      "id": "p4-f5-bigip-adc-inventory",
+      "vendor_id": "f5_bigip",
+      "capability": "adc_services",
+      "prompt": "On the F5 BIG-IP ltm-prod-07, show me the configured virtual servers and their backend pools.",
+      "expected_specialist": "discovery"
+    },
+    {
+      "id": "p4-vmware-virtualization-inventory",
+      "vendor_id": "vmware",
+      "capability": "virtualization_inventory",
+      "prompt": "In VMware vCenter vc-east-03, which virtual machines are powered on and which ESXi hosts run them?",
+      "expected_specialist": "discovery"
+    }
+  ]
+}

@@ -5,7 +5,7 @@
 | **Wave** | P4 W4 — Evals + phase-exit gate |
 | **Owner** | `wf-eval-designer` (strong) |
 | **Review tier** | **strong** |
-| **Depends on** | **W2** (derivation + impact surface shipped) |
+| **Depends on** | **W2** (derivation + impact surface shipped), **W4-T2A** (route-domain/provenance corrections) |
 | **ADRs** | ADR-0052 §2/§4/§6/§8 (the contracts being proven) |
 | **PRODUCTION.md** | §2.4, §11 (P4-PLAN §5 W4: "green and biting") |
 | **Status** | Proposed |
@@ -26,26 +26,35 @@ disambiguation, unreconcilable members), VM placement chains (incl. Tools-less
 VMs, template exclusion, hosts absent from inventory), DNS reconciliation
 (CNAME hops), manual tags + name-collision attach + manual-wins precedence;
 expected-graph fixtures with per-edge source/provenance expectations;
-precision/recall computation + thresholds (bound here, recorded in the
-readiness doc); impact-analysis correctness cases over the derived graph
+precision/recall computation gated at exact-match precision `1.0` and recall
+`1.0`; impact-analysis correctness cases over the derived graph
 (both directions, indirect chains) + the citation contract (every claim has
 source + refs + watermark); idempotency eval (derive twice ⇒ identical graph);
-**negative controls**: a planted wrong `DEPENDS_ON` edge in the
-expected-fixtures fails; a suppressed source's edges disappearing is detected
-(recall drop bites).
+**negative controls**: checked-in tests assert that a planted wrong
+`DEPENDS_ON` edge trips precision and suppressing a source trips recall
+(assert-red-inside-green).
 
-**Out** — changes to derivation logic (evals prove; fixes go back through
-W2-owned files as separate findings); flow-telemetry cases (out of scope);
-real-LLM agent runs (opt-in gate).
+**Out** — changes to derivation logic. T2A is the production-correction
+precondition; T2 remains eval-only, and any later runtime finding lands as a
+separate correction rather than being hidden in the corpus commit;
+flow-telemetry cases (out of scope); real-LLM agent runs (opt-in gate).
 
 ## Requirements (grounded in ADR-0052 §4/§6, P4-PLAN §0a)
 
 1. **All four sources produce provenance-carrying edges in the corpus** —
    the ADR-0052 §6.4 exit criterion, demonstrated not assumed.
-2. **Thresholds are explicit** — precision/recall numbers named in the corpus
-   config; below-threshold fails CI.
-3. **The negative control RUNS and BITES** — planted wrong edge ⇒ red,
-   removal ⇒ green, both evidenced with run URLs.
+2. **Exact match is the gate** — precision `1.0` and recall `1.0` on the curated
+   corpus. Any miss is a pipeline or fixture defect to adjudicate, never a
+   reason to lower the threshold. A genuinely ambiguous case may move to a
+   labeled known-hard partition excluded from the gate only with rationale in
+   `P4-RELEASE-READINESS.md`; ADR-defined exclusions are expected exclusions,
+   not false negatives.
+3. **The negative controls RUN and BITE continuously** — checked-in tests
+   assert the scorer rejects a planted wrong edge and a suppressed source
+   inside the otherwise-green blocking job. T2 records only task status,
+   focused commands/results, bite test node IDs, and the blocking-CI collection
+   path. T4 later records the landed T2 commit SHA and final release-HEAD
+   blocking run/job URL and result. A temporary red commit is not evidence.
 4. **Runs under real PG where derivation writes** (`tests/pg/` /
    `pg-integration`) — idempotency asserted there, not on SQLite.
 
@@ -60,14 +69,19 @@ real-LLM agent runs (opt-in gate).
 - Derive-twice idempotency (its own eval check): running derivation twice
   over the corpus yields a byte-identical expected graph — no dupes, no
   unstable IDs.
-- Bite proofs: planted wrong edge red; threshold trip red on a degraded
-  fixture set.
+- Bite proofs: assert-red-inside-green wrong-edge and suppressed-source
+  mutations prove the `1.0` thresholds trip on every CI run. In the ledger's T2
+  section, record only task status, focused verification commands/results,
+  bite test node IDs, and the blocking-CI collection path. These are
+  non-self-referential pre-commit records. T2 must not add its own commit SHA,
+  a final release HEAD, or a blocking run/job URL; T4 records the landed T2
+  commit SHA and owns final revalidation evidence.
 
 ## Exit criteria
 
 - [ ] Corpus covers all four sources + interaction cases; expected graphs carry per-edge source/provenance.
-- [ ] Precision/recall thresholds enforced in CI; impact + citation correctness green.
-- [ ] Planted wrong-edge negative control proven to bite (evidence recorded).
+- [ ] Precision `1.0` and recall `1.0` enforced in CI; impact + citation correctness green.
+- [ ] Wrong-edge and suppressed-source controls assert failure inside green; T2 records only task status, focused commands/results, bite test node IDs, and the blocking-CI collection path, leaving landed-task and final-release evidence to T4.
 - [ ] One atomic commit.
 
 ## Workflow

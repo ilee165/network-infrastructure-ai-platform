@@ -1,6 +1,6 @@
 # ADR-0052: Application-Dependency Topology — PG-Backed `Application`/`DEPENDS_ON` Layer, Four Derivation Sources, Direct-Write Tagging Under RBAC
 
-**Status:** Proposed | **Date:** 2026-07-05 | **Milestone:** P4 W0
+**Status:** Accepted | **Date:** 2026-07-05 | **Accepted:** 2026-07-21 | **Milestone:** P4
 
 ## Context
 

@@ -311,6 +311,57 @@ exit criteria; `backend/app/plugins/transport/{ssh,junos_ssh,ssh_params}.py`.
 
 ---
 
+## P4 W4 review follow-up
+
+### L-CI-2 — PR path filters apply to the whole PR diff, not only the tip commit
+
+**Bit us:** P4 W4 release evidence claimed its documentation-only T4 tip would
+not run regular CI. That is true for a docs-only `push`, but false for the
+`pull_request` run on PR #167: the PR still contained code changes, so the full
+workflow ran and passed at the actual final HEAD.
+
+**Rule:** Before choosing an evidence HEAD, inspect the completed check run for
+the final PR SHA. Never infer PR-run selection from only the latest commit's
+paths. Prefer the final-HEAD run when it exists; distinguish `push` and
+`pull_request` path-filter semantics explicitly.
+
+**Hits next:** Phase-exit readiness records, ADR acceptance flips, and any
+release ledger that cites a pre-closeout candidate SHA.
+
+### L-CI-3 — Every package-manager network acquisition uses the egress retry wrapper
+
+**Bit us:** The P4 PDF evaluation added direct `apt-get update` and `apt-get
+install` commands while adjacent pip/npm acquisitions used
+`ci/scripts/retry-egress.sh`. A transient Ubuntu mirror failure could therefore
+fail the blocking backend gate without retry.
+
+**Rule:** Wrap each networked package-manager command—including OS package
+index refresh and installation—with the shared retry helper and an explicit
+per-attempt timeout. Add a structural mutation test that fails when the wrapper
+is removed from any command.
+
+**Hits next:** New CI-native libraries, image build prerequisites, and tool
+bootstrap steps.
+
+### L-TOPO-1 — Provenance-shape changes cause expected one-time reconciliation churn
+
+**Bit us:** Adding the missing virtual-server → pool → member step changed the
+canonical provenance for existing VMware/DNS-derived dependency rows. The
+first post-upgrade derivation run will legitimately rewrite those rows, bump
+`updated_at`, and produce a one-time `updated` statistic spike.
+
+**Rule:** Treat provenance as reconciled data with schema-like operational
+impact. When its canonical shape changes, document the expected first-run churn
+and distinguish it from continuing drift; continuing rewrites after the first
+successful reconciliation are a defect.
+
+**Hits next:** Dependency source-chain enrichment, provenance versioning, and
+topology migration/runbook work.
+
+**Evidence:** PR #167 review follow-up; final-head CI run `29840145528`.
+
+---
+
 ## Related
 
 | Doc | Scope |

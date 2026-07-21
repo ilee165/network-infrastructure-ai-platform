@@ -228,6 +228,11 @@ def _dns_name_key(name: str) -> str:
     return name.strip().rstrip(".").lower()
 
 
+def _is_default_route_domain(value: object) -> bool:
+    """Whether an F5 member belongs to the global/default route domain."""
+    return value is None or str(value).strip() in {"", "0"}
+
+
 class _AppKey:
     """Internal union key of a dependency's application (existing id XOR planned ref)."""
 
@@ -402,11 +407,12 @@ def derive_application_dependencies(
             if not isinstance(entry, Mapping):
                 continue
             raw_name = str(entry.get("name") or "").strip()
-            address = _canonical_ip(entry.get("address"))
+            raw_address = _canonical_ip(entry.get("address"))
+            address = raw_address if _is_default_route_domain(entry.get("vrf")) else None
             fqdn_raw = entry.get("fqdn")
             fqdn_key = _dns_name_key(str(fqdn_raw)) if fqdn_raw else None
             member_name = raw_name or (
-                f"{address}:{entry.get('port')}" if address else fqdn_key or "<member>"
+                f"{raw_address}:{entry.get('port')}" if raw_address else fqdn_key or "<member>"
             )
             parsed.append((member_name, address, fqdn_key))
 
@@ -420,7 +426,13 @@ def derive_application_dependencies(
         ):
             member_step = ProvenanceStep(kind="member", ref=member_name)
             member_evidence.append(
-                _MemberEvidence(app_key, (vs_step, member_step), member_name, address, fqdn_key)
+                _MemberEvidence(
+                    app_key,
+                    (vs_step, pool_step, member_step),
+                    member_name,
+                    address,
+                    fqdn_key,
+                )
             )
             target = index.resolve(address) if address is not None else None
             if target is None:

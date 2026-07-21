@@ -1,0 +1,322 @@
+{
+    "schema_version": 1,
+    "_comment": "Independent P4-W4 T3 completeness anchors. The large expected row sets remain owned by the four W3 golden JSON files; these anchors deliberately state only the evidence items whose omission must fail the eval.",
+    "cases": [
+        {
+            "kind": "change",
+            "golden": "tests/engines/reports/golden/change_report_golden.json",
+            "anchors": [
+                {
+                    "name": "change-request-lifecycle",
+                    "section": "Change requests",
+                    "columns": [
+                        "CR id",
+                        "State"
+                    ],
+                    "required_rows": [
+                        [
+                            "00000000-0000-0000-0000-000000000c01",
+                            "completed"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c02",
+                            "draft"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c03",
+                            "rolled_back"
+                        ]
+                    ]
+                },
+                {
+                    "name": "change-request-transition-sequences",
+                    "section": "Lifecycle transitions",
+                    "columns": [
+                        "CR id",
+                        "Lifecycle event"
+                    ],
+                    "required_rows": [
+                        [
+                            "00000000-0000-0000-0000-000000000c01",
+                            "created"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c01",
+                            "draft_to_pending_approval"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c01",
+                            "pending_approval_to_approved"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c01",
+                            "approved_to_executing"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c01",
+                            "executing_to_completed"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c02",
+                            "created"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c02",
+                            "draft_to_pending_approval"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c02",
+                            "pending_approval_to_draft"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c03",
+                            "created"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c03",
+                            "draft_to_pending_approval"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c03",
+                            "pending_approval_to_approved"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c03",
+                            "approved_to_executing"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c03",
+                            "executing_to_failed"
+                        ],
+                        [
+                            "00000000-0000-0000-0000-000000000c03",
+                            "failed_to_rolled_back"
+                        ]
+                    ]
+                }
+            ]
+        },
+        {
+            "kind": "compliance_posture",
+            "golden": "tests/engines/reports/golden/compliance_posture_golden.json",
+            "anchors": [
+                {
+                    "name": "daily-posture-days-and-gaps",
+                    "section": "Daily posture trend",
+                    "columns": [
+                        "Date (UTC)",
+                        "Runs recorded",
+                        "Devices evaluated",
+                        "Pass",
+                        "Violation",
+                        "Skipped"
+                    ],
+                    "required_rows": [
+                        [
+                            "2026-07-01",
+                            "1",
+                            "2",
+                            "2",
+                            "1",
+                            "1"
+                        ],
+                        [
+                            "2026-07-02",
+                            "0",
+                            "gap",
+                            "gap",
+                            "gap",
+                            "gap"
+                        ],
+                        [
+                            "2026-07-03",
+                            "2",
+                            "2",
+                            "1",
+                            "2",
+                            "1"
+                        ],
+                        [
+                            "2026-07-04",
+                            "0",
+                            "gap",
+                            "gap",
+                            "gap",
+                            "gap"
+                        ],
+                        [
+                            "2026-07-05",
+                            "0",
+                            "gap",
+                            "gap",
+                            "gap",
+                            "gap"
+                        ],
+                        [
+                            "2026-07-06",
+                            "0",
+                            "gap",
+                            "gap",
+                            "gap",
+                            "gap"
+                        ],
+                        [
+                            "2026-07-07",
+                            "0",
+                            "gap",
+                            "gap",
+                            "gap",
+                            "gap"
+                        ]
+                    ]
+                }
+            ]
+        },
+        {
+            "kind": "access_review",
+            "golden": "tests/engines/reports/golden/access_review_golden.json",
+            "anchors": [
+                {
+                    "name": "break-glass-event-keys",
+                    "section": "Break-glass local logins in period",
+                    "columns": [
+                        "Time (UTC)",
+                        "Actor",
+                        "User id",
+                        "Request id"
+                    ],
+                    "required_rows": [
+                        [
+                            "2026-07-03T09:00:00+00:00",
+                            "user:alice.admin",
+                            "00000000-0000-0000-0000-00000000ee01",
+                            "none"
+                        ],
+                        [
+                            "2026-07-15T11:30:00+00:00",
+                            "user:alice.admin",
+                            "00000000-0000-0000-0000-00000000ee01",
+                            "00000000-0000-0000-0000-00000000fe01"
+                        ]
+                    ]
+                }
+            ]
+        },
+        {
+            "kind": "audit_integrity",
+            "golden": "tests/engines/reports/golden/audit_integrity_golden.json",
+            "anchors": [
+                {
+                    "name": "daily-integrity-days-and-gaps",
+                    "section": "Daily verification outcomes",
+                    "columns": [
+                        "Date (UTC)",
+                        "Runs recorded",
+                        "Chain outcome",
+                        "Append-only grant check"
+                    ],
+                    "required_rows": [
+                        [
+                            "2026-07-01",
+                            "1",
+                            "clean",
+                            "clean"
+                        ],
+                        [
+                            "2026-07-02",
+                            "1",
+                            "clean",
+                            "clean"
+                        ],
+                        [
+                            "2026-07-03",
+                            "0",
+                            "gap",
+                            "gap"
+                        ],
+                        [
+                            "2026-07-04",
+                            "1",
+                            "clean",
+                            "clean"
+                        ],
+                        [
+                            "2026-07-05",
+                            "1",
+                            "break",
+                            "clean"
+                        ],
+                        [
+                            "2026-07-06",
+                            "1",
+                            "clean",
+                            "violation"
+                        ],
+                        [
+                            "2026-07-07",
+                            "1",
+                            "clean",
+                            "clean"
+                        ]
+                    ]
+                },
+                {
+                    "name": "generation-time-attestation-fields",
+                    "section": "Append-only grant attestation (generation time)",
+                    "columns": [
+                        "Field",
+                        "Value"
+                    ],
+                    "required_rows": [
+                        [
+                            "Table",
+                            "audit_log (parent and every partition)"
+                        ],
+                        [
+                            "Attested at (UTC)",
+                            "2026-07-08T00:05:00+00:00"
+                        ],
+                        [
+                            "Method",
+                            "live PostgreSQL catalog query (pg_class relacl via aclexplode) at generation time; never cached"
+                        ],
+                        [
+                            "UPDATE/DELETE grants found",
+                            "unavailable"
+                        ],
+                        [
+                            "Grants",
+                            "none"
+                        ],
+                        [
+                            "Attestation",
+                            "unavailable: this database backend exposes no grant catalog (non-PostgreSQL)"
+                        ]
+                    ]
+                },
+                {
+                    "name": "integrity-gap-finding",
+                    "section": "Integrity findings",
+                    "columns": [
+                        "Finding",
+                        "Scope"
+                    ],
+                    "required_rows": [
+                        [
+                            "verification-gap",
+                            "2026-07-03"
+                        ],
+                        [
+                            "chain-break",
+                            "2026-07-05"
+                        ],
+                        [
+                            "append-only-grant",
+                            "2026-07-06"
+                        ]
+                    ]
+                }
+            ]
+        }
+    ]
+}

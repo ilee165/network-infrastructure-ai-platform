@@ -125,13 +125,20 @@ def make_vs(
     )
 
 
-def member(name: str, address: str | None, port: int, *, fqdn: str | None = None) -> dict[str, Any]:
+def member(
+    name: str,
+    address: str | None,
+    port: int,
+    *,
+    fqdn: str | None = None,
+    vrf: str | None = None,
+) -> dict[str, Any]:
     return {
         "name": name,
         "address": address,
         "fqdn": fqdn,
         "port": port,
-        "vrf": None,
+        "vrf": vrf,
         "admin_state": "enabled",
         "availability": "available",
     }
@@ -342,6 +349,35 @@ def test_f5_unreconcilable_member_emits_no_edge_but_is_counted() -> None:
     assert len(plan.applications) == 1
 
 
+def test_f5_nondefault_route_domain_member_does_not_match_global_inventory() -> None:
+    plan = _derive(
+        virtual_servers=[make_vs("/Common/payroll.corp.example.com")],
+        pools=[make_pool([member("/Common/rd2-web01:80", "10.0.0.11", 80, vrf="2")])],
+    )
+
+    assert _deps(plan, "f5") == []
+    assert plan.stats.f5_members_unreconciled == 1
+
+
+def test_f5_default_route_domain_variants_reconcile_global_inventory() -> None:
+    absent = member("/Common/absent:80", "10.0.0.11", 80)
+    absent.pop("vrf")
+    variants = (
+        absent,
+        member("/Common/empty:80", "10.0.0.11", 80, vrf=""),
+        member("/Common/zero:80", "10.0.0.11", 80, vrf="0"),
+    )
+
+    for entry in variants:
+        plan = _derive(
+            virtual_servers=[make_vs("/Common/payroll.corp.example.com")],
+            pools=[make_pool([entry])],
+        )
+        (dep,) = _deps(plan, "f5")
+        assert (dep.target_kind, dep.target_ref) == ("ip_address", str(IF_WEB1))
+        assert plan.stats.f5_members_unreconciled == 0
+
+
 def test_f5_fqdn_seed_heuristic_only_for_valid_fqdn_leaves() -> None:
     fqdn_vs = make_vs("/Common/payroll.corp.example.com", row_id=VS_ROW, pool_name=None)
     plain_vs = make_vs("/Common/vs_web", row_id=POOL_ROW, pool_name=None)
@@ -451,12 +487,29 @@ def test_vmware_member_ip_to_guest_ip_link_extends_chain_to_host_device() -> Non
     assert (dep.target_kind, dep.target_ref) == ("device", str(ESX1_DEV))
     assert _steps(dep) == [
         ("virtual_server", str(VS_ROW)),
+        ("pool", str(POOL_ROW)),
         ("member", "/Common/web01:80"),
         ("virtual_machine", str(VM_WEB)),
         ("hypervisor_host", str(HOST_ESX1)),
         ("device", str(ESX1_DEV)),
     ]
     assert plan.stats.vmware_edges == 1
+
+
+def test_vmware_nondefault_route_domain_member_ip_does_not_match_guest_ip() -> None:
+    plan = _derive(
+        virtual_servers=[make_vs("/Common/payroll.corp.example.com")],
+        pools=[make_pool([member("/Common/rd2-web01:80", "10.0.0.11", 80, vrf="2")])],
+        virtual_machines=[make_vm("web01vm", row_id=VM_WEB, guest_ips=["10.0.0.11"])],
+        hypervisor_hosts=[
+            make_host("esx1.corp.example.com", row_id=HOST_ESX1, management_ip="10.0.1.5")
+        ],
+    )
+
+    assert _deps(plan, "f5") == []
+    assert plan.stats.f5_members_unreconciled == 1
+    assert _deps(plan, "vmware") == []
+    assert plan.stats.vmware_edges == 0
 
 
 def test_vmware_fqdn_member_joins_guest_hostname_despite_no_address() -> None:
@@ -483,6 +536,63 @@ def test_vmware_fqdn_member_joins_guest_hostname_despite_no_address() -> None:
     (dep,) = _deps(plan, "vmware")
     assert (dep.target_kind, dep.target_ref) == ("device", str(ESX1_DEV))
     assert ("virtual_machine", str(VM_APP)) in _steps(dep)
+
+
+def test_vmware_nondefault_route_domain_member_fqdn_still_matches_guest_hostname() -> None:
+    plan = _derive(
+        virtual_servers=[make_vs("/Common/payroll.corp.example.com")],
+        pools=[
+            make_pool(
+                [
+                    member(
+                        "/Common/rd2-appvm:443",
+                        "10.0.0.99",
+                        443,
+                        fqdn="appvm.corp.example.com",
+                        vrf="2",
+                    )
+                ]
+            )
+        ],
+        virtual_machines=[
+            make_vm(
+                "appvm",
+                row_id=VM_APP,
+                guest_ips=["192.0.2.44"],
+                guest_hostname="APPVM.corp.example.COM",
+            )
+        ],
+        hypervisor_hosts=[
+            make_host("esx1.corp.example.com", row_id=HOST_ESX1, management_ip="10.0.1.5")
+        ],
+    )
+
+    assert _deps(plan, "f5") == []
+    assert plan.stats.f5_members_unreconciled == 1
+    (dep,) = _deps(plan, "vmware")
+    assert (dep.target_kind, dep.target_ref) == ("device", str(ESX1_DEV))
+    assert _steps(dep) == [
+        ("virtual_server", str(VS_ROW)),
+        ("pool", str(POOL_ROW)),
+        ("member", "/Common/rd2-appvm:443"),
+        ("virtual_machine", str(VM_APP)),
+        ("hypervisor_host", str(HOST_ESX1)),
+        ("device", str(ESX1_DEV)),
+    ]
+
+
+def test_vmware_tools_less_vm_does_not_link_member() -> None:
+    plan = _derive(
+        virtual_servers=[make_vs("/Common/payroll.corp.example.com")],
+        pools=[make_pool([member("/Common/web01:80", "10.0.0.11", 80)])],
+        virtual_machines=[make_vm("web01vm", row_id=VM_WEB, guest_ips=[])],
+        hypervisor_hosts=[
+            make_host("esx1.corp.example.com", row_id=HOST_ESX1, management_ip="10.0.1.5")
+        ],
+    )
+
+    assert _deps(plan, "vmware") == []
+    assert plan.stats.vmware_edges == 0
 
 
 def test_vmware_no_edge_when_host_not_an_inventory_device() -> None:
