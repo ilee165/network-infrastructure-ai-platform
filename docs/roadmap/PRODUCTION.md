@@ -218,7 +218,8 @@ gantt
 > **P4 EXIT 2026-07-21 (W4-T4 phase-exit gate).** All P4-scoped §11 gates and
 > the W4 vendor/routing, application-derivation, and report-conformance evals
 > pass simultaneously at final PR HEAD `4707f09a` (run `29840145528`;
-> required `all-gates` and all blocking jobs success). The T4 closeout is
+> required `all-gates` and all blocking jobs success), then squash-merged
+> through PR #167 as `77d8dd63` on 2026-07-21. The T4 closeout is
 > docs-only, but `pull_request` path filtering evaluates the PR's complete diff,
 > so the full suite also verified the closeout documents. **G-SEC PASS
 > (continuous), G-MNT PASS, G-OBS PASS (P4 slice), and G-SCA/G-REL mechanism

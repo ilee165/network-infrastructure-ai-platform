@@ -5,6 +5,7 @@
 **Evidence date:** 2026-07-21
 
 **CI-evidenced final HEAD:** `4707f09a260f34ee2126dc59ea8fa7ed7d18667e`
+**Merged:** PR #167 was squash-merged to `main` as `77d8dd63db92ed92f3b80661c74269da9954acb5` on 2026-07-21.
 
 **Blocking run:** [GitHub Actions run 29840145528](https://github.com/ilee165/network-infrastructure-ai-platform/actions/runs/29840145528) — success
 

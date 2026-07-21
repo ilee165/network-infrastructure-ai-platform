@@ -1,7 +1,7 @@
 # P4 Build Plan — Vendor Wave 3 (F5 BIG-IP + VMware) + Application-Dependency Topology + Compliance & Audit Reporting
 
 **Project:** AI Network Operations Platform
-**Status:** **COMPLETE — P4 EXIT 2026-07-21.** W0–W3 are merged (PRs #117–#119, #123, and #166); W4's three biting eval suites and all P4-scoped gates passed at final PR HEAD `4707f09a260f34ee2126dc59ea8fa7ed7d18667e` in CI run `29840145528`. See `P4-RELEASE-READINESS.md`. Entry condition was satisfied by **P3-Platform COMPLETE** (`docs/roadmap/P3-RELEASE-READINESS.md` — all five §11 gates PASS; ADRs 0042–0047 Accepted, 0048 Rejected).
+**Status:** **COMPLETE — P4 EXIT 2026-07-21.** W0–W4 are merged (PRs #117–#119, #123, #166, and #167); W4's three biting eval suites and all P4-scoped gates passed at final PR HEAD `4707f09a260f34ee2126dc59ea8fa7ed7d18667e` in CI run `29840145528`, then PR #167 was squash-merged as `77d8dd63`. See `P4-RELEASE-READINESS.md`. Entry condition was satisfied by **P3-Platform COMPLETE** (`docs/roadmap/P3-RELEASE-READINESS.md` — all five §11 gates PASS; ADRs 0042–0047 Accepted, 0048 Rejected).
 **Authority:** Bound by `CLAUDE.md`, `docs/architecture/DECISIONS-BRIEF.md` (D1–D16), and `docs/roadmap/PRODUCTION.md` §1 (phase table), §2.4 (Wave 3), §2.6 (per-wave exit criteria), §7 (compliance & audit reporting), §11 (gates).
 **Scope source:** `PRODUCTION.md` Phase **P4** = Wave 3 vendors **F5 BIG-IP + VMware**; **application-dependency topology** (per MVP traceability); the **compliance & audit reporting suite** (§7). This is the recorded P4 inheritance from the P3 exit marker (PRODUCTION.md §1 "P4 inheritance" + `P3-RELEASE-READINESS.md` §4) — nothing else rides in.
 
@@ -15,7 +15,7 @@
 | **W1 — F5 + VMware** | **Merged** | PR #118: both plugins and inventory surfacing; live-lab validation remains deferred as planned |
 | **W2 — application dependencies** | **Merged** | PR #119 plus optimistic-concurrency follow-up PR #123: schema/projection, derivation, tagging, impact reads |
 | **W3 — compliance/audit reporting** | **Merged** | PR #166, squash `7298f4b8` (2026-07-19): T1–T6, with 27 validated review findings remediated in four fix waves and 18/18 required checks green before merge. The [review report](../reviews/P4-W3-PR166-REVIEW.md) is historical evidence, not open status. |
-| **W4 — evals + phase exit** | **Complete** | Final PR HEAD `4707f09a`, run `29840145528`: all required jobs and `all-gates` green; T1/T2/T3 and the docs-only T4 closeout revalidated at one HEAD. |
+| **W4 — evals + phase exit** | **Merged** | PR #167, squash `77d8dd63` (2026-07-21). Final PR HEAD `4707f09a`, run `29840145528`: all required jobs and `all-gates` green; T1/T2/T3 and the docs-only T4 closeout revalidated at one HEAD. |
 
 W3 is complete at its merged head. W4 adds proof and performs the phase-exit
 audit; it does not reopen the historical W3 review state.

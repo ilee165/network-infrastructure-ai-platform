@@ -107,7 +107,8 @@ and **`wf-release-auditor`** (gate evidence). The LAST P4 wave and the
 phase-exit gate. Apart from the bounded T2A correctness prerequisite, it builds
 the *proof*, not new features. **Rebase the W4 branch onto `origin/main` first.**
 
-**Current state:** all W4 tasks are complete. Final PR HEAD `4707f09a` passed
+**Current state:** all W4 tasks are complete and PR #167 was squash-merged as
+`77d8dd63` on 2026-07-21. Final PR HEAD `4707f09a` passed
 run `29840145528`, including the docs-only T4 closeout because pull-request path
 filtering evaluated the PR's complete changed-file set.
 
