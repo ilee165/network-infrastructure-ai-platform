@@ -61,7 +61,11 @@ from app.schemas.normalized import (
     AdcProtocol,
     HaPeerRole,
 )
-from tests.plugins.conformance import ConformanceCase, make_conformance_cases
+from tests.plugins.conformance import (
+    ConformanceCase,
+    assert_fixture_case_completeness,
+    make_conformance_cases,
+)
 
 # ---------------------------------------------------------------------------
 # Fake credentials — never real secrets (obviously-fake sentinels).
@@ -434,7 +438,7 @@ def test_suite_covers_every_declared_capability() -> None:
     ids = {case.id for case in CASES}
     for capability in F5BigipPlugin.capabilities:
         assert f"implementation:{capability.value}" in ids
-        assert f"fixtures:{capability.value}" in ids
+    assert_fixture_case_completeness(F5BigipPlugin(), CASES)
 
 
 # ---------------------------------------------------------------------------

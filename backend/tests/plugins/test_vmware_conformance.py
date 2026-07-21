@@ -51,7 +51,11 @@ from app.schemas.normalized import (
     VirtualSwitchType,
     VmPowerState,
 )
-from tests.plugins.conformance import ConformanceCase, make_conformance_cases
+from tests.plugins.conformance import (
+    ConformanceCase,
+    assert_fixture_case_completeness,
+    make_conformance_cases,
+)
 
 # Obviously-fake secrets — never real credentials.
 _FAKE_USERNAME = "netops-ro@vsphere.local"
@@ -374,7 +378,7 @@ def test_suite_covers_every_declared_capability() -> None:
     ids = {case.id for case in CASES}
     for capability in VmwarePlugin.capabilities:
         assert f"implementation:{capability.value}" in ids
-        assert f"fixtures:{capability.value}" in ids
+    assert_fixture_case_completeness(VmwarePlugin(), CASES)
 
 
 # ---------------------------------------------------------------------------

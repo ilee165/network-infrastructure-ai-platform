@@ -113,6 +113,7 @@ __all__ = [
     "ConformanceCase",
     "FixtureReplayTransport",
     "FixtureSnmpTransport",
+    "assert_fixture_case_completeness",
     "make_conformance_cases",
 ]
 
@@ -376,6 +377,29 @@ def make_conformance_cases(
                 )
             )
     return cases
+
+
+def assert_fixture_case_completeness(
+    plugin: VendorPlugin,
+    cases: Sequence[ConformanceCase],
+) -> None:
+    """Assert every capability declared by *plugin* has a fixture case.
+
+    This check is deliberately opt-in.  Generic case generation continues to
+    permit capabilities whose typed fixture interface has not landed yet, while
+    release-certified plugins can require complete fixture-family coverage and
+    catch a missing ``_INTERFACE_SPECS`` entry instead of silently skipping it.
+    """
+    case_ids = {case.id for case in cases}
+    missing = sorted(
+        capability.value
+        for capability in plugin.capabilities
+        if f"fixtures:{capability.value}" not in case_ids
+    )
+    assert not missing, (
+        f"{plugin.vendor_id}: declared capabilities missing fixtures:* "
+        f"conformance families: {missing}"
+    )
 
 
 # ---------------------------------------------------------------------------

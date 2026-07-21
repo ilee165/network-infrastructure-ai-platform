@@ -20,13 +20,13 @@ rewrite the task-owned sections.
 
 **Section owner:** W4-T1 only
 
-| Evidence field | Pending value |
+| Evidence field | T1 value |
 |---|---|
-| Task status | PENDING — not yet executed |
-| Focused verification command(s) | PENDING |
-| Focused verification result(s) | PENDING |
-| Bite test node IDs | PENDING |
-| Blocking-CI collection path (workflow/job/selector) | PENDING |
+| Task status | **PASS (task-local)** — the pinned P3 10-vendor matrix is preserved; `f5_bigip` and `vmware` are the only P4 vendor additions; the routing roster and per-agent allow-lists remain the recorded nine-agent P3 baseline. Final release-HEAD revalidation remains T4-owned. |
+| Focused verification command(s) | `cd backend && .venv/bin/pytest tests/plugins/test_conformance.py tests/plugins/test_*_conformance.py tests/agents/eval/test_p4_vendor_conformance.py tests/agents/eval/test_m3_exit_criteria.py tests/agents/eval/test_p3_routing_no_regression.py -q`; `cd backend && .venv/bin/pytest --collect-only -q tests/agents/eval/test_p4_vendor_conformance.py`; `cd backend && .venv/bin/pytest tests/agents/eval/test_p4_vendor_conformance.py::test_vendor_conformance_module_substitution_is_rejected tests/agents/eval/test_p4_vendor_conformance.py::test_missing_vmware_interface_spec_is_rejected -q` |
+| Focused verification result(s) | `512 passed in 4.62s`; `10 tests collected in 0.06s`; bite nodes `2 passed in 0.09s`. Vendor delta: exactly `f5_bigip` + `vmware`; routing delta: none. |
+| Bite test node IDs | `tests/agents/eval/test_p4_vendor_conformance.py::test_vendor_conformance_module_substitution_is_rejected`; `tests/agents/eval/test_p4_vendor_conformance.py::test_missing_vmware_interface_spec_is_rejected` |
+| Blocking-CI collection path (workflow/job/selector) | `.github/workflows/ci.yml` → `backend-gates` reusable workflow → `.github/workflows/backend-gates.yml` job `backend`, step `Test (pytest + coverage)` → unfiltered `pytest -n 4 --cov=app --cov-report=term -q`, which collects `tests/agents/eval/test_p4_vendor_conformance.py`. |
 
 ## W4-T2 — Application-dependency derivation
 
