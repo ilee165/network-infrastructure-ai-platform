@@ -29,10 +29,10 @@ Cloud plugins validate over recorded fixtures; certification executes at the
 maximum feasible reduced scale with targets shipped ready-to-run; live/full
 criteria are **named deferred-accepted** with promotion paths, never silent.
 
-**This file carries the goal + exit criteria per task.** Full deep specs (the
-P4 template: Metadata · Objective · Scope In/Out · Requirements ·
-Contracts/artifacts · Test & gate plan · Exit criteria · Workflow · Risks, one
-file per task) are cut at **W0-T7** from the reviewed ADRs, mirroring P3/P4.
+**This file carries the goal + exit criteria per task.** The 16 W1–W5 deep
+specs alongside it are the executable contract, grounded in ADRs 0055–0060
+and using the P4 template: Metadata · Objective · Scope In/Out · Requirements ·
+Contracts/artifacts · Test & gate plan · Exit criteria.
 
 ---
 

@@ -1,7 +1,7 @@
 # P5 Build Plan — Vendor Wave 4 (AWS incl. Route53 + Azure) + Hybrid Cloud Topology Stitching + Scale Certification + Dispatch Durability
 
 **Project:** AI Network Operations Platform
-**Status:** **PLANNED — authored 2026-07-21, pending plan review.** No wave has started. Entry condition is satisfied: **P4 EXIT 2026-07-21** (`docs/roadmap/P4-RELEASE-READINESS.md` — all P4-scoped §11 gates PASS at final PR HEAD `4707f09a`, run `29840145528`; ADRs 0050–0053 Accepted; squash `77d8dd63`).
+**Status:** **CONTRACTED — W0 design gate authored 2026-07-21.** No implementation wave has started. Entry condition is satisfied: **P4 EXIT 2026-07-21** (`docs/roadmap/P4-RELEASE-READINESS.md` — all P4-scoped §11 gates PASS at final PR HEAD `4707f09a`, run `29840145528`; ADRs 0050–0053 Accepted; squash `77d8dd63`).
 **Authority:** Bound by `CLAUDE.md`, `docs/architecture/DECISIONS-BRIEF.md` (D1–D16), and `docs/roadmap/PRODUCTION.md` §1 (phase table), §2.5 (Wave 4), §2.6 (per-wave exit criteria), §11 (gates), and the P4 exit marker's **P5 inheritance** paragraph.
 **Scope source:** The recorded P5 inheritance (PRODUCTION.md §1 P4-exit marker + `P4-RELEASE-READINESS.md`) — nothing else rides in:
 
@@ -119,10 +119,10 @@ Per-task pattern, unchanged since P1: **1 implementer → 2 reviewers (spec +
 quality) → conditional fixer → verifier → 1 atomic commit.** Sequential tasks
 share files; parallelize only within a task. Single combined sonnet reviewer
 allowed for non-secret-surface tasks; dual strong review on the escalation set.
-ADRs numbered from **0055** (current max 0054). Per-task goals + exit criteria:
-`docs/roadmap/p5-tasks/README.md` (authored with this plan); full deep specs
-(Requirements/Contracts/Test-plan files, P4 template) are cut at **W0-T7**
-after the ADRs are reviewed, mirroring the P3/P4 pattern.
+ADRs numbered from **0055** (prior max 0054). Per-task goals + exit criteria:
+`docs/roadmap/p5-tasks/README.md`; all 16 W1–W5 deep specs use the P4
+Metadata/Objective/Scope/Requirements/Contracts/Test-plan/Exit template and
+are part of this W0 contract.
 
 | Wave | Tasks | Owner(s) | Review tier | Notes |
 |---|---|---|---|---|

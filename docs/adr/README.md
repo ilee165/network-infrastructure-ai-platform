@@ -59,5 +59,11 @@
 | [0052](0052-application-dependency-topology.md) | Application-Dependency Topology — PG-Backed `Application`/`DEPENDS_ON` Layer, Four Derivation Sources, Direct-Write Tagging Under RBAC | Accepted | P4 |
 | [0053](0053-compliance-audit-reporting.md) | Compliance & Audit Reporting Suite — Report Engine, Air-Gap CSV/PDF Rendering, Redaction Contract, SOC 2 CC-Series Default | Accepted | P4 |
 | [0054](0054-retention-and-partitioning.md) | Retention and Partitioning Policy — Checkpoint-Anchored Audit Pruning, Archive-Then-Drop, and Bounded Snapshot Cleanup | Proposed | Audit W7 |
+| [0055](0055-cloud-credential-and-normalization-model.md) | Shared Cloud Credentials and Network Normalization | Proposed | P5 W0 |
+| [0056](0056-aws-plugin-route53.md) | AWS Network and Route53 Plugin | Proposed | P5 W0 |
+| [0057](0057-azure-plugin.md) | Azure Network Plugin | Proposed | P5 W0 |
+| [0058](0058-hybrid-topology-stitching.md) | Hybrid Cloud Topology Stitching | Proposed | P5 W0 |
+| [0059](0059-durable-dispatch-outbox.md) | Durable Dispatch via Report Outbox and Platform Ratchet | Proposed | P5 W0 |
+| [0060](0060-scale-certification-methodology.md) | Scale Certification Methodology | Proposed | P5 W0 |
 
 **Conventions:** every binding decision D1–D16 has a current ADR; any deviation requires a superseding ADR (no silent drift — see `PRODUCTION.md` gate G-MNT). New capabilities, normalized models, agents, or vendors beyond the CLAUDE.md lists require an ADR *before* implementation (`REPO-STRUCTURE.md` §6–§7).

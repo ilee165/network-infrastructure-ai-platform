@@ -238,6 +238,38 @@ gantt
 > drill. Live F5/VMware golden paths promote in a live lab. Every item retains
 > the named promotion path in `P4-RELEASE-READINESS.md`.
 
+> **P5 IN PROGRESS 2026-07-21 (W0 design gate).** P5 is open and no build
+> wave has started. Its reviewed contract is `docs/roadmap/P5-PLAN.md`, six
+> Proposed ADRs, and the 16 W1–W5 deep specs in
+> `docs/roadmap/p5-tasks/`. The exit marker and ADR acceptance are deferred to
+> W5-T3 and require simultaneous P5-scoped gates at the release HEAD.
+>
+> - [ADR-0055](../adr/0055-cloud-credential-and-normalization-model.md)
+>   defines one read-only cloud credential/capability/normalization model;
+>   [ADR-0056](../adr/0056-aws-plugin-route53.md) binds AWS and Route53;
+>   [ADR-0057](../adr/0057-azure-plugin.md) binds Azure;
+>   [ADR-0058](../adr/0058-hybrid-topology-stitching.md) makes hybrid edges
+>   PG-backed, provenance-carrying, and rebuildable;
+>   [ADR-0059](../adr/0059-durable-dispatch-outbox.md) closes report dispatch
+>   crash windows and bans bare Celery publication; and
+>   [ADR-0060](../adr/0060-scale-certification-methodology.md) separates the
+>   achieved reduced-scale mechanism proof from full certified capacity.
+> - **Validation posture:** no live cloud account or certified-scale cluster is
+>   available on the authoring host. AWS/Azure validate over verbatim recorded
+>   responses and ship read-only live scripts. The scale harness renders the
+>   full §11 targets but executes to the maximum feasible measured point.
+>   Live-cloud and remaining certified-scale results are named
+>   deferred-accepted with explicit promotion triggers; all dispatch,
+>   normalization, stitching, rebuild, and reconciliation contracts are true
+>   biting CI gates. This posture is ratified for W0; it authorizes no claim
+>   beyond recorded evidence.
+> - **Consultant §12 re-check:** Q1 scale targets, Q8 air-gap posture, Q13 data
+>   retention, and Q10 telemetry were reviewed. No new owner answer arrived;
+>   their defaults remain Proposed, cloud plugins are absent from the fully
+>   air-gapped profile, and telemetry remains out of P5. A new read-only cloud
+>   least-privilege provisioning question is recorded. See the P5 kickoff note
+>   in `docs/consultant/QUESTIONS.md`.
+
 ---
 
 ## 2. Vendor rollout — all 13 vendor families
