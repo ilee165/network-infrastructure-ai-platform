@@ -238,6 +238,51 @@ gantt
 > drill. Live F5/VMware golden paths promote in a live lab. Every item retains
 > the named promotion path in `P4-RELEASE-READINESS.md`.
 
+> **P5 IN PROGRESS 2026-07-21 (W0 design gate).** This is the canonical
+> **P5 in progress** marker. P5 is open and no build
+> wave has started. Its reviewed contract is `docs/roadmap/P5-PLAN.md`, six
+> Proposed ADRs, and the 16 W1–W5 deep specs in
+> `docs/roadmap/p5-tasks/`. The exit marker and ADR acceptance are deferred to
+> W5-T3 and require simultaneous P5-scoped gates at the release HEAD.
+>
+> **Scope — verbatim from `P5-PLAN.md` §1:**
+>
+> | Track | Deliverables | Source |
+> |---|---|---|
+> | Dispatch durability (carried debt) | **Transactional report outbox**: both report request paths commit durable rows atomically with the state transition; relay worker with crash recovery — at-least-once publication with no dropped run and exactly one render/state-transition effect. **Platform-wide `send_task` sweep**: every bare Celery `send_task` site moved onto the hardened dispatch wrapper + a static CI ratchet that fails on any new bare site | P4 exit marker; `P4-RELEASE-READINESS.md` dispatch guarantee; W4-T0 deferral record |
+> | Observability reconciliation (carried debt) | §6 rows 5/6/9 promoted to backed series: scheduled-config-backup completeness (misses alerted < 15 min), CR-execution→audit completeness (daily reconciliation), reasoning-trace persistence (no orphans) — each with recording rule, burn alert, runbook, and a biting negative control | P3 exit flag; declined P4-W3-T7; PRODUCTION.md §6 |
+> | Vendor Wave 4 — AWS (`aws`) | boto3 per D7: `CLOUD_NETWORK_INVENTORY` — VPCs, subnets, route tables, TGW/peering, security groups (**→ `FIREWALL_POLICY`-style normalization**), ENIs; **`DDI_DNS` via Route53** (hosted zones + records into the existing DDI framework, completing the BlueCat/Infoblox/Route53 triad); read-only cloud credential model (IAM access key / STS assume-role) via the D11 vault — **designed once, shared with Azure** | §2.5 |
+> | Vendor Wave 4 — Azure (`azure`) | azure SDK per D7: `CLOUD_NETWORK_INVENTORY` — VNets, subnets, route tables, peerings, NSGs (→ same `FIREWALL_POLICY` normalization), NICs; service-principal credential model mirroring the AWS design; cloud normalization (VNet↔VPC, NSG↔SG) validated across both providers before declared stable | §2.5 |
+> | Hybrid topology stitching | Cloud network nodes/edges in Postgres (expand-only) projected to Neo4j; stitching derivation joining cloud subnets to the on-prem L3 graph via VPN / Direct Connect / ExpressRoute interconnect edges, deterministic + idempotent + per-source provenance; Route53 zones linked into the DNS-dependency graph; hybrid impact/reachability query surface + Troubleshooting-Agent tool + hybrid topology UI view; rebuild-drill compatibility (D5) | §2.5 platform deliverable |
+> | Scale certification | Certification harness at the §11 G-SCA target numbers (seeded-estate generator, k6 load profiles, projection-scale fixture, queue-burst profile), ready-to-run; executed reduced-scale certification runs with the achieved scale point recorded; G-SCA re-base on Consultant answers or re-confirmed PROPOSED targets; promotion path to GA kept named | §1, §11 G-SCA, ADR-0047 promotion path |
+> | Evals + exit | Plugin conformance + cross-vendor/routing re-run (roster extended with `aws`/`azure`, no regression); hybrid-stitching derivation eval corpus (precision/recall, planted wrong-edge negative control); `P5-RELEASE-READINESS.md`; ADRs 0055–0060 flipped on green; PRODUCTION.md P5 EXIT marker + GA inheritance | §2.6, §11 |
+>
+> - [ADR-0055](../adr/0055-cloud-credential-and-normalization-model.md)
+>   defines one read-only cloud credential/capability/normalization model;
+>   [ADR-0056](../adr/0056-aws-plugin-route53.md) binds AWS and Route53;
+>   [ADR-0057](../adr/0057-azure-plugin.md) binds Azure;
+>   [ADR-0058](../adr/0058-hybrid-topology-stitching.md) makes hybrid edges
+>   PG-backed, provenance-carrying, and rebuildable;
+>   [ADR-0059](../adr/0059-durable-dispatch-outbox.md) closes report dispatch
+>   crash windows and bans bare Celery publication; and
+>   [ADR-0060](../adr/0060-scale-certification-methodology.md) separates the
+>   achieved reduced-scale mechanism proof from full certified capacity.
+> - **Validation posture:** no live cloud account or certified-scale cluster is
+>   available on the authoring host. AWS/Azure validate over verbatim recorded
+>   responses and ship read-only live scripts. The scale harness renders the
+>   full §11 targets but executes to the maximum feasible measured point.
+>   Live-cloud and remaining certified-scale results are named
+>   deferred-accepted with explicit promotion triggers; all dispatch,
+>   normalization, stitching, rebuild, and reconciliation contracts are true
+>   biting CI gates. This posture is ratified for W0; it authorizes no claim
+>   beyond recorded evidence.
+> - **Consultant §12 re-check:** Q1 scale targets, Q8 air-gap posture, Q13 data
+>   retention, and Q10 telemetry were reviewed. No new owner answer arrived;
+>   their defaults remain Proposed, cloud plugins are absent from the fully
+>   air-gapped profile, and telemetry remains out of P5. A new read-only cloud
+>   least-privilege provisioning question is recorded. See the P5 kickoff note
+>   in `docs/consultant/QUESTIONS.md`.
+
 ---
 
 ## 2. Vendor rollout — all 13 vendor families

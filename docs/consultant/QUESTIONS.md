@@ -306,3 +306,18 @@ for P4** — no new numbers invented, no silent carry. Mirror marker:
 | **Q13 — Data retention** | (b) Per-class retention; `audit_log` never auto-purged (7-yr guidance) | §7 **audit retention 7 yr stays PROPOSED** and now also governs report-artifact retention (`report_runs`/`report_artifacts` `expires_at` default + scheduled purge — ADR-0053 §4; per-kind override via settings) | **Re-confirmed (default holds)** |
 | **Q10 — Streaming telemetry** | (b) Out of scope through M5; capability names reserved; telemetry engine needs its own ADR | §2.4: **NetFlow/gNMI flow-telemetry enrichment stays OUT of the application-dependency graph** until answered — the ADR-0052 derivation source set is **closed at four** (F5, VMware, DNS, manual); P4 does not smuggle it in | **Re-confirmed (stays out)** |
 | **Application-tagging ownership** (new item, raised at P4 planning; §12 row added at this kickoff) | Write-path mechanism **DECIDED by the owner (2026-07-05)**: manual tagging is a **direct write under RBAC (`engineer`+) with a full audit entry per mutation**; CR-gating considered and **declined** (tags never touch a device — ADR-0052 §7) | W2-T3 tagging API/UI; the mechanism is settled and not re-openable by a Consultant answer — the open remainder is the **role floor only** (`engineer` stays the PROPOSED floor, e.g. refinable to `operator`) | **Converted (mechanism); role floor stays PROPOSED** |
+
+### P5 kickoff — 2026-07-21
+
+P5 (AWS including Route53, Azure, hybrid topology, durable dispatch, and scale
+certification) opened at W0. No owner answer has arrived for the four items
+that materially shape it, so the recorded defaults are re-confirmed without
+inventing capacity, connectivity, retention, or telemetry requirements.
+
+| Question | Working contract for P5 | Verdict |
+|---|---|---|
+| **Q1 — Scale targets** | §11 targets remain Proposed; ADR-0060 ships full-target manifests, records the maximum feasible achieved point, and re-bases at W4-T3 if answered. | **Re-confirmed** |
+| **Q8 — Air-gapped operation** | The core remains air-gap capable. AWS/Azure/Route53 collectors require controlled cloud-API egress and are disabled/absent in the fully air-gapped profile; SDK wheels and fixtures remain bundleable offline. | **Re-confirmed; partial-connectivity boundary explicit** |
+| **Q13 — Data retention** | ADR-0054 class defaults continue to govern cloud raw artifacts and traces; outbox rows retain only non-secret dispatch metadata and follow operational retention after terminal state. | **Re-confirmed** |
+| **Q10 — Streaming telemetry** | NetFlow/gNMI enrichment remains outside P5; stitching uses provider endpoint plus route evidence from existing discovery sources. | **Re-confirmed; stays out** |
+| **Cloud least-privilege provisioning (new)** | Should the product own installation of AWS IAM/Azure custom roles, or only publish versioned read-only policy templates for operator-controlled provisioning? P5 defaults to documentation only; the platform has no IAM mutation permission. | **Open; documentation-only default** |
