@@ -30,7 +30,10 @@ Topology/API tests cover scoped paths, no-path, cycles/depth, provenance,
 snapshot, stale/conflict exclusion, and RBAC. Agent tests assert evidence-bound
 answers and no fabricated connectivity; they enumerate the registered
 Troubleshooting tool set and assert it equals the read-only allowlist, so no
-write-capable tool can be registered. UI tests cover filters, legend,
+write-capable tool can be registered. This executable assertion lands with the
+W3-T3 implementation after the hybrid tool and its registration surface exist;
+W0 defines the blocking test contract and does not add premature runtime code.
+UI tests cover filters, legend,
 keyboard/axe, provenance panel, and partial failures; update sibling API mocks.
 Run backend and frontend full gates plus OpenAPI drift.
 
