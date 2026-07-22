@@ -28,7 +28,9 @@ actions, speculative remediation, and a second graph authority.
 
 Topology/API tests cover scoped paths, no-path, cycles/depth, provenance,
 snapshot, stale/conflict exclusion, and RBAC. Agent tests assert evidence-bound
-answers and no fabricated connectivity. UI tests cover filters, legend,
+answers and no fabricated connectivity; they enumerate the registered
+Troubleshooting tool set and assert it equals the read-only allowlist, so no
+write-capable tool can be registered. UI tests cover filters, legend,
 keyboard/axe, provenance panel, and partial failures; update sibling API mocks.
 Run backend and frontend full gates plus OpenAPI drift.
 

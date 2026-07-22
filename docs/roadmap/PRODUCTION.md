@@ -238,11 +238,24 @@ gantt
 > drill. Live F5/VMware golden paths promote in a live lab. Every item retains
 > the named promotion path in `P4-RELEASE-READINESS.md`.
 
-> **P5 IN PROGRESS 2026-07-21 (W0 design gate).** P5 is open and no build
+> **P5 IN PROGRESS 2026-07-21 (W0 design gate).** This is the canonical
+> **P5 in progress** marker. P5 is open and no build
 > wave has started. Its reviewed contract is `docs/roadmap/P5-PLAN.md`, six
 > Proposed ADRs, and the 16 W1–W5 deep specs in
 > `docs/roadmap/p5-tasks/`. The exit marker and ADR acceptance are deferred to
 > W5-T3 and require simultaneous P5-scoped gates at the release HEAD.
+>
+> **Scope — verbatim from `P5-PLAN.md` §1:**
+>
+> | Track | Deliverables | Source |
+> |---|---|---|
+> | Dispatch durability (carried debt) | **Transactional report outbox**: both report request paths commit durable rows atomically with the state transition; relay worker with crash recovery — at-least-once publication with no dropped run and exactly one render/state-transition effect. **Platform-wide `send_task` sweep**: every bare Celery `send_task` site moved onto the hardened dispatch wrapper + a static CI ratchet that fails on any new bare site | P4 exit marker; `P4-RELEASE-READINESS.md` dispatch guarantee; W4-T0 deferral record |
+> | Observability reconciliation (carried debt) | §6 rows 5/6/9 promoted to backed series: scheduled-config-backup completeness (misses alerted < 15 min), CR-execution→audit completeness (daily reconciliation), reasoning-trace persistence (no orphans) — each with recording rule, burn alert, runbook, and a biting negative control | P3 exit flag; declined P4-W3-T7; PRODUCTION.md §6 |
+> | Vendor Wave 4 — AWS (`aws`) | boto3 per D7: `CLOUD_NETWORK_INVENTORY` — VPCs, subnets, route tables, TGW/peering, security groups (**→ `FIREWALL_POLICY`-style normalization**), ENIs; **`DDI_DNS` via Route53** (hosted zones + records into the existing DDI framework, completing the BlueCat/Infoblox/Route53 triad); read-only cloud credential model (IAM access key / STS assume-role) via the D11 vault — **designed once, shared with Azure** | §2.5 |
+> | Vendor Wave 4 — Azure (`azure`) | azure SDK per D7: `CLOUD_NETWORK_INVENTORY` — VNets, subnets, route tables, peerings, NSGs (→ same `FIREWALL_POLICY` normalization), NICs; service-principal credential model mirroring the AWS design; cloud normalization (VNet↔VPC, NSG↔SG) validated across both providers before declared stable | §2.5 |
+> | Hybrid topology stitching | Cloud network nodes/edges in Postgres (expand-only) projected to Neo4j; stitching derivation joining cloud subnets to the on-prem L3 graph via VPN / Direct Connect / ExpressRoute interconnect edges, deterministic + idempotent + per-source provenance; Route53 zones linked into the DNS-dependency graph; hybrid impact/reachability query surface + Troubleshooting-Agent tool + hybrid topology UI view; rebuild-drill compatibility (D5) | §2.5 platform deliverable |
+> | Scale certification | Certification harness at the §11 G-SCA target numbers (seeded-estate generator, k6 load profiles, projection-scale fixture, queue-burst profile), ready-to-run; executed reduced-scale certification runs with the achieved scale point recorded; G-SCA re-base on Consultant answers or re-confirmed PROPOSED targets; promotion path to GA kept named | §1, §11 G-SCA, ADR-0047 promotion path |
+> | Evals + exit | Plugin conformance + cross-vendor/routing re-run (roster extended with `aws`/`azure`, no regression); hybrid-stitching derivation eval corpus (precision/recall, planted wrong-edge negative control); `P5-RELEASE-READINESS.md`; ADRs 0055–0060 flipped on green; PRODUCTION.md P5 EXIT marker + GA inheritance | §2.6, §11 |
 >
 > - [ADR-0055](../adr/0055-cloud-credential-and-normalization-model.md)
 >   defines one read-only cloud credential/capability/normalization model;

@@ -34,9 +34,9 @@ rules and `docs/runbooks/report-outbox-relay.md`; PG tests.
 
 Write failing PG tests for rollback-without-row, committed-row recovery,
 pre-send crash, post-send crash, concurrent relays, lease expiry, poison row,
-and duplicate consumer. New `tests/pg/` files declare
+and duplicate consumer. New `backend/tests/pg/` files declare
 `pytestmark = pytest.mark.integration`; prove collection with
-`pytest -m integration --collect-only`. Run focused tests, report conformance,
+`pytest -m integration --collect-only backend/tests/pg`. Run focused tests, report conformance,
 full backend gates, migration check, promtool tests, and coverage ≥80%. Retain a
 red bite proving the old post-commit direct-dispatch window drops work.
 

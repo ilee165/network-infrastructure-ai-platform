@@ -29,8 +29,10 @@ and a live-cloud script. Out: Resolver and every mutation API.
 Botocore stub cases cover multi-page, empty region, 429/5xx recovery, permanent
 denial, expired STS, IPv6, SG references, TGW/VPN/DX, private/public zones,
 aliases, and multi-page records. Run plugin conformance, DDI golden path,
-secret-leak suite, full backend gates, lock drift, and coverage ≥80%. Sweep any
-pagination/retry/fixture class fix across Azure before exit.
+secret-leak suite, an exported-method allowlist/static API-surface check, and a
+planted attempted-mutation case that must be denied. Run full backend gates,
+lock drift, and coverage ≥80%. Sweep any pagination/retry/fixture class fix
+across Azure before exit.
 
 ## Exit criteria
 

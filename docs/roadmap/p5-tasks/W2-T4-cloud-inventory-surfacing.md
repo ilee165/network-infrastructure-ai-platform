@@ -27,10 +27,12 @@ configuration, topology stitching, credential reveal, and cloud writes.
 ## Test and gate plan
 
 API tests cover RBAC, scope/filter isolation, pagination, partial states, and
-secret-field absence. UI tests cover both providers, keyboard/accessibility,
-stale/partial status, and API failure. Update every partial `vi.mock` sibling
-when adding exports. Run backend gates, OpenAPI drift, frontend lint/type/test/
-build, axe, and coverage ratchets.
+secret-field absence. UI tests change provider, account, and region filters and
+assert distinct query keys/refetches; they explicitly cover loading, empty,
+error, pagination, provider, stale, and partial states plus keyboard/
+accessibility. Update every partial `vi.mock` sibling when adding exports. Run
+backend gates, OpenAPI drift, frontend lint/type/test/build, axe, and coverage
+ratchets.
 
 ## Exit criteria
 

@@ -39,9 +39,10 @@ send leaves a stale claim that a lease reaper returns to pending. Crash after
 send but before mark causes a duplicate delivery, resolved by the stable task
 ID and consumer idempotency. Broker rejection schedules bounded exponential
 retry; non-retryable envelope errors become `dead` and alert. Operators may
-requeue a dead row through an audited admin action. At-least-once transport plus
-idempotent consumption provides no dropped and no duplicate effect—not a false
-exactly-once claim.
+requeue a dead row only through an audited, RBAC-protected admin action after
+the service verifies the allowlisted task envelope and aggregate idempotency
+key are replay-safe. At-least-once transport plus idempotent consumption
+provides no dropped and no duplicate effect—not a false exactly-once claim.
 
 All platform Celery publication must go through the hardened wrapper. A static
 AST check fails on `.send_task(` outside the wrapper module and on direct

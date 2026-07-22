@@ -10,10 +10,12 @@ a single atomic-commit unit running the standing per-task pattern:
 
 **Escalation set** (reviewers + fixer on the live strong model; confirm the
 model exists in the live registry before launch — a dead-model escalation
-returns a silently "clean" review): **W1-T1** (report outbox — report-run
-spine, artifacts leave the platform), **W2-T1** (cloud credential model +
-vault kinds), **W2-T2 / W2-T3** (AWS/Azure credential flows: access keys, STS
-tokens, service-principal secrets).
+returns a silently "clean" review): **W0-T1** (whole ADR), the credential
+sections of **W0-T2 / W0-T3**, and the outbox section of **W0-T5** use the W0
+table's strong tiers; downstream implementation escalations are **W1-T1**
+(report outbox — report-run spine, artifacts leave the platform), **W2-T1**
+(cloud credential model + vault kinds), and **W2-T2 / W2-T3** (AWS/Azure
+credential flows: access keys, STS tokens, service-principal secrets).
 
 **Carry-forward lessons:** `P5-PLAN.md` §0a — read before starting any wave.
 The ones that bite most often: every new gate ships a negative control proven
@@ -74,7 +76,7 @@ existing Security-Agent engine.
 
 **Goal.** Bind the AWS plugin design to ADR-0055: boto3 (D7), session/region
 enumeration, pagination and throttling/retry policy, recorded-fixture strategy
-(botocore-style stubbed responses stored verbatim), the `DISCOVERY_API`
+(botocore-style stubbed responses stored verbatim), the `CLOUD_NETWORK_INVENTORY`
 surface (VPCs, subnets, route tables, TGW/peering, SGs, ENIs), and Route53 as
 `DDI_DNS` through the existing DDI framework — completing the
 BlueCat/Infoblox/Route53 triad.
@@ -88,7 +90,7 @@ BlueCat/Infoblox/Route53 triad.
 
 **Goal.** Mirror ADR-0056 for Azure: azure SDK (D7), service-principal auth
 via the ADR-0055 kind, subscription/resource-group enumeration, fixture
-strategy, and the `DISCOVERY_API` surface (VNets, subnets, route tables,
+strategy, and the `CLOUD_NETWORK_INVENTORY` surface (VNets, subnets, route tables,
 peerings, NSGs, NICs) mapped to the shared normalized models.
 
 **Exit criteria.**
@@ -115,8 +117,9 @@ impact/reachability query extension.
 
 **Goal.** Close the two P4 deferrals as one architecture decision: a
 transactional outbox on report runs (both request paths commit the outbox row
-atomically with the state transition; relay worker with crash recovery — no
-dropped, no double-dispatched runs), and a platform-wide mandate that all
+atomically with the state transition; relay worker with crash recovery —
+at-least-once publication, no dropped run, and exactly one render/state-
+transition effect), and a platform-wide mandate that all
 Celery dispatch goes through the hardened wrapper, enforced by a static CI
 ratchet that fails on any new bare `send_task` site. Start from the exact
 current dispatch guarantee recorded in `P4-RELEASE-READINESS.md`.
@@ -176,8 +179,8 @@ crash recovery. The P4-recorded crash window (durable requested-but-unclaimed
 work; possible drop/double-dispatch) is closed.
 
 **Exit criteria.**
-- [ ] Atomicity proven under real PG: a planted crash between state transition and dispatch leaves a row the relay recovers; a planted duplicate relay pass dispatches exactly once (`tests/pg/`, `pytestmark = pytest.mark.integration`, collection proven via `-m integration --collect-only`).
-- [ ] No dropped and no double-dispatched report run across the enumerated crash windows (each window has a named test).
+- [ ] Atomicity proven under real PG: a planted crash between state transition and publication leaves a row the relay recovers; a post-send/pre-mark crash may redeliver, while stable dispatch identity produces exactly one render/state-transition effect (`backend/tests/pg/`, `pytestmark = pytest.mark.integration`, collection proven via `pytest -m integration --collect-only backend/tests/pg`).
+- [ ] At-least-once publication produces no dropped run and no duplicate render/state-transition effect across every enumerated crash window (each window has a named test).
 - [ ] Relay emits metrics (lag, retries, failures) wired to the existing alert spine.
 - [ ] P4-W4 report conformance evals stay green (no behavioral regression).
 - [ ] Strong review passed; D16 + `pg-integration` green; one atomic commit.
@@ -240,7 +243,7 @@ rotation hooks.
 
 ### W2-T2 — AWS plugin (incl. Route53)
 
-**Goal.** Ship `aws` per ADR-0056: `DISCOVERY_API` over VPCs, subnets, route
+**Goal.** Ship `aws` per ADR-0056: `CLOUD_NETWORK_INVENTORY` over VPCs, subnets, route
 tables, TGW/peering, security groups (normalized into `FIREWALL_POLICY`
 rules), ENIs; `DDI_DNS` via Route53 through the existing DDI framework;
 conformance fixtures (raw payloads verbatim); pagination + throttling retry;
@@ -255,7 +258,7 @@ read-only.
 
 ### W2-T3 — Azure plugin
 
-**Goal.** Ship `azure` per ADR-0057: `DISCOVERY_API` over VNets, subnets,
+**Goal.** Ship `azure` per ADR-0057: `CLOUD_NETWORK_INVENTORY` over VNets, subnets,
 route tables, peerings, NSGs (same `FIREWALL_POLICY` normalization), NICs;
 service-principal credential flow; conformance fixtures; read-only. Validates
 the cross-provider normalization before it is declared stable (§2.5).
@@ -284,7 +287,7 @@ T1 → T2 → T3; T1 may start on ADR-0058 alongside W2.
 
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
-| W3-T1 | PG schema + projector for cloud topology | `wf-implementer` | sonnet | W0-T4 |
+| W3-T1 | PG schema + projector for cloud topology | `wf-implementer` | sonnet | W0-T4, W2-T1 |
 | W3-T2 | Stitching derivation pipelines + Route53 DNS linkage | `wf-implementer` | sonnet | W3-T1, W2-T2, W2-T3 |
 | W3-T3 | Hybrid impact/reachability + agent tool + UI view | `wf-implementer` | sonnet | W3-T1, W3-T2 |
 

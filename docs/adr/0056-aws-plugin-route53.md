@@ -20,8 +20,12 @@ Account identity comes from STS. Enabled regions are enumerated once per run;
 an explicit configured region allowlist narrows collection. One region failure
 is a typed partial result and does not erase successful regions. EC2 paginators
 collect VPCs, subnets, route tables, VPC peerings, transit gateways and
-attachments, VPN connections/gateways, Direct Connect gateways/connections,
-security groups, and ENIs. Raw pages are persisted verbatim before parsing.
+attachments, VPN connections/gateways, security groups, and ENIs. The boto3
+Direct Connect client and its paginators collect Direct Connect gateways,
+connections, and virtual interfaces under `directconnect:Describe*` permissions.
+Raw pages are persisted verbatim before parsing. The operator policy also
+includes Route53 `List*`/`Get*`, EC2 region discovery, and conditional
+`sts:AssumeRole` scoped to configured role ARNs; it contains no write action.
 
 SDK standard retries are configured in adaptive mode with bounded attempts.
 `Throttling`, `RequestLimitExceeded`, and transient 5xx responses use jittered

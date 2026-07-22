@@ -37,12 +37,17 @@ remain `None`; collectors must not invent values.
 
 AWS security-group and Azure NSG rules map to `NormalizedFirewallRule`.
 Ingress/egress map directly; allow/deny is preserved (AWS SG is allow-only).
-All protocols map to `any`; ICMP type/code use the existing service metadata;
-`from_port=None,to_port=None` means any port, while a single port is represented
-as an equal inclusive range. `0.0.0.0/0` and `::/0` remain explicit any-source
-CIDRs. References to another SG/application security group become named address
-references, never silently broadened to any. Provider priority/order is stable,
-and the source raw reference is retained for explanation.
+Protocol and inclusive port constraints are encoded together in the existing
+service strings (for example, `tcp/443-443`); only AWS `IpProtocol=-1` or the
+Azure `*` protocol maps to `any`. ICMP type/code use the existing service
+metadata. `from_port=None,to_port=None` means any port for the named protocol,
+while a single port is an equal inclusive range. `0.0.0.0/0` and `::/0` remain
+explicit any-source CIDRs. References to another SG/application security group
+become named address references, never silently broadened to any. Provider
+priority/order is stable, and the source raw reference is retained for
+explanation. A provider rule whose protocol restriction cannot be represented
+losslessly remains raw-only and emits a normalization finding; it is never
+broadened into an unrestricted normalized rule.
 
 ### Credential contract
 
@@ -68,10 +73,15 @@ stage→verify read-only probe→activate→disable-old; assume-role records rot
 rotating their source or metadata. Failed verification preserves the active
 credential. Every reveal, probe, rotation, and disable action is audited.
 
-Operator docs ship an AWS least-privilege policy limited to EC2 network
-describe APIs and Route53 list/get APIs, and an Azure custom Reader role limited
-to Microsoft.Network reads. P5 plugins expose no write method. A future cloud
-write capability requires a new ADR and an approved ChangeRequest path.
+Operator docs ship an AWS least-privilege policy limited to the required EC2
+network `Describe*`, `directconnect:Describe*`, and Route53 `List*`/`Get*`
+actions, plus conditional `sts:AssumeRole` on only the configured role ARNs;
+EC2 region discovery is included in that read inventory. The Azure template is
+a custom Reader role limited to Microsoft.Network reads. Both rendered policy
+templates must be strict subsets of their versioned read-action inventories;
+mutation or provisioning actions fail validation. P5 plugins expose no write
+method. A future cloud write capability requires a new ADR and an approved
+ChangeRequest path.
 
 ## Validation
 

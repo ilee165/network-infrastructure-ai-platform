@@ -30,8 +30,9 @@ dependencies, docs, fixtures, and live script. Out: Azure mutations and DNS.
 SDK fakes cover continuation pages, empty groups, 429 then success, forbidden
 subscription, IPv6, prefix/port lists, service tags, ASGs, peerings, VPN, and
 ExpressRoute. Run conformance, secret-leak, cross-provider equivalence, full
-backend gates, lock drift, and coverage ≥80%. Sweep sibling bug classes across
-AWS before exit.
+backend gates, an exported-method allowlist/static API-surface check, and a
+planted attempted-mutation case that must be denied. Run lock drift and
+coverage ≥80%. Sweep sibling bug classes across AWS before exit.
 
 ## Exit criteria
 

@@ -58,9 +58,10 @@ edges, and return path nodes, edges, confidence, and provenance references.
 The Troubleshooting Agent uses this typed read-only tool. The UI distinguishes
 confirmed, inferred, and candidate/conflict evidence.
 
-The Neo4j rebuild job reads all cloud and derived rows from PostgreSQL and
-recreates the identical graph. W3 must keep `neo4j-rebuild-bite.sh` green and
-prove idempotency under real PostgreSQL.
+The Neo4j rebuild job reads all active cloud and derived rows from PostgreSQL,
+excluding lifecycle-closed observations, and recreates the identical live
+graph. W3 must keep `neo4j-rebuild-bite.sh` green and prove idempotency under
+real PostgreSQL.
 
 ## Consequences
 

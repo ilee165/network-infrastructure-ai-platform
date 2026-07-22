@@ -29,6 +29,13 @@ errors, queue lag, pool use, and topology usability. Seeds, image digests,
 commit SHA, configuration, start/end times, target and achieved scale, and raw
 metric artifact digests are recorded. Secrets and bearer tokens are excluded.
 
+Certification write traffic runs only against a dedicated, non-production,
+disposable environment. Synthetic identities are restricted to the seeded
+fixture namespace and minimum test permissions. Preflight verifies target
+identity, fixture scope, isolation, and explicit operator authorization; a run
+is blocked and invalid unless every isolation assertion passes before write
+traffic begins.
+
 Each scenario first runs a negative control (disabled autoscaling, removed
 queue isolation, constrained connection budget, or corrupted projection
 expectation as appropriate) and must fail its assertion. The control is then

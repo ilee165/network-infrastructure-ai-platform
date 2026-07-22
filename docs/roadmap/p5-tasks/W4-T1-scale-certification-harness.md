@@ -28,9 +28,12 @@ result or requiring production secrets.
 ## Test and gate plan
 
 Unit-test deterministic generation and manifest validation. Render full-target
-manifests in CI without executing them. Execute a smoke point and, for each
-assertion, plant the ADR-0060 regression and prove non-zero before restoring.
-Run shell/yaml/k6 validation, kind harness smoke, and artifact schema checks.
+manifests in CI without executing them. A generator test streams the full
+5,000-device/100,000-interface projection fixture and asserts controller peak
+RSS remains below the versioned harness memory budget; a non-streaming planted
+implementation must fail it. Execute a smoke point and, for each assertion,
+plant the ADR-0060 regression and prove non-zero before restoring. Run
+shell/yaml/k6 validation, kind harness smoke, and artifact schema checks.
 
 ## Exit criteria
 

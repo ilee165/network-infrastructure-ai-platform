@@ -29,8 +29,10 @@ only guessed links, telemetry enrichment, or Neo4j-only writes.
 Table-driven fixtures cover each mechanism, reciprocal and one-sided routes,
 overlap-only, conflicting ownership, multi-source merge, stale source, IPv6,
 rerun, and Route53 private/public association. PG concurrency/idempotency tests
-and Neo4j rebuild comparison are blocking. Mutation proof removes endpoint
-matching and must make the planted wrong-edge case fail.
+under `backend/tests/pg/` declare `pytestmark = pytest.mark.integration`, with
+selection proven by `pytest -m integration --collect-only backend/tests/pg`;
+Neo4j rebuild comparison is blocking. Mutation proof removes endpoint matching
+and must make the planted wrong-edge case fail.
 
 ## Exit criteria
 

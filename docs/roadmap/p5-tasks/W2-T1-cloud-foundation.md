@@ -30,8 +30,11 @@ rotation hooks. Out: provider SDK clients and cloud writes.
 
 Begin with model/interface and equivalence contract tests. Add planted-secret
 tests for API/log/exception/repr/raw artifact paths and rotation failure/rollback
-tests. Run credential PG integration, conformance collection, ruff, format,
-mypy, lint-imports, full pytest, and module coverage ≥80%.
+tests. Parse each rendered AWS/Azure operator policy, assert its actions are a
+subset of the versioned required read inventory, and make every mutation or
+provisioning action fail the policy gate. Run credential PG integration,
+conformance collection, ruff, format, mypy, lint-imports, full pytest, and
+module coverage ≥80%.
 
 ## Exit criteria
 

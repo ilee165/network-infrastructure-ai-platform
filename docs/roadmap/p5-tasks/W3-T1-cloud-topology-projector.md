@@ -26,8 +26,10 @@ derivation and impact UI.
 ## Test and gate plan
 
 PG tests cover concurrent/repeated upserts, stale closure, partial run rollback,
-and identity collisions. Neo4j integration compares incremental versus rebuilt
-graph. Run topology suites, migration checks, PG integration, kind
+and identity collisions under `backend/tests/pg/` with
+`pytestmark = pytest.mark.integration`; prove selection with
+`pytest -m integration --collect-only backend/tests/pg`. Neo4j integration
+compares incremental versus rebuilt graph. Run topology suites, migration checks, PG integration, kind
 `neo4j-rebuild-bite.sh`, SLO rules, and full backend gates.
 
 ## Exit criteria

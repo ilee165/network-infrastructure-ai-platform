@@ -3,7 +3,7 @@
 | Field | Contract |
 |---|---|
 | Owner | `wf-reliability` |
-| Depends on | W4-T1, W1 complete, W3-T2 |
+| Depends on | W4-T1, W1 complete, W3-T1, W3-T2 |
 | Review | strong reliability review |
 | Status | Proposed |
 
@@ -36,5 +36,6 @@ proofs and Neo4j rebuild with the hybrid dataset.
 
 - [ ] Every G-SCA dimension has achieved-vs-target evidence at release SHA.
 - [ ] Positive run passes at the recorded point and negative control fails.
+- [ ] P3 `drill-bite-proofs` stays green with the hybrid dataset.
 - [ ] First unsupported point/reason and all telemetry gaps are explicit.
 - [ ] Evidence review passes; one atomic commit.
