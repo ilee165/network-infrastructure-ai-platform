@@ -35,6 +35,9 @@ fixture namespace and minimum test permissions. Preflight verifies target
 identity, fixture scope, isolation, and explicit operator authorization; a run
 is blocked and invalid unless every isolation assertion passes before write
 traffic begins.
+Preflight also records the approving human's identity, decision timestamp,
+approved target and fixture scope, and complete isolation results in the
+immutable evidence manifest. Missing approval or audit evidence blocks the run.
 
 Each scenario first runs a negative control (disabled autoscaling, removed
 queue isolation, constrained connection budget, or corrupted projection
