@@ -573,7 +573,7 @@ groups:
           or absent(slo:netops_reconciliation:query_healthy{reconciliation="config_backup"})
           or absent(slo:netops_reconciliation:inconsistencies{reconciliation="config_backup"})
           or absent(slo:netops_reconciliation:age_seconds{reconciliation="config_backup"})
-          or slo:netops_reconciliation:age_seconds{reconciliation="config_backup"} > 90000
+          or slo:netops_reconciliation:age_seconds{reconciliation="config_backup"} >= 90000
         for: 1m
         labels: {severity: page, slo: config_backup_completeness, tier: fast}
         annotations:
@@ -587,7 +587,7 @@ groups:
           or absent(slo:netops_reconciliation:query_healthy{reconciliation="change_request_audit"})
           or absent(slo:netops_reconciliation:inconsistencies{reconciliation="change_request_audit"})
           or absent(slo:netops_reconciliation:age_seconds{reconciliation="change_request_audit"})
-          or slo:netops_reconciliation:age_seconds{reconciliation="change_request_audit"} > 90000
+          or slo:netops_reconciliation:age_seconds{reconciliation="change_request_audit"} >= 90000
         for: 1m
         labels: {severity: page, slo: change_request_audit_completeness, tier: fast}
         annotations:
@@ -601,7 +601,7 @@ groups:
           or absent(slo:netops_reconciliation:query_healthy{reconciliation="reasoning_trace"})
           or absent(slo:netops_reconciliation:inconsistencies{reconciliation="reasoning_trace"})
           or absent(slo:netops_reconciliation:age_seconds{reconciliation="reasoning_trace"})
-          or slo:netops_reconciliation:age_seconds{reconciliation="reasoning_trace"} > 90000
+          or slo:netops_reconciliation:age_seconds{reconciliation="reasoning_trace"} >= 90000
         for: 1m
         labels: {severity: page, slo: reasoning_trace_persistence, tier: fast}
         annotations:
