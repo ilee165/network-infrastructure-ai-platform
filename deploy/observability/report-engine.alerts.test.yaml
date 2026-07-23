@@ -64,6 +64,7 @@ tests:
         alertname: NetopsReportOutboxDead
         exp_alerts:
           - exp_labels:
+              event: dead
               severity: page
               slo: report_outbox
             exp_annotations:
@@ -79,6 +80,33 @@ tests:
     alert_rule_test:
       - eval_time: 10m
         alertname: NetopsReportOutboxDead
+        exp_alerts: []
+
+  - interval: 1m
+    name: report outbox relay freshness — FIRES when polling stopped
+    input_series:
+      - series: 'netops_report_outbox_relay_last_success_timestamp'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: NetopsReportOutboxRelayStale
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: report_outbox
+            exp_annotations:
+              summary: "The durable report dispatch relay has stopped completing"
+              description: "The report outbox relay has not completed a polling cycle for over five minutes."
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-outbox-relay.md"
+
+  - interval: 1m
+    name: report outbox relay freshness — recent polling stays silent
+    input_series:
+      - series: 'netops_report_outbox_relay_last_success_timestamp'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: NetopsReportOutboxRelayStale
         exp_alerts: []
 
   # ===========================================================================

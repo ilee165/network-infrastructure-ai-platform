@@ -30,6 +30,7 @@ from app.agents.framework.tools import agent_run_context
 from app.core.security import Role
 from app.engines.reports import deterministic_run_id
 from app.models import AuditLog, Base
+from app.models.dispatch_outbox import DispatchOutbox
 from app.models.reports import ReportArtifact, ReportKind, ReportRun, ReportRunStatus
 
 
@@ -153,12 +154,11 @@ async def test_request_generation_enqueues_under_invoking_user(
 ) -> None:
     from app.workers import celery_app as celery_module
 
-    calls: list[dict[str, Any]] = []
-
-    def _record(name: str, args: list[Any] | None = None, **kwargs: Any) -> None:
-        calls.append({"name": name, "args": list(args or []), **kwargs})
-
-    monkeypatch.setattr(celery_module.celery_app, "send_task", _record)
+    monkeypatch.setattr(
+        celery_module.celery_app,
+        "send_task",
+        lambda *_args, **_kwargs: pytest.fail("agent request reached broker publication"),
+    )
 
     user_id = uuid.uuid4()
     with agent_run_context(role=Role.ENGINEER, user_id=user_id):
@@ -176,18 +176,14 @@ async def test_request_generation_enqueues_under_invoking_user(
         "run_id": str(deterministic_run_id(ReportKind.CHANGE, _START, _END)),
         "status": "queued",
     }
-    assert len(calls) == 1
-    call = calls[0]
-    assert call["name"] == "reports.generate"
-    assert call["queue"] == "docs"
-    # The SAME engine task vector the API uses, with the invoking user recorded.
-    assert call["args"] == [
-        "change",
-        _START.isoformat(),
-        _END.isoformat(),
-        "on_demand",
-        str(user_id),
-    ]
+    async with db.get_sessionmaker()() as session:
+        envelope = (await session.execute(select(DispatchOutbox))).scalar_one()
+        run = await session.get(ReportRun, deterministic_run_id(ReportKind.CHANGE, _START, _END))
+    assert envelope.payload_json == {
+        "dispatch_id": str(envelope.id),
+        "run_id": str(envelope.aggregate_id),
+    }
+    assert run is not None
     # Durable-audit parity with POST /api/v1/reports (PR #166 F3): the agent
     # path records the same committed generation_requested event, attributed
     # to the requesting principal.
@@ -203,22 +199,20 @@ async def test_request_generation_enqueues_under_invoking_user(
     }
 
 
-async def test_request_generation_audit_is_committed_before_dispatch(
+async def test_request_generation_commits_audit_run_and_outbox_without_dispatch(
     seeded_db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The audit row is durable BEFORE the broker call: a dispatch failure can
     never lose the evidence that the generation was requested (PR #166 F3)."""
     from app.workers import celery_app as celery_module
 
-    def _broker_down(*_a: Any, **_kw: Any) -> None:
-        raise RuntimeError("broker unreachable")
-
-    monkeypatch.setattr(celery_module.celery_app, "send_task", _broker_down)
+    monkeypatch.setattr(
+        celery_module.celery_app,
+        "send_task",
+        lambda *_args, **_kwargs: pytest.fail("agent request reached broker publication"),
+    )
     user_id = uuid.uuid4()
-    with (
-        agent_run_context(role=Role.ENGINEER, user_id=user_id),
-        pytest.raises(RuntimeError, match="broker unreachable"),
-    ):
+    with agent_run_context(role=Role.ENGINEER, user_id=user_id):
         await request_report_generation.ainvoke(
             {
                 "kind": "change",
@@ -227,8 +221,55 @@ async def test_request_generation_audit_is_committed_before_dispatch(
             }
         )
     rows = await _generation_audit_rows()
-    assert len(rows) == 1  # committed despite the failed dispatch
+    assert len(rows) == 1
     assert rows[0].actor == f"user:{user_id}"
+    async with db.get_sessionmaker()() as session:
+        assert (await session.execute(select(DispatchOutbox))).scalar_one()
+
+
+async def test_agent_request_rollback_persists_neither_run_outbox_nor_audit(
+    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import audit as audit_service
+
+    real_record = audit_service.record
+
+    async def _fail_after_audit(*args: Any, **kwargs: Any) -> Any:
+        await real_record(*args, **kwargs)
+        raise RuntimeError("transaction aborted")
+
+    monkeypatch.setattr(audit_service, "record", _fail_after_audit)
+    start = datetime(2026, 6, 1, tzinfo=UTC)
+    end = datetime(2026, 6, 8, tzinfo=UTC)
+    run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+    with (
+        agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()),
+        pytest.raises(RuntimeError, match="transaction aborted"),
+    ):
+        await request_report_generation.ainvoke(
+            {
+                "kind": "change",
+                "period_start": start.isoformat(),
+                "period_end": end.isoformat(),
+            }
+        )
+    async with db.get_sessionmaker()() as session:
+        assert await session.get(ReportRun, run_id) is None
+        assert (
+            await session.scalar(
+                select(DispatchOutbox).where(DispatchOutbox.aggregate_id == run_id)
+            )
+            is None
+        )
+        assert (
+            await session.scalar(
+                select(AuditLog).where(
+                    AuditLog.action == "report.generation_requested",
+                    AuditLog.target_id == str(run_id),
+                )
+            )
+            is None
+        )
 
 
 async def test_request_generation_pins_naive_period_as_utc(
@@ -242,12 +283,11 @@ async def test_request_generation_pins_naive_period_as_utc(
     """
     from app.workers import celery_app as celery_module
 
-    calls: list[dict[str, Any]] = []
-
-    def _record(name: str, args: list[Any] | None = None, **kwargs: Any) -> None:
-        calls.append({"name": name, "args": list(args or []), **kwargs})
-
-    monkeypatch.setattr(celery_module.celery_app, "send_task", _record)
+    monkeypatch.setattr(
+        celery_module.celery_app,
+        "send_task",
+        lambda *_args, **_kwargs: pytest.fail("agent request reached broker publication"),
+    )
 
     with agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()):
         result = json.loads(
@@ -261,9 +301,9 @@ async def test_request_generation_pins_naive_period_as_utc(
         )
 
     assert result["run_id"] == str(deterministic_run_id(ReportKind.CHANGE, _START, _END))
-    # Serialized aware-UTC, so the worker's _parse_utc derives the SAME id.
-    assert calls[0]["args"][1] == _START.isoformat()
-    assert calls[0]["args"][2] == _END.isoformat()
+    async with db.get_sessionmaker()() as session:
+        envelope = (await session.execute(select(DispatchOutbox))).scalar_one()
+    assert envelope.aggregate_id == deterministic_run_id(ReportKind.CHANGE, _START, _END)
 
 
 async def test_request_generation_rejects_future_period_end(
@@ -358,7 +398,11 @@ async def test_request_generation_accepts_at_cap_span(
             )
         )
     assert result["status"] == "queued"
-    assert calls == [1]
+    assert calls == []
+    async with db.get_sessionmaker()() as session:
+        assert await session.scalar(
+            select(DispatchOutbox).where(DispatchOutbox.aggregate_id == uuid.UUID(result["run_id"]))
+        )
 
 
 async def test_request_generation_rejects_pre_floor_period_start(

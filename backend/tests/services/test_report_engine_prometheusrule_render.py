@@ -25,6 +25,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CHART_DIR = REPO_ROOT / "deploy" / "kubernetes" / "netops"
@@ -58,6 +59,33 @@ def _alert_names() -> list[str]:
     """Every ``alert:`` name in the promtool-gated source file, in order."""
     text = ALERTS_FILE.read_text(encoding="utf-8")
     return re.findall(r"^\s*-\s*alert:\s*(\w+)\s*$", text, re.MULTILINE)
+
+
+def _source_groups() -> list[dict[str, object]]:
+    source = yaml.safe_load(ALERTS_FILE.read_text(encoding="utf-8"))
+    return list(source["groups"])
+
+
+def _canonical_groups(groups: list[dict[str, object]]) -> list[dict[str, object]]:
+    for group in groups:
+        for rule in group["rules"]:  # type: ignore[index]
+            rule["expr"] = " ".join(str(rule["expr"]).split())
+    return groups
+
+
+def test_report_alert_source_has_canonical_annotation_siblings() -> None:
+    """YAML indentation cannot silently nest annotations under labels."""
+    alerts = [
+        rule
+        for group in _source_groups()
+        for rule in group["rules"]  # type: ignore[index]
+        if "alert" in rule
+    ]
+    assert alerts
+    for alert in alerts:
+        assert set(alert) >= {"alert", "expr", "labels", "annotations"}
+        assert "annotations" not in alert["labels"]
+        assert alert["annotations"]["runbook_url"].startswith("https://")
 
 
 @pytest.mark.skipif(_helm() is None, reason="helm not installed; manifest gates run in CI")
@@ -95,6 +123,8 @@ def test_prometheus_rule_enabled_renders_report_engine_rule() -> None:
 
     # Every alert carries a resolving runbook_url (ADR-0046 §3).
     assert rendered.count("runbook_url:") == len(source_alerts)
+    rendered_doc = yaml.safe_load(rendered)
+    assert _canonical_groups(rendered_doc["spec"]["groups"]) == _canonical_groups(_source_groups())
 
 
 @pytest.mark.skipif(_helm() is None, reason="helm not installed; manifest gates run in CI")

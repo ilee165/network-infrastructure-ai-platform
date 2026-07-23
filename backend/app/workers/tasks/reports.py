@@ -39,12 +39,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import socket
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import structlog
 from sqlalchemy import delete, func, select, update
@@ -59,6 +60,7 @@ from app.core.config import Settings, get_settings
 from app.core.metrics import (
     observe_report_generation,
     record_report_failure,
+    record_report_outbox_event,
     set_report_last_success,
 )
 from app.engines.config_mgmt.compliance.engine import DeviceContext, evaluate_policy
@@ -81,6 +83,7 @@ from app.models.compliance_history import (
     ComplianceSweepTrigger,
 )
 from app.models.config_mgmt import ConfigSnapshot
+from app.models.dispatch_outbox import DispatchConsumerState
 from app.models.reports import (
     ReportArtifact,
     ReportKind,
@@ -89,6 +92,12 @@ from app.models.reports import (
     ReportTrigger,
 )
 from app.services import audit
+from app.services.report_outbox import (
+    ConsumerClaimStatus,
+    InvalidDispatchEnvelope,
+    claim_consumer,
+    lock_owned_consumer,
+)
 from app.workers.celery_app import celery_app
 
 __all__ = [
@@ -118,6 +127,10 @@ ERROR_CLASS_REDACTION: Final = "redaction_violation"
 ERROR_CLASS_BUILDER: Final = "builder_error"
 ERROR_CLASS_RENDER: Final = "render_error"
 ERROR_CLASS_PERSISTENCE: Final = "persistence_error"
+
+
+class ReportConsumerActive(RuntimeError):
+    """A young durable consumer lease is owned by another delivery."""
 
 
 # ---------------------------------------------------------------------------
@@ -273,14 +286,24 @@ async def _claim_report_run(
 
 
 async def _fail_run(
-    run_id: UUID, kind: ReportKind, error_class: str, detail: dict[str, Any]
-) -> None:
+    run_id: UUID,
+    kind: ReportKind,
+    error_class: str,
+    detail: dict[str, Any],
+    *,
+    dispatch_id: UUID,
+    owner: str,
+) -> bool:
     """Mark the run ``failed`` (typed class) + audit — unless already succeeded.
 
     *detail* must carry field paths / rule names / class tokens ONLY — never a
     payload value (ADR-0053 §6: a redaction failure must not itself leak).
     """
     async with _session() as session:
+        consumer = await lock_owned_consumer(session, dispatch_id=dispatch_id, owner=owner)
+        if consumer is None:
+            await session.rollback()
+            return False
         cursor = await session.execute(
             update(ReportRun)
             .where(ReportRun.id == run_id, ReportRun.status != ReportRunStatus.SUCCEEDED.value)
@@ -291,6 +314,11 @@ async def _fail_run(
             )
         )
         if cursor.rowcount == 1:  # type: ignore[attr-defined]
+            consumer.consumer_state = DispatchConsumerState.FAILED.value
+            consumer.consumer_owner = None
+            consumer.consumer_claimed_at = None
+            consumer.consumer_finished_at = datetime.now(UTC)
+            consumer.consumer_error_code = error_class
             await audit.record(
                 session,
                 actor=_ACTOR,
@@ -301,6 +329,7 @@ async def _fail_run(
             )
         await session.commit()
     record_report_failure(report_kind=kind.value, error_class=error_class)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -328,45 +357,50 @@ def _parse_utc(value: str) -> datetime:
 
 
 async def _generate_report_core(
-    kind_value: str,
-    period_start_iso: str,
-    period_end_iso: str,
-    trigger: str,
-    requested_by: str | None,
-    dispatch_id: str | None = None,
+    dispatch_id_value: str,
+    run_id_value: str,
 ) -> dict[str, Any]:
-    """Claim → build → redact+render → persist for one ``(kind, period)``."""
-    kind = ReportKind(kind_value)
-    ReportTrigger(trigger)  # validate the token early (typed vocabulary)
-    period_start = _parse_utc(period_start_iso)
-    period_end = _parse_utc(period_end_iso)
-    requested_uuid = UUID(requested_by) if requested_by else None
-    run_id = deterministic_run_id(kind, period_start, period_end)
+    """Load authoritative row → claim dispatch → render → terminal transition."""
+    try:
+        dispatch_id = UUID(dispatch_id_value)
+        run_id = UUID(run_id_value)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise InvalidDispatchEnvelope("invalid_consumer_identifier") from exc
+    owner = f"{socket.gethostname()}:{uuid4()}"
+    async with _session() as session:
+        claim = await claim_consumer(
+            session,
+            dispatch_id=dispatch_id,
+            run_id=run_id,
+            owner=owner,
+            lease_seconds=get_settings().report_claim_timeout_seconds,
+            now=datetime.now(UTC),
+        )
+        await session.commit()
+    kind = claim.kind
+    trigger = claim.trigger
+    requested_by = str(claim.requested_by) if claim.requested_by else None
+    period_start = claim.period_start
+    period_end = claim.period_end
+    ReportTrigger(trigger)
     run_id_str = str(run_id)
 
-    claim = await _claim_report_run(
-        run_id=run_id,
-        kind=kind,
-        trigger=trigger,
-        requested_by=requested_uuid,
-        period_start=period_start,
-        period_end=period_end,
-        dispatch_id=UUID(dispatch_id) if dispatch_id else None,
-    )
-    if claim == "skipped":
+    if claim.status in {ConsumerClaimStatus.SUCCEEDED, ConsumerClaimStatus.FAILED}:
+        record_report_outbox_event(event="duplicate_consumer")
         logger.info("reports.generate_skipped_duplicate", run_id=run_id_str, kind=kind.value)
-        return {"run_id": run_id_str, "status": "skipped"}
-    if claim == "in_progress":
-        # Another worker actively owns the claim (PR #166 F2): do NOT resume —
-        # no duplicate report.generated audit, no interleaved artifact writes.
+        return {"run_id": run_id_str, "status": claim.status.value}
+    if claim.status is ConsumerClaimStatus.ACTIVE:
+        record_report_outbox_event(event="duplicate_consumer")
         logger.info("reports.generate_claim_active_elsewhere", run_id=run_id_str, kind=kind.value)
-        return {"run_id": run_id_str, "status": "in_progress"}
+        raise ReportConsumerActive("consumer_active")
+    if claim.status is ConsumerClaimStatus.RECOVERED:
+        record_report_outbox_event(event="consumer_recovered")
     logger.info(
         "reports.generate_started",
         run_id=run_id_str,
         kind=kind.value,
         trigger=trigger,
-        claim=claim,
+        claim=claim.status.value,
     )
 
     started = time.monotonic()
@@ -383,8 +417,20 @@ async def _generate_report_core(
                 generated_at=generated_at,
             )
     except Exception as exc:
-        logger.exception("reports.builder_failed", run_id=run_id_str, kind=kind.value)
-        await _fail_run(run_id, kind, ERROR_CLASS_BUILDER, {"exception": type(exc).__name__})
+        logger.error(
+            "reports.builder_failed",
+            run_id=run_id_str,
+            kind=kind.value,
+            reason_class=type(exc).__name__,
+        )
+        await _fail_run(
+            run_id,
+            kind,
+            ERROR_CLASS_BUILDER,
+            {"exception": type(exc).__name__},
+            dispatch_id=dispatch_id,
+            owner=owner,
+        )
         return {"run_id": run_id_str, "status": "failed", "error_class": ERROR_CLASS_BUILDER}
 
     # Phase 2 — THE single render path (redaction choke point runs first inside).
@@ -404,15 +450,36 @@ async def _generate_report_core(
             kind,
             ERROR_CLASS_REDACTION,
             {"field_path": exc.field_path, "rule": exc.rule},
+            dispatch_id=dispatch_id,
+            owner=owner,
         )
         return {"run_id": run_id_str, "status": "failed", "error_class": ERROR_CLASS_REDACTION}
     except RenderEgressBlockedError:
-        logger.exception("reports.render_egress_blocked", run_id=run_id_str, kind=kind.value)
-        await _fail_run(run_id, kind, ERROR_CLASS_RENDER, {"reason": "egress_blocked"})
+        logger.error("reports.render_egress_blocked", run_id=run_id_str, kind=kind.value)
+        await _fail_run(
+            run_id,
+            kind,
+            ERROR_CLASS_RENDER,
+            {"reason": "egress_blocked"},
+            dispatch_id=dispatch_id,
+            owner=owner,
+        )
         return {"run_id": run_id_str, "status": "failed", "error_class": ERROR_CLASS_RENDER}
     except Exception as exc:
-        logger.exception("reports.render_failed", run_id=run_id_str, kind=kind.value)
-        await _fail_run(run_id, kind, ERROR_CLASS_RENDER, {"exception": type(exc).__name__})
+        logger.error(
+            "reports.render_failed",
+            run_id=run_id_str,
+            kind=kind.value,
+            reason_class=type(exc).__name__,
+        )
+        await _fail_run(
+            run_id,
+            kind,
+            ERROR_CLASS_RENDER,
+            {"exception": type(exc).__name__},
+            dispatch_id=dispatch_id,
+            owner=owner,
+        )
         return {"run_id": run_id_str, "status": "failed", "error_class": ERROR_CLASS_RENDER}
 
     # Phase 3 — persist artifacts + terminal status + the generation audit entry.
@@ -422,6 +489,10 @@ async def _generate_report_core(
     try:
         async with _session() as session:
             try:
+                consumer = await lock_owned_consumer(session, dispatch_id=dispatch_id, owner=owner)
+                if consumer is None:
+                    await session.rollback()
+                    return {"run_id": run_id_str, "status": "ownership_lost"}
                 # A resumed claim may already carry artifacts from the dead
                 # attempt: replace them so the run's artifacts always match
                 # its final render.
@@ -440,8 +511,17 @@ async def _generate_report_core(
                 await session.execute(
                     update(ReportRun)
                     .where(ReportRun.id == run_id)
-                    .values(status=ReportRunStatus.SUCCEEDED.value, finished_at=finished_at)
+                    .values(
+                        status=ReportRunStatus.SUCCEEDED.value,
+                        finished_at=finished_at,
+                        regime_tags=list(REGIME_TAG_DEFAULTS[kind]),
+                    )
                 )
+                consumer.consumer_state = DispatchConsumerState.SUCCEEDED.value
+                consumer.consumer_owner = None
+                consumer.consumer_claimed_at = None
+                consumer.consumer_finished_at = finished_at
+                consumer.consumer_error_code = None
                 await audit.record(
                     session,
                     actor=_ACTOR,
@@ -477,8 +557,20 @@ async def _generate_report_core(
         # leaving the claim ``running`` forever. Routing to _fail_run marks it
         # FAILED, which _claim_report_run's "reclaimed" path makes reclaimable
         # by the next request for this period — never a permanently stuck run.
-        logger.exception("reports.persist_failed", run_id=run_id_str, kind=kind.value)
-        await _fail_run(run_id, kind, ERROR_CLASS_PERSISTENCE, {"exception": type(exc).__name__})
+        logger.error(
+            "reports.persist_failed",
+            run_id=run_id_str,
+            kind=kind.value,
+            reason_class=type(exc).__name__,
+        )
+        await _fail_run(
+            run_id,
+            kind,
+            ERROR_CLASS_PERSISTENCE,
+            {"exception": type(exc).__name__},
+            dispatch_id=dispatch_id,
+            owner=owner,
+        )
         return {"run_id": run_id_str, "status": "failed", "error_class": ERROR_CLASS_PERSISTENCE}
 
     duration = time.monotonic() - started
@@ -498,23 +590,15 @@ async def _generate_report_core(
     }
 
 
-@celery_app.task(name="reports.generate")
-def generate(
-    kind: str,
-    period_start: str,
-    period_end: str,
-    trigger: str = ReportTrigger.ON_DEMAND.value,
-    requested_by: str | None = None,
-    dispatch_id: str | None = None,
-) -> dict[str, Any]:
-    """Generate one report for ``(kind, period)`` (on-demand API entrypoint)."""
-    return dict(
-        asyncio.run(
-            _generate_report_core(
-                kind, period_start, period_end, trigger, requested_by, dispatch_id
-            )
-        )
-    )
+@celery_app.task(name="reports.generate", bind=True, max_retries=None)
+def generate(task: Any, dispatch_id: str, run_id: str) -> dict[str, Any]:
+    """Consume one identifier-only durable report envelope."""
+    try:
+        return dict(asyncio.run(_generate_report_core(dispatch_id, run_id)))
+    except ReportConsumerActive as exc:
+        raise task.retry(
+            exc=RuntimeError("consumer_active"), countdown=5, max_retries=None
+        ) from exc
 
 
 @celery_app.task(name="reports.generate_scheduled")

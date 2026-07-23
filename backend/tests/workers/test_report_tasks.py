@@ -32,7 +32,9 @@ from app.engines.reports.regime_mapping import MAPPING_VERSION_TAG
 from app.models import AuditLog, Base, Device, DeviceStatus
 from app.models.compliance_history import ComplianceRun, ComplianceRunFinding
 from app.models.config_mgmt import ConfigSnapshot, ConfigSource
+from app.models.dispatch_outbox import DispatchOutbox
 from app.models.reports import ReportArtifact, ReportKind, ReportRun, ReportRunStatus
+from app.services.report_outbox import enqueue_report
 from app.workers.celery_app import celery_app
 from app.workers.tasks import reports as tasks
 
@@ -109,6 +111,38 @@ def _audit_actions(db_url: str) -> list[str]:
 _RUN_ID = deterministic_run_id(ReportKind.CHANGE, _START_DT, _END_DT)
 
 
+def _enqueue_generation(
+    db_url: str,
+    *,
+    trigger: str = "on_demand",
+    requested_by: UUID | None = None,
+) -> tuple[str, str]:
+    async def _go() -> tuple[str, str]:
+        engine = create_async_engine(db_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            await enqueue_report(
+                session,
+                run_id=_RUN_ID,
+                kind=ReportKind.CHANGE,
+                period_start=_START_DT,
+                period_end=_END_DT,
+                trigger=trigger,
+                requested_by=requested_by,
+            )
+            row = (await session.execute(select(DispatchOutbox))).scalar_one()
+            await session.commit()
+        await engine.dispose()
+        return str(row.id), str(_RUN_ID)
+
+    return asyncio.run(_go())
+
+
+def _run_generation(db_url: str, *, trigger: str = "on_demand") -> dict[str, Any]:
+    dispatch_id, run_id = _enqueue_generation(db_url, trigger=trigger)
+    return dict(tasks.generate.run(dispatch_id, run_id))
+
+
 # ---------------------------------------------------------------------------
 # Generation + claim-row semantics (ADR-0053 §2)
 # ---------------------------------------------------------------------------
@@ -117,7 +151,7 @@ _RUN_ID = deterministic_run_id(ReportKind.CHANGE, _START_DT, _END_DT)
 def test_generate_succeeds_and_persists_artifacts(
     eager_celery: None, db_url: str, stub_pdf: None
 ) -> None:
-    result = tasks.generate.run("change", _START, _END, "on_demand", None)
+    result = _run_generation(db_url)
     assert result["status"] == "succeeded"
     assert result["run_id"] == str(_RUN_ID)
 
@@ -147,10 +181,11 @@ def test_generate_succeeds_and_persists_artifacts(
 def test_duplicate_delivery_skips_without_second_artifact_or_audit(
     eager_celery: None, db_url: str, stub_pdf: None
 ) -> None:
-    first = tasks.generate.run("change", _START, _END, "on_demand", None)
+    dispatch_id, run_id = _enqueue_generation(db_url)
+    first = tasks.generate.run(dispatch_id, run_id)
     assert first["status"] == "succeeded"
-    second = tasks.generate.run("change", _START, _END, "scheduled", None)
-    assert second["status"] == "skipped"
+    second = tasks.generate.run(dispatch_id, run_id)
+    assert second["status"] == "succeeded"
 
     assert len(_query_all(db_url, select(ReportArtifact))) == 2  # one csv + one pdf
     assert _audit_actions(db_url).count("report.generated") == 1
@@ -182,7 +217,7 @@ def test_stale_running_claim_is_resumed_not_lost(
             updated_at=stale,
         ),
     )
-    result = tasks.generate.run("change", _START, _END, "scheduled", None)
+    result = _run_generation(db_url, trigger="scheduled")
     assert result["status"] == "succeeded"
     runs = _query_all(db_url, select(ReportRun))
     assert len(runs) == 1
@@ -215,8 +250,22 @@ def test_active_running_claim_returns_in_progress_without_generating(
             updated_at=now,
         ),
     )
-    result = tasks.generate.run("change", _START, _END, "on_demand", None)
-    assert result["status"] == "in_progress"
+    dispatch_id, run_id = _enqueue_generation(db_url)
+
+    async def _mark_active() -> None:
+        engine = create_async_engine(db_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as session:
+            row = (await session.execute(select(DispatchOutbox))).scalar_one()
+            row.consumer_state = "running"
+            row.consumer_owner = "other-worker"
+            row.consumer_claimed_at = now
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_mark_active())
+    with pytest.raises(RuntimeError, match="consumer_active"):
+        tasks.generate.run(dispatch_id, run_id)
     runs = _query_all(db_url, select(ReportRun))
     assert len(runs) == 1
     assert runs[0].status == ReportRunStatus.RUNNING.value
@@ -246,7 +295,7 @@ def test_failed_run_is_reclaimed_for_a_fresh_attempt(
             updated_at=now,
         ),
     )
-    result = tasks.generate.run("change", _START, _END, "on_demand", None)
+    result = _run_generation(db_url)
     assert result["status"] == "succeeded"
     run = _query_all(db_url, select(ReportRun))[0]
     assert run.status == ReportRunStatus.SUCCEEDED.value
@@ -289,7 +338,10 @@ def test_generate_scheduled_uses_settings_cadence(
 
 
 def test_generate_scheduled_honors_dispatch_supplied_bounds_across_midnight(
-    eager_celery: None, db_url: str, stub_pdf: None
+    eager_celery: None,
+    db_url: str,
+    stub_pdf: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PR #166 F2 (beat-slot identity): a redelivered or delayed tick that the
     worker only executes well AFTER a UTC-midnight/week boundary must still
@@ -304,6 +356,11 @@ def test_generate_scheduled_honors_dispatch_supplied_bounds_across_midnight(
     """
     dispatched_start = "2020-01-05T00:00:00+00:00"  # an arbitrary past Sunday
     dispatched_end = "2020-01-12T00:00:00+00:00"
+    monkeypatch.setattr(
+        celery_app,
+        "send_task",
+        lambda *_args, **_kwargs: pytest.fail("scheduled request reached broker publication"),
+    )
 
     result = tasks.generate_scheduled.run("change", dispatched_start, dispatched_end)
 
@@ -311,6 +368,7 @@ def test_generate_scheduled_honors_dispatch_supplied_bounds_across_midnight(
     run = _query_all(db_url, select(ReportRun))[0]
     assert run.period_start == datetime(2020, 1, 5, tzinfo=UTC)
     assert run.period_end == datetime(2020, 1, 12, tzinfo=UTC)
+    assert len(_query_all(db_url, select(DispatchOutbox))) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +403,7 @@ def test_redaction_violation_fails_closed(
 ) -> None:
     monkeypatch.setattr(tasks, "build_payload", _planted_payload_builder())
 
-    result = tasks.generate.run("change", _START, _END, "on_demand", None)
+    result = _run_generation(db_url)
 
     assert result["status"] == "failed"
     assert result["error_class"] == "redaction_violation"
@@ -369,13 +427,17 @@ def test_redaction_violation_fails_closed(
 
 
 def test_builder_error_is_typed_not_freeform(
-    eager_celery: None, db_url: str, stub_pdf: None, monkeypatch: pytest.MonkeyPatch
+    eager_celery: None,
+    db_url: str,
+    stub_pdf: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def _boom(session: Any, **kwargs: Any) -> ReportPayload:
         raise RuntimeError("db exploded with secret-shaped text hunter2")
 
     monkeypatch.setattr(tasks, "build_payload", _boom)
-    result = tasks.generate.run("change", _START, _END, "on_demand", None)
+    result = _run_generation(db_url)
     assert result == {
         "run_id": str(_RUN_ID),
         "status": "failed",
@@ -390,6 +452,7 @@ def test_builder_error_is_typed_not_freeform(
         if row.action == "report.generation_failed"
     ]
     assert "hunter2" not in str(failures[0].detail)
+    assert "hunter2" not in caplog.text
 
 
 def test_phase3_persistence_failure_fails_the_run_and_makes_it_reclaimable(
@@ -420,7 +483,7 @@ def test_phase3_persistence_failure_fails_the_run_and_makes_it_reclaimable(
 
     monkeypatch.setattr(tasks.audit, "record", _boom_on_generated)
 
-    result = tasks.generate.run("change", _START, _END, "on_demand", None)
+    result = _run_generation(db_url)
 
     assert result == {
         "run_id": str(_RUN_ID),
@@ -442,7 +505,7 @@ def test_phase3_persistence_failure_fails_the_run_and_makes_it_reclaimable(
     # RECLAIMABLE: a fresh request (boom removed) succeeds instead of the
     # claim staying stuck ``running`` forever.
     monkeypatch.setattr(tasks.audit, "record", real_record)
-    second = tasks.generate.run("change", _START, _END, "on_demand", None)
+    second = _run_generation(db_url)
     assert second["status"] == "succeeded"
     run2 = _query_all(db_url, select(ReportRun))[0]
     assert run2.status == ReportRunStatus.SUCCEEDED.value
@@ -457,7 +520,7 @@ def test_phase3_persistence_failure_fails_the_run_and_makes_it_reclaimable(
 def test_purge_deletes_only_expired_artifacts_and_audits(
     eager_celery: None, db_url: str, stub_pdf: None
 ) -> None:
-    tasks.generate.run("change", _START, _END, "on_demand", None)
+    _run_generation(db_url)
     now = datetime.now(UTC)
     expired = ReportArtifact(
         run_id=_RUN_ID,

@@ -375,6 +375,7 @@ class Settings(BaseSettings):
     #: entries / interleaved artifact writes). Floor 1s (tests); size it above
     #: the slowest expected generation in production.
     report_claim_timeout_seconds: int = Field(default=900, ge=1)
+    report_outbox_max_batch_size: int = Field(default=50, ge=1, le=500)
     #: Daily UTC schedule of the report-artifact retention purge (ADR-0053 §4).
     report_purge_hour: int = 5
     report_purge_minute: int = 30

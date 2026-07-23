@@ -81,6 +81,7 @@ __all__ = [
     "REPORT_OUTBOX_PENDING",
     "REPORT_OUTBOX_OLDEST_SECONDS",
     "REPORT_OUTBOX_EVENTS_TOTAL",
+    "REPORT_OUTBOX_RELAY_LAST_SUCCESS_TIMESTAMP",
     "RECONCILIATION_HEALTHY",
     "RECONCILIATION_INCONSISTENCIES",
     "RECONCILIATION_LAST_SUCCESS_TIMESTAMP",
@@ -95,6 +96,7 @@ __all__ = [
     "set_celery_queue_depth",
     "set_report_last_success",
     "set_report_outbox_backlog",
+    "set_report_outbox_relay_last_success",
     "record_report_outbox_event",
     "set_reconciliation_result",
     "set_reconciliation_unhealthy",
@@ -253,15 +255,22 @@ try:  # Optional observability dependency (D15) — degrade to no-ops if absent.
     REPORT_OUTBOX_PENDING: Any = Gauge(
         "netops_report_outbox_pending",
         "Pending durable report dispatch envelopes.",
+        multiprocess_mode="mostrecent",
     )
     REPORT_OUTBOX_OLDEST_SECONDS: Any = Gauge(
         "netops_report_outbox_oldest_seconds",
         "Age in seconds of the oldest pending report dispatch envelope.",
+        multiprocess_mode="mostrecent",
     )
     REPORT_OUTBOX_EVENTS_TOTAL: Any = Counter(
         "netops_report_outbox_events_total",
         "Report outbox lifecycle events by bounded outcome.",
         ["event"],
+    )
+    REPORT_OUTBOX_RELAY_LAST_SUCCESS_TIMESTAMP: Any = Gauge(
+        "netops_report_outbox_relay_last_success_timestamp",
+        "Unix timestamp of the latest successfully completed relay polling cycle.",
+        multiprocess_mode="mostrecent",
     )
     RECONCILIATION_INCONSISTENCIES: Any = Gauge(
         "netops_reconciliation_inconsistencies",
@@ -309,6 +318,7 @@ except ImportError:  # pragma: no cover - exercised only on a slim install
     REPORT_OUTBOX_PENDING = None
     REPORT_OUTBOX_OLDEST_SECONDS = None
     REPORT_OUTBOX_EVENTS_TOTAL = None
+    REPORT_OUTBOX_RELAY_LAST_SUCCESS_TIMESTAMP = None
     RECONCILIATION_INCONSISTENCIES = None
     RECONCILIATION_HEALTHY = None
     RECONCILIATION_LAST_SUCCESS_TIMESTAMP = None
@@ -485,9 +495,26 @@ def set_report_outbox_backlog(*, pending: int, oldest_seconds: float) -> None:
 
 def record_report_outbox_event(*, event: str) -> None:
     """Count one bounded relay outcome (claim/retry/dead/recovered/duplicate)."""
+    if event not in {
+        "claimed",
+        "dispatched",
+        "retry",
+        "dead",
+        "recovered",
+        "duplicate_consumer",
+        "consumer_recovered",
+    }:
+        raise ValueError("report_outbox_event_invalid")
     if not _PROM_ENABLED:
         return
     REPORT_OUTBOX_EVENTS_TOTAL.labels(event=event).inc()
+
+
+def set_report_outbox_relay_last_success(*, timestamp: float) -> None:
+    """Expose relay freshness without envelope or error data."""
+    if not _PROM_ENABLED:
+        return
+    REPORT_OUTBOX_RELAY_LAST_SUCCESS_TIMESTAMP.set(timestamp)
 
 
 def set_reconciliation_result(

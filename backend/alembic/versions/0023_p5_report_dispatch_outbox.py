@@ -10,6 +10,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = "0023"
 down_revision: str | None = "0022"
@@ -25,7 +26,7 @@ def upgrade() -> None:
         sa.Column("aggregate_id", sa.Uuid(), nullable=False),
         sa.Column("task_name", sa.String(128), nullable=False),
         sa.Column("queue", sa.String(32), nullable=False),
-        sa.Column("payload_json", sa.JSON(), nullable=False),
+        sa.Column("payload_json", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("state", sa.String(16), nullable=False),
         sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
@@ -34,6 +35,11 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("dispatched_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_error_code", sa.String(64), nullable=True),
+        sa.Column("consumer_state", sa.String(16), nullable=False, server_default="pending"),
+        sa.Column("consumer_owner", sa.String(128), nullable=True),
+        sa.Column("consumer_claimed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("consumer_finished_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("consumer_error_code", sa.String(64), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_dispatch_outbox"),
         sa.UniqueConstraint(
             "aggregate_type",

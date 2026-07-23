@@ -16,7 +16,7 @@ def durable_dispatch(
     queue: str,
     dispatch_id: uuid.UUID,
 ) -> Any:
-    validate_dispatch(task_name, payload, queue)
+    validate_dispatch(task_name, payload, queue, dispatch_id=dispatch_id)
     return celery_app.send_task(
         task_name,
         kwargs=payload,

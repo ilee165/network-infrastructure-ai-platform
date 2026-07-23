@@ -506,11 +506,6 @@ ignore_imports = [
     # Discovery job dispatch remains at its established Celery signature seam;
     # owner: future discovery-dispatch framework port (not the read facade).
     "app.agents.discovery.tools -> app.workers.celery_app",
-    # Report generation dispatch (P4 W3-T1, ADR-0053 §1): the Documentation
-    # Agent's request_report_generation tool enqueues the SAME engine task the
-    # scheduler uses, by Celery signature only — the established discovery
-    # dispatch seam above; owner: the same future framework dispatch port.
-    "app.agents.documentation.tools -> app.workers.celery_app",
     # Report API schema reuses the ReportKind model enum (P4 W3-T1) — the same
     # pre-existing schemas -> models enum-reuse edge class as the entries below.
     "app.schemas.reports_api -> app.models.reports",

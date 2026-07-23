@@ -1241,7 +1241,6 @@ async def request_report_generation(
         report_generation_args,
     )
     from app.agents.framework.tools import current_invoking_identity, current_invoking_role
-    from app.workers.celery_app import QUEUE_DOCS, celery_app
 
     ensure_report_access(current_invoking_role(), kind)
     run_id, task_args = report_generation_args(
@@ -1251,7 +1250,6 @@ async def request_report_generation(
     )
     identity = current_invoking_identity()
     user_id = identity.user_id if identity is not None else None
-    args: list[str | None] = [*task_args, str(user_id) if user_id is not None else None]
 
     from app.agents.framework.report_requests import record_generation_requested
 
@@ -1265,16 +1263,7 @@ async def request_report_generation(
         kind=task_args[0],
         period_start=task_args[1],
         period_end=task_args[2],
-    )
-
-    import asyncio
-
-    # send_task performs synchronous broker I/O; run_in_executor keeps the
-    # event loop unblocked (D2 async-first, the trigger_discovery_run pattern).
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(
-        None,
-        lambda: celery_app.send_task("reports.generate", args=args, queue=QUEUE_DOCS),
+        requested_by=user_id,
     )
     return json.dumps({"run_id": str(run_id), "status": "queued"})
 

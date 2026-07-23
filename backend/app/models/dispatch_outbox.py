@@ -20,6 +20,13 @@ class DispatchOutboxState(StrEnum):
     DEAD = "dead"
 
 
+class DispatchConsumerState(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 class DispatchOutbox(UuidPkMixin, Base):
     __tablename__ = "dispatch_outbox"
     __table_args__ = (
@@ -47,3 +54,10 @@ class DispatchOutbox(UuidPkMixin, Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False, default=utcnow)
     dispatched_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    consumer_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=DispatchConsumerState.PENDING.value
+    )
+    consumer_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    consumer_claimed_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    consumer_finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    consumer_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
