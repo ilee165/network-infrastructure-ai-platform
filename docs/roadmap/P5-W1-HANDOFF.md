@@ -43,12 +43,16 @@ focused fix commits `59e8b7b3`, `2a1a7c4e`, `7973b979`, `ba2e60a6`,
   the table above and the three implemented deep specs map every requirement.
 - `p5_w1_branch_is_clean_and_contains_only_goal_and_w1_commits`: **PASS before
   this documentation commit** — `origin/main..79e837e1` is exactly the 13
-  commits listed above; the final range adds only this closeout commit.
-- `p5_w1_graphify_index_is_current`: **UNPROVEN / TOOL GAP** — this linked
-  worktree has no root `graphify-out/graph.json`. Repeated `graphify update .`
-  attempts completed the AST scan and then stalled in symbol resolution. T2
-  reported completion, but no updated root graph is present here. A nested
-  artifact queried during closeout identifies itself as using the pre-#1504
-  node-ID scheme; the authoritative main-worktree graph therefore remains
-  pre-#1504. This non-code closeout gap does not change the verified W1 runtime
-  verdict and is deliberately not marked PASS.
+  commits listed above; the final range adds only documentation-only closeout
+  commits.
+- `p5_w1_graphify_index_is_current`: **PASS** — exact committed W1 HEAD was
+  exported to native Linux ext4 at `/tmp/p5-w1-graph-build.6LmXjy`, where
+  `graphify update .` completed with exit 0 in 24.6 seconds and rebuilt 1,267
+  source files into 21,413 nodes, 50,021 edges, and 960 communities. The
+  ignored `graphify-out` was copied back to this linked worktree; graph and
+  manifest mtimes are 2026-07-23 14:41. A closeout query for `P5 W1
+  transactional report outbox Celery publication ratchet reconciliation`
+  completed with exit 0 and surfaced the W1 specs, `DispatchOutbox`,
+  `ReportRun`, and related controls. Direct update on DrvFS had stalled during
+  symbol resolution, so the native ext4 rebuild was the successful,
+  authoritative workaround.
