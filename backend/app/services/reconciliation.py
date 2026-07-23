@@ -19,11 +19,13 @@ from app.models.change_requests import ChangeRequest, ChangeRequestState
 from app.models.config_mgmt import ConfigBackupRun
 
 BACKUP_MISS_GRACE = timedelta(minutes=15)
-# Persistence lifecycle contract: agent.py commits the trace header, each step,
-# trace completion, and session completion as separate short transactions. The
-# platform's documented five-minute first-token objective is the upper bound for
-# that lifecycle to settle, so reconciliation observes only rows at/after it.
-TRACE_SETTLED_GRACE = timedelta(minutes=5)
+# Persistence lifecycle contract: PostgresTraceRecorder awaits the commit for a
+# trace header, every step, and trace completion. AgentSessionService then awaits
+# the terminal session commit only after the supervisor (and therefore its trace
+# recorder) returns. There is no background persistence or retry queue to settle:
+# a committed row is authoritative immediately. The reconciliation job's daily
+# cadence controls detection latency, not transaction settlement.
+TRACE_SETTLED_GRACE = timedelta(0)
 
 
 @dataclass(frozen=True)

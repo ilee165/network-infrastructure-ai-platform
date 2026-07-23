@@ -64,10 +64,10 @@ async def test_disabled_backup_task_does_not_query(monkeypatch) -> None:
     assert await tasks._run("config_backup") == 0
 
 
-def test_trace_reconcile_respects_both_sides_of_settled_grace_window() -> None:
+def test_trace_reconcile_settles_at_synchronous_commit_boundary() -> None:
     now = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
-    assert not is_settled(timestamp=now - timedelta(minutes=4, seconds=59), now=now)
-    assert is_settled(timestamp=now - timedelta(minutes=5), now=now)
+    assert not is_settled(timestamp=now + timedelta(microseconds=1), now=now)
+    assert is_settled(timestamp=now, now=now)
 
 
 def test_cr_audit_reconcile_fails_closed_on_query_error(monkeypatch) -> None:
@@ -183,8 +183,8 @@ async def test_reconciliation_queries_return_aggregate_counts() -> None:
         ScalarSession([3])  # type: ignore[arg-type]
     )
     traces = await reconcile_reasoning_traces(
-        ScalarSession([1, 2, 3]),
-        now=now,  # type: ignore[arg-type]
+        ScalarSession([1, 2, 3]),  # type: ignore[arg-type]
+        now=now,
     )
     assert backup.inconsistencies == 1
     assert change.inconsistencies == 3

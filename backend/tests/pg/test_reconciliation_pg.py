@@ -131,7 +131,7 @@ async def test_trace_reconcile_matched_graph_and_orphan_step_exact_counts(
     pg_session: AsyncSession,
 ) -> None:
     user_id, session_id, trace_id = uuid4(), uuid4(), uuid4()
-    orphan_trace_id = uuid4()
+    orphan_session_id, orphan_trace_id, missing_trace_id = uuid4(), uuid4(), uuid4()
     settled = datetime.now(UTC) - timedelta(minutes=6)
     await pg_session.execute(
         text(
@@ -156,7 +156,19 @@ async def test_trace_reconcile_matched_graph_and_orphan_step_exact_counts(
         ),
         {"id": trace_id, "session": session_id, "t": settled},
     )
-    for ordinal, parent in ((1, trace_id), (2, orphan_trace_id)):
+    # Production declares the session FK, so deliberately bypass it in this
+    # throwaway PostgreSQL transaction to prove the reconciliation query detects
+    # corruption that normal writes cannot create. SET LOCAL resets on commit.
+    await pg_session.execute(text("SET LOCAL session_replication_role = replica"))
+    await pg_session.execute(
+        text(
+            "INSERT INTO reasoning_traces "
+            "(id,created_at,session_id,agent_name,started_at,completed_at) "
+            "VALUES (:id,:t,:session,'orphan',:t,:t)"
+        ),
+        {"id": orphan_trace_id, "session": orphan_session_id, "t": settled},
+    )
+    for ordinal, parent in ((1, trace_id), (2, missing_trace_id)):
         await pg_session.execute(
             text(
                 "INSERT INTO reasoning_trace_steps "
@@ -168,5 +180,5 @@ async def test_trace_reconcile_matched_graph_and_orphan_step_exact_counts(
     await pg_session.commit()
     result = await reconcile_reasoning_traces(pg_session, now=datetime.now(UTC))
     assert result.sessions_without_trace == 0
-    assert result.traces_without_session == 0
+    assert result.traces_without_session == 1
     assert result.steps_without_trace == 1
