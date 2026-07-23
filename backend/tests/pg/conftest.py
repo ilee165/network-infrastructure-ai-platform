@@ -79,6 +79,7 @@ _RESET_TABLES = (
     # P4 W3-T1 report engine + compliance trend history (ADR-0053 §1/§7.2):
     # CASCADE removes artifacts/findings with their runs.
     "report_artifacts",
+    "dispatch_outbox",
     "report_runs",
     "compliance_run_findings",
     "compliance_runs",

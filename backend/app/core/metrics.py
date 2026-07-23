@@ -78,6 +78,9 @@ __all__ = [
     "REPORT_FAILURES_TOTAL",
     "REPORT_GENERATION_SECONDS",
     "REPORT_LAST_SUCCESS_TIMESTAMP",
+    "REPORT_OUTBOX_PENDING",
+    "REPORT_OUTBOX_OLDEST_SECONDS",
+    "REPORT_OUTBOX_EVENTS_TOTAL",
     "RECONCILIATION_HEALTHY",
     "RECONCILIATION_INCONSISTENCIES",
     "RECONCILIATION_LAST_SUCCESS_TIMESTAMP",
@@ -91,6 +94,8 @@ __all__ = [
     "set_audit_export_lag",
     "set_celery_queue_depth",
     "set_report_last_success",
+    "set_report_outbox_backlog",
+    "record_report_outbox_event",
     "set_reconciliation_result",
     "set_reconciliation_unhealthy",
     "set_provider_healthy",
@@ -245,6 +250,19 @@ try:  # Optional observability dependency (D15) — degrade to no-ops if absent.
         # multiprocess mode (no ``PROMETHEUS_MULTIPROC_DIR``).
         multiprocess_mode="mostrecent",
     )
+    REPORT_OUTBOX_PENDING: Any = Gauge(
+        "netops_report_outbox_pending",
+        "Pending durable report dispatch envelopes.",
+    )
+    REPORT_OUTBOX_OLDEST_SECONDS: Any = Gauge(
+        "netops_report_outbox_oldest_seconds",
+        "Age in seconds of the oldest pending report dispatch envelope.",
+    )
+    REPORT_OUTBOX_EVENTS_TOTAL: Any = Counter(
+        "netops_report_outbox_events_total",
+        "Report outbox lifecycle events by bounded outcome.",
+        ["event"],
+    )
     RECONCILIATION_INCONSISTENCIES: Any = Gauge(
         "netops_reconciliation_inconsistencies",
         "Current completeness violations by bounded PRODUCTION section 6 row.",
@@ -288,6 +306,9 @@ except ImportError:  # pragma: no cover - exercised only on a slim install
     REPORT_GENERATION_SECONDS = None
     REPORT_FAILURES_TOTAL = None
     REPORT_LAST_SUCCESS_TIMESTAMP = None
+    REPORT_OUTBOX_PENDING = None
+    REPORT_OUTBOX_OLDEST_SECONDS = None
+    REPORT_OUTBOX_EVENTS_TOTAL = None
     RECONCILIATION_INCONSISTENCIES = None
     RECONCILIATION_HEALTHY = None
     RECONCILIATION_LAST_SUCCESS_TIMESTAMP = None
@@ -452,6 +473,21 @@ def set_report_last_success(*, report_kind: str, timestamp: float) -> None:
     if not _PROM_ENABLED:
         return
     REPORT_LAST_SUCCESS_TIMESTAMP.labels(report_kind=report_kind).set(timestamp)
+
+
+def set_report_outbox_backlog(*, pending: int, oldest_seconds: float) -> None:
+    """Expose bounded backlog aggregates; never envelope data."""
+    if not _PROM_ENABLED:
+        return
+    REPORT_OUTBOX_PENDING.set(pending)
+    REPORT_OUTBOX_OLDEST_SECONDS.set(oldest_seconds)
+
+
+def record_report_outbox_event(*, event: str) -> None:
+    """Count one bounded relay outcome (claim/retry/dead/recovered/duplicate)."""
+    if not _PROM_ENABLED:
+        return
+    REPORT_OUTBOX_EVENTS_TOTAL.labels(event=event).inc()
 
 
 def set_reconciliation_result(

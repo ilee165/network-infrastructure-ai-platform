@@ -280,7 +280,7 @@ def test_generate_scheduled_uses_settings_cadence(
     """Legacy fallback: an empty message (no dispatch-supplied bounds) still
     derives the period from the current wall clock, exactly as before."""
     result = tasks.generate_scheduled.run("change")
-    assert result["status"] == "succeeded"
+    assert result["status"] == "queued"
     run = _query_all(db_url, select(ReportRun))[0]
     assert run.trigger == "scheduled"
     assert run.requested_by is None
@@ -307,7 +307,7 @@ def test_generate_scheduled_honors_dispatch_supplied_bounds_across_midnight(
 
     result = tasks.generate_scheduled.run("change", dispatched_start, dispatched_end)
 
-    assert result["status"] == "succeeded"
+    assert result["status"] == "queued"
     run = _query_all(db_url, select(ReportRun))[0]
     assert run.period_start == datetime(2020, 1, 5, tzinfo=UTC)
     assert run.period_end == datetime(2020, 1, 12, tzinfo=UTC)

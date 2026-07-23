@@ -140,4 +140,26 @@ spec:
               failing (builder, render, or redaction), and the kind's staleness
               page will follow at cadence + grace if not fixed (ADR-0053 §9).
             runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-engine.md"
+    - name: netops-report-outbox
+      rules:
+        - alert: NetopsReportOutboxBacklog
+          expr: netops_report_outbox_pending > 0 and netops_report_outbox_oldest_seconds > 300
+          for: 5m
+          labels:
+            severity: page
+            slo: report_outbox
+          annotations:
+            summary: "Durable report dispatch backlog is not draining"
+            description: "At least one pending report envelope has remained undispatched for over five minutes."
+            runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-outbox-relay.md"
+        - alert: NetopsReportOutboxDead
+          expr: increase(netops_report_outbox_events_total{event="dead"}[15m]) > 0
+          for: 1m
+          labels:
+            severity: page
+            slo: report_outbox
+          annotations:
+            summary: "A durable report dispatch envelope became dead"
+            description: "A report envelope failed validation or exhausted bounded broker retries."
+            runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-outbox-relay.md"
 {{- end }}

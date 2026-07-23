@@ -53,6 +53,7 @@ from app.models.config_mgmt import (
     DocumentKind,
     Embedding,
 )
+from app.models.dispatch_outbox import DispatchOutbox, DispatchOutboxState
 from app.models.identity import RefreshSession, Role, SystemSetting, User
 from app.models.inventory import (
     CredentialKind,
@@ -140,6 +141,8 @@ __all__ = [
     "ReportKind",
     "ReportRun",
     "ReportRunStatus",
+    "DispatchOutbox",
+    "DispatchOutboxState",
     "ReportTrigger",
     "ReasoningTraceStep",
     "RefreshSession",

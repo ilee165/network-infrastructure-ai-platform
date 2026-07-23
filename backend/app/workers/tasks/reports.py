@@ -154,6 +154,7 @@ async def _claim_report_run(
     requested_by: UUID | None,
     period_start: datetime,
     period_end: datetime,
+    dispatch_id: UUID | None = None,
 ) -> str:
     """INSERT the ``report_runs`` claim row; classify ANY unique conflict.
 
@@ -223,6 +224,17 @@ async def _claim_report_run(
         if existing.status == ReportRunStatus.SUCCEEDED.value:
             await session.commit()
             return "skipped"
+        if existing.status == ReportRunStatus.QUEUED.value and dispatch_id is not None:
+            await session.execute(
+                update(ReportRun)
+                .where(
+                    ReportRun.id == run_id,
+                    ReportRun.status == ReportRunStatus.QUEUED.value,
+                )
+                .values(status=ReportRunStatus.RUNNING.value, updated_at=datetime.now(UTC))
+            )
+            await session.commit()
+            return "claimed"
         if existing.status == ReportRunStatus.FAILED.value:
             # A failed period is re-attemptable (fail-closed redaction must not
             # block a period forever once the payload is fixed): reset the row.
@@ -321,6 +333,7 @@ async def _generate_report_core(
     period_end_iso: str,
     trigger: str,
     requested_by: str | None,
+    dispatch_id: str | None = None,
 ) -> dict[str, Any]:
     """Claim → build → redact+render → persist for one ``(kind, period)``."""
     kind = ReportKind(kind_value)
@@ -338,6 +351,7 @@ async def _generate_report_core(
         requested_by=requested_uuid,
         period_start=period_start,
         period_end=period_end,
+        dispatch_id=UUID(dispatch_id) if dispatch_id else None,
     )
     if claim == "skipped":
         logger.info("reports.generate_skipped_duplicate", run_id=run_id_str, kind=kind.value)
@@ -491,10 +505,15 @@ def generate(
     period_end: str,
     trigger: str = ReportTrigger.ON_DEMAND.value,
     requested_by: str | None = None,
+    dispatch_id: str | None = None,
 ) -> dict[str, Any]:
     """Generate one report for ``(kind, period)`` (on-demand API entrypoint)."""
     return dict(
-        asyncio.run(_generate_report_core(kind, period_start, period_end, trigger, requested_by))
+        asyncio.run(
+            _generate_report_core(
+                kind, period_start, period_end, trigger, requested_by, dispatch_id
+            )
+        )
     )
 
 
@@ -529,17 +548,27 @@ def generate_scheduled(
         start_dt, end_dt = scheduled_period(cadence, datetime.now(UTC))
         period_start = start_dt.isoformat()
         period_end = end_dt.isoformat()
-    return dict(
-        asyncio.run(
-            _generate_report_core(
-                kind,
-                period_start,
-                period_end,
-                ReportTrigger.SCHEDULED.value,
-                None,
+
+    async def _enqueue() -> dict[str, Any]:
+        from app.services.report_outbox import enqueue_report
+
+        kind_enum = ReportKind(kind)
+        start = _parse_utc(period_start)
+        end = _parse_utc(period_end)
+        async with _session() as session:
+            run = await enqueue_report(
+                session,
+                run_id=deterministic_run_id(kind_enum, start, end),
+                kind=kind_enum,
+                period_start=start,
+                period_end=end,
+                trigger=ReportTrigger.SCHEDULED.value,
+                requested_by=None,
             )
-        )
-    )
+            await session.commit()
+        return {"run_id": str(run.id), "status": "queued"}
+
+    return dict(asyncio.run(_enqueue()))
 
 
 # ---------------------------------------------------------------------------

@@ -203,6 +203,7 @@ def create_celery_app() -> Celery:
             "app.workers.tasks.credentials",
             "app.workers.tasks.maintenance",
             "app.workers.tasks.reports",
+            "app.workers.tasks.report_outbox",
             "app.workers.tasks.reconciliation",
         ],
     )
@@ -360,6 +361,14 @@ def create_celery_app() -> Celery:
                     hour=str(settings.report_purge_hour),
                     minute=str(settings.report_purge_minute),
                 ),
+            },
+            "report-outbox-relay": {
+                "task": "reports.outbox_relay",
+                "schedule": 5.0,
+            },
+            "report-outbox-reaper": {
+                "task": "reports.outbox_reaper",
+                "schedule": 60.0,
             },
             # Daily compliance evaluation sweep (ADR-0053 §2) feeding the §7.2
             # trend history — without it the posture report has no time series.
