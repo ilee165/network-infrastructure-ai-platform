@@ -142,9 +142,11 @@ def _seeded_value(kind: str) -> tuple[str, str]:
 # (carrier, agent) pair where that agent really ingests that carrier AND the
 # agent can reach a state-changing path: the DDI agent (typed mutator tools),
 # the Configuration agent (drafts CONFIG CRs through the gate), and the
-# Automation agent (executes approved CRs). Read-only-only agents (discovery,
-# documentation, troubleshooting, packet_analysis, consultant) are out of this
-# matrix by construction — they cannot reach a state-changing outcome.
+# Automation agent (executes approved CRs). Documentation's report-request tool
+# is also STATE_CHANGING, but report generation does not ingest one of these
+# untrusted network-data carriers; its real gate boundary is exercised
+# separately below. Read-only-only agents (discovery, troubleshooting,
+# packet_analysis, consultant) are out of this matrix by construction.
 # ---------------------------------------------------------------------------
 
 REQUIRED_MATRIX_CELLS: frozenset[tuple[str, str]] = frozenset(
@@ -458,15 +460,12 @@ class TestCoverageMatrix:
             "corpus target_agent(s) with no exercisable state-changing surface: "
             f"{sorted(targets - exercisable)}"
         )
-        # DDI and (P2 W3) security are the agents that register state-changing
-        # MODEL tools today (ddi: typed DDI mutators; security:
-        # propose_firewall_remediation, gate-routed to a security_remediation CR
-        # draft). Pin that set so a future change to the surface is named, not
-        # assumed away. The security tool's ED1/ED2 gate behaviour is exercised by
-        # TestSecurityRemediationModelToolBoundary below (the full
-        # firewall-analysis precision/recall corpus is W5-T1), so the relaxed set
-        # keeps the suite's per-(carrier x agent) guarantee honest.
-        assert with_registered_tool == {"ddi", "security"}, (
+        # DDI, Documentation, and (P2 W3) Security register state-changing MODEL
+        # tools today. Pin that set so a future change to the surface is named,
+        # not assumed away. Security and Documentation each have an executable
+        # gate-boundary proof below; the carrier matrix remains scoped to agents
+        # that ingest those carrier families.
+        assert with_registered_tool == {"ddi", "documentation", "security"}, (
             "registered state-changing tool surface changed; revisit the honest "
             f"dispatch and this guardrail: {sorted(with_registered_tool)}"
         )
@@ -978,3 +977,46 @@ class TestSecurityRemediationModelToolBoundary:
         assert state_changing == {"propose_firewall_remediation"}
         for foreign in ("add_dns_record", "deploy_config", "execute_change_request"):
             assert foreign not in security_tools
+
+
+class TestDocumentationReportGenerationBoundary:
+    """The registered report request remains approval-gated and non-executing."""
+
+    async def test_injected_report_request_only_drafts_a_cr(
+        self,
+        service: ChangeRequestService,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        registry_tool = next(
+            tool
+            for tool in build_default_registry().get("documentation").tools
+            if tool.name == "request_report_generation"
+        )
+        assert registry_tool.classification is ToolClassification.STATE_CHANGING
+
+        async def _must_not_execute(**_kwargs: Any) -> str:
+            raise AssertionError("approval-gated report request executed before approval")
+
+        guarded_tool = registry_tool.model_copy(update={"coroutine": _must_not_execute})
+        requester = await _seed_engineer(sessionmaker)
+        sink = RecordingAuditSink()
+        result = await _invoke_through_real_gate(
+            guarded_tool,
+            {
+                "kind": "change",
+                "period_start": "2026-07-01T00:00:00+00:00",
+                "period_end": "2026-07-08T00:00:00+00:00",
+            },
+            service=service,
+            requester_id=requester,
+            audit_sink=sink,
+        )
+
+        assert isinstance(result, ChangeRequestCreated)
+        assert result.change_request_state == ChangeRequestState.DRAFT.value
+        cr = await service.get(uuid.UUID(result.change_request_id))
+        assert cr.state is ChangeRequestState.DRAFT
+        assert len(sink.events) == 1
+        assert sink.events[0].tool_name == "request_report_generation"
+        assert sink.events[0].outcome == "denied"
+        assert sink.events[0].classification is ToolClassification.STATE_CHANGING
