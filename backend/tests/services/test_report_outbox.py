@@ -145,9 +145,19 @@ def test_dispatch_wrapper_redacts_publication_errors(
             args=["run-id"],
             queue="discovery",
         )
-    assert secret not in str(raised.value)
-    assert raised.value.__cause__ is None
-    assert raised.value.__suppress_context__
+    pending: list[BaseException] = [raised.value]
+    seen: set[int] = set()
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        assert secret not in str(error)
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        pending.extend(
+            linked for linked in (error.__cause__, error.__context__) if linked is not None
+        )
 
 
 def test_row_validation_fences_dispatch_and_aggregate_identity() -> None:

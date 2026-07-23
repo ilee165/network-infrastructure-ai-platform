@@ -69,4 +69,5 @@ def durable_dispatch(
     try:
         return celery_app.send_task(task_name, **options)
     except Exception:
-        raise DispatchPublicationError("publication_failed") from None
+        publication_error = DispatchPublicationError("publication_failed")
+    raise publication_error

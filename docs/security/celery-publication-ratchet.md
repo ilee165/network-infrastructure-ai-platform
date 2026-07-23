@@ -17,7 +17,7 @@ The pre-migration census on 2026-07-23 contained these bare production sites:
 | `app/api/v1/discovery.py::start_run` | `discovery.run` | `discovery` |
 | `app/api/v1/agents.py::launch_capture` (device branch) | `packet.capture_device` | `packet_capture` |
 | `app/api/v1/agents.py::launch_capture` (segment branch) | `packet.capture_segment` | `packet_capture` |
-| `app/agents/discovery/tools.py::run_discovery` | `discovery.run` | `discovery` |
+| `app/agents/discovery/tools.py::trigger_discovery_run` | `discovery.run` | `discovery` |
 | `app/workers/tasks/discovery.py::_trigger_topology_sync` | `topology.sync_after_run` | implicit `topology.*` route, now the equivalent explicit `topology` queue |
 
 The post-migration census has no bare application publication sites and no
