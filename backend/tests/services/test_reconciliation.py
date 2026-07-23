@@ -2,10 +2,14 @@
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
 from app.core import metrics
+from app.models.audit import AuditLog
+from app.models.change_requests import ChangeRequest, ChangeRequestKind, ChangeRequestState
+from app.models.identity import Role, User
 from app.services.reconciliation import (
     ReconcileResult,
     backup_slot_due,
@@ -16,6 +20,81 @@ from app.services.reconciliation import (
     reconcile_reasoning_traces,
 )
 from app.workers.tasks import reconciliation as tasks
+
+
+@pytest.mark.asyncio
+async def test_cr_audit_reconcile_validates_actions_for_each_terminal_path(session) -> None:
+    role = Role(name=f"reconcile-{uuid4()}")
+    user = User(
+        username=f"reconcile-{uuid4()}",
+        password_hash="x",
+        role=role,
+        is_active=True,
+    )
+    session.add(user)
+    await session.flush()
+    completed_trace, rolled_back_trace, masked_trace = uuid4(), uuid4(), uuid4()
+    completed = ChangeRequest(
+        state=ChangeRequestState.COMPLETED,
+        kind=ChangeRequestKind.CONFIG,
+        requester_id=user.id,
+        reasoning_trace_id=completed_trace,
+    )
+    rolled_back = ChangeRequest(
+        state=ChangeRequestState.ROLLED_BACK,
+        kind=ChangeRequestKind.CONFIG,
+        requester_id=user.id,
+        reasoning_trace_id=rolled_back_trace,
+    )
+    masked = ChangeRequest(
+        state=ChangeRequestState.COMPLETED,
+        kind=ChangeRequestKind.CONFIG,
+        requester_id=user.id,
+        reasoning_trace_id=masked_trace,
+    )
+    session.add_all((completed, rolled_back, masked))
+    await session.flush()
+
+    common = (
+        "change_request.created",
+        "change_request.draft_to_pending_approval",
+        "change_request.pending_approval_to_approved",
+        "change_request.approved_to_executing",
+    )
+    terminal_actions = (
+        (completed, ("change_request.executing_to_completed",)),
+        (
+            rolled_back,
+            (
+                "change_request.executing_to_failed",
+                "change_request.failed_to_rolled_back",
+            ),
+        ),
+        (
+            masked,
+            (
+                "change_request.executing_to_failed",
+                "change_request.failed_to_rolled_back",
+            ),
+        ),
+    )
+    seq = 1
+    for cr, final_actions in terminal_actions:
+        for action in common + final_actions:
+            session.add(
+                AuditLog(
+                    seq=seq,
+                    actor="test",
+                    action=action,
+                    target_type="change_request",
+                    target_id=cr.id.hex,
+                    reasoning_trace_id=cr.reasoning_trace_id,
+                )
+            )
+            seq += 1
+    await session.commit()
+
+    assert (await reconcile_change_request_audit(session)).inconsistencies == 1
 
 
 def test_backup_reconcile_alerts_within_fifteen_minutes_of_due_miss() -> None:

@@ -111,8 +111,9 @@ _SECTION6_BACKED_SLO_LABELS = frozenset(
     }
 )
 
-#: The seven ``record:`` SLI series names (ADR-0046 §1, one per backed §6 row; API
-#: read latency contributes two — p95 and p99). A renamed/added/dropped rule bites.
+#: The exact ``record:`` SLI series names (ADR-0046 §1, one per backed §6 row;
+#: API read latency and reconciliation contribute supporting series). A
+#: renamed/added/dropped rule bites.
 _EXPECTED_RECORDING_RULES = frozenset(
     {
         "slo:netops_api_availability:ratio_rate5m",
@@ -125,6 +126,7 @@ _EXPECTED_RECORDING_RULES = frozenset(
         "slo:netops_reconciliation:inconsistencies",
         "slo:netops_reconciliation:query_healthy",
         "slo:netops_reconciliation:age_seconds",
+        "slo:netops_reconciliation:schedule_enabled",
     }
 )
 
@@ -246,7 +248,7 @@ def test_coverage_matrix_is_grounded_in_production_section6() -> None:
     """The declared alert classes map 1:1 onto all nine backed §6 SLI rows.
 
     Bites on drift in either direction: a new alert class not tied to a §6 row, or a
-    dropped §6 SLO. The seven recording-rule SLI series are asserted exactly, and the
+    dropped §6 SLO. The recording-rule SLI series are asserted exactly, and the
     three reconciliation rows share the bounded aggregate recording series.
     """
     declared = _declared_alerts()

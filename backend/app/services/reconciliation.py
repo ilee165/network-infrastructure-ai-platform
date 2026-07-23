@@ -105,7 +105,12 @@ def change_request_audit_reconciliation_query() -> Select[tuple[int]]:
         select(
             AuditLog.target_id.label("target_id"),
             AuditLog.reasoning_trace_id.label("reasoning_trace_id"),
-            func.count(func.distinct(AuditLog.action)).label("action_count"),
+            func.count(
+                func.distinct(case((AuditLog.action.in_(expected_completed), AuditLog.action)))
+            ).label("completed_action_count"),
+            func.count(
+                func.distinct(case((AuditLog.action.in_(expected_rolled_back), AuditLog.action)))
+            ).label("rolled_back_action_count"),
         )
         .where(
             AuditLog.target_type == "change_request",
@@ -122,12 +127,20 @@ def change_request_audit_reconciliation_query() -> Select[tuple[int]]:
         select(
             ChangeRequest.id.label("id"),
             ChangeRequest.reasoning_trace_id.label("reasoning_trace_id"),
+            ChangeRequest.state.label("state"),
             expected_count.label("expected_count"),
         )
         .where(
             ChangeRequest.state.in_((ChangeRequestState.COMPLETED, ChangeRequestState.ROLLED_BACK)),
         )
         .cte("terminal_crs")
+    )
+    action_count = case(
+        (
+            terminal_crs.c.state == ChangeRequestState.COMPLETED,
+            audit_counts.c.completed_action_count,
+        ),
+        else_=audit_counts.c.rolled_back_action_count,
     )
     return (
         select(func.count())
@@ -144,7 +157,7 @@ def change_request_audit_reconciliation_query() -> Select[tuple[int]]:
         .where(
             or_(
                 terminal_crs.c.reasoning_trace_id.is_(None),
-                func.coalesce(audit_counts.c.action_count, 0) < terminal_crs.c.expected_count,
+                func.coalesce(action_count, 0) < terminal_crs.c.expected_count,
             )
         )
     )
