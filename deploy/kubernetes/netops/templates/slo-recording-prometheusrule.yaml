@@ -108,4 +108,6 @@ spec:
           expr: netops_reconciliation_query_healthy
         - record: slo:netops_reconciliation:age_seconds
           expr: time() - netops_reconciliation_last_success_timestamp
+        - record: slo:netops_reconciliation:schedule_enabled
+          expr: netops_reconciliation_schedule_enabled
 {{- end }}

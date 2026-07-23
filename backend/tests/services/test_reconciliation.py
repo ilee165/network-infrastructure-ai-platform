@@ -43,7 +43,11 @@ def test_backup_slot_after_midnight_uses_most_recent_due_slot_date() -> None:
 
 
 @pytest.mark.asyncio
-async def test_disabled_backup_task_does_not_query(monkeypatch) -> None:
+async def test_disabled_backup_task_does_not_query_and_emits_excluded_healthy_state(
+    monkeypatch,
+) -> None:
+    emitted: list[tuple[str, object]] = []
+
     class Engine:
         async def dispose(self) -> None:
             return None
@@ -61,7 +65,24 @@ async def test_disabled_backup_task_does_not_query(monkeypatch) -> None:
     )
     monkeypatch.setattr(tasks.db, "create_engine", lambda _settings: Engine())
     monkeypatch.setattr(tasks, "async_sessionmaker", lambda *_args, **_kwargs: ForbiddenMaker())
+    monkeypatch.setattr(
+        tasks.metrics,
+        "set_reconciliation_schedule_enabled",
+        lambda **kwargs: emitted.append(("enabled", kwargs)),
+    )
+    monkeypatch.setattr(
+        tasks.metrics,
+        "set_reconciliation_result",
+        lambda **kwargs: emitted.append(("result", kwargs)),
+    )
     assert await tasks._run("config_backup") == 0
+    assert emitted[0] == (
+        "enabled",
+        {"reconciliation": "config_backup", "enabled": False},
+    )
+    assert emitted[1][0] == "result"
+    assert emitted[1][1]["reconciliation"] == "config_backup"
+    assert emitted[1][1]["inconsistencies"] == 0
 
 
 def test_trace_reconcile_settles_at_synchronous_commit_boundary() -> None:

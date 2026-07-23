@@ -22,7 +22,16 @@ from app.workers.celery_app import celery_app
 async def _run(kind: str) -> int:
     settings = get_settings()
     if kind == "config_backup" and not settings.config_backup_enabled:
+        now = datetime.now(UTC)
+        metrics.set_reconciliation_schedule_enabled(reconciliation=kind, enabled=False)
+        metrics.set_reconciliation_result(
+            reconciliation=kind,
+            inconsistencies=0,
+            timestamp=now.timestamp(),
+        )
         return 0
+    if kind == "config_backup":
+        metrics.set_reconciliation_schedule_enabled(reconciliation=kind, enabled=True)
     engine = db.create_engine(settings)
     maker = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)

@@ -389,13 +389,20 @@ spec:
       rules:
         - alert: NetopsConfigBackupCompletenessBurn
           expr: |
-            max_over_time(slo:netops_reconciliation:inconsistencies{reconciliation="config_backup"}[5m]) > 0
-            and max_over_time(slo:netops_reconciliation:inconsistencies{reconciliation="config_backup"}[10m]) > 0
-            or slo:netops_reconciliation:query_healthy{reconciliation="config_backup"} == 0
-            or absent(slo:netops_reconciliation:query_healthy{reconciliation="config_backup"})
-            or absent(slo:netops_reconciliation:inconsistencies{reconciliation="config_backup"})
-            or absent(slo:netops_reconciliation:age_seconds{reconciliation="config_backup"})
-            or slo:netops_reconciliation:age_seconds{reconciliation="config_backup"} >= 90000
+            (
+              slo:netops_reconciliation:schedule_enabled{reconciliation="config_backup"} == 1
+              and on(reconciliation)
+              (
+                max_over_time(slo:netops_reconciliation:inconsistencies{reconciliation="config_backup"}[5m]) > 0
+                and max_over_time(slo:netops_reconciliation:inconsistencies{reconciliation="config_backup"}[10m]) > 0
+                or slo:netops_reconciliation:query_healthy{reconciliation="config_backup"} == 0
+                or absent(slo:netops_reconciliation:query_healthy{reconciliation="config_backup"})
+                or absent(slo:netops_reconciliation:inconsistencies{reconciliation="config_backup"})
+                or absent(slo:netops_reconciliation:age_seconds{reconciliation="config_backup"})
+                or slo:netops_reconciliation:age_seconds{reconciliation="config_backup"} >= 90000
+              )
+            )
+            or absent(slo:netops_reconciliation:schedule_enabled{reconciliation="config_backup"})
           for: 1m
           labels: {severity: page, slo: config_backup_completeness, tier: fast}
           annotations:

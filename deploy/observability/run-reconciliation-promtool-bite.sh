@@ -23,6 +23,8 @@ assert_mutation_bites "trace alert" "NetopsReasoningTracePersistenceBurn" "Muted
 assert_mutation_bites "inconsistency branch" "> 0" "> 999"
 assert_mutation_bites "query-health branch" "== 0" "== -1"
 assert_mutation_bites "freshness branch" ">= 90000" ">= 999999"
+assert_mutation_bites "enabled exclusion branch" "schedule_enabled{reconciliation=\"config_backup\"} == 1" "schedule_enabled{reconciliation=\"config_backup\"} == 0"
+assert_mutation_bites "enabled absent branch" "absent(slo:netops_reconciliation:schedule_enabled" "vector(0) and (slo:netops_reconciliation:schedule_enabled"
 assert_mutation_bites "absent-health branch" "absent(slo:netops_reconciliation:query_healthy" "vector(0) and (slo:netops_reconciliation:query_healthy"
 assert_mutation_bites "absent-count branch" "absent(slo:netops_reconciliation:inconsistencies" "vector(0) and (slo:netops_reconciliation:inconsistencies"
 assert_mutation_bites "absent-freshness branch" "absent(slo:netops_reconciliation:age_seconds" "vector(0) and (slo:netops_reconciliation:age_seconds"

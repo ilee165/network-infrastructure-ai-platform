@@ -28,7 +28,7 @@ from prometheus_client.multiprocess import MultiProcessCollector
 from app.core.config import get_settings
 from app.engines.reports.idempotency import scheduled_period
 from app.workers import celery_app as celery_app_module
-from app.workers.celery_app import celery_app
+from app.workers.celery_app import celery_app, create_celery_app
 
 _REPORT_BEAT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("report-generate-change", "report_change_cadence"),
@@ -59,6 +59,18 @@ def test_report_beat_entries_carry_lazy_period_bounds() -> None:
         assert isinstance(entry["kwargs"]["period_end"], BeatLazyFunc)
         # The task's own positional kind arg is untouched (static, harmless).
         assert entry["args"]
+
+
+def test_disabled_config_backup_retains_reconciliation_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings().model_copy(update={"config_backup_enabled": False})
+    monkeypatch.setattr(celery_app_module, "get_settings", lambda: settings)
+    app = create_celery_app()
+    assert "config-nightly-backup" not in app.conf.beat_schedule
+    assert app.conf.beat_schedule["config-backup-reconcile"]["task"] == (
+        "system.reconcile_config_backup"
+    )
 
 
 def test_beat_dispatch_evaluates_the_period_at_the_dispatch_instant(

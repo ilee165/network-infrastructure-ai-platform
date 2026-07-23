@@ -7,6 +7,7 @@ from datetime import UTC, datetime, time, timedelta
 
 from sqlalchemy import and_, case, exists, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from app.models.agents import (
     AgentSession,
@@ -86,8 +87,8 @@ async def reconcile_config_backup(
     return ReconcileResult(0 if successful else 1)
 
 
-async def reconcile_change_request_audit(session: AsyncSession) -> ReconcileResult:
-    """Count terminal executed CRs missing any required lifecycle audit edge."""
+def change_request_audit_reconciliation_query() -> Select[tuple[int]]:
+    """Build the set-wise aggregate/join used by CR audit reconciliation."""
     expected_completed = (
         "change_request.created",
         "change_request.draft_to_pending_approval",
@@ -99,39 +100,59 @@ async def reconcile_change_request_audit(session: AsyncSession) -> ReconcileResu
         "change_request.executing_to_failed",
         "change_request.failed_to_rolled_back",
     )
-    audit_count = (
-        select(func.count(func.distinct(AuditLog.action)))
+    expected_actions = tuple(dict.fromkeys(expected_completed + expected_rolled_back))
+    audit_counts = (
+        select(
+            AuditLog.target_id.label("target_id"),
+            AuditLog.reasoning_trace_id.label("reasoning_trace_id"),
+            func.count(func.distinct(AuditLog.action)).label("action_count"),
+        )
         .where(
             AuditLog.target_type == "change_request",
-            AuditLog.target_id == func.cast(ChangeRequest.id, AuditLog.target_id.type),
-            ChangeRequest.reasoning_trace_id.is_not(None),
-            AuditLog.reasoning_trace_id == ChangeRequest.reasoning_trace_id,
-            or_(
-                and_(
-                    ChangeRequest.state == ChangeRequestState.COMPLETED,
-                    AuditLog.action.in_(expected_completed),
-                ),
-                and_(
-                    ChangeRequest.state == ChangeRequestState.ROLLED_BACK,
-                    AuditLog.action.in_(expected_rolled_back),
-                ),
-            ),
+            AuditLog.action.in_(expected_actions),
         )
-        .correlate(ChangeRequest)
-        .scalar_subquery()
+        .group_by(AuditLog.target_id, AuditLog.reasoning_trace_id)
+        .cte("audit_counts")
     )
     expected_count = case(
         (ChangeRequest.state == ChangeRequestState.COMPLETED, literal(len(expected_completed))),
         else_=literal(len(expected_rolled_back)),
     )
-    count = await session.scalar(
-        select(func.count())
-        .select_from(ChangeRequest)
+    terminal_crs = (
+        select(
+            ChangeRequest.id.label("id"),
+            ChangeRequest.reasoning_trace_id.label("reasoning_trace_id"),
+            expected_count.label("expected_count"),
+        )
         .where(
             ChangeRequest.state.in_((ChangeRequestState.COMPLETED, ChangeRequestState.ROLLED_BACK)),
-            or_(ChangeRequest.reasoning_trace_id.is_(None), audit_count < expected_count),
+        )
+        .cte("terminal_crs")
+    )
+    return (
+        select(func.count())
+        .select_from(
+            terminal_crs.outerjoin(
+                audit_counts,
+                and_(
+                    audit_counts.c.target_id
+                    == func.cast(terminal_crs.c.id, AuditLog.target_id.type),
+                    audit_counts.c.reasoning_trace_id == terminal_crs.c.reasoning_trace_id,
+                ),
+            )
+        )
+        .where(
+            or_(
+                terminal_crs.c.reasoning_trace_id.is_(None),
+                func.coalesce(audit_counts.c.action_count, 0) < terminal_crs.c.expected_count,
+            )
         )
     )
+
+
+async def reconcile_change_request_audit(session: AsyncSession) -> ReconcileResult:
+    """Count terminal executed CRs missing any required lifecycle audit edge."""
+    count = await session.scalar(change_request_audit_reconciliation_query())
     return ReconcileResult(int(count or 0))
 
 

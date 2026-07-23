@@ -5,9 +5,11 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.reconciliation import (
+    change_request_audit_reconciliation_query,
     reconcile_change_request_audit,
     reconcile_reasoning_traces,
 )
@@ -119,6 +121,75 @@ async def test_cr_audit_trace_join_graph_counts_only_missing_or_mismatched_edges
     await pg_session.commit()
     result = await reconcile_change_request_audit(pg_session)
     assert result.inconsistencies == 3
+
+
+async def test_cr_audit_reconcile_plan_is_set_wise_and_uses_composite_lookup(
+    pg_session: AsyncSession,
+) -> None:
+    """A realistic lifecycle fixture gets one aggregate audit pass, never N subplans."""
+    user_id = uuid4()
+    await _seed_admin_user(
+        pg_session,
+        user_id=user_id,
+        username=f"cr-plan-{user_id}",
+    )
+    actions = (
+        "change_request.created",
+        "change_request.draft_to_pending_approval",
+        "change_request.pending_approval_to_approved",
+        "change_request.approved_to_executing",
+        "change_request.executing_to_completed",
+    )
+    cr_rows: list[dict[str, object]] = []
+    audit_rows: list[dict[str, object]] = []
+    for ordinal in range(250):
+        cr_id, trace_id = uuid4(), uuid4()
+        cr_rows.append({"id": cr_id, "u": user_id, "trace": trace_id})
+        for action_index, action in enumerate(actions):
+            audit_rows.append(
+                {
+                    "id": uuid4(),
+                    "seq": 20_000 + ordinal * len(actions) + action_index,
+                    "action": action,
+                    "target": str(cr_id),
+                    "trace": trace_id,
+                }
+            )
+    await pg_session.execute(
+        text(
+            "INSERT INTO change_requests (id,state,kind,requester_id,four_eyes_required,"
+            "reasoning_trace_id,created_at,updated_at) "
+            "VALUES (:id,'completed','config',:u,true,:trace,now(),now())"
+        ),
+        cr_rows,
+    )
+    await pg_session.execute(
+        text(
+            "INSERT INTO audit_log "
+            "(id,created_at,seq,actor,action,target_type,target_id,reasoning_trace_id,"
+            "prev_hash,entry_hash) VALUES "
+            "(:id,now(),:seq,'test',:action,'change_request',:target,:trace,"
+            "decode(repeat('00',32),'hex'),decode(repeat('00',32),'hex'))"
+        ),
+        audit_rows,
+    )
+    await pg_session.commit()
+
+    assert (await reconcile_change_request_audit(pg_session)).inconsistencies == 0
+    await pg_session.execute(text("SET LOCAL enable_seqscan = off"))
+    statement = change_request_audit_reconciliation_query()
+    sql = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    plan_value = await pg_session.scalar(text(f"EXPLAIN (FORMAT JSON) {sql}"))
+    plan_text = str(plan_value)
+    assert "SubPlan" not in plan_text
+    # PostgreSQL gives each partition-attached index a derived child name.
+    assert "target_type_target_id_action_reasoning_tr" in plan_text
+    assert plan_text.count("'Relation Name': 'change_requests'") == 1
 
 
 async def test_trace_reconcile_finds_required_session_without_trace(

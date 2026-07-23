@@ -49,6 +49,6 @@ def test_0023_payload_and_consumer_ownership_match_postgresql_orm_contract() -> 
         assert column in table
 
 
-def test_single_head_is_0023() -> None:
+def test_single_head_is_0024() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
-    assert script.get_heads() == ["0023"]
+    assert script.get_heads() == ["0024"]

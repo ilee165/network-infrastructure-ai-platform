@@ -85,6 +85,7 @@ __all__ = [
     "RECONCILIATION_HEALTHY",
     "RECONCILIATION_INCONSISTENCIES",
     "RECONCILIATION_LAST_SUCCESS_TIMESTAMP",
+    "RECONCILIATION_SCHEDULE_ENABLED",
     "observe_agent_first_token",
     "observe_discovery_run",
     "observe_http_request",
@@ -99,6 +100,7 @@ __all__ = [
     "set_report_outbox_relay_last_success",
     "record_report_outbox_event",
     "set_reconciliation_result",
+    "set_reconciliation_schedule_enabled",
     "set_reconciliation_unhealthy",
     "set_provider_healthy",
     "set_provider_production_grade",
@@ -287,6 +289,12 @@ try:  # Optional observability dependency (D15) — degrade to no-ops if absent.
     RECONCILIATION_LAST_SUCCESS_TIMESTAMP: Any = Gauge(
         "netops_reconciliation_last_success_timestamp",
         "Unix timestamp of the latest successful reconciliation query.",
+        ["reconciliation"],
+        multiprocess_mode="mostrecent",
+    )
+    RECONCILIATION_SCHEDULE_ENABLED: Any = Gauge(
+        "netops_reconciliation_schedule_enabled",
+        "1 when the bounded reconciliation objective is configured, 0 when excluded.",
         ["reconciliation"],
         multiprocess_mode="mostrecent",
     )
@@ -526,6 +534,13 @@ def set_reconciliation_result(
     RECONCILIATION_INCONSISTENCIES.labels(reconciliation=reconciliation).set(inconsistencies)
     RECONCILIATION_HEALTHY.labels(reconciliation=reconciliation).set(1)
     RECONCILIATION_LAST_SUCCESS_TIMESTAMP.labels(reconciliation=reconciliation).set(timestamp)
+
+
+def set_reconciliation_schedule_enabled(*, reconciliation: str, enabled: bool) -> None:
+    """Publish authoritative configured/excluded state for a bounded objective."""
+    if not _PROM_ENABLED:
+        return
+    RECONCILIATION_SCHEDULE_ENABLED.labels(reconciliation=reconciliation).set(int(enabled))
 
 
 def set_reconciliation_unhealthy(*, reconciliation: str) -> None:
