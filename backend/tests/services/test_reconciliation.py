@@ -10,6 +10,7 @@ from app.services.reconciliation import (
     ReconcileResult,
     backup_slot_due,
     is_settled,
+    most_recent_due_backup_slot,
     reconcile_change_request_audit,
     reconcile_config_backup,
     reconcile_reasoning_traces,
@@ -32,6 +33,35 @@ def test_backup_reconcile_is_idempotent_at_boundary_times() -> None:
     due = datetime(2026, 7, 23, 2, 0, tzinfo=UTC)
     first = backup_slot_due(now=due + timedelta(minutes=15), due_at=due)
     assert first == backup_slot_due(now=due + timedelta(minutes=15), due_at=due)
+
+
+def test_backup_slot_after_midnight_uses_most_recent_due_slot_date() -> None:
+    now = datetime(2026, 7, 24, 0, 10, tzinfo=UTC)
+    slot, due = most_recent_due_backup_slot(now=now, hour=23, minute=50)
+    assert slot == "2026-07-23"
+    assert due == datetime(2026, 7, 23, 23, 50, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_disabled_backup_task_does_not_query(monkeypatch) -> None:
+    class Engine:
+        async def dispose(self) -> None:
+            return None
+
+    class ForbiddenMaker:
+        def __call__(self):
+            raise AssertionError("disabled backup must not open a database session")
+
+    monkeypatch.setattr(
+        tasks,
+        "get_settings",
+        lambda: SimpleNamespace(
+            config_backup_enabled=False, config_backup_hour=2, config_backup_minute=0
+        ),
+    )
+    monkeypatch.setattr(tasks.db, "create_engine", lambda _settings: Engine())
+    monkeypatch.setattr(tasks, "async_sessionmaker", lambda *_args, **_kwargs: ForbiddenMaker())
+    assert await tasks._run("config_backup") == 0
 
 
 def test_trace_reconcile_respects_both_sides_of_settled_grace_window() -> None:

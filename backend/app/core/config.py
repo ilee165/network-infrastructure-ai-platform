@@ -258,6 +258,7 @@ class Settings(BaseSettings):
     #: Nightly config-backup schedule (Celery beat, ADR-0017 §1). UTC hour/minute
     #: the ``config.nightly_backup`` task fires at; operators retune cadence
     #: without code changes. Default 02:00 UTC (a low-traffic window).
+    config_backup_enabled: bool = True
     config_backup_hour: int = 2
     config_backup_minute: int = 0
 

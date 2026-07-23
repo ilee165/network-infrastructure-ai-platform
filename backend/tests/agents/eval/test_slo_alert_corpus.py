@@ -26,11 +26,10 @@ properties that a green-at-setup corpus could otherwise fake:
   ``test_perturbation_bite_is_wired_into_ci`` guards that wiring here. See the module
   docstrings of ``slo-corpus-perturbation.test.yaml`` and the bite script.
 
-Grounding: the six §6 SLI rows with a backing Prometheus series map 1:1 onto the
-declared alert classes; the three reconciliation-job rows (§6 rows 5/6/9) have NO
-metric yet and are FLAGGED-deferred in the recording-rules file — this module asserts
-that named-deferral is still documented (no silent drift), it does NOT fabricate a
-rule for them (the W3-T2 anti-false-green contract).
+Grounding: all nine §6 SLI rows now have backing Prometheus series. The three
+reconciliation-job rows (§6 rows 5/6/9) use the bounded reconciliation label and
+are covered by the real-promtool firing, quiet, absent, stale, and mutation
+fixtures in ``deploy/observability/reconciliation.alerts.test.yaml``.
 
 No external services, no wall-clock: the corpus is synthetic compressed-minute series
 parsed from committed YAML, so this runs deterministically in the backend pytest job
@@ -56,8 +55,31 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _OBS = _REPO_ROOT / "deploy" / "observability"
 _ALERTS_FILE = _OBS / "slo-burn-rate.alerts.yaml"
 _RECORDING_FILE = _OBS / "slo-recording.rules.yaml"
+_HELM_ALERTS_FILE = (
+    _REPO_ROOT / "deploy/kubernetes/netops/templates/slo-burn-rate-prometheusrule.yaml"
+)
 _PERTURBATION_SCRIPT = _OBS / "run-slo-corpus-perturbation-bite.sh"
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "platform-gates.yml"
+
+
+def test_reconciliation_checked_alerts_equal_deployed_helm_source() -> None:
+    """The promtool-checked reconciliation group is exactly what Helm deploys."""
+    checked = yaml.safe_load(_ALERTS_FILE.read_text(encoding="utf-8"))
+    template_yaml = "spec:" + _HELM_ALERTS_FILE.read_text(encoding="utf-8").split("\nspec:", 1)[1]
+    rendered_source = "\n".join(
+        line for line in template_yaml.splitlines() if not line.lstrip().startswith("{{")
+    )
+    deployed = yaml.safe_load(rendered_source)
+    checked_group = next(
+        group for group in checked["groups"] if group["name"] == "netops-slo-reconciliation-burn"
+    )
+    deployed_group = next(
+        group
+        for group in deployed["spec"]["groups"]
+        if group["name"] == "netops-slo-reconciliation-burn"
+    )
+    assert deployed_group == checked_group
+
 
 #: The promtool alert-as-test corpus consolidated into the coverage matrix: the
 #: W3-T3 firing/healthy cases, the W3-T5 fault-injection MTTD cases, the W4-T7

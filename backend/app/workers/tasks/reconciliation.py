@@ -11,6 +11,7 @@ from app import db
 from app.core import metrics
 from app.core.config import get_settings
 from app.services.reconciliation import (
+    most_recent_due_backup_slot,
     reconcile_change_request_audit,
     reconcile_config_backup,
     reconcile_reasoning_traces,
@@ -20,22 +21,21 @@ from app.workers.celery_app import celery_app
 
 async def _run(kind: str) -> int:
     settings = get_settings()
+    if kind == "config_backup" and not settings.config_backup_enabled:
+        return 0
     engine = db.create_engine(settings)
     maker = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
     try:
         async with maker() as session:
             if kind == "config_backup":
-                due_at = now.replace(
+                slot, due_at = most_recent_due_backup_slot(
+                    now=now,
                     hour=settings.config_backup_hour,
                     minute=settings.config_backup_minute,
-                    second=0,
-                    microsecond=0,
                 )
                 inconsistencies = (
-                    await reconcile_config_backup(
-                        session, slot=now.date().isoformat(), due_at=due_at, now=now
-                    )
+                    await reconcile_config_backup(session, slot=slot, due_at=due_at, now=now)
                 ).inconsistencies
             elif kind == "change_request_audit":
                 inconsistencies = (await reconcile_change_request_audit(session)).inconsistencies

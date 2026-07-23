@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 
 from sqlalchemy import and_, case, exists, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,9 +19,10 @@ from app.models.change_requests import ChangeRequest, ChangeRequestState
 from app.models.config_mgmt import ConfigBackupRun
 
 BACKUP_MISS_GRACE = timedelta(minutes=15)
-# Trace start, step append, trace completion, and session completion are separate
-# short transactions. The §6 first-token objective permits five minutes; using
-# that existing timing as settled grace prevents observing those commit seams.
+# Persistence lifecycle contract: agent.py commits the trace header, each step,
+# trace completion, and session completion as separate short transactions. The
+# platform's documented five-minute first-token objective is the upper bound for
+# that lifecycle to settle, so reconciliation observes only rows at/after it.
 TRACE_SETTLED_GRACE = timedelta(minutes=5)
 
 
@@ -44,6 +45,14 @@ class TraceReconcileResult:
 def backup_slot_due(*, now: datetime, due_at: datetime, enabled: bool = True) -> bool:
     """Whether an enabled backup slot has entered its 15-minute miss window."""
     return enabled and now >= due_at + BACKUP_MISS_GRACE
+
+
+def most_recent_due_backup_slot(*, now: datetime, hour: int, minute: int) -> tuple[str, datetime]:
+    """Return the latest slot whose miss-grace boundary is due, including yesterday."""
+    due_at = datetime.combine(now.date(), time(hour, minute), tzinfo=UTC)
+    if now < due_at + BACKUP_MISS_GRACE:
+        due_at -= timedelta(days=1)
+    return due_at.date().isoformat(), due_at
 
 
 def is_settled(*, timestamp: datetime, now: datetime) -> bool:
@@ -93,6 +102,8 @@ async def reconcile_change_request_audit(session: AsyncSession) -> ReconcileResu
         .where(
             AuditLog.target_type == "change_request",
             AuditLog.target_id == func.cast(ChangeRequest.id, AuditLog.target_id.type),
+            ChangeRequest.reasoning_trace_id.is_not(None),
+            AuditLog.reasoning_trace_id == ChangeRequest.reasoning_trace_id,
             or_(
                 and_(
                     ChangeRequest.state == ChangeRequestState.COMPLETED,
@@ -116,7 +127,7 @@ async def reconcile_change_request_audit(session: AsyncSession) -> ReconcileResu
         .select_from(ChangeRequest)
         .where(
             ChangeRequest.state.in_((ChangeRequestState.COMPLETED, ChangeRequestState.ROLLED_BACK)),
-            audit_count < expected_count,
+            or_(ChangeRequest.reasoning_trace_id.is_(None), audit_count < expected_count),
         )
     )
     return ReconcileResult(int(count or 0))

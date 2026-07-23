@@ -372,6 +372,9 @@ def create_celery_app() -> Celery:
             },
         },
     )
+    if not settings.config_backup_enabled:
+        celery.conf.beat_schedule.pop("config-nightly-backup", None)
+        celery.conf.beat_schedule.pop("config-backup-reconcile", None)
     return celery
 
 
