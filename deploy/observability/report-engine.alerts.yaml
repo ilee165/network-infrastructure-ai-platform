@@ -156,7 +156,7 @@ groups:
           description: "A report envelope failed validation or exhausted bounded broker retries."
           runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/report-outbox-relay.md"
       - alert: NetopsReportOutboxRelayStale
-        expr: time() - netops_report_outbox_relay_last_success_timestamp > 300
+        expr: (time() - netops_report_outbox_relay_last_success_timestamp > 300) or absent(netops_report_outbox_relay_last_success_timestamp)
         for: 5m
         labels:
           severity: page

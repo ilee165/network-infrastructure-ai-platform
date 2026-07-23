@@ -419,3 +419,63 @@ async def test_report_outbox_poison_becomes_dead_and_safe_replay_is_auditable(
         )
         == 1
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "poison_shape",
+    ["array-of-pairs", "list", "scalar", "null"],
+)
+async def test_report_outbox_non_object_json_poison_is_dead_without_publication(
+    pg_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    poison_shape: str,
+) -> None:
+    from app import db
+    from app.workers.tasks import report_outbox as relay_tasks
+
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 8, tzinfo=UTC)
+    run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+    await enqueue_report(
+        pg_session,
+        run_id=run_id,
+        kind=ReportKind.CHANGE,
+        period_start=start,
+        period_end=end,
+        trigger="scheduled",
+        requested_by=None,
+    )
+    row = (await pg_session.execute(select(DispatchOutbox))).scalar_one()
+    poison: object
+    if poison_shape == "array-of-pairs":
+        poison = [
+            ["dispatch_id", str(row.id)],
+            ["run_id", str(run_id)],
+        ]
+    elif poison_shape == "list":
+        poison = ["raw-secret-hunter2"]
+    elif poison_shape == "scalar":
+        poison = "raw-secret-hunter2"
+    else:
+        poison = None
+    row.payload_json = poison  # type: ignore[assignment]
+    await pg_session.commit()
+
+    assert pg_session.bind is not None
+    maker = async_sessionmaker(pg_session.bind, expire_on_commit=False)
+    monkeypatch.setattr(db, "get_sessionmaker", lambda: maker)
+    monkeypatch.setattr(
+        relay_tasks,
+        "durable_dispatch",
+        lambda **_kwargs: pytest.fail("poison envelope reached broker"),
+    )
+
+    result = await relay_tasks._relay_core(1)
+
+    assert result == {"claimed": 1, "dispatched": 0, "retried": 0, "dead": 1}
+    await pg_session.refresh(row)
+    assert row.state == DispatchOutboxState.DEAD.value
+    assert row.last_error_code == "invalid_envelope"
+    assert "raw-secret-hunter2" not in str(result)
+    assert "raw-secret-hunter2" not in str(row.last_error_code)

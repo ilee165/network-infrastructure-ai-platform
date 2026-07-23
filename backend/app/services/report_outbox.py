@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -57,7 +58,7 @@ class ConsumerClaim:
     period_end: datetime
 
 
-def _parse_payload(payload: dict[str, Any]) -> ReportDispatchPayload:
+def _parse_payload(payload: Mapping[str, Any]) -> ReportDispatchPayload:
     identifiers_are_strings = all(
         isinstance(payload[key], str) for key in _PAYLOAD_KEYS if key in payload
     )
@@ -75,7 +76,7 @@ def _parse_payload(payload: dict[str, Any]) -> ReportDispatchPayload:
 
 def validate_dispatch(
     task_name: str,
-    payload: dict[str, Any],
+    payload: Mapping[str, Any],
     queue: str,
     *,
     dispatch_id: uuid.UUID,
@@ -91,9 +92,12 @@ def validate_dispatch(
 def validate_dispatch_row(row: DispatchOutbox) -> ReportDispatchPayload:
     if row.aggregate_type != "report_run":
         raise InvalidDispatchEnvelope("invalid_aggregate_type")
+    payload: object = row.payload_json
+    if not isinstance(payload, Mapping):
+        raise InvalidDispatchEnvelope("invalid_payload_shape")
     parsed = validate_dispatch(
         row.task_name,
-        dict(row.payload_json),
+        payload,
         row.queue,
         dispatch_id=row.id,
     )

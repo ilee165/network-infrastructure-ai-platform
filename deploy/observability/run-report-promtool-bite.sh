@@ -7,8 +7,9 @@
 #            (`promtool check rules` + `promtool test rules`).
 # NEGATIVE — with the weekly staleness threshold raised to an unreachable value
 #            (the alert MUTED, it can never fire), the corresponding FIRING
-#            test goes RED. A gate that stayed green here would be a
-#            false-green gate; this script exits non-zero so CI fails.
+#            test goes RED; removing the relay's absent-series fail-closed branch
+#            also makes its FIRING test go RED. A gate that stayed green under
+#            either mutation would be false-green.
 #
 # The mutation is applied to a COPY in a temp dir; committed rules are never
 # changed.
@@ -50,6 +51,23 @@ else
     fail=1
   else
     echo "PASS: the muted staleness alert's firing test went RED — the gate bites"
+  fi
+fi
+
+# Remove the relay's fail-closed absent-series branch. Its dedicated FIRING
+# corpus case must fail while the remaining expression still loads cleanly.
+sed 's/) or absent(netops_report_outbox_relay_last_success_timestamp)/)/g' \
+  "${RULES}" > "${TMP}/report-engine.alerts.yaml"
+
+if cmp -s "${RULES}" "${TMP}/report-engine.alerts.yaml"; then
+  echo "FAIL: mutation was a no-op — the relay absent-series branch was not found (rule drift?)" >&2
+  fail=1
+else
+  if promtool test rules "${TMP}/report-engine.alerts.test.yaml" >/dev/null 2>&1; then
+    echo "FAIL: removing the relay absent-series branch still PASSED — the gate does NOT bite (false-green)" >&2
+    fail=1
+  else
+    echo "PASS: removing the relay absent-series branch went RED — the gate bites"
   fi
 fi
 
