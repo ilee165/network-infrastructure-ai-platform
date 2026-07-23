@@ -440,11 +440,11 @@ D15 gives structlog JSON, Prometheus `/metrics`, OTel tracing, health endpoints.
 | API read latency | p95 < 300 ms, p99 < 1 s | FastAPI middleware histograms |
 | Agent chat first-token latency | p95 < 5 s (local profile, reference GPU); < 3 s (external providers) | Agent-session spans (OTel) |
 | Discovery job success rate | ≥99% of device tasks succeed (after retries) per run | Celery task metrics per queue |
-| Scheduled config backup completeness | 100% reachable devices snapshotted per cycle; misses alerted < 15 min | `config` queue job metrics |
-| ChangeRequest execution → audit completeness | 100% — every executed CR has full audit chain + trace link | Daily reconciliation job (count CRs vs. audit entries) |
+| Scheduled config backup completeness | 100% reachable devices snapshotted per cycle; misses alerted < 15 min | Backed: `netops_reconciliation_inconsistencies{reconciliation="config_backup"}` + query-health/freshness series |
+| ChangeRequest execution → audit completeness | 100% — every executed CR has full audit chain + trace link | Backed: daily `netops_reconciliation_inconsistencies{reconciliation="change_request_audit"}` + fail-closed query-health/freshness |
 | Topology projection freshness | Projection lag after discovery run < 5 min | Projection job timestamps |
 | Audit → SIEM export lag | p95 < 60 s | Export pipeline metric |
-| Reasoning-trace persistence | 100% of agent answers have a trace (no orphans) | Reconciliation job (M3 invariant, kept forever) |
+| Reasoning-trace persistence | 100% of agent answers have a trace (no orphans) | Backed: `netops_reconciliation_inconsistencies{reconciliation="reasoning_trace"}` over a documented 5-minute settled grace |
 
 Supporting requirements: 100% of containers expose `/metrics` + health endpoints (already D15); OTel tracing on by default in production with 100% sampling of agent runs and ≥10% of API requests; every alert rule links to a runbook (generated and maintained by the Documentation Agent — dogfooding); log retention per the data-retention Consultant answer (**PROPOSED default:** 90 days hot, 1 year archived).
 

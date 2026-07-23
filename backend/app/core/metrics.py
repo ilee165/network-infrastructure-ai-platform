@@ -78,6 +78,9 @@ __all__ = [
     "REPORT_FAILURES_TOTAL",
     "REPORT_GENERATION_SECONDS",
     "REPORT_LAST_SUCCESS_TIMESTAMP",
+    "RECONCILIATION_HEALTHY",
+    "RECONCILIATION_INCONSISTENCIES",
+    "RECONCILIATION_LAST_SUCCESS_TIMESTAMP",
     "observe_agent_first_token",
     "observe_discovery_run",
     "observe_http_request",
@@ -88,6 +91,8 @@ __all__ = [
     "set_audit_export_lag",
     "set_celery_queue_depth",
     "set_report_last_success",
+    "set_reconciliation_result",
+    "set_reconciliation_unhealthy",
     "set_provider_healthy",
     "set_provider_production_grade",
     "status_class_for",
@@ -240,6 +245,24 @@ try:  # Optional observability dependency (D15) — degrade to no-ops if absent.
         # multiprocess mode (no ``PROMETHEUS_MULTIPROC_DIR``).
         multiprocess_mode="mostrecent",
     )
+    RECONCILIATION_INCONSISTENCIES: Any = Gauge(
+        "netops_reconciliation_inconsistencies",
+        "Current completeness violations by bounded PRODUCTION section 6 row.",
+        ["reconciliation"],
+        multiprocess_mode="mostrecent",
+    )
+    RECONCILIATION_HEALTHY: Any = Gauge(
+        "netops_reconciliation_query_healthy",
+        "1 when the latest reconciliation query completed, 0 on query failure.",
+        ["reconciliation"],
+        multiprocess_mode="mostrecent",
+    )
+    RECONCILIATION_LAST_SUCCESS_TIMESTAMP: Any = Gauge(
+        "netops_reconciliation_last_success_timestamp",
+        "Unix timestamp of the latest successful reconciliation query.",
+        ["reconciliation"],
+        multiprocess_mode="mostrecent",
+    )
 
     _PROM_ENABLED = True
 except ImportError:  # pragma: no cover - exercised only on a slim install
@@ -265,6 +288,9 @@ except ImportError:  # pragma: no cover - exercised only on a slim install
     REPORT_GENERATION_SECONDS = None
     REPORT_FAILURES_TOTAL = None
     REPORT_LAST_SUCCESS_TIMESTAMP = None
+    RECONCILIATION_INCONSISTENCIES = None
+    RECONCILIATION_HEALTHY = None
+    RECONCILIATION_LAST_SUCCESS_TIMESTAMP = None
     _PROM_ENABLED = False
 
 
@@ -426,6 +452,24 @@ def set_report_last_success(*, report_kind: str, timestamp: float) -> None:
     if not _PROM_ENABLED:
         return
     REPORT_LAST_SUCCESS_TIMESTAMP.labels(report_kind=report_kind).set(timestamp)
+
+
+def set_reconciliation_result(
+    *, reconciliation: str, inconsistencies: int, timestamp: float
+) -> None:
+    """Publish a successful aggregate result using one of three bounded labels."""
+    if not _PROM_ENABLED:
+        return
+    RECONCILIATION_INCONSISTENCIES.labels(reconciliation=reconciliation).set(inconsistencies)
+    RECONCILIATION_HEALTHY.labels(reconciliation=reconciliation).set(1)
+    RECONCILIATION_LAST_SUCCESS_TIMESTAMP.labels(reconciliation=reconciliation).set(timestamp)
+
+
+def set_reconciliation_unhealthy(*, reconciliation: str) -> None:
+    """Fail closed without overwriting the last discrepancy count with zero."""
+    if not _PROM_ENABLED:
+        return
+    RECONCILIATION_HEALTHY.labels(reconciliation=reconciliation).set(0)
 
 
 def set_audit_export_lag(*, lag_seconds: float) -> None:

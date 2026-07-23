@@ -1,0 +1,161 @@
+"""Unit contracts for the P5 W1-T3 reconciliation jobs."""
+
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from app.core import metrics
+from app.services.reconciliation import (
+    ReconcileResult,
+    backup_slot_due,
+    is_settled,
+    reconcile_change_request_audit,
+    reconcile_config_backup,
+    reconcile_reasoning_traces,
+)
+from app.workers.tasks import reconciliation as tasks
+
+
+def test_backup_reconcile_alerts_within_fifteen_minutes_of_due_miss() -> None:
+    due = datetime(2026, 7, 23, 2, 0, tzinfo=UTC)
+    assert not backup_slot_due(now=due + timedelta(minutes=14, seconds=59), due_at=due)
+    assert backup_slot_due(now=due + timedelta(minutes=15), due_at=due)
+
+
+def test_backup_reconcile_excludes_disabled_schedules_and_accepts_terminal_success() -> None:
+    due = datetime(2026, 7, 23, 2, 0, tzinfo=UTC)
+    assert not backup_slot_due(now=due + timedelta(hours=1), due_at=due, enabled=False)
+
+
+def test_backup_reconcile_is_idempotent_at_boundary_times() -> None:
+    due = datetime(2026, 7, 23, 2, 0, tzinfo=UTC)
+    first = backup_slot_due(now=due + timedelta(minutes=15), due_at=due)
+    assert first == backup_slot_due(now=due + timedelta(minutes=15), due_at=due)
+
+
+def test_trace_reconcile_respects_both_sides_of_settled_grace_window() -> None:
+    now = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
+    assert not is_settled(timestamp=now - timedelta(minutes=4, seconds=59), now=now)
+    assert is_settled(timestamp=now - timedelta(minutes=5), now=now)
+
+
+def test_cr_audit_reconcile_fails_closed_on_query_error(monkeypatch) -> None:
+    calls: list[tuple[str, int]] = []
+
+    class Gauge:
+        def labels(self, *, reconciliation: str):
+            assert reconciliation in {"config_backup", "change_request_audit", "reasoning_trace"}
+            return self
+
+        def set(self, value: int) -> None:
+            calls.append(("healthy", value))
+
+    class ForbiddenCountGauge:
+        def labels(self, **_kwargs):
+            raise AssertionError("query failure must not emit a healthy zero count")
+
+    monkeypatch.setattr(metrics, "_PROM_ENABLED", True)
+    monkeypatch.setattr(metrics, "RECONCILIATION_HEALTHY", Gauge())
+    monkeypatch.setattr(metrics, "RECONCILIATION_INCONSISTENCIES", ForbiddenCountGauge())
+    metrics.set_reconciliation_unhealthy(reconciliation="change_request_audit")
+    assert calls == [("healthy", 0)]
+
+
+@pytest.mark.asyncio
+async def test_cr_audit_task_query_failure_never_emits_healthy_zero(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class Engine:
+        async def dispose(self) -> None:
+            calls.append(("disposed", True))
+
+    class Context:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def fail(_session):
+        raise RuntimeError("query unavailable")
+
+    monkeypatch.setattr(tasks, "get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(tasks.db, "create_engine", lambda _settings: Engine())
+    monkeypatch.setattr(tasks, "async_sessionmaker", lambda *_args, **_kwargs: Context)
+    monkeypatch.setattr(tasks, "reconcile_change_request_audit", fail)
+    monkeypatch.setattr(
+        tasks.metrics,
+        "set_reconciliation_unhealthy",
+        lambda **kwargs: calls.append(("unhealthy", kwargs["reconciliation"])),
+    )
+    monkeypatch.setattr(
+        tasks.metrics,
+        "set_reconciliation_result",
+        lambda **_kwargs: calls.append(("result", "forbidden")),
+    )
+
+    with pytest.raises(RuntimeError, match="query unavailable"):
+        await tasks._run("change_request_audit")
+    assert ("unhealthy", "change_request_audit") in calls
+    assert ("result", "forbidden") not in calls
+
+
+@pytest.mark.asyncio
+async def test_cr_audit_reconcile_repeat_run_does_not_duplicate_effects(monkeypatch) -> None:
+    emitted: list[int] = []
+
+    class Engine:
+        async def dispose(self) -> None:
+            return None
+
+    class Context:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def healthy(_session):
+        return ReconcileResult(2)
+
+    monkeypatch.setattr(tasks, "get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(tasks.db, "create_engine", lambda _settings: Engine())
+    monkeypatch.setattr(tasks, "async_sessionmaker", lambda *_args, **_kwargs: Context)
+    monkeypatch.setattr(tasks, "reconcile_change_request_audit", healthy)
+    monkeypatch.setattr(
+        tasks.metrics,
+        "set_reconciliation_result",
+        lambda **kwargs: emitted.append(kwargs["inconsistencies"]),
+    )
+    assert await tasks._run("change_request_audit") == 2
+    assert await tasks._run("change_request_audit") == 2
+    assert emitted == [2, 2]
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_queries_return_aggregate_counts() -> None:
+    class ScalarSession:
+        def __init__(self, values: list[object]) -> None:
+            self.values = iter(values)
+
+        async def scalar(self, _statement):
+            return next(self.values)
+
+    now = datetime(2026, 7, 23, 12, tzinfo=UTC)
+    backup = await reconcile_config_backup(
+        ScalarSession([False]),  # type: ignore[arg-type]
+        slot="2026-07-23",
+        due_at=now - timedelta(hours=1),
+        now=now,
+    )
+    change = await reconcile_change_request_audit(
+        ScalarSession([3])  # type: ignore[arg-type]
+    )
+    traces = await reconcile_reasoning_traces(
+        ScalarSession([1, 2, 3]),
+        now=now,  # type: ignore[arg-type]
+    )
+    assert backup.inconsistencies == 1
+    assert change.inconsistencies == 3
+    assert traces.inconsistencies == 6

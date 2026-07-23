@@ -681,6 +681,8 @@ jobs:
           test -s /tmp/promtool-rec.out
           promtool test rules deploy/observability/slo-burn-rate.alerts.test.yaml | tee /tmp/promtool-alert.out
           test -s /tmp/promtool-alert.out
+          promtool test rules deploy/observability/reconciliation.alerts.test.yaml | tee /tmp/promtool-reconciliation.out
+          test -s /tmp/promtool-reconciliation.out
           # Report-engine alert set (P4 W3-T1, ADR-0053 §9): staleness per
           # scheduled cadence class + redaction-trip page + failure burn, each
           # with a firing AND a healthy case (ADR-0046 §6).
@@ -693,6 +695,8 @@ jobs:
       # rule). The mutation is on a temp copy; committed rules are untouched.
       - name: promtool alert-as-test bite proof
         run: bash deploy/observability/run-promtool-bite.sh
+      - name: reconciliation alert-as-test bite proof
+        run: bash deploy/observability/run-reconciliation-promtool-bite.sh
 
       # Report-engine bite proof (P4 W3-T1, ADR-0053 §9): the clean report
       # alerts pass AND a MUTED (never-firing) staleness alert fails its firing
