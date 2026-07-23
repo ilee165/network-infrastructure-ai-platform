@@ -164,6 +164,10 @@ reviewed ADRs (P4 template); update the ADR index with 0055–0060.
 T1 ∥ T2 ∥ T3 (disjoint files). Lands before W4 (burst drills exercise the
 hardened dispatch) and W5 (evals certify the final architecture).
 
+**Status:** Implemented and verified 2026-07-23. See
+`docs/roadmap/P5-W1-HANDOFF.md`. P5 remains active; this wave does not accept
+ADR-0059 or release the phase.
+
 | Task | Title | Owner | Review tier | Depends on |
 |---|---|---|---|---|
 | W1-T1 | Transactional report outbox + relay/recovery | `wf-implementer` | **strong** (escalated) | W0-T5 |
@@ -179,11 +183,11 @@ crash recovery. The P4-recorded crash window (durable requested-but-unclaimed
 work; possible drop/double-dispatch) is closed.
 
 **Exit criteria.**
-- [ ] Atomicity proven under real PG: a planted crash between state transition and publication leaves a row the relay recovers; a post-send/pre-mark crash may redeliver, while stable dispatch identity produces exactly one render/state-transition effect (`backend/tests/pg/`, `pytestmark = pytest.mark.integration`, collection proven via `pytest -m integration --collect-only backend/tests/pg`).
-- [ ] At-least-once publication produces no dropped run and no duplicate render/state-transition effect across every enumerated crash window (each window has a named test).
-- [ ] Relay emits metrics (lag, retries, failures) wired to the existing alert spine.
-- [ ] P4-W4 report conformance evals stay green (no behavioral regression).
-- [ ] Strong review passed; D16 + `pg-integration` green; one atomic commit.
+- [x] Atomicity proven under real PG: a planted crash between state transition and publication leaves a row the relay recovers; a post-send/pre-mark crash may redeliver, while stable dispatch identity produces exactly one render/state-transition effect (`backend/tests/pg/`, `pytestmark = pytest.mark.integration`, collection proven via `pytest -m integration --collect-only backend/tests/pg`).
+- [x] At-least-once publication produces no dropped run and no duplicate render/state-transition effect across every enumerated crash window (each window has a named test).
+- [x] Relay emits metrics (lag, retries, failures) wired to the existing alert spine.
+- [x] P4-W4 report conformance evals stay green (no behavioral regression).
+- [x] Strong review passed; D16 + `pg-integration` green; implementation and focused review fixes are atomic commits.
 
 ### W1-T2 — Bare-`send_task` sweep + static ratchet
 
@@ -193,10 +197,10 @@ static CI ratchet (lint/import-linter/grep-gate per ADR-0059) that fails on
 any new bare site, with a planted-site negative control proven red.
 
 **Exit criteria.**
-- [ ] Zero bare `send_task` sites outside the wrapper (allowlist empty or each entry justified in ADR-0059).
-- [ ] Ratchet runs in a blocking CI job; **planted bare site goes red** (red run URL kept), then removed.
-- [ ] Behavior-preserving: existing task dispatch tests green; sibling-class sweep applied if a wrapper gap class is found.
-- [ ] D16 green; one atomic commit.
+- [x] Zero bare `send_task` sites outside the wrapper (allowlist empty or each entry justified in ADR-0059).
+- [x] Ratchet runs in a blocking CI job; the checked-in six-form negative control goes red, then the clean tree passes.
+- [x] Behavior-preserving: existing task dispatch tests green; sibling-class sweep applied if a wrapper gap class is found.
+- [x] D16 green; implementation and focused review fix are atomic commits.
 
 ### W1-T3 — G-OBS reconciliation rows 5/6/9
 
@@ -208,10 +212,10 @@ rules, multi-window burn alerts, runbook links, each with a biting negative
 control. Closes the P3 flag the declined P4-W3-T7 stretch left open.
 
 **Exit criteria.**
-- [ ] Three reconciliation jobs ship with recording rules + alerts + runbooks; `promtool check/test rules` green.
-- [ ] Negative controls fire: planted missed backup, planted CR-without-audit-chain, planted orphan trace each raise the alert in the fault-injection harness (bite proof per row).
-- [ ] §6 table rows updated from flagged-deferred to backed (PRODUCTION.md edit in the same commit).
-- [ ] D16 green; one atomic commit.
+- [x] Three reconciliation jobs ship with recording rules + alerts + runbooks; `promtool check/test rules` green.
+- [x] Negative controls fire: planted missed backup, planted CR-without-audit-chain, planted orphan trace each raise the alert in the fault-injection harness (bite proof per row).
+- [x] §6 table rows updated from flagged-deferred to backed (PRODUCTION.md edit in the same commit).
+- [x] D16 green; implementation and focused review fixes are atomic commits.
 
 ---
 

@@ -42,4 +42,5 @@ orphan trace. Run observability gates and full backend gates.
 Evidence: `backend/tests/services/test_reconciliation.py`,
 `backend/tests/pg/test_reconciliation_pg.py`, and
 `deploy/observability/reconciliation.alerts.test.yaml`; the mutation proof is
-`deploy/observability/run-reconciliation-promtool-bite.sh`.
+`deploy/observability/run-reconciliation-promtool-bite.sh`. Consolidated
+closeout evidence: `docs/roadmap/P5-W1-HANDOFF.md`.
