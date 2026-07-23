@@ -493,8 +493,10 @@ layers = [
     "core",
 ]
 ignore_imports = [
-    # REPO-STRUCTURE row 12: API enqueues Celery jobs via task signatures
-    # only (app.api.v1.discovery / app.api.v1.agents -> app.workers.celery_app).
+    # REPO-STRUCTURE row 12: API enqueues Celery jobs only through the
+    # allowlisted/redacting publication boundary (ADR-0059).
+    "app.api.** -> app.workers.dispatch",
+    # Queue-name constants remain sourced from the canonical Celery module.
     "app.api.** -> app.workers.celery_app",
     # REPO-STRUCTURE row 5: knowledge needs an llm provider for embeddings (D9).
     "app.knowledge.embedding -> app.llm.redaction",
@@ -503,8 +505,8 @@ ignore_imports = [
     # ("services MUST NOT import agents"). Flagged as an open question in the
     # T1 report, not fixed here (zero behavior change).
     "app.services.agent_session.service -> app.agents.framework.*",
-    # Discovery job dispatch remains at its established Celery signature seam;
-    # owner: future discovery-dispatch framework port (not the read facade).
+    # Discovery read-tool job launch crosses the same hardened boundary.
+    "app.agents.discovery.tools -> app.workers.dispatch",
     "app.agents.discovery.tools -> app.workers.celery_app",
     # Report API schema reuses the ReportKind model enum (P4 W3-T1) — the same
     # pre-existing schemas -> models enum-reuse edge class as the entries below.

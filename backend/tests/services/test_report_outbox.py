@@ -85,6 +85,71 @@ def test_durable_dispatch_uses_payload_dispatch_id_as_celery_task_id(
     }
 
 
+def test_dispatch_wrapper_preserves_queue_countdown_eta_and_task_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.workers import dispatch as dispatch_module
+
+    eta = datetime(2026, 7, 23, 12, tzinfo=UTC)
+    calls: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        dispatch_module.celery_app,
+        "send_task",
+        lambda name, **options: calls.append((name, options)),
+    )
+
+    durable_dispatch(
+        task_name="discovery.run",
+        args=["run-id"],
+        queue="discovery",
+        countdown=30,
+        eta=eta,
+        task_id="caller-idempotency-key",
+    )
+
+    assert calls == [
+        (
+            "discovery.run",
+            {
+                "args": ["run-id"],
+                "queue": "discovery",
+                "countdown": 30,
+                "eta": eta,
+                "task_id": "caller-idempotency-key",
+                "retry": True,
+                "retry_policy": {
+                    "max_retries": 3,
+                    "interval_start": 0,
+                    "interval_step": 1,
+                },
+            },
+        )
+    ]
+
+
+def test_dispatch_wrapper_redacts_publication_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.workers import dispatch as dispatch_module
+    from app.workers.dispatch import DispatchPublicationError
+
+    secret = "redis://user:hunter2@broker.internal/0"
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(dispatch_module.celery_app, "send_task", _fail)
+    with pytest.raises(DispatchPublicationError, match="publication_failed") as raised:
+        durable_dispatch(
+            task_name="discovery.run",
+            args=["run-id"],
+            queue="discovery",
+        )
+    assert secret not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
+
+
 def test_row_validation_fences_dispatch_and_aggregate_identity() -> None:
     dispatch_id = uuid.uuid4()
     run_id = uuid.uuid4()

@@ -49,7 +49,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.api import deps
 from app.api.v1 import credentials as credentials_routes
-from app.api.v1 import discovery as discovery_routes
 from app.core.crypto import _StaticKeyProvider
 from app.models import (
     AgentSession,
@@ -62,6 +61,7 @@ from app.models import (
     TopologySnapshot,
     User,
 )
+from app.workers import dispatch as dispatch_module
 
 # ---------------------------------------------------------------------------
 # Shared local seeding helpers (kept self-contained rather than importing from
@@ -175,7 +175,7 @@ def sent_tasks(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
         return _Result()
 
-    monkeypatch.setattr(discovery_routes.celery_app, "send_task", _fake_send_task)
+    monkeypatch.setattr(dispatch_module.celery_app, "send_task", _fake_send_task)
     return calls
 
 

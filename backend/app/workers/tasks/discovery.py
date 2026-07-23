@@ -96,7 +96,8 @@ from app.plugins.transport import (
 )
 from app.schemas.normalized import NormalizedNeighbor
 from app.services import audit, credentials
-from app.workers.celery_app import celery_app
+from app.workers.celery_app import QUEUE_TOPOLOGY, celery_app
+from app.workers.dispatch import durable_dispatch
 
 __all__ = [
     "collect_device",
@@ -938,7 +939,11 @@ def _trigger_topology_sync(run_id: str) -> None:
     logged and swallowed — the run is already finished and must not regress.
     """
     try:
-        celery_app.send_task("topology.sync_after_run", args=[run_id])
+        durable_dispatch(
+            task_name="topology.sync_after_run",
+            args=[run_id],
+            queue=QUEUE_TOPOLOGY,
+        )
         logger.info("discovery.topology_sync_enqueued", run_id=run_id)
     except Exception:  # dispatch failures must not fail an already-finished run
         logger.warning("discovery.topology_sync_dispatch_failed", run_id=run_id)

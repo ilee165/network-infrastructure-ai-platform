@@ -45,6 +45,7 @@ from app.models import AuditLog, Base, ChangeRequest, PcapMetadata, User
 from app.models import Role as RoleRow
 from app.models.change_requests import ChangeRequestKind, ChangeRequestState
 from app.models.mixins import utcnow
+from app.workers import dispatch as dispatch_module
 
 TEST_PASSWORD = "unit-test-password"
 ROLE_ORDER = ("viewer", "operator", "engineer", "admin")
@@ -144,7 +145,7 @@ def sent_tasks(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
         return _Result()
 
-    monkeypatch.setattr(agents_router.celery_app, "send_task", _fake_send_task)
+    monkeypatch.setattr(dispatch_module.celery_app, "send_task", _fake_send_task)
     return calls
 
 
