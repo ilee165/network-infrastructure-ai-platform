@@ -2335,7 +2335,7 @@ export interface components {
          *     a Security-Agent remediation draft, gate-routed exactly like ``ddi_record``.
          * @enum {string}
          */
-        ChangeRequestKind: "config" | "ddi_record" | "security_remediation";
+        ChangeRequestKind: "config" | "ddi_record" | "report_generation" | "security_remediation";
         /**
          * ChangeRequestListResponse
          * @description Paginated list of ChangeRequests, newest first.

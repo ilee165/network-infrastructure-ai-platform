@@ -31,6 +31,9 @@ from app.services.report_outbox import (
     reap_stale_claims,
     requeue_dead,
 )
+from app.workers import celery_app as celery_module
+from app.workers.tasks import report_outbox as relay_tasks
+from app.workers.tasks.report_outbox import ScheduledReportSpec
 
 pytestmark = pytest.mark.integration
 
@@ -80,6 +83,88 @@ async def test_report_outbox_committed_row_survives_crash_before_relay(
     )
     assert row is not None
     assert row.state == DispatchOutboxState.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_missed_beat_publication_is_materialized_once_and_relayed_on_pg(
+    pg_engine: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broker outage at the weekly Beat slot leaves no row; the frequent
+    relay later materializes and publishes its durable envelope exactly once."""
+    boundary = datetime(2026, 7, 26, 5, 0, tzinfo=UTC)
+    start = datetime(2026, 7, 19, tzinfo=UTC)
+    end = datetime(2026, 7, 26, tzinfo=UTC)
+    run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    def _broker_down(*_args: Any, **_kwargs: Any) -> None:
+        raise ConnectionError("broker unavailable")
+
+    monkeypatch.setattr(celery_module.celery_app, "send_task", _broker_down)
+    with pytest.raises(ConnectionError, match="broker unavailable"):
+        celery_module.celery_app.send_task(
+            "reports.generate_scheduled",
+            args=("change",),
+            kwargs={"period_start": start.isoformat(), "period_end": end.isoformat()},
+            queue="docs",
+        )
+
+    async with maker() as check:
+        assert await check.scalar(select(func.count()).select_from(ReportRun)) == 0
+        assert await check.scalar(select(func.count()).select_from(DispatchOutbox)) == 0
+
+    publications: list[tuple[uuid.UUID, uuid.UUID]] = []
+
+    def _publish(**kwargs: Any) -> None:
+        publications.append((kwargs["dispatch_id"], uuid.UUID(kwargs["payload"]["run_id"])))
+
+    monkeypatch.setattr(relay_tasks.db, "get_sessionmaker", lambda: maker)
+    monkeypatch.setattr(relay_tasks, "durable_dispatch", _publish)
+    schedule = (
+        ScheduledReportSpec(
+            kind=ReportKind.CHANGE,
+            cadence="weekly",
+            hour=5,
+            minute=0,
+        ),
+    )
+
+    first = await relay_tasks._relay_core(
+        batch_size=10,
+        now=boundary + timedelta(minutes=1),
+        schedules=schedule,
+        recovery_lookback=timedelta(minutes=10),
+    )
+    second = await relay_tasks._relay_core(
+        batch_size=10,
+        now=boundary + timedelta(minutes=2),
+        schedules=schedule,
+        recovery_lookback=timedelta(minutes=10),
+    )
+
+    assert first == {
+        "claimed": 1,
+        "dispatched": 1,
+        "retried": 0,
+        "dead": 0,
+    }
+    assert second == {
+        "claimed": 0,
+        "dispatched": 0,
+        "retried": 0,
+        "dead": 0,
+    }
+    assert len(publications) == 1
+    assert publications[0][1] == run_id
+    async with maker() as check:
+        assert await check.scalar(select(func.count()).select_from(ReportRun)) == 1
+        assert await check.scalar(select(func.count()).select_from(DispatchOutbox)) == 1
+        row = await check.scalar(
+            select(DispatchOutbox).where(DispatchOutbox.aggregate_id == run_id)
+        )
+        assert row is not None
+        assert row.state == DispatchOutboxState.DISPATCHED.value
 
 
 @pytest.mark.asyncio

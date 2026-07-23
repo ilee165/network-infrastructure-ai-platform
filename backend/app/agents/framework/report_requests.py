@@ -11,11 +11,31 @@ precedent).
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from app.core.security import Role
 
 #: Must match ``app.api.v1.reports._GENERATION_REQUESTED`` — the agent and
 #: HTTP triggers write ONE event stream for generation requests.
 GENERATION_REQUESTED_ACTION = "report.generation_requested"
+
+
+async def report_requester_role(
+    *,
+    requester_id: UUID,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> Role | None:
+    """Resolve the current RBAC role for an approved report operation."""
+    from app.core.security import Role
+    from app.models.identity import User
+
+    async with sessionmaker() as session:
+        requester = await session.get(User, requester_id)
+    return Role.from_name(requester.role.name) if requester is not None else None
 
 
 async def record_generation_requested(
@@ -26,6 +46,7 @@ async def record_generation_requested(
     period_start: str,
     period_end: str,
     requested_by: UUID | None,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     """Commit audit, report run, and dispatch envelope in one transaction."""
     import app.db as db
@@ -33,7 +54,8 @@ async def record_generation_requested(
     from app.services import audit
     from app.services.report_outbox import enqueue_report
 
-    async with db.get_sessionmaker()() as session:
+    maker = sessionmaker if sessionmaker is not None else db.get_sessionmaker()
+    async with maker() as session:
         await audit.record(
             session,
             actor=actor,

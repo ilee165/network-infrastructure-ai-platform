@@ -20,19 +20,31 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.db as db
+from app.agents.automation import AutomationAgent
+from app.agents.automation.agent import ChangeExecutionRefused
 from app.agents.documentation.tools import (
     get_report_run,
     list_report_runs,
     request_report_generation,
 )
-from app.agents.framework.approval import ApprovalRequiredError
+from app.agents.framework.approval import ApprovalRequiredError, ChangeRequestGate
 from app.agents.framework.read_facade import ReportAccessDeniedError
-from app.agents.framework.tools import ToolClassification, agent_run_context
+from app.agents.framework.tools import (
+    AgentRunIdentity,
+    ChangeRequestCreated,
+    ToolClassification,
+    agent_run_context,
+    change_request_gate_context,
+)
 from app.core.security import Role
 from app.engines.reports import deterministic_run_id
 from app.models import AuditLog, Base
+from app.models.change_requests import ChangeRequest, ChangeRequestKind, ChangeRequestState
 from app.models.dispatch_outbox import DispatchOutbox
+from app.models.identity import Role as RoleRow
+from app.models.identity import User
 from app.models.reports import ReportArtifact, ReportKind, ReportRun, ReportRunStatus
+from app.services.change_requests import ChangeRequestService
 from tests.agents.conftest import ApproveAllGate
 
 
@@ -137,6 +149,86 @@ async def test_request_generation_without_approval_persists_nothing(
             is None
         )
     assert await _generation_audit_rows() == []
+
+
+async def test_real_gate_approval_executes_report_request_exactly_once(
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production-shaped gate + human approval reaches only the report executor."""
+    monkeypatch.setattr(request_report_generation, "approval_gate", None)
+    maker = db.get_sessionmaker()
+    async with maker() as session:
+        role = RoleRow(name="engineer")
+        session.add(role)
+        await session.flush()
+        requester = User(username="report-requester", password_hash="x", role_id=role.id)
+        approver = User(username="report-approver", password_hash="x", role_id=role.id)
+        session.add_all([requester, approver])
+        await session.commit()
+        requester_id = requester.id
+        approver_id = approver.id
+
+    service = ChangeRequestService(maker)
+    start = datetime(2026, 6, 1, tzinfo=UTC)
+    end = datetime(2026, 6, 8, tzinfo=UTC)
+    expected_run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+
+    def gate_factory(identity: AgentRunIdentity) -> ChangeRequestGate:
+        assert identity.user_id is not None
+        return ChangeRequestGate(
+            service,
+            requester_id=identity.user_id,
+            actor_role=identity.role,
+        )
+
+    with (
+        agent_run_context(role=Role.ENGINEER, user_id=requester_id),
+        change_request_gate_context(gate_factory),
+    ):
+        proposed = await request_report_generation.ainvoke(
+            {
+                "kind": "change",
+                "period_start": start.isoformat(),
+                "period_end": end.isoformat(),
+            }
+        )
+
+    assert isinstance(proposed, ChangeRequestCreated)
+    cr_id = uuid.UUID(proposed.change_request_id)
+    cr = await service.get(cr_id)
+    assert cr.kind is ChangeRequestKind.REPORT_GENERATION
+    assert cr.state is ChangeRequestState.DRAFT
+    async with maker() as session:
+        assert await session.get(ReportRun, expected_run_id) is None
+        assert await session.scalar(select(DispatchOutbox)) is None
+
+    await service.submit(cr_id, actor_id=requester_id, actor_role=Role.ENGINEER)
+    await service.approve(cr_id, actor_id=approver_id, actor_role=Role.ENGINEER)
+
+    class ConfigExecutorMustNotRun:
+        async def apply(self, *_args: Any, **_kwargs: Any) -> Any:
+            pytest.fail("report request was routed to the device config executor")
+
+    result = await AutomationAgent(
+        change_request_service=service,
+        config_executor=ConfigExecutorMustNotRun(),  # type: ignore[arg-type]
+    ).execute(cr_id)
+    assert result.state is ChangeRequestState.COMPLETED
+
+    with pytest.raises(ChangeExecutionRefused):
+        await AutomationAgent(change_request_service=service).execute(cr_id)
+
+    async with maker() as session:
+        run = await session.get(ReportRun, expected_run_id)
+        envelopes = (await session.execute(select(DispatchOutbox))).scalars().all()
+        executed_cr = await session.get(ChangeRequest, cr_id)
+    assert run is not None
+    assert run.requested_by == requester_id
+    assert len(envelopes) == 1
+    assert envelopes[0].aggregate_id == run.id
+    assert executed_cr is not None
+    assert executed_cr.state is ChangeRequestState.COMPLETED
 
 
 async def test_list_excludes_kinds_above_the_invoking_role(

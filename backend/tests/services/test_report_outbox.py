@@ -24,6 +24,10 @@ from app.services.report_outbox import (
     validate_dispatch_row,
 )
 from app.workers.dispatch import durable_dispatch
+from app.workers.tasks.report_outbox import (
+    ScheduledReportSpec,
+    materialize_due_scheduled_reports,
+)
 
 
 def test_report_outbox_payload_and_metrics_never_contain_secret_or_raw_error() -> None:
@@ -208,6 +212,30 @@ def test_outbox_gauges_use_mostrecent_and_duplicate_event_is_bounded() -> None:
     metrics.record_report_outbox_event(event="duplicate_consumer")
     with pytest.raises(ValueError, match="report_outbox_event_invalid"):
         metrics.record_report_outbox_event(event="secret-hunter2")
+
+
+@pytest.mark.asyncio
+async def test_schedule_recovery_does_not_materialize_before_boundary(
+    session: AsyncSession,
+) -> None:
+    """The relay recovery cannot create a run before the configured Beat slot."""
+    before_boundary = datetime(2026, 7, 26, 4, 59, tzinfo=UTC)
+    recovered = await materialize_due_scheduled_reports(
+        session,
+        now=before_boundary,
+        schedules=(
+            ScheduledReportSpec(
+                kind=ReportKind.CHANGE,
+                cadence="weekly",
+                hour=5,
+                minute=0,
+            ),
+        ),
+        lookback=timedelta(minutes=10),
+    )
+
+    assert recovered == 0
+    assert (await session.execute(select(DispatchOutbox))).scalars().all() == []
 
 
 @pytest.mark.asyncio

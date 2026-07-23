@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from pydantic import Field
 
-from app.agents.framework.tools import ToolClassification, netops_tool
+from app.agents.framework.tools import ChangeRequestKind, ToolClassification, netops_tool
 from app.llm.redaction import redact_payload, redact_prompt
 
 if TYPE_CHECKING:
@@ -1209,7 +1209,10 @@ async def get_report_run(
     return json.dumps(_report_run_json(run))
 
 
-@netops_tool(classification=ToolClassification.STATE_CHANGING)
+@netops_tool(
+    classification=ToolClassification.STATE_CHANGING,
+    change_request_kind=ChangeRequestKind.REPORT_GENERATION,
+)
 async def request_report_generation(
     kind: Annotated[
         str,
