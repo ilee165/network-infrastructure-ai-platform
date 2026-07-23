@@ -13,9 +13,11 @@ FORBIDDEN_METHODS = frozenset({"send_task", "apply_async", "delay"})
 TRACK_BOUND_METHOD_ALIAS = True
 TRACK_IMPORTED_TASK_ALIAS = True
 TRACK_IMPORTED_TASK_METHOD = True
+TRACK_CALLABLE_CANVAS = True
+_CANVAS_CONSTRUCTORS = frozenset({"chord", "chain", "group", "signature"})
 _BACKEND = Path(__file__).resolve().parents[1]
 _WRAPPER_PATH = (_BACKEND / "app" / "workers" / "dispatch.py").resolve()
-_WRAPPER_SYMBOL = "durable_dispatch"
+_WRAPPER_SYMBOLS = frozenset({"durable_dispatch", "durable_dispatch_canvas"})
 _TASK_MODULE_PREFIX = "app.workers.tasks"
 
 
@@ -49,6 +51,8 @@ class _PublicationVisitor(ast.NodeVisitor):
         self.method_aliases: dict[str, str] = {}
         self.imported_task_aliases: set[str] = set()
         self.imported_task_modules: dict[str, str] = {}
+        self.canvas_constructors: set[str] = set()
+        self.canvas_aliases: set[str] = set()
 
     @property
     def symbol(self) -> str:
@@ -82,6 +86,12 @@ class _PublicationVisitor(ast.NodeVisitor):
             return
         for imported in node.names:
             bound_name = imported.asname or imported.name
+            if (
+                TRACK_CALLABLE_CANVAS
+                and node.module in {"celery", "celery.canvas"}
+                and imported.name in _CANVAS_CONSTRUCTORS
+            ):
+                self.canvas_constructors.add(bound_name)
             imported_module = f"{node.module}.{imported.name}"
             if imported_module in self.task_symbols:
                 if TRACK_IMPORTED_TASK_METHOD:
@@ -114,6 +124,14 @@ class _PublicationVisitor(ast.NodeVisitor):
             and value.id in self.imported_task_aliases
         ):
             self.imported_task_aliases.update(names)
+        if TRACK_CALLABLE_CANVAS and self._is_canvas_construction(value):
+            self.canvas_aliases.update(names)
+        if (
+            TRACK_CALLABLE_CANVAS
+            and isinstance(value, ast.Name)
+            and value.id in self.canvas_constructors
+        ):
+            self.canvas_constructors.update(names)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self._track_assignment(node.targets, node.value)
@@ -140,9 +158,20 @@ class _PublicationVisitor(ast.NodeVisitor):
 
     def _record(self, node: ast.Call, kind: str) -> None:
         scope = ExceptionScope(self.path, self.symbol, kind)
-        wrapper_call = self.path == _WRAPPER_PATH and self.symbol == _WRAPPER_SYMBOL
+        wrapper_call = self.path == _WRAPPER_PATH and self.symbol in _WRAPPER_SYMBOLS
         if not wrapper_call and scope not in self.exceptions:
             self.violations.append(Violation(self.path, node.lineno, self.symbol, kind))
+
+    def _is_canvas_construction(self, node: ast.expr) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        if isinstance(node.func, ast.Name):
+            return node.func.id in self.canvas_constructors
+        return isinstance(node.func, ast.Attribute) and node.func.attr in {
+            "s",
+            "si",
+            "signature",
+        }
 
     def visit_Call(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Attribute) and node.func.attr in FORBIDDEN_METHODS:
@@ -159,6 +188,11 @@ class _PublicationVisitor(ast.NodeVisitor):
             and self._is_imported_task_attribute(node.func)
         ):
             self._record(node, "task_call")
+        elif TRACK_CALLABLE_CANVAS and (
+            (isinstance(node.func, ast.Name) and node.func.id in self.canvas_aliases)
+            or self._is_canvas_construction(node.func)
+        ):
+            self._record(node, "canvas_call")
         self.generic_visit(node)
 
 

@@ -97,7 +97,7 @@ from app.plugins.transport import (
 from app.schemas.normalized import NormalizedNeighbor
 from app.services import audit, credentials
 from app.workers.celery_app import QUEUE_TOPOLOGY, celery_app
-from app.workers.dispatch import durable_dispatch
+from app.workers.dispatch import durable_dispatch, durable_dispatch_canvas
 
 __all__ = [
     "collect_device",
@@ -781,7 +781,7 @@ def _enqueue_discovery_wave(
         list(wave),
         started_monotonic,
     )
-    async_result = chord(header)(body)
+    async_result = durable_dispatch_canvas(chord(header, body))
     if celery_app.conf.task_always_eager:
         # Eager tests: resolve the full cascade synchronously for assertable
         # return values; production never blocks the orchestrator on children.

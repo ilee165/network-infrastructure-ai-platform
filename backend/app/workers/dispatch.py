@@ -6,8 +6,11 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from celery.canvas import Signature
+
 from app.services.report_outbox import REPORT_TASK, validate_dispatch
 from app.workers.celery_app import (
+    QUEUE_CONFIG,
     QUEUE_DISCOVERY,
     QUEUE_DOCS,
     QUEUE_PACKET_CAPTURE,
@@ -23,9 +26,43 @@ _ALLOWED_TASK_QUEUES = {
     ("topology.sync_after_run", QUEUE_TOPOLOGY),
 }
 
+_ALLOWED_CHORDS = {
+    ("discovery.collect_device", "discovery.continue_wave", QUEUE_DISCOVERY),
+    ("config.capture_device", "config.finalize_backup_wave", QUEUE_CONFIG),
+}
+
 
 class DispatchPublicationError(RuntimeError):
     """Redacted broker publication failure."""
+
+
+def durable_dispatch_canvas(canvas: Signature) -> Any:
+    """Publish one allowlisted chord without changing its signatures or routing."""
+    if canvas.subtask_type != "chord":
+        raise ValueError("canvas_not_allowlisted")
+    header = list(canvas.tasks)
+    body = canvas.body
+    header_names = {item.task for item in header}
+    if len(header_names) != 1 or body is None:
+        raise ValueError("canvas_not_allowlisted")
+    header_name = next(iter(header_names))
+    matching = [
+        queue
+        for allowed_header, allowed_body, queue in _ALLOWED_CHORDS
+        if header_name == allowed_header and body.task == allowed_body
+    ]
+    if len(matching) != 1:
+        raise ValueError("canvas_not_allowlisted")
+    expected_queue = matching[0]
+    for item in [canvas, *header, body]:
+        explicit_queue = item.options.get("queue")
+        if explicit_queue is not None and explicit_queue != expected_queue:
+            raise ValueError("canvas_not_allowlisted")
+    try:
+        return canvas.apply_async()
+    except Exception:
+        publication_error = DispatchPublicationError("publication_failed")
+    raise publication_error
 
 
 def durable_dispatch(

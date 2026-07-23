@@ -40,6 +40,22 @@ def test_dispatch_ratchet_rejects_imported_task_object_publication_method() -> N
     assert _kinds("imported_task_method.py") == {"task_call"}
 
 
+def test_dispatch_ratchet_rejects_callable_chord_alias_multiline_form() -> None:
+    assert _kinds("chord_callable_alias.py") == {"canvas_call"}
+
+
+def test_dispatch_ratchet_rejects_assigned_chord_constructor_alias() -> None:
+    assert _kinds("chord_constructor_assignment_alias.py") == {"canvas_call"}
+
+
+def test_dispatch_ratchet_rejects_nested_callable_signature_form() -> None:
+    assert _kinds("signature_callable_nested.py") == {"canvas_call"}
+
+
+def test_dispatch_ratchet_allows_canvas_and_signature_construction_only() -> None:
+    assert _kinds("canvas_construction_only.py") == set()
+
+
 def test_dispatch_ratchet_accepts_ordinary_imported_function_alias() -> None:
     assert _kinds("ordinary_function_alias.py") == set()
 
@@ -89,6 +105,9 @@ def test_dispatch_ratchet_wrapper_exemption_requires_exact_canonical_path(
         ("bound_method_alias.py", "bound_method_alias"),
         ("imported_task_alias.py", "imported_task_alias"),
         ("imported_task_method.py", "imported_task_method"),
+        ("chord_callable_alias.py", "canvas_call"),
+        ("chord_constructor_assignment_alias.py", "canvas_call"),
+        ("signature_callable_nested.py", "canvas_call"),
     ],
 )
 def test_dispatch_ratchet_mutating_each_visitor_branch_makes_fixture_fail(
@@ -101,7 +120,8 @@ def test_dispatch_ratchet_mutating_each_visitor_branch_makes_fixture_fail(
             check_celery_dispatch.FORBIDDEN_METHODS - {branch},
         )
     else:
-        monkeypatch.setattr(check_celery_dispatch, f"TRACK_{branch.upper()}", False)
+        switch = "TRACK_CALLABLE_CANVAS" if branch == "canvas_call" else f"TRACK_{branch.upper()}"
+        monkeypatch.setattr(check_celery_dispatch, switch, False)
     assert check_celery_dispatch.scan_paths([FIXTURES / fixture]) == []
 
 
@@ -122,4 +142,4 @@ def test_dispatch_ratchet_blocking_ci_step_executes_the_negative_control() -> No
         check=False,
     )
     assert result.returncode != 0
-    assert {"send_task", "apply_async", "delay"} <= set(result.stdout.split())
+    assert {"send_task", "apply_async", "delay", "canvas_call"} <= set(result.stdout.split())
