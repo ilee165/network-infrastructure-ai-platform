@@ -25,13 +25,15 @@ from app.agents.documentation.tools import (
     list_report_runs,
     request_report_generation,
 )
+from app.agents.framework.approval import ApprovalRequiredError
 from app.agents.framework.read_facade import ReportAccessDeniedError
-from app.agents.framework.tools import agent_run_context
+from app.agents.framework.tools import ToolClassification, agent_run_context
 from app.core.security import Role
 from app.engines.reports import deterministic_run_id
 from app.models import AuditLog, Base
 from app.models.dispatch_outbox import DispatchOutbox
 from app.models.reports import ReportArtifact, ReportKind, ReportRun, ReportRunStatus
+from tests.agents.conftest import ApproveAllGate
 
 
 async def _generation_audit_rows() -> list[AuditLog]:
@@ -93,6 +95,48 @@ def seeded_db(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def engineer_identity() -> Iterator[None]:
     with agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()):
         yield
+
+
+@pytest.fixture(autouse=True)
+def approved_report_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Functional report-request tests execute only through an approved gate."""
+    monkeypatch.setattr(request_report_generation, "approval_gate", ApproveAllGate())
+
+
+def test_request_generation_is_state_changing() -> None:
+    assert request_report_generation.classification is ToolClassification.STATE_CHANGING
+
+
+async def test_request_generation_without_approval_persists_nothing(
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(request_report_generation, "approval_gate", None)
+    start = datetime(2026, 6, 1, tzinfo=UTC)
+    end = datetime(2026, 6, 8, tzinfo=UTC)
+    run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+
+    with (
+        agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()),
+        pytest.raises(ApprovalRequiredError),
+    ):
+        await request_report_generation.ainvoke(
+            {
+                "kind": "change",
+                "period_start": start.isoformat(),
+                "period_end": end.isoformat(),
+            }
+        )
+
+    async with db.get_sessionmaker()() as session:
+        assert await session.get(ReportRun, run_id) is None
+        assert (
+            await session.scalar(
+                select(DispatchOutbox).where(DispatchOutbox.aggregate_id == run_id)
+            )
+            is None
+        )
+    assert await _generation_audit_rows() == []
 
 
 async def test_list_excludes_kinds_above_the_invoking_role(

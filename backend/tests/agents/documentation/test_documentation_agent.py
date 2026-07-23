@@ -223,19 +223,14 @@ class TestDocumentationToolClassification:
         names = {t.name for t in _AgentImpl().tools}
         assert "generate_inventory" in names
 
-    def test_all_tools_read_only(self) -> None:
-        for tool in _AgentImpl().tools:
-            assert tool.classification is ToolClassification.READ_ONLY, (
-                f"tool '{tool.name}' is {tool.classification}; all M4 doc tools must be READ_ONLY"
-            )
-
-    def test_no_state_changing_tool_declared(self) -> None:
-        offenders = [
-            t.name
-            for t in _AgentImpl().tools
-            if t.classification is ToolClassification.STATE_CHANGING
-        ]
-        assert not offenders, f"STATE_CHANGING tools found: {offenders}"
+    def test_only_report_generation_request_is_state_changing(self) -> None:
+        classified = {tool.name: tool.classification for tool in _AgentImpl().tools}
+        assert classified["request_report_generation"] is ToolClassification.STATE_CHANGING
+        assert {
+            name
+            for name, classification in classified.items()
+            if classification is not ToolClassification.READ_ONLY
+        } == {"request_report_generation"}
 
     def test_all_tools_are_netops_tool(self) -> None:
         for tool in _AgentImpl().tools:

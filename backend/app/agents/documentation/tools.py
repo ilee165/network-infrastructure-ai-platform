@@ -1209,7 +1209,7 @@ async def get_report_run(
     return json.dumps(_report_run_json(run))
 
 
-@netops_tool(classification=ToolClassification.READ_ONLY)
+@netops_tool(classification=ToolClassification.STATE_CHANGING)
 async def request_report_generation(
     kind: Annotated[
         str,
@@ -1225,14 +1225,16 @@ async def request_report_generation(
     ],
     period_end: Annotated[str, Field(description="Reporting period end, ISO-8601 UTC timestamp.")],
 ) -> str:
-    """Request an on-demand compliance/audit report generation for a period.
+    """Propose an on-demand compliance/audit report generation for a period.
 
-    Enqueues the SAME deterministic engine task the scheduler uses, recorded
-    under the invoking user (ADR-0053 §3) — the per-kind role floor applies
-    exactly as it does on the API. Returns the deterministic run id
-    immediately; generation happens asynchronously (use ``get_report_run`` to
-    poll). Classified READ_ONLY because this is a job launch that renders
-    evidence from platform data — no device or network state is modified.
+    The framework approval gate intercepts the proposal before this body can
+    execute. Once approved, it enqueues the SAME deterministic engine task the
+    scheduler uses, recorded under the invoking user (ADR-0053 §3) — the
+    per-kind role floor applies exactly as it does on the API. Approved
+    execution returns the deterministic run id immediately; generation happens
+    asynchronously (use ``get_report_run`` to poll). This is STATE_CHANGING
+    because accepting the request durably creates a report run, dispatch
+    envelope, and audit record, even though no device or network state changes.
     """
     from datetime import datetime
 

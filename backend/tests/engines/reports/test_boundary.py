@@ -405,8 +405,14 @@ def test_generation_touches_no_deny_set_table_for_any_kind(
     assert re.search(r"insert\s+into\s+report_artifacts\b", joined)
 
 
-def test_deny_table_scanner_is_not_vacuous(statements: list[str]) -> None:
+def test_deny_table_scanner_is_not_vacuous(
+    generation_boundary: tuple[
+        list[str],
+        dict[ReportKind, tuple[uuid.UUID, uuid.UUID]],
+    ],
+) -> None:
     """A planted deny-set SELECT is caught by the same capture mechanism."""
+    statements, _dispatches = generation_boundary
 
     async def _planted() -> None:
         async with report_tasks._session() as session:
