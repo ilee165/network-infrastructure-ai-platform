@@ -15,16 +15,37 @@ from app.services.reconciliation import (
 pytestmark = pytest.mark.integration
 
 
+async def _seed_admin_user(
+    session: AsyncSession,
+    *,
+    user_id: object,
+    username: str,
+) -> None:
+    """Insert a user linked to the migration-seeded admin role."""
+    role_id = await session.scalar(text("SELECT id FROM roles WHERE name = 'admin'"))
+    assert role_id is not None
+    await session.execute(
+        text(
+            "INSERT INTO users (id, username, email, password_hash, role_id, is_active,"
+            " created_at, updated_at) VALUES (:u, :n, :e, 'x', :role_id, true, now(), now())"
+        ),
+        {
+            "u": user_id,
+            "n": username,
+            "e": f"{user_id}@example.test",
+            "role_id": role_id,
+        },
+    )
+
+
 async def test_cr_audit_reconcile_counts_executed_terminal_change_without_lifecycle_audit(
     pg_session: AsyncSession,
 ) -> None:
     cr_id, user_id = uuid4(), uuid4()
-    await pg_session.execute(
-        text(
-            "INSERT INTO users (id, username, email, password_hash, role, is_active,"
-            " created_at, updated_at) VALUES (:u, :n, :e, 'x', 'admin', true, now(), now())"
-        ),
-        {"u": user_id, "n": f"reconcile-{user_id}", "e": f"{user_id}@example.test"},
+    await _seed_admin_user(
+        pg_session,
+        user_id=user_id,
+        username=f"reconcile-{user_id}",
     )
     await pg_session.execute(
         text(
@@ -44,12 +65,10 @@ async def test_cr_audit_trace_join_graph_counts_only_missing_or_mismatched_edges
     user_id = uuid4()
     trace_id, wrong_trace_id = uuid4(), uuid4()
     healthy_id, missing_cr_link_id, missing_audit_link_id, mismatch_id = (uuid4() for _ in range(4))
-    await pg_session.execute(
-        text(
-            "INSERT INTO users (id, username, email, password_hash, role, is_active,"
-            " created_at, updated_at) VALUES (:u, :n, :e, 'x', 'admin', true, now(), now())"
-        ),
-        {"u": user_id, "n": f"cr-graph-{user_id}", "e": f"{user_id}@example.test"},
+    await _seed_admin_user(
+        pg_session,
+        user_id=user_id,
+        username=f"cr-graph-{user_id}",
     )
     for cr_id, cr_trace in (
         (healthy_id, trace_id),
@@ -107,12 +126,10 @@ async def test_trace_reconcile_finds_required_session_without_trace(
 ) -> None:
     user_id, session_id = uuid4(), uuid4()
     settled = datetime.now(UTC) - timedelta(minutes=6)
-    await pg_session.execute(
-        text(
-            "INSERT INTO users (id, username, email, password_hash, role, is_active,"
-            " created_at, updated_at) VALUES (:u, :n, :e, 'x', 'admin', true, now(), now())"
-        ),
-        {"u": user_id, "n": f"trace-{user_id}", "e": f"{user_id}@example.test"},
+    await _seed_admin_user(
+        pg_session,
+        user_id=user_id,
+        username=f"trace-{user_id}",
     )
     await pg_session.execute(
         text(
@@ -133,12 +150,10 @@ async def test_trace_reconcile_matched_graph_and_orphan_step_exact_counts(
     user_id, session_id, trace_id = uuid4(), uuid4(), uuid4()
     orphan_session_id, orphan_trace_id, missing_trace_id = uuid4(), uuid4(), uuid4()
     settled = datetime.now(UTC) - timedelta(minutes=6)
-    await pg_session.execute(
-        text(
-            "INSERT INTO users (id, username, email, password_hash, role, is_active,"
-            " created_at, updated_at) VALUES (:u, :n, :e, 'x', 'admin', true, now(), now())"
-        ),
-        {"u": user_id, "n": f"graph-{user_id}", "e": f"{user_id}@example.test"},
+    await _seed_admin_user(
+        pg_session,
+        user_id=user_id,
+        username=f"graph-{user_id}",
     )
     await pg_session.execute(
         text(
