@@ -115,3 +115,22 @@ class ReportRunListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class DeadDispatchRead(BaseModel):
+    """Payload-free operational metadata for one dead report dispatch."""
+
+    id: uuid.UUID
+    run_id: uuid.UUID
+    error_code: str | None
+    attempts: int
+    created_at: datetime
+
+
+class DeadDispatchListResponse(BaseModel):
+    """Bounded admin listing for dead report dispatches."""
+
+    items: list[DeadDispatchRead]
+    total: int
+    limit: int
+    offset: int

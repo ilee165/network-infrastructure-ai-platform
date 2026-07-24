@@ -1618,6 +1618,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/reports/outbox": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Outbox
+         * @description List bounded payload-free metadata for dead report dispatches.
+         */
+        get: operations["list_outbox_api_v1_reports_outbox_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/reports/outbox/{dispatch_id}/requeue": {
         parameters: {
             query?: never;
@@ -2739,6 +2759,45 @@ export interface components {
              * Format: password
              */
             secret: string;
+        };
+        /**
+         * DeadDispatchListResponse
+         * @description Bounded admin listing for dead report dispatches.
+         */
+        DeadDispatchListResponse: {
+            /** Items */
+            items: components["schemas"]["DeadDispatchRead"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
+        };
+        /**
+         * DeadDispatchRead
+         * @description Payload-free operational metadata for one dead report dispatch.
+         */
+        DeadDispatchRead: {
+            /** Attempts */
+            attempts: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error Code */
+            error_code: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
         };
         /**
          * DependencySource
@@ -6737,6 +6796,46 @@ export interface operations {
             };
         };
     };
+    list_outbox_api_v1_reports_outbox_get: {
+        parameters: {
+            query?: {
+                state?: "dead";
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeadDispatchListResponse"];
+                };
+            };
+            /** @description Administrator role required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     requeue_dead_dispatch_api_v1_reports_outbox__dispatch_id__requeue_post: {
         parameters: {
             query?: never;
@@ -6750,6 +6849,27 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Administrator role required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Dead dispatch not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Persisted dispatch envelope failed validation. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

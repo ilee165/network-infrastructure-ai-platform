@@ -33,7 +33,7 @@ classification).
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, select
@@ -41,12 +41,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db, require_role
-from app.core.errors import ForbiddenError, NotFoundError
+from app.core.errors import ForbiddenError, InvalidDispatchEnvelopeError, NotFoundError
 from app.core.security import Role
 from app.engines.reports import deterministic_run_id, kinds_visible_to, required_role
 from app.models import User
 from app.models.reports import ReportArtifact, ReportFormat, ReportKind, ReportRun
 from app.schemas.reports_api import (
+    DeadDispatchListResponse,
+    DeadDispatchRead,
     ReportGenerationQueued,
     ReportGenerationRequest,
     ReportRunDetail,
@@ -54,7 +56,12 @@ from app.schemas.reports_api import (
     ReportRunRead,
 )
 from app.services import audit
-from app.services.report_outbox import enqueue_report, requeue_dead
+from app.services.report_outbox import (
+    InvalidDispatchEnvelope,
+    enqueue_report,
+    list_dead_dispatches,
+    requeue_dead,
+)
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -148,14 +155,58 @@ async def request_generation(
     return ReportGenerationQueued(run_id=run_id, status="queued")
 
 
-@router.post("/outbox/{dispatch_id}/requeue", status_code=204)
+@router.get(
+    "/outbox",
+    response_model=DeadDispatchListResponse,
+    responses={403: {"description": "Administrator role required."}},
+)
+async def list_outbox(
+    session: DbSession,
+    _admin: Annotated[User, Depends(require_role("admin"))],
+    state: Annotated[Literal["dead"], Query()] = "dead",
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> DeadDispatchListResponse:
+    """List bounded payload-free metadata for dead report dispatches."""
+    rows, total = await list_dead_dispatches(session, limit=limit, offset=offset)
+    return DeadDispatchListResponse(
+        items=[
+            DeadDispatchRead(
+                id=row.id,
+                run_id=row.aggregate_id,
+                error_code=row.last_error_code,
+                attempts=row.attempts,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post(
+    "/outbox/{dispatch_id}/requeue",
+    status_code=204,
+    responses={
+        403: {"description": "Administrator role required."},
+        404: {"description": "Dead dispatch not found."},
+        409: {"description": "Persisted dispatch envelope failed validation."},
+    },
+)
 async def requeue_dead_dispatch(
     dispatch_id: uuid.UUID,
     session: DbSession,
     admin: Annotated[User, Depends(require_role("admin"))],
 ) -> Response:
     """Admin-only, audited replay of a validated dead report envelope."""
-    result = await requeue_dead(session, dispatch_id)
+    try:
+        result = await requeue_dead(session, dispatch_id)
+    except InvalidDispatchEnvelope as exc:
+        raise InvalidDispatchEnvelopeError(
+            "dead report dispatch envelope failed validation"
+        ) from exc
     if result is None:
         raise NotFoundError(f"dead report dispatch {dispatch_id} does not exist")
     row = result.row

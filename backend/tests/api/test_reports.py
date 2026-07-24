@@ -272,6 +272,140 @@ async def test_dead_replay_requires_admin_and_is_audited(
     assert audit_row.actor == f"user:{users['admin'].username}"
 
 
+async def test_dead_dispatch_listing_is_admin_only_and_payload_free(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    session: AsyncSession,
+) -> None:
+    run_id = deterministic_run_id(ReportKind.CHANGE, _START, _END)
+    run = ReportRun(
+        id=run_id,
+        kind=ReportKind.CHANGE.value,
+        trigger="on_demand",
+        requested_by=None,
+        period_start=_START,
+        period_end=_END,
+        status=ReportRunStatus.FAILED.value,
+        error_class="dispatch_dead:broker_unavailable",
+        regime_tags=[],
+        finished_at=_END,
+    )
+    dispatch_id = uuid.uuid4()
+    session.add_all(
+        [
+            run,
+            DispatchOutbox(
+                id=dispatch_id,
+                aggregate_type="report_run",
+                aggregate_id=run_id,
+                task_name="reports.generate",
+                queue="docs",
+                payload_json={
+                    "dispatch_id": str(dispatch_id),
+                    "run_id": str(run_id),
+                },
+                state=DispatchOutboxState.DEAD.value,
+                attempts=5,
+                available_at=_END,
+                consumer_state=DispatchConsumerState.PENDING.value,
+                last_error_code="broker_unavailable",
+            ),
+        ]
+    )
+    await session.commit()
+
+    denied = await client.get(
+        "/api/v1/reports/outbox",
+        params={"state": "dead"},
+        headers=auth_headers("engineer"),
+    )
+    assert denied.status_code == 403
+
+    response = await client.get(
+        "/api/v1/reports/outbox",
+        params={"state": "dead", "limit": 10, "offset": 0},
+        headers=auth_headers("admin"),
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "id": str(dispatch_id),
+                "run_id": str(run_id),
+                "error_code": "broker_unavailable",
+                "attempts": 5,
+                "created_at": response.json()["items"][0]["created_at"],
+            }
+        ],
+        "total": 1,
+        "limit": 10,
+        "offset": 0,
+    }
+    assert "payload_json" not in response.text
+
+
+async def test_dead_replay_invalid_envelope_is_typed_conflict(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    session: AsyncSession,
+) -> None:
+    run_id = deterministic_run_id(ReportKind.CHANGE, _START, _END)
+    dispatch_id = uuid.uuid4()
+    session.add_all(
+        [
+            ReportRun(
+                id=run_id,
+                kind=ReportKind.CHANGE.value,
+                trigger="on_demand",
+                requested_by=None,
+                period_start=_START,
+                period_end=_END,
+                status=ReportRunStatus.FAILED.value,
+                error_class="dispatch_dead:invalid_envelope",
+                regime_tags=[],
+                finished_at=_END,
+            ),
+            DispatchOutbox(
+                id=dispatch_id,
+                aggregate_type="report_run",
+                aggregate_id=run_id,
+                task_name="reports.generate",
+                queue="docs",
+                payload_json={
+                    "dispatch_id": str(dispatch_id),
+                    "run_id": str(run_id),
+                    "secret": "must-not-echo",
+                },
+                state=DispatchOutboxState.DEAD.value,
+                attempts=1,
+                available_at=_END,
+                consumer_state=DispatchConsumerState.PENDING.value,
+                last_error_code="invalid_envelope",
+            ),
+        ]
+    )
+    await session.commit()
+
+    response = await client.post(
+        f"/api/v1/reports/outbox/{dispatch_id}/requeue",
+        headers=auth_headers("admin"),
+    )
+    assert response.status_code == 409
+    assert response.json()["type"] == "urn:netops:error:invalid-dispatch-envelope"
+    assert "must-not-echo" not in response.text
+
+
+async def test_dead_replay_missing_dispatch_is_404(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+) -> None:
+    response = await client.post(
+        f"/api/v1/reports/outbox/{uuid.uuid4()}/requeue",
+        headers=auth_headers("admin"),
+    )
+    assert response.status_code == 404
+
+
 async def test_generation_rejects_inverted_period(
     client: httpx.AsyncClient,
     auth_headers: Callable[[str], dict[str, str]],

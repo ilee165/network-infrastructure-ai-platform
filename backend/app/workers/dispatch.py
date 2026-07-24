@@ -8,7 +8,11 @@ from typing import Any
 
 from celery.canvas import Signature
 
-from app.services.report_outbox import REPORT_TASK, validate_dispatch
+from app.services.report_outbox import (
+    REPORT_TASK,
+    InvalidDispatchEnvelope,
+    validate_dispatch,
+)
 from app.workers.celery_app import (
     QUEUE_CONFIG,
     QUEUE_DISCOVERY,
@@ -77,16 +81,16 @@ def durable_dispatch(
     dispatch_id: uuid.UUID | None = None,
 ) -> Any:
     if (task_name, queue) not in _ALLOWED_TASK_QUEUES:
-        raise ValueError("dispatch_not_allowlisted")
+        raise InvalidDispatchEnvelope("dispatch_not_allowlisted")
     if payload is not None and args is not None:
-        raise ValueError("dispatch_arguments_ambiguous")
+        raise InvalidDispatchEnvelope("dispatch_arguments_ambiguous")
     if dispatch_id is not None:
         if payload is None:
-            raise ValueError("dispatch_payload_required")
+            raise InvalidDispatchEnvelope("dispatch_payload_required")
         validate_dispatch(task_name, payload, queue, dispatch_id=dispatch_id)
         stable_task_id = str(dispatch_id)
         if task_id is not None and task_id != stable_task_id:
-            raise ValueError("dispatch_identity_conflict")
+            raise InvalidDispatchEnvelope("dispatch_identity_conflict")
         task_id = stable_task_id
     options: dict[str, Any] = {
         "queue": queue,

@@ -62,6 +62,36 @@ def test_poison_envelope_is_rejected_before_publication_without_echo() -> None:
     assert secret not in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "code"),
+    [
+        ({"task_name": "unknown.task", "queue": "docs", "args": []}, "dispatch_not_allowlisted"),
+        (
+            {
+                "task_name": "reports.generate",
+                "queue": "docs",
+                "payload": {},
+                "args": [],
+            },
+            "dispatch_arguments_ambiguous",
+        ),
+        (
+            {
+                "task_name": "reports.generate",
+                "queue": "docs",
+                "dispatch_id": uuid.uuid4(),
+            },
+            "dispatch_payload_required",
+        ),
+    ],
+)
+def test_durable_dispatch_validation_uses_typed_envelope_error(
+    kwargs: dict[str, object], code: str
+) -> None:
+    with pytest.raises(InvalidDispatchEnvelope, match=code):
+        durable_dispatch(**kwargs)  # type: ignore[arg-type]
+
+
 def test_durable_dispatch_uses_payload_dispatch_id_as_celery_task_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

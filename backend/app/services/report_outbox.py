@@ -529,6 +529,29 @@ async def requeue_dead(session: AsyncSession, dispatch_id: uuid.UUID) -> Requeue
     return RequeueResult(row=row, run_transitioned=run_transitioned)
 
 
+async def list_dead_dispatches(
+    session: AsyncSession, *, limit: int, offset: int
+) -> tuple[list[DispatchOutbox], int]:
+    """Return payload-free API source rows for bounded admin diagnostics."""
+    filters = (
+        DispatchOutbox.aggregate_type == "report_run",
+        DispatchOutbox.state == DispatchOutboxState.DEAD.value,
+    )
+    total = await session.scalar(select(func.count()).select_from(DispatchOutbox).where(*filters))
+    rows = list(
+        (
+            await session.scalars(
+                select(DispatchOutbox)
+                .where(*filters)
+                .order_by(DispatchOutbox.created_at.desc(), DispatchOutbox.id.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
+    )
+    return rows, int(total or 0)
+
+
 async def outbox_status(session: AsyncSession, now: datetime) -> tuple[int, float]:
     count, oldest = (
         await session.execute(
