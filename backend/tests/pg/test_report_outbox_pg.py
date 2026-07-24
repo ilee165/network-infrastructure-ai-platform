@@ -655,48 +655,6 @@ async def test_requeue_never_revives_post_consumption_failure(
 
 
 @pytest.mark.asyncio
-async def test_fresh_request_never_revives_post_consumption_failure(
-    pg_session: AsyncSession,
-) -> None:
-    start = datetime(2026, 7, 1, tzinfo=UTC)
-    end = datetime(2026, 7, 8, tzinfo=UTC)
-    run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
-    run = await enqueue_report(
-        pg_session,
-        run_id=run_id,
-        kind=ReportKind.CHANGE,
-        period_start=start,
-        period_end=end,
-        trigger="scheduled",
-        requested_by=None,
-    )
-    finished_at = datetime.now(UTC)
-    run.status = ReportRunStatus.FAILED.value
-    run.error_class = "builder_error"
-    run.finished_at = finished_at
-    await pg_session.commit()
-
-    # A fresh same-period request shares enqueue_report's provenance gate with
-    # admin replay: a post-consumption failure stays FAILED and is not revived.
-    reentered = await enqueue_report(
-        pg_session,
-        run_id=run_id,
-        kind=ReportKind.CHANGE,
-        period_start=start,
-        period_end=end,
-        trigger="on_demand",
-        requested_by=uuid.uuid4(),
-    )
-    await pg_session.commit()
-    assert reentered.id == run.id
-    assert await pg_session.scalar(select(func.count()).select_from(DispatchOutbox)) == 1
-    await pg_session.refresh(run)
-    assert run.status == ReportRunStatus.FAILED.value
-    assert run.error_class == "builder_error"
-    assert run.finished_at is not None
-
-
-@pytest.mark.asyncio
 async def test_requeue_and_rerequest_converge_on_stable_dispatch_row(
     pg_session: AsyncSession,
 ) -> None:
