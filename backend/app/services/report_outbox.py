@@ -199,9 +199,10 @@ async def enqueue_report(
     run = (
         await session.execute(select(ReportRun).where(ReportRun.id == run_id).with_for_update())
     ).scalar_one()
-    fresh_failed_retry = run.status == ReportRunStatus.FAILED.value and is_dispatch_dead_error(
-        run.error_class
-    )
+    # A fresh user/scheduler request may retry any failed generation. This is
+    # distinct from admin outbox replay below: requeue_dead is provenance-gated
+    # to dispatch_dead:* so replay can never revive a post-consumption failure.
+    fresh_failed_retry = run.status == ReportRunStatus.FAILED.value
     if fresh_failed_retry:
         run.status = ReportRunStatus.QUEUED.value
         run.error_class = None
