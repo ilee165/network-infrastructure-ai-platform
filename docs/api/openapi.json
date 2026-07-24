@@ -824,6 +824,7 @@
         "enum": [
           "config",
           "ddi_record",
+          "report_generation",
           "security_remediation"
         ],
         "title": "ChangeRequestKind",
@@ -1626,6 +1627,82 @@
           "secret"
         ],
         "title": "CredentialRotate",
+        "type": "object"
+      },
+      "DeadDispatchListResponse": {
+        "description": "Bounded admin listing for dead report dispatches.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DeadDispatchRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "DeadDispatchListResponse",
+        "type": "object"
+      },
+      "DeadDispatchRead": {
+        "description": "Payload-free operational metadata for one dead report dispatch.",
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "run_id",
+          "error_code",
+          "attempts",
+          "created_at"
+        ],
+        "title": "DeadDispatchRead",
         "type": "object"
       },
       "DependencySource": {
@@ -9302,6 +9379,133 @@
           }
         ],
         "summary": "Request Generation",
+        "tags": [
+          "reports"
+        ]
+      }
+    },
+    "/api/v1/reports/outbox": {
+      "get": {
+        "description": "List bounded payload-free metadata for dead report dispatches.",
+        "operationId": "list_outbox_api_v1_reports_outbox_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "const": "dead",
+              "default": "dead",
+              "title": "State",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeadDispatchListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "Administrator role required."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Outbox",
+        "tags": [
+          "reports"
+        ]
+      }
+    },
+    "/api/v1/reports/outbox/{dispatch_id}/requeue": {
+      "post": {
+        "description": "Admin-only, audited replay of a validated dead report envelope.",
+        "operationId": "requeue_dead_dispatch_api_v1_reports_outbox__dispatch_id__requeue_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dispatch_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Dispatch Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "Administrator role required."
+          },
+          "404": {
+            "description": "Dead dispatch not found."
+          },
+          "409": {
+            "description": "Persisted dispatch envelope failed validation."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Requeue Dead Dispatch",
         "tags": [
           "reports"
         ]

@@ -110,7 +110,9 @@ class ReportRun(UuidPkMixin, TimestampMixin, Base):
         String(16), nullable=False, default=ReportRunStatus.RUNNING.value
     )
     #: Typed failure class (``redaction_violation``, ``builder_error``,
-    #: ``render_error``) — NEVER free-form text (no secret can leak through it).
+    #: ``render_error``, or ``dispatch_dead:<typed_outbox_error_code>``) — NEVER
+    #: free-form text (no secret can leak through it). The composite relay token
+    #: remains bounded because ``last_error_code`` is itself a closed typed code.
     error_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
     #: Regime control tags snapshotting the mapping in force at generation
     #: (ADR-0053 §8; SOC 2 CC-series PROPOSED default). Metadata only.

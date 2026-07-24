@@ -5,7 +5,7 @@
 | Owner | `wf-implementer` (strong) |
 | Depends on | W0-T5 / ADR-0059 |
 | Review | strong spec + quality; secret/report spine |
-| Status | Proposed |
+| Status | Implemented |
 
 ## Objective and scope
 
@@ -42,7 +42,10 @@ red bite proving the old post-commit direct-dispatch window drops work.
 
 ## Exit criteria
 
-- [ ] Every crash window has a real-PG assertion; no dropped or duplicate effect.
-- [ ] Both request paths are atomic and direct publication is absent.
-- [ ] Relay alerts/runbook and dead-row audited recovery work.
-- [ ] Strong review, D16 and `pg-integration` pass; one atomic commit.
+- [x] Every crash window has a real-PG assertion; no dropped or duplicate effect.
+- [x] Both request paths are atomic and direct publication is absent.
+- [x] Relay alerts/runbook and dead-row audited recovery work.
+- [x] Strong review, D16 and `pg-integration` pass; implementation and focused
+  review fixes are recorded as atomic commits.
+
+Closeout evidence: `docs/roadmap/P5-W1-HANDOFF.md`.

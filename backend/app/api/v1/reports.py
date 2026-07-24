@@ -32,9 +32,8 @@ classification).
 
 from __future__ import annotations
 
-import asyncio
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, select
@@ -42,12 +41,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db, require_role
-from app.core.errors import ForbiddenError, NotFoundError
+from app.core.errors import ForbiddenError, InvalidDispatchEnvelopeError, NotFoundError
 from app.core.security import Role
 from app.engines.reports import deterministic_run_id, kinds_visible_to, required_role
 from app.models import User
 from app.models.reports import ReportArtifact, ReportFormat, ReportKind, ReportRun
 from app.schemas.reports_api import (
+    DeadDispatchListResponse,
+    DeadDispatchRead,
     ReportGenerationQueued,
     ReportGenerationRequest,
     ReportRunDetail,
@@ -55,7 +56,12 @@ from app.schemas.reports_api import (
     ReportRunRead,
 )
 from app.services import audit
-from app.workers.celery_app import QUEUE_DOCS, celery_app
+from app.services.report_outbox import (
+    InvalidDispatchEnvelope,
+    enqueue_report,
+    list_dead_dispatches,
+    requeue_dead,
+)
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -67,6 +73,7 @@ AuthedUser = Annotated[User, Depends(require_role("viewer"))]
 
 _GENERATION_REQUESTED = "report.generation_requested"
 _ARTIFACT_DOWNLOADED = "report.artifact_downloaded"
+_OUTBOX_REQUEUED = "report.outbox_requeued"
 
 _MEDIA_TYPES = {
     ReportFormat.CSV.value: "text/csv; charset=utf-8",
@@ -135,26 +142,88 @@ async def request_generation(
             "period_end": body.period_end.isoformat(),
         },
     )
-    await session.commit()
-    # send_task performs synchronous broker I/O; run_in_executor keeps the
-    # event loop unblocked (D2 async-first, the trigger_discovery_run /
-    # request_report_generation agent-tool pattern — PR #166 F4).
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(
-        None,
-        lambda: celery_app.send_task(
-            "reports.generate",
-            args=[
-                body.kind.value,
-                body.period_start.isoformat(),
-                body.period_end.isoformat(),
-                "on_demand",
-                str(user.id),
-            ],
-            queue=QUEUE_DOCS,
-        ),
+    await enqueue_report(
+        session,
+        run_id=run_id,
+        kind=body.kind,
+        period_start=body.period_start,
+        period_end=body.period_end,
+        trigger="on_demand",
+        requested_by=user.id,
     )
+    await session.commit()
     return ReportGenerationQueued(run_id=run_id, status="queued")
+
+
+@router.get(
+    "/outbox",
+    response_model=DeadDispatchListResponse,
+    responses={403: {"description": "Administrator role required."}},
+)
+async def list_outbox(
+    session: DbSession,
+    _admin: Annotated[User, Depends(require_role("admin"))],
+    state: Annotated[Literal["dead"], Query()] = "dead",
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> DeadDispatchListResponse:
+    """List bounded payload-free metadata for dead report dispatches."""
+    rows, total = await list_dead_dispatches(session, limit=limit, offset=offset)
+    return DeadDispatchListResponse(
+        items=[
+            DeadDispatchRead(
+                id=row.id,
+                run_id=row.aggregate_id,
+                error_code=row.last_error_code,
+                attempts=row.attempts,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post(
+    "/outbox/{dispatch_id}/requeue",
+    status_code=204,
+    responses={
+        403: {"description": "Administrator role required."},
+        404: {"description": "Dead dispatch not found."},
+        409: {"description": "Persisted dispatch envelope failed validation."},
+    },
+)
+async def requeue_dead_dispatch(
+    dispatch_id: uuid.UUID,
+    session: DbSession,
+    admin: Annotated[User, Depends(require_role("admin"))],
+) -> Response:
+    """Admin-only, audited replay of a validated dead report envelope."""
+    try:
+        result = await requeue_dead(session, dispatch_id)
+    except InvalidDispatchEnvelope as exc:
+        raise InvalidDispatchEnvelopeError(
+            "dead report dispatch envelope failed validation"
+        ) from exc
+    if result is None:
+        raise NotFoundError(f"dead report dispatch {dispatch_id} does not exist")
+    row = result.row
+    await audit.record(
+        session,
+        actor=f"user:{admin.username}",
+        action=_OUTBOX_REQUEUED,
+        target_type="dispatch_outbox",
+        target_id=str(dispatch_id),
+        detail={
+            "aggregate_type": row.aggregate_type,
+            "aggregate_id": str(row.aggregate_id),
+            "run_transitioned": result.run_transitioned,
+        },
+    )
+    await session.commit()
+    return Response(status_code=204)
 
 
 @router.get("", response_model=ReportRunListResponse)

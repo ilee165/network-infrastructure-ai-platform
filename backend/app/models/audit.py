@@ -110,6 +110,13 @@ class AuditLog(Base):
     # table option must be the LAST element.
     __table_args__ = (
         Index(_SEQ_UNIQUE_INDEX_NAME, "seq"),
+        Index(
+            "ix_audit_log_cr_reconciliation_lookup",
+            "target_type",
+            "target_id",
+            "action",
+            "reasoning_trace_id",
+        ),
         {"postgresql_partition_by": "RANGE (created_at)"},
     )
 

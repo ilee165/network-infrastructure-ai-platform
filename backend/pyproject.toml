@@ -67,6 +67,10 @@ dependencies = [
     # Device transports (D7): SSH CLI + SNMP v2c/v3
     "netmiko",
     "pysnmp",
+    # pysnmp transitive security floor: 0.6.4 fixes CVE-2026-59885 and
+    # CVE-2026-59886 (crafted ASN.1 OID/REAL denial of service). Keep direct so
+    # the hash-pinned lock and image scan cannot regress through resolver drift.
+    "pyasn1>=0.6.4",
     # Virtualization SDK (D7, ADR-0051): pyVmomi is the named VMware transport —
     # the vCenter (SOAP) client behind the `vmware` plugin. Floor + major-cap
     # tracks client-side currency (one pinned client serves mixed vCenter 7/8
@@ -493,8 +497,10 @@ layers = [
     "core",
 ]
 ignore_imports = [
-    # REPO-STRUCTURE row 12: API enqueues Celery jobs via task signatures
-    # only (app.api.v1.discovery / app.api.v1.agents -> app.workers.celery_app).
+    # REPO-STRUCTURE row 12: API enqueues Celery jobs only through the
+    # allowlisted/redacting publication boundary (ADR-0059).
+    "app.api.** -> app.workers.dispatch",
+    # Queue-name constants remain sourced from the canonical Celery module.
     "app.api.** -> app.workers.celery_app",
     # REPO-STRUCTURE row 5: knowledge needs an llm provider for embeddings (D9).
     "app.knowledge.embedding -> app.llm.redaction",
@@ -503,14 +509,9 @@ ignore_imports = [
     # ("services MUST NOT import agents"). Flagged as an open question in the
     # T1 report, not fixed here (zero behavior change).
     "app.services.agent_session.service -> app.agents.framework.*",
-    # Discovery job dispatch remains at its established Celery signature seam;
-    # owner: future discovery-dispatch framework port (not the read facade).
+    # Discovery read-tool job launch crosses the same hardened boundary.
+    "app.agents.discovery.tools -> app.workers.dispatch",
     "app.agents.discovery.tools -> app.workers.celery_app",
-    # Report generation dispatch (P4 W3-T1, ADR-0053 §1): the Documentation
-    # Agent's request_report_generation tool enqueues the SAME engine task the
-    # scheduler uses, by Celery signature only — the established discovery
-    # dispatch seam above; owner: the same future framework dispatch port.
-    "app.agents.documentation.tools -> app.workers.celery_app",
     # Report API schema reuses the ReportKind model enum (P4 W3-T1) — the same
     # pre-existing schemas -> models enum-reuse edge class as the entries below.
     "app.schemas.reports_api -> app.models.reports",

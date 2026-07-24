@@ -18,7 +18,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1 import discovery as discovery_api
 from app.models import (
     AuditLog,
     Device,
@@ -35,6 +34,7 @@ from app.schemas.normalized import (
     NeighborProtocol,
     RouteProtocol,
 )
+from app.workers import dispatch as dispatch_module
 
 COLLECTED_AT = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
 
@@ -68,7 +68,7 @@ def sent_tasks(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
         return _Result()
 
-    monkeypatch.setattr(discovery_api.celery_app, "send_task", _fake_send_task)
+    monkeypatch.setattr(dispatch_module.celery_app, "send_task", _fake_send_task)
     return calls
 
 

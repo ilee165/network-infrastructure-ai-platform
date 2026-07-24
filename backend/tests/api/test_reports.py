@@ -5,7 +5,6 @@ download-time role-revocation regression (no stale-authz caching).
 
 from __future__ import annotations
 
-import threading
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -18,10 +17,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-import app.api.v1.reports as reports_module
 from app.engines.reports import deterministic_run_id
 from app.models import AuditLog, Role, User
+from app.models.dispatch_outbox import DispatchConsumerState, DispatchOutbox, DispatchOutboxState
 from app.models.reports import ReportArtifact, ReportKind, ReportRun, ReportRunStatus
+from app.workers.celery_app import celery_app
 
 _START = datetime(2026, 7, 1, tzinfo=UTC)
 _END = datetime(2026, 7, 8, tzinfo=UTC)
@@ -29,14 +29,14 @@ _END = datetime(2026, 7, 8, tzinfo=UTC)
 
 @pytest.fixture()
 def sent_tasks(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Record Celery dispatches instead of touching a broker."""
-    calls: list[dict[str, Any]] = []
+    """Record any direct Celery publication so no-publication assertions bite."""
+    sent: list[dict[str, Any]] = []
 
-    def _record(name: str, args: list[Any] | None = None, **kwargs: Any) -> None:
-        calls.append({"name": name, "args": list(args or []), **kwargs})
+    def _record(task_name: str, *args: Any, **kwargs: Any) -> None:
+        sent.append({"task_name": task_name, "args": args, "kwargs": kwargs})
 
-    monkeypatch.setattr(reports_module.celery_app, "send_task", _record)
-    return calls
+    monkeypatch.setattr(celery_app, "send_task", _record)
+    return sent
 
 
 async def _seed_run(
@@ -113,34 +113,38 @@ async def test_generation_floor_per_kind(
         payload = response.json()
         assert payload["status"] == "queued"
         assert payload["run_id"] == str(deterministic_run_id(ReportKind(kind), _START, _END))
-        assert sent_tasks and sent_tasks[-1]["name"] == "reports.generate"
+        assert sent_tasks == []
     else:
         assert sent_tasks == []  # a denied request must never enqueue
 
 
-async def test_generation_dispatch_runs_off_the_event_loop_thread(
+async def test_generation_request_never_publishes_before_commit(
     client: httpx.AsyncClient,
     auth_headers: Callable[[str], dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
+    session: AsyncSession,
 ) -> None:
-    """PR #166 F4: ``celery_app.send_task`` is dispatched via
-    ``loop.run_in_executor`` (the D2 async-first pattern) so the synchronous
-    broker I/O never blocks the request-handling event loop. A regression to
-    a bare inline ``send_task`` call would execute ON the same thread as the
-    awaiting coroutine; wrapped in ``run_in_executor`` it runs on a distinct
-    executor thread."""
-    seen_thread_ids: list[int] = []
+    """ADR-0059: the request transaction persists only; relay publishes later."""
+    from app.workers.celery_app import celery_app
 
-    def _record(name: str, args: list[Any] | None = None, **kwargs: Any) -> None:
-        seen_thread_ids.append(threading.get_ident())
-
-    monkeypatch.setattr(reports_module.celery_app, "send_task", _record)
+    monkeypatch.setattr(
+        celery_app,
+        "send_task",
+        lambda *_args, **_kwargs: pytest.fail("request path reached broker publication"),
+    )
     response = await client.post(
         "/api/v1/reports", json=_body("change"), headers=auth_headers("engineer")
     )
     assert response.status_code == 202
-    assert seen_thread_ids
-    assert seen_thread_ids[0] != threading.get_ident()
+    run_id = deterministic_run_id(ReportKind.CHANGE, _START, _END)
+    assert await session.get(ReportRun, run_id) is not None
+    envelope = (
+        await session.execute(select(DispatchOutbox).where(DispatchOutbox.aggregate_id == run_id))
+    ).scalar_one()
+    assert envelope.payload_json == {
+        "dispatch_id": str(envelope.id),
+        "run_id": str(run_id),
+    }
 
 
 async def test_generation_request_is_audited(
@@ -162,8 +166,256 @@ async def test_generation_request_is_audited(
     assert len(rows) == 1
     assert rows[0].actor == f"user:{users['engineer'].username}"
     assert rows[0].detail["kind"] == "change"
-    # The enqueued task carries the requesting user id (invoking-user RBAC).
-    assert sent_tasks[-1]["args"][-1] == str(users["engineer"].id)
+    assert sent_tasks == []
+
+
+async def test_fresh_request_rearms_dispatch_dead_run_and_stable_envelope(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    session: AsyncSession,
+) -> None:
+    run_id = deterministic_run_id(ReportKind.CHANGE, _START, _END)
+    run = ReportRun(
+        id=run_id,
+        kind=ReportKind.CHANGE.value,
+        trigger="on_demand",
+        requested_by=None,
+        period_start=_START,
+        period_end=_END,
+        status=ReportRunStatus.FAILED.value,
+        error_class="dispatch_dead:broker_unavailable",
+        regime_tags=[],
+        finished_at=_END,
+    )
+    dispatch_id = uuid.uuid4()
+    envelope = DispatchOutbox(
+        id=dispatch_id,
+        aggregate_type="report_run",
+        aggregate_id=run_id,
+        task_name="reports.generate",
+        queue="docs",
+        payload_json={"dispatch_id": str(dispatch_id), "run_id": str(run_id)},
+        state=DispatchOutboxState.DEAD.value,
+        attempts=5,
+        available_at=_END,
+        consumer_state=DispatchConsumerState.PENDING.value,
+        last_error_code="broker_unavailable",
+    )
+    session.add_all([run, envelope])
+    await session.commit()
+
+    response = await client.post(
+        "/api/v1/reports", json=_body("change"), headers=auth_headers("engineer")
+    )
+    assert response.status_code == 202
+    assert response.json() == {"run_id": str(run_id), "status": "queued"}
+    await session.refresh(run)
+    await session.refresh(envelope)
+    assert run.status == ReportRunStatus.QUEUED.value
+    assert run.error_class is None
+    assert envelope.id == dispatch_id
+    assert envelope.state == DispatchOutboxState.PENDING.value
+    assert envelope.attempts == 0
+    assert envelope.last_error_code is None
+    assert envelope.consumer_state == DispatchConsumerState.PENDING.value
+
+
+async def test_dead_replay_requires_admin_and_is_audited(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    session: AsyncSession,
+    users: dict[str, User],
+) -> None:
+    run_id = deterministic_run_id(ReportKind.CHANGE, _START, _END)
+    run = ReportRun(
+        id=run_id,
+        kind=ReportKind.CHANGE.value,
+        trigger="on_demand",
+        requested_by=None,
+        period_start=_START,
+        period_end=_END,
+        status=ReportRunStatus.QUEUED.value,
+        regime_tags=[],
+    )
+    dispatch_id = uuid.uuid4()
+    envelope = DispatchOutbox(
+        id=dispatch_id,
+        aggregate_type="report_run",
+        aggregate_id=run_id,
+        task_name="reports.generate",
+        queue="docs",
+        payload_json={"dispatch_id": str(dispatch_id), "run_id": str(run_id)},
+        state=DispatchOutboxState.DEAD.value,
+        available_at=_END,
+        consumer_state=DispatchConsumerState.PENDING.value,
+        last_error_code="invalid_envelope",
+    )
+    session.add_all([run, envelope])
+    await session.commit()
+
+    denied = await client.post(
+        f"/api/v1/reports/outbox/{dispatch_id}/requeue",
+        headers=auth_headers("engineer"),
+    )
+    assert denied.status_code == 403
+    await session.refresh(envelope)
+    assert envelope.state == DispatchOutboxState.DEAD.value
+
+    replayed = await client.post(
+        f"/api/v1/reports/outbox/{dispatch_id}/requeue",
+        headers=auth_headers("admin"),
+    )
+    assert replayed.status_code == 204
+    await session.refresh(envelope)
+    assert envelope.state == DispatchOutboxState.PENDING.value
+    audit_row = (
+        await session.execute(
+            select(AuditLog).where(
+                AuditLog.action == "report.outbox_requeued",
+                AuditLog.target_id == str(dispatch_id),
+            )
+        )
+    ).scalar_one()
+    assert audit_row.actor == f"user:{users['admin'].username}"
+
+
+async def test_dead_dispatch_listing_is_admin_only_and_payload_free(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    session: AsyncSession,
+) -> None:
+    run_id = deterministic_run_id(ReportKind.CHANGE, _START, _END)
+    run = ReportRun(
+        id=run_id,
+        kind=ReportKind.CHANGE.value,
+        trigger="on_demand",
+        requested_by=None,
+        period_start=_START,
+        period_end=_END,
+        status=ReportRunStatus.FAILED.value,
+        error_class="dispatch_dead:broker_unavailable",
+        regime_tags=[],
+        finished_at=_END,
+    )
+    dispatch_id = uuid.uuid4()
+    session.add_all(
+        [
+            run,
+            DispatchOutbox(
+                id=dispatch_id,
+                aggregate_type="report_run",
+                aggregate_id=run_id,
+                task_name="reports.generate",
+                queue="docs",
+                payload_json={
+                    "dispatch_id": str(dispatch_id),
+                    "run_id": str(run_id),
+                },
+                state=DispatchOutboxState.DEAD.value,
+                attempts=5,
+                available_at=_END,
+                consumer_state=DispatchConsumerState.PENDING.value,
+                last_error_code="broker_unavailable",
+            ),
+        ]
+    )
+    await session.commit()
+
+    denied = await client.get(
+        "/api/v1/reports/outbox",
+        params={"state": "dead"},
+        headers=auth_headers("engineer"),
+    )
+    assert denied.status_code == 403
+
+    response = await client.get(
+        "/api/v1/reports/outbox",
+        params={"state": "dead", "limit": 10, "offset": 0},
+        headers=auth_headers("admin"),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    created_at = body["items"][0].pop("created_at")
+    assert body == {
+        "items": [
+            {
+                "id": str(dispatch_id),
+                "run_id": str(run_id),
+                "error_code": "broker_unavailable",
+                "attempts": 5,
+            }
+        ],
+        "total": 1,
+        "limit": 10,
+        "offset": 0,
+    }
+    # created_at must be a present, non-null, well-formed ISO-8601 timestamp;
+    # the prior comparison against itself verified nothing.
+    assert isinstance(created_at, str)
+    assert datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    assert "payload_json" not in response.text
+
+
+async def test_dead_replay_invalid_envelope_is_typed_conflict(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+    session: AsyncSession,
+) -> None:
+    run_id = deterministic_run_id(ReportKind.CHANGE, _START, _END)
+    dispatch_id = uuid.uuid4()
+    session.add_all(
+        [
+            ReportRun(
+                id=run_id,
+                kind=ReportKind.CHANGE.value,
+                trigger="on_demand",
+                requested_by=None,
+                period_start=_START,
+                period_end=_END,
+                status=ReportRunStatus.FAILED.value,
+                error_class="dispatch_dead:invalid_envelope",
+                regime_tags=[],
+                finished_at=_END,
+            ),
+            DispatchOutbox(
+                id=dispatch_id,
+                aggregate_type="report_run",
+                aggregate_id=run_id,
+                task_name="reports.generate",
+                queue="docs",
+                payload_json={
+                    "dispatch_id": str(dispatch_id),
+                    "run_id": str(run_id),
+                    "secret": "must-not-echo",
+                },
+                state=DispatchOutboxState.DEAD.value,
+                attempts=1,
+                available_at=_END,
+                consumer_state=DispatchConsumerState.PENDING.value,
+                last_error_code="invalid_envelope",
+            ),
+        ]
+    )
+    await session.commit()
+
+    response = await client.post(
+        f"/api/v1/reports/outbox/{dispatch_id}/requeue",
+        headers=auth_headers("admin"),
+    )
+    assert response.status_code == 409
+    assert response.json()["type"] == "urn:netops:error:invalid-dispatch-envelope"
+    assert "must-not-echo" not in response.text
+
+
+async def test_dead_replay_missing_dispatch_is_404(
+    client: httpx.AsyncClient,
+    auth_headers: Callable[[str], dict[str, str]],
+) -> None:
+    response = await client.post(
+        f"/api/v1/reports/outbox/{uuid.uuid4()}/requeue",
+        headers=auth_headers("admin"),
+    )
+    assert response.status_code == 404
 
 
 async def test_generation_rejects_inverted_period(
@@ -202,11 +454,7 @@ async def test_generation_pins_naive_period_as_utc(
     response = await client.post("/api/v1/reports", json=body, headers=auth_headers("engineer"))
     assert response.status_code == 202
     assert response.json()["run_id"] == str(deterministic_run_id(ReportKind.CHANGE, _START, _END))
-    # The serialized task args are aware-UTC, so the worker's _parse_utc
-    # round-trips to the identical period (and therefore the identical id).
-    args = sent_tasks[-1]["args"]
-    assert args[1] == _START.isoformat()
-    assert args[2] == _END.isoformat()
+    assert sent_tasks == []
 
 
 async def test_generation_mixed_naive_and_aware_is_not_a_500(
@@ -287,7 +535,7 @@ async def test_generation_accepts_at_cap_span(
     }
     response = await client.post("/api/v1/reports", json=body, headers=auth_headers("engineer"))
     assert response.status_code == 202
-    assert sent_tasks and sent_tasks[-1]["name"] == "reports.generate"
+    assert sent_tasks == []
 
 
 async def test_generation_rejects_pre_floor_period_start(

@@ -79,11 +79,17 @@ _RESET_TABLES = (
     # P4 W3-T1 report engine + compliance trend history (ADR-0053 §1/§7.2):
     # CASCADE removes artifacts/findings with their runs.
     "report_artifacts",
+    "dispatch_outbox",
     "report_runs",
     "compliance_run_findings",
     "compliance_runs",
     # P4 W3-T5 audit chain verification history (ADR-0053 §7.4).
     "audit_chain_verification_runs",
+    # M3 trace tables are partitioned; reasoning_trace_steps intentionally has
+    # no FK to reasoning_traces, so users ... CASCADE cannot clean orphan steps.
+    "reasoning_trace_steps",
+    "reasoning_traces",
+    "agent_sessions",
 )
 
 

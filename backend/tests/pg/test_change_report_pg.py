@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import undefer
 
+from app.engines.reports import deterministic_run_id
 from app.engines.reports.change_report import (
     NOTE_EMPTY_PERIOD,
     SECTION_APPROVALS,
@@ -40,9 +41,11 @@ from app.models.change_requests import (
     ChangeRequestKind,
     ChangeRequestState,
 )
+from app.models.dispatch_outbox import DispatchOutbox
 from app.models.identity import Role, User
-from app.models.reports import ReportArtifact
+from app.models.reports import ReportArtifact, ReportKind
 from app.services.audit import service as audit_actions
+from app.services.report_outbox import enqueue_report
 from app.workers.tasks import reports as report_tasks
 
 pytestmark = pytest.mark.integration
@@ -390,9 +393,24 @@ async def test_full_change_generation_runs_the_rollup_on_pg(
     )
     await pg_session.commit()
 
-    result = await report_tasks._generate_report_core(
-        "change", _START.isoformat(), _END.isoformat(), "on_demand", None
+    run_id = deterministic_run_id(ReportKind.CHANGE, _START, _END)
+    await enqueue_report(
+        pg_session,
+        run_id=run_id,
+        kind=ReportKind.CHANGE,
+        period_start=_START,
+        period_end=_END,
+        trigger="on_demand",
+        requested_by=requester.id,
     )
+    dispatch_id = (
+        await pg_session.execute(
+            select(DispatchOutbox.id).where(DispatchOutbox.aggregate_id == run_id)
+        )
+    ).scalar_one()
+    await pg_session.commit()
+
+    result = await report_tasks._generate_report_core(str(dispatch_id), str(run_id))
 
     assert result["status"] == "succeeded"
     # content is deferred with raiseload (PR #166 F4) — this rollup test reads the

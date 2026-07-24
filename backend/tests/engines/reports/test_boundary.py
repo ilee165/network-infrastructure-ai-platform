@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models import AuditLog, Base
@@ -39,9 +39,11 @@ from app.models.change_requests import (
     ChangeRequestKind,
     ChangeRequestState,
 )
+from app.models.dispatch_outbox import DispatchOutbox
 from app.models.identity import Role, User
 from app.models.reports import ReportKind
 from app.services.audit import service as audit_actions
+from app.services.report_outbox import enqueue_report
 from app.workers.tasks import reports as report_tasks
 
 _APP_DIR = Path(__file__).resolve().parents[3] / "app"
@@ -247,10 +249,14 @@ def test_reports_engine_imports_no_deny_surface() -> None:
 
 
 @pytest.fixture()
-def statements(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def generation_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[str], dict[ReportKind, tuple[uuid.UUID, uuid.UUID]]]:
     """File-backed schema + a cursor-level statement capture on the task seam."""
     url = f"sqlite+aiosqlite:///{tmp_path / 'boundary.sqlite'}"
     captured: list[str] = []
+    dispatches: dict[ReportKind, tuple[uuid.UUID, uuid.UUID]] = {}
 
     async def _create_schema() -> None:
         engine = create_async_engine(url)
@@ -306,6 +312,23 @@ def statements(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
                     created_at=seeded_at,
                 )
             )
+            for kind in ReportKind:
+                run_id = uuid.uuid4()
+                await enqueue_report(
+                    session,
+                    run_id=run_id,
+                    kind=kind,
+                    period_start=datetime(2026, 7, 1, tzinfo=UTC),
+                    period_end=datetime(2026, 7, 8, tzinfo=UTC),
+                    trigger="on_demand",
+                    requested_by=None,
+                )
+                dispatch_id = (
+                    await session.execute(
+                        select(DispatchOutbox.id).where(DispatchOutbox.aggregate_id == run_id)
+                    )
+                ).scalar_one()
+                dispatches[kind] = (dispatch_id, run_id)
             await session.commit()
         await engine.dispose()
 
@@ -325,20 +348,24 @@ def statements(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     from app.engines.reports import render
 
     monkeypatch.setattr(render, "_render_pdf", lambda payload: b"%PDF-1.7 stub")
-    return captured
+    return captured, dispatches
 
 
-def test_generation_touches_no_deny_set_table_for_any_kind(statements: list[str]) -> None:
+def test_generation_touches_no_deny_set_table_for_any_kind(
+    generation_boundary: tuple[
+        list[str],
+        dict[ReportKind, tuple[uuid.UUID, uuid.UUID]],
+    ],
+) -> None:
+    statements, dispatches = generation_boundary
     per_kind: dict[str, list[str]] = {}
     for kind in ReportKind:
         before = len(statements)
+        dispatch_id, run_id = dispatches[kind]
         result = asyncio.run(
             report_tasks._generate_report_core(
-                kind.value,
-                "2026-07-01T00:00:00+00:00",
-                "2026-07-08T00:00:00+00:00",
-                "on_demand",
-                None,
+                str(dispatch_id),
+                str(run_id),
             )
         )
         assert result["status"] == "succeeded", result
@@ -378,8 +405,14 @@ def test_generation_touches_no_deny_set_table_for_any_kind(statements: list[str]
     assert re.search(r"insert\s+into\s+report_artifacts\b", joined)
 
 
-def test_deny_table_scanner_is_not_vacuous(statements: list[str]) -> None:
+def test_deny_table_scanner_is_not_vacuous(
+    generation_boundary: tuple[
+        list[str],
+        dict[ReportKind, tuple[uuid.UUID, uuid.UUID]],
+    ],
+) -> None:
     """A planted deny-set SELECT is caught by the same capture mechanism."""
+    statements, _dispatches = generation_boundary
 
     async def _planted() -> None:
         async with report_tasks._session() as session:

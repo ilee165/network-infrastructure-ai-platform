@@ -94,6 +94,7 @@ class ChangeRequestKind(StrEnum):
 
     CONFIG = "config"
     DDI_RECORD = "ddi_record"
+    REPORT_GENERATION = "report_generation"
     SECURITY_REMEDIATION = "security_remediation"
 
 

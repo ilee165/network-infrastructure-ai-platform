@@ -120,6 +120,7 @@ async def test_change_request_kind_enum_values() -> None:
     assert {k.value for k in ChangeRequestKind} == {
         "config",
         "ddi_record",
+        "report_generation",
         "security_remediation",
     }
 

@@ -41,7 +41,8 @@ from app.schemas.discovery_api import (
     StartRunRequest,
 )
 from app.services import audit
-from app.workers.celery_app import QUEUE_DISCOVERY, celery_app
+from app.workers.celery_app import QUEUE_DISCOVERY
+from app.workers.dispatch import durable_dispatch
 
 router = APIRouter(prefix="/discovery", tags=["discovery"])
 
@@ -94,7 +95,7 @@ async def start_run(body: StartRunRequest, session: DbSession, user: Engineer) -
     )
     response = RunStatus.model_validate(run)
     await session.commit()
-    celery_app.send_task(RUN_TASK_NAME, args=[str(run.id)], queue=QUEUE_DISCOVERY)
+    durable_dispatch(task_name=RUN_TASK_NAME, args=[str(run.id)], queue=QUEUE_DISCOVERY)
     return response
 
 

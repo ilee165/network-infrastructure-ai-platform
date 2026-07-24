@@ -112,6 +112,13 @@ class ConflictError(NetOpsError):
     slug = "conflict"
 
 
+class InvalidDispatchEnvelopeError(ConflictError):
+    """A persisted dispatch cannot be replayed without violating its contract."""
+
+    title = "Invalid Dispatch Envelope"
+    slug = "invalid-dispatch-envelope"
+
+
 class PreconditionRequiredError(NetOpsError):
     """The request must be conditional (If-Match) to avoid a lost update (RFC 6585).
 

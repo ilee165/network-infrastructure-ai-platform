@@ -42,6 +42,31 @@ jobs:
             fontconfig \
             fonts-dejavu-core
 
+      - name: Celery publication ratchet — blocking + negative control
+        working-directory: backend
+        shell: bash
+        run: |
+          python scripts/check_celery_dispatch.py
+          set +e
+          negative_output="$(python scripts/check_celery_dispatch.py --negative-control 2>&1)"
+          negative_status=$?
+          set -e
+          echo "$negative_output"
+          if [ "$negative_status" -ne 1 ]; then
+            echo "::error::Celery dispatch ratchet negative control exited $negative_status, expected 1"
+            exit 1
+          fi
+          for expected in send_task apply_async delay canvas_call task_star_import; do
+            if [[ "$negative_output" != *"$expected"* ]]; then
+              echo "::error::Celery dispatch ratchet negative control missed $expected"
+              exit 1
+            fi
+          done
+          if [ -z "$negative_output" ]; then
+            echo "::error::Celery dispatch ratchet negative control produced no evidence"
+            exit 1
+          fi
+
       # Dependency-vulnerability gate (P1 W6-T4, ADR-0016 §, PRODUCTION.md §5).
       # pip-audit audits the RESOLVED backend environment (the editable install
       # above + dev extras) against the OSV/PyPI advisory DB and FAILS the job on

@@ -41,6 +41,7 @@ from kombu import Queue
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.engines.reports.idempotency import scheduled_period
+from app.services.reconciliation import BACKUP_MISS_GRACE
 
 _logger = get_logger(__name__)
 
@@ -190,6 +191,7 @@ def _report_schedule_kwargs(cadence: str) -> dict[str, BeatLazyFunc]:
 def create_celery_app() -> Celery:
     """Build the Celery app from settings (broker and backend are Redis)."""
     settings = get_settings()
+    backup_miss_grace_minutes = int(BACKUP_MISS_GRACE.total_seconds() // 60)
     celery = Celery(
         "netops",
         broker=settings.redis_url,
@@ -203,6 +205,8 @@ def create_celery_app() -> Celery:
             "app.workers.tasks.credentials",
             "app.workers.tasks.maintenance",
             "app.workers.tasks.reports",
+            "app.workers.tasks.report_outbox",
+            "app.workers.tasks.reconciliation",
         ],
     )
     if settings.redis_url.startswith("sentinel://"):
@@ -267,6 +271,27 @@ def create_celery_app() -> Celery:
                     hour=str(settings.config_backup_hour),
                     minute=str(settings.config_backup_minute),
                 ),
+            },
+            "config-backup-reconcile": {
+                "task": "system.reconcile_config_backup",
+                "schedule": crontab(
+                    hour=str(
+                        (
+                            settings.config_backup_hour
+                            + (settings.config_backup_minute + backup_miss_grace_minutes) // 60
+                        )
+                        % 24
+                    ),
+                    minute=str((settings.config_backup_minute + backup_miss_grace_minutes) % 60),
+                ),
+            },
+            "change-request-audit-reconcile": {
+                "task": "system.reconcile_change_request_audit",
+                "schedule": crontab(hour="0", minute="35"),
+            },
+            "reasoning-trace-reconcile": {
+                "task": "system.reconcile_reasoning_traces",
+                "schedule": crontab(hour="0", minute="40"),
             },
             # pcap retention purge (ADR-0023 §4): delete expired pcap files and
             # tombstone their metadata rows on a daily UTC schedule.
@@ -342,6 +367,14 @@ def create_celery_app() -> Celery:
                     minute=str(settings.report_purge_minute),
                 ),
             },
+            "report-outbox-relay": {
+                "task": "reports.outbox_relay",
+                "schedule": 5.0,
+            },
+            "report-outbox-reaper": {
+                "task": "reports.outbox_reaper",
+                "schedule": 60.0,
+            },
             # Daily compliance evaluation sweep (ADR-0053 §2) feeding the §7.2
             # trend history — without it the posture report has no time series.
             "compliance-daily-sweep": {
@@ -353,6 +386,8 @@ def create_celery_app() -> Celery:
             },
         },
     )
+    if not settings.config_backup_enabled:
+        celery.conf.beat_schedule.pop("config-nightly-backup", None)
     return celery
 
 

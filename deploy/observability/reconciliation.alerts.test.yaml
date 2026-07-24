@@ -1,0 +1,253 @@
+rule_files:
+  - slo-recording.rules.yaml
+  - slo-burn-rate.alerts.yaml
+evaluation_interval: 1m
+tests:
+  - name: disabled config backup is explicitly excluded and quiet
+    interval: 1m
+    input_series:
+      - series: 'netops_reconciliation_schedule_enabled{reconciliation="config_backup"}'
+        values: '0x5'
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="config_backup"}'
+        values: '0x5'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="config_backup"}'
+        values: '1x5'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="config_backup"}'
+        values: '0+60x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NetopsConfigBackupCompletenessBurn
+        exp_alerts: []
+  - name: enabled config backup that never reconciled fails closed
+    interval: 1m
+    input_series:
+      - series: 'netops_reconciliation_schedule_enabled{reconciliation="config_backup"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NetopsConfigBackupCompletenessBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: config_backup, severity: page, slo: config_backup_completeness, tier: fast}
+            exp_annotations:
+              summary: "Scheduled configuration backup completeness is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-config-backup-completeness.md"
+  - name: planted backup miss fires
+    interval: 1m
+    input_series:
+      - series: 'netops_reconciliation_schedule_enabled{reconciliation="config_backup"}'
+        values: '1x30'
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="config_backup"}'
+        values: '1x30'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="config_backup"}'
+        values: '1x30'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="config_backup"}'
+        values: '0+60x30'
+    alert_rule_test:
+      # Job at due+15m, 1m scrape/eval, 10m confirmation and 1m `for`:
+      # this fires 12m after the miss is emitted, inside the contractual 15m.
+      - eval_time: 12m
+        alertname: NetopsConfigBackupCompletenessBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: config_backup, severity: page, slo: config_backup_completeness, tier: fast}
+            exp_annotations:
+              summary: "Scheduled configuration backup completeness is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-config-backup-completeness.md"
+  - name: planted CR without audit fires
+    interval: 1m
+    input_series:
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="change_request_audit"}'
+        values: '1x30'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="change_request_audit"}'
+        values: '1x30'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="change_request_audit"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NetopsChangeRequestAuditCompletenessBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: change_request_audit, severity: page, slo: change_request_audit_completeness, tier: fast}
+            exp_annotations:
+              summary: "ChangeRequest audit completeness is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-change-request-audit-completeness.md"
+  - name: planted orphan trace fires
+    interval: 1m
+    input_series:
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="reasoning_trace"}'
+        values: '1x30'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="reasoning_trace"}'
+        values: '1x30'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="reasoning_trace"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NetopsReasoningTracePersistenceBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: reasoning_trace, severity: page, slo: reasoning_trace_persistence, tier: fast}
+            exp_annotations:
+              summary: "Reasoning-trace persistence is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-reasoning-trace-persistence.md"
+  - name: healthy reconciliations remain quiet
+    interval: 1m
+    input_series:
+      - series: 'netops_reconciliation_schedule_enabled{reconciliation="config_backup"}'
+        values: '1x30'
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="config_backup"}'
+        values: '0x30'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="config_backup"}'
+        values: '1x30'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="config_backup"}'
+        values: '0+60x30'
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="change_request_audit"}'
+        values: '0x30'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="change_request_audit"}'
+        values: '1x30'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="change_request_audit"}'
+        values: '0+60x30'
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="reasoning_trace"}'
+        values: '0x30'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="reasoning_trace"}'
+        values: '1x30'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="reasoning_trace"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NetopsConfigBackupCompletenessBurn
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: NetopsChangeRequestAuditCompletenessBurn
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: NetopsReasoningTracePersistenceBurn
+        exp_alerts: []
+  - name: never emitted reconciliation series fail closed
+    interval: 1m
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NetopsConfigBackupCompletenessBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: config_backup, severity: page, slo: config_backup_completeness, tier: fast}
+            exp_annotations:
+              summary: "Scheduled configuration backup completeness is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-config-backup-completeness.md"
+      - eval_time: 2m
+        alertname: NetopsChangeRequestAuditCompletenessBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: change_request_audit, severity: page, slo: change_request_audit_completeness, tier: fast}
+            exp_annotations:
+              summary: "ChangeRequest audit completeness is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-change-request-audit-completeness.md"
+      - eval_time: 2m
+        alertname: NetopsReasoningTracePersistenceBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: reasoning_trace, severity: page, slo: reasoning_trace_persistence, tier: fast}
+            exp_annotations:
+              summary: "Reasoning-trace persistence is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-reasoning-trace-persistence.md"
+  - name: emitted unhealthy reconciliation query fails closed
+    interval: 1m
+    input_series:
+      - series: 'netops_reconciliation_schedule_enabled{reconciliation="config_backup"}'
+        values: '1x5'
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="config_backup"}'
+        values: '0x5'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="config_backup"}'
+        values: '0x5'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="config_backup"}'
+        values: '0+60x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NetopsConfigBackupCompletenessBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: config_backup, severity: page, slo: config_backup_completeness, tier: fast}
+            exp_annotations:
+              summary: "Scheduled configuration backup completeness is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-config-backup-completeness.md"
+  - name: each missing reconciliation metric independently fails closed
+    interval: 1m
+    input_series:
+      # config_backup isolates absent query health.
+      - series: 'netops_reconciliation_schedule_enabled{reconciliation="config_backup"}'
+        values: '1x5'
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="config_backup"}'
+        values: '0x5'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="config_backup"}'
+        values: '0+60x5'
+      # change_request_audit isolates absent inconsistency count.
+      - series: 'netops_reconciliation_query_healthy{reconciliation="change_request_audit"}'
+        values: '1x5'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="change_request_audit"}'
+        values: '0+60x5'
+      # reasoning_trace isolates absent last-success freshness.
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="reasoning_trace"}'
+        values: '0x5'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="reasoning_trace"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: NetopsConfigBackupCompletenessBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: config_backup, severity: page, slo: config_backup_completeness, tier: fast}
+            exp_annotations:
+              summary: "Scheduled configuration backup completeness is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-config-backup-completeness.md"
+      - eval_time: 2m
+        alertname: NetopsChangeRequestAuditCompletenessBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: change_request_audit, severity: page, slo: change_request_audit_completeness, tier: fast}
+            exp_annotations:
+              summary: "ChangeRequest audit completeness is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-change-request-audit-completeness.md"
+      - eval_time: 2m
+        alertname: NetopsReasoningTracePersistenceBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: reasoning_trace, severity: page, slo: reasoning_trace_persistence, tier: fast}
+            exp_annotations:
+              summary: "Reasoning-trace persistence is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-reasoning-trace-persistence.md"
+  - name: stale reconciliation series fail closed
+    interval: 1m
+    input_series:
+      - series: 'netops_reconciliation_schedule_enabled{reconciliation="config_backup"}'
+        values: '1x1510'
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="config_backup"}'
+        values: '0x1510'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="config_backup"}'
+        values: '1x1510'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="config_backup"}'
+        values: '0x1510'
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="change_request_audit"}'
+        values: '0x1510'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="change_request_audit"}'
+        values: '1x1510'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="change_request_audit"}'
+        values: '0x1510'
+      - series: 'netops_reconciliation_inconsistencies{reconciliation="reasoning_trace"}'
+        values: '0x1510'
+      - series: 'netops_reconciliation_query_healthy{reconciliation="reasoning_trace"}'
+        values: '1x1510'
+      - series: 'netops_reconciliation_last_success_timestamp{reconciliation="reasoning_trace"}'
+        values: '0x1510'
+    alert_rule_test:
+      # Recording and alert groups evaluate independently: the inclusive 25h
+      # boundary is observed on the next tick, then the 1m `for` fires at 25h2m.
+      - eval_time: 1502m
+        alertname: NetopsConfigBackupCompletenessBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: config_backup, severity: page, slo: config_backup_completeness, tier: fast}
+            exp_annotations:
+              summary: "Scheduled configuration backup completeness is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-config-backup-completeness.md"
+      - eval_time: 1502m
+        alertname: NetopsChangeRequestAuditCompletenessBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: change_request_audit, severity: page, slo: change_request_audit_completeness, tier: fast}
+            exp_annotations:
+              summary: "ChangeRequest audit completeness is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-change-request-audit-completeness.md"
+      - eval_time: 1502m
+        alertname: NetopsReasoningTracePersistenceBurn
+        exp_alerts:
+          - exp_labels: {reconciliation: reasoning_trace, severity: page, slo: reasoning_trace_persistence, tier: fast}
+            exp_annotations:
+              summary: "Reasoning-trace persistence is burning its zero-error budget"
+              runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-reasoning-trace-persistence.md"

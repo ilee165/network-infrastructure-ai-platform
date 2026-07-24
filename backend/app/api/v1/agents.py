@@ -108,7 +108,8 @@ from app.services.agent_stream import (
     StreamTicketStore,
 )
 from app.services.change_requests import ChangeRequestService
-from app.workers.celery_app import QUEUE_PACKET_CAPTURE, celery_app
+from app.workers.celery_app import QUEUE_PACKET_CAPTURE
+from app.workers.dispatch import durable_dispatch
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -1137,8 +1138,8 @@ async def launch_capture(
     await session.commit()
 
     if body.device_id is not None:
-        celery_app.send_task(
-            DEVICE_CAPTURE_TASK,
+        durable_dispatch(
+            task_name=DEVICE_CAPTURE_TASK,
             args=[
                 str(user.id),
                 str(body.device_id),
@@ -1151,8 +1152,8 @@ async def launch_capture(
             queue=QUEUE_PACKET_CAPTURE,
         )
     else:
-        celery_app.send_task(
-            SEGMENT_CAPTURE_TASK,
+        durable_dispatch(
+            task_name=SEGMENT_CAPTURE_TASK,
             args=[
                 str(user.id),
                 body.interface,

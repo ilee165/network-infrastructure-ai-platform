@@ -149,6 +149,13 @@ def test_module_imports_without_prometheus(monkeypatch: pytest.MonkeyPatch) -> N
             raise ImportError("simulated slim install")
         return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
 
+    collector_names = {
+        name
+        for name in metrics.__all__
+        if (obj := getattr(metrics, name, None)) is not None and hasattr(obj, "_name")
+    }
+    assert "RECONCILIATION_SCHEDULE_ENABLED" in collector_names
+
     # Free the names the real module registered so the slim reload's body (and the
     # later restore reload) do not collide on the default REGISTRY.
     _unregister_module_collectors(metrics)
@@ -156,8 +163,9 @@ def test_module_imports_without_prometheus(monkeypatch: pytest.MonkeyPatch) -> N
     slim = importlib.reload(metrics)
     try:
         assert slim._PROM_ENABLED is False
-        assert slim.HTTP_REQUESTS_TOTAL is None
-        assert slim.CELERY_QUEUE_DEPTH is None
+        assert collector_names
+        for name in collector_names:
+            assert getattr(slim, name) is None, f"{name} missing from slim-import fallback"
         # Helpers are no-ops, not crashes.
         slim.observe_http_request(method="GET", route="/x", status_code=200, duration_seconds=0.0)
     finally:

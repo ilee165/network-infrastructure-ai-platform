@@ -21,14 +21,10 @@ EXPOSE-DON'T-BUNDLE (ADR-0015 alt.1 / ADR-0046 §4)
   recording rules ship as opt-in CODE; running the monitoring stack stays the
   operator's choice.
 
-1:1 ROW<->RULE + THE THREE FLAGGED GAPS (ADR-0046 §1; do NOT fabricate)
-  Six §6 rows have a backing series after W3-T0/W3-T1 and get a rule here. The three
-  reconciliation-job SLIs — config-backup completeness (row 5), CR->audit
-  completeness (row 6), reasoning-trace persistence (row 9) — have NO Prometheus base
-  series (their §6 "measured by" is a daily reconciliation JOB, not a /metrics
-  series), so they are FLAGGED to the reconciliation-job owners, NOT fabricated as
-  rules over a non-existent series (the P1-W4 false-green trap). See the standalone
-  rules file header for the named-deferred follow-up series.
+1:1 ROW<->RULE (ADR-0046 §1)
+  P5 W1-T3 closes the former rows 5/6/9 gaps with the bounded reconciliation
+  series. This object deploys the same complete nine-row rule source that
+  promtool validates.
 */ -}}
 {{- if .Values.observability.prometheusRule.enabled }}
 apiVersion: monitoring.coreos.com/v1
@@ -103,4 +99,15 @@ spec:
       rules:
         - record: slo:netops_audit_siem_export_lag:seconds
           expr: audit_export_lag_seconds
+
+    - name: netops-slo-reconciliation-completeness
+      rules:
+        - record: slo:netops_reconciliation:inconsistencies
+          expr: netops_reconciliation_inconsistencies
+        - record: slo:netops_reconciliation:query_healthy
+          expr: netops_reconciliation_query_healthy
+        - record: slo:netops_reconciliation:age_seconds
+          expr: time() - netops_reconciliation_last_success_timestamp
+        - record: slo:netops_reconciliation:schedule_enabled
+          expr: netops_reconciliation_schedule_enabled
 {{- end }}
