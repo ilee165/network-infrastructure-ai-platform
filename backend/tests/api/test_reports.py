@@ -21,6 +21,7 @@ from app.engines.reports import deterministic_run_id
 from app.models import AuditLog, Role, User
 from app.models.dispatch_outbox import DispatchConsumerState, DispatchOutbox, DispatchOutboxState
 from app.models.reports import ReportArtifact, ReportKind, ReportRun, ReportRunStatus
+from app.workers.celery_app import celery_app
 
 _START = datetime(2026, 7, 1, tzinfo=UTC)
 _END = datetime(2026, 7, 8, tzinfo=UTC)
@@ -28,8 +29,14 @@ _END = datetime(2026, 7, 8, tzinfo=UTC)
 
 @pytest.fixture()
 def sent_tasks(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Legacy assertion aid: request handlers never publish to Celery."""
-    return []
+    """Record any direct Celery publication so no-publication assertions bite."""
+    sent: list[dict[str, Any]] = []
+
+    def _record(task_name: str, *args: Any, **kwargs: Any) -> None:
+        sent.append({"task_name": task_name, "args": args, "kwargs": kwargs})
+
+    monkeypatch.setattr(celery_app, "send_task", _record)
+    return sent
 
 
 async def _seed_run(

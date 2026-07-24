@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -20,6 +20,7 @@ from app.services.report_outbox import (
     claim_consumer,
     enqueue_report,
     mark_claim_dispatched,
+    outbox_status,
     report_envelope,
     validate_dispatch_row,
 )
@@ -354,3 +355,31 @@ async def test_consumer_active_duplicate_waits_and_stale_owner_recovers(
     assert recovered.status is ConsumerClaimStatus.RECOVERED
     assert recovered.owner == "consumer-b"
     assert recovered.kind is ReportKind.CHANGE
+
+
+@pytest.mark.asyncio
+async def test_outbox_status_computes_age_across_timezone_offsets(
+    session: AsyncSession,
+) -> None:
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    run_id = deterministic_run_id(ReportKind.CHANGE, start, start + timedelta(days=7))
+    await enqueue_report(
+        session,
+        run_id=run_id,
+        kind=ReportKind.CHANGE,
+        period_start=start,
+        period_end=start + timedelta(days=7),
+        trigger="scheduled",
+        requested_by=None,
+    )
+    row = (await session.execute(select(DispatchOutbox))).scalar_one()
+    row.created_at = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
+    await session.commit()
+
+    count, oldest_seconds = await outbox_status(
+        session,
+        datetime(2026, 7, 23, 8, 5, tzinfo=timezone(timedelta(hours=-4))),
+    )
+
+    assert count == 1
+    assert oldest_seconds == 300
