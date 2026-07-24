@@ -24,6 +24,15 @@ from app.models.reports import ReportKind, ReportRun, ReportRunStatus
 REPORT_TASK = "reports.generate"
 QUEUE_DOCS = "docs"
 DISPATCH_DEAD_PREFIX = "dispatch_dead:"
+# Failure classes a fresh same-period request must NOT silently revive-and-clear.
+# A redaction_violation is a security-terminal outcome (ADR-0053): re-requesting a
+# report must never erase a redaction failure's cause — it requires an explicit
+# distinct action (audit everything / secure by default). Every other FAILED run
+# (transient persistence_error per PR #166 F2, dispatch_dead:*, and the
+# content-level builder_error / render_error) is legitimately retried by
+# re-generating. The literal mirrors reports.ERROR_CLASS_REDACTION and is
+# drift-guarded in tests.
+NON_REVIVABLE_ERROR_CLASSES = frozenset({"redaction_violation"})
 _ALLOWED = {(REPORT_TASK, QUEUE_DOCS)}
 _PAYLOAD_KEYS = {"dispatch_id", "run_id"}
 
@@ -54,6 +63,13 @@ def dispatch_dead_error(error_code: str) -> str:
 
 def is_dispatch_dead_error(error_class: str | None) -> bool:
     return bool(error_class and error_class.startswith(DISPATCH_DEAD_PREFIX))
+
+
+def is_revivable_failure(error_class: str | None) -> bool:
+    """A FAILED run a fresh same-period request may reclaim: transient and
+    content failures are retried by re-generating; a security-terminal failure
+    (redaction_violation) is not revived here and must be cleared explicitly."""
+    return error_class not in NON_REVIVABLE_ERROR_CLASSES
 
 
 @dataclass(frozen=True)
@@ -199,10 +215,17 @@ async def enqueue_report(
     run = (
         await session.execute(select(ReportRun).where(ReportRun.id == run_id).with_for_update())
     ).scalar_one()
-    # A fresh user/scheduler request may retry any failed generation. This is
-    # distinct from admin outbox replay below: requeue_dead is provenance-gated
-    # to dispatch_dead:* so replay can never revive a post-consumption failure.
-    fresh_failed_retry = run.status == ReportRunStatus.FAILED.value
+    # A fresh user/scheduler request reclaims a same-period FAILED run by
+    # re-generating it: transient failures (persistence_error per PR #166 F2,
+    # dispatch_dead:*) and content failures (builder_error, render_error) are all
+    # retried. The one exception is a security-terminal redaction_violation, which
+    # is never silently revived-and-cleared here (see NON_REVIVABLE_ERROR_CLASSES).
+    # This is intentionally BROADER than admin outbox replay: requeue_dead is
+    # provenance-gated to dispatch_dead:* only, since a blind admin replay must not
+    # resurrect a post-consumption failure it never dispatched.
+    fresh_failed_retry = run.status == ReportRunStatus.FAILED.value and is_revivable_failure(
+        run.error_class
+    )
     if fresh_failed_retry:
         run.status = ReportRunStatus.QUEUED.value
         run.error_class = None

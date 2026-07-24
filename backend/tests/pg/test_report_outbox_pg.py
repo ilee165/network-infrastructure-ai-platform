@@ -655,6 +655,91 @@ async def test_requeue_never_revives_post_consumption_failure(
 
 
 @pytest.mark.asyncio
+async def test_fresh_request_never_revives_redaction_violation(
+    pg_session: AsyncSession,
+) -> None:
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 8, tzinfo=UTC)
+    run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+    run = await enqueue_report(
+        pg_session,
+        run_id=run_id,
+        kind=ReportKind.CHANGE,
+        period_start=start,
+        period_end=end,
+        trigger="scheduled",
+        requested_by=None,
+    )
+    run.status = ReportRunStatus.FAILED.value
+    run.error_class = "redaction_violation"
+    run.finished_at = datetime.now(UTC)
+    await pg_session.commit()
+
+    # A security-terminal redaction failure is NOT silently revived-and-cleared
+    # by a fresh same-period request; it requires an explicit distinct action.
+    # This is the one exception to enqueue_report's otherwise-broad reclaim.
+    reentered = await enqueue_report(
+        pg_session,
+        run_id=run_id,
+        kind=ReportKind.CHANGE,
+        period_start=start,
+        period_end=end,
+        trigger="on_demand",
+        requested_by=uuid.uuid4(),
+    )
+    await pg_session.commit()
+    assert reentered.id == run.id
+    assert await pg_session.scalar(select(func.count()).select_from(DispatchOutbox)) == 1
+    await pg_session.refresh(run)
+    assert run.status == ReportRunStatus.FAILED.value
+    assert run.error_class == "redaction_violation"
+    assert run.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_fresh_request_revives_content_failure(
+    pg_session: AsyncSession,
+) -> None:
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 8, tzinfo=UTC)
+    run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+    run = await enqueue_report(
+        pg_session,
+        run_id=run_id,
+        kind=ReportKind.CHANGE,
+        period_start=start,
+        period_end=end,
+        trigger="scheduled",
+        requested_by=None,
+    )
+    run.status = ReportRunStatus.FAILED.value
+    run.error_class = "builder_error"
+    run.finished_at = datetime.now(UTC)
+    await pg_session.commit()
+
+    # A content failure (builder_error) is not security-terminal: a fresh
+    # same-period request retries it by returning the run to QUEUED with cleared
+    # failure metadata. Pins the gate's narrow exclusion (only redaction_violation)
+    # so an over-broad NON_REVIVABLE set cannot silently break content/F2 reclaim.
+    reentered = await enqueue_report(
+        pg_session,
+        run_id=run_id,
+        kind=ReportKind.CHANGE,
+        period_start=start,
+        period_end=end,
+        trigger="on_demand",
+        requested_by=uuid.uuid4(),
+    )
+    await pg_session.commit()
+    assert reentered.id == run.id
+    assert await pg_session.scalar(select(func.count()).select_from(DispatchOutbox)) == 1
+    await pg_session.refresh(run)
+    assert run.status == ReportRunStatus.QUEUED.value
+    assert run.error_class is None
+    assert run.finished_at is None
+
+
+@pytest.mark.asyncio
 async def test_requeue_and_rerequest_converge_on_stable_dispatch_row(
     pg_session: AsyncSession,
 ) -> None:

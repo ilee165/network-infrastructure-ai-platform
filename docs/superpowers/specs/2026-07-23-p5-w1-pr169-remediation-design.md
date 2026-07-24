@@ -63,11 +63,21 @@ Revival sets `status='queued'`, clears `error_class` and `finished_at`, and
 leaves genuine post-consumption failures untouched. The API's existing replay
 audit detail records whether the run was revived.
 
-`enqueue_report` uses the same provenance predicate. A deterministic
-re-request may revive only a dispatch-death failure, never an arbitrary failed
-report. It locks and resets the existing unique outbox row rather than creating
-a second publishable envelope. Admin replay and user re-request therefore
-converge on the unique `(aggregate_type, aggregate_id, task_name)` row.
+`enqueue_report` uses a deliberately **broader** predicate than admin replay,
+because a fresh user/scheduler re-request has a different meaning: "generate
+this report again." It must reclaim a transient dispatch or persistence failure
+— PR #166 F2 requires a phase-3 `persistence_error` run to be reclaimable by the
+next same-period request — and it legitimately retries content failures
+(`builder_error`, `render_error`). The single exception is a security-terminal
+`redaction_violation`, which `enqueue_report` never silently revives or clears
+(`NON_REVIVABLE_ERROR_CLASSES`); erasing a redaction failure's cause on
+re-request would violate `secure by default` / `audit everything`, so it
+requires an explicit distinct action. Admin `requeue_dead` stays narrowly gated
+to `dispatch_dead:*` because a blind replay must not resurrect a
+post-consumption failure it never dispatched. Both paths lock and reset the
+existing unique outbox row rather than creating a second publishable envelope,
+so admin replay and user re-request still converge on the unique
+`(aggregate_type, aggregate_id, task_name)` row.
 
 The admin dead-dispatch listing returns bounded operational metadata only:
 dispatch id, aggregate/run id, typed error code, attempts, and creation time.

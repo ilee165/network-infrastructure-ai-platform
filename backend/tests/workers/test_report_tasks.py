@@ -512,6 +512,26 @@ def test_phase3_persistence_failure_fails_the_run_and_makes_it_reclaimable(
     assert run2.error_class is None
 
 
+def test_redaction_violation_is_the_non_revivable_class() -> None:
+    """Drift guard for the fresh-request revival gate: the security-terminal
+    class report_outbox refuses to silently revive-and-clear must stay identical
+    to the reports task's own ERROR_CLASS_REDACTION literal. If the task renames
+    or adds a security-terminal class, this fails until the gate is updated.
+    """
+    from app.services.report_outbox import NON_REVIVABLE_ERROR_CLASSES
+
+    assert tasks.ERROR_CLASS_REDACTION == "redaction_violation"
+    assert tasks.ERROR_CLASS_REDACTION in NON_REVIVABLE_ERROR_CLASSES
+    # The gate must stay narrow: transient/content failures remain revivable so
+    # PR #166 F2 (persistence_error reclaim) and content retry keep working.
+    for revivable in (
+        tasks.ERROR_CLASS_PERSISTENCE,
+        tasks.ERROR_CLASS_BUILDER,
+        tasks.ERROR_CLASS_RENDER,
+    ):
+        assert revivable not in NON_REVIVABLE_ERROR_CLASSES
+
+
 # ---------------------------------------------------------------------------
 # Retention purge (ADR-0053 §4)
 # ---------------------------------------------------------------------------
