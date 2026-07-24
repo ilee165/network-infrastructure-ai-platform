@@ -334,20 +334,25 @@ async def test_dead_dispatch_listing_is_admin_only_and_payload_free(
         headers=auth_headers("admin"),
     )
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    created_at = body["items"][0].pop("created_at")
+    assert body == {
         "items": [
             {
                 "id": str(dispatch_id),
                 "run_id": str(run_id),
                 "error_code": "broker_unavailable",
                 "attempts": 5,
-                "created_at": response.json()["items"][0]["created_at"],
             }
         ],
         "total": 1,
         "limit": 10,
         "offset": 0,
     }
+    # created_at must be a present, non-null, well-formed ISO-8601 timestamp;
+    # the prior comparison against itself verified nothing.
+    assert isinstance(created_at, str)
+    assert datetime.fromisoformat(created_at.replace("Z", "+00:00"))
     assert "payload_json" not in response.text
 
 

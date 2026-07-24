@@ -707,6 +707,11 @@ async def test_requeue_and_rerequest_converge_on_stable_dispatch_row(
     assert converged.id == stable_dispatch_id
     assert converged.state == DispatchOutboxState.PENDING.value
     assert converged.attempts == 0
+    # Convergence also revives the public run: a dispatch-death failure returns
+    # to QUEUED with its failure metadata cleared (part of the "converge" claim).
+    await pg_session.refresh(run)
+    assert run.status == ReportRunStatus.QUEUED.value
+    assert run.error_class is None
 
 
 @pytest.mark.asyncio

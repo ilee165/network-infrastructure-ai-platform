@@ -310,6 +310,12 @@ async def mark_claim_failed(
         if retryable and attempts < max_attempts
         else DispatchOutboxState.DEAD
     )
+    # Validate the typed death token before mutating the row: an invalid
+    # error_code must fail while the row is still CLAIMED, not after the outbox
+    # has been flushed out of that state.
+    dead_error_class = (
+        dispatch_dead_error(error_code) if state is DispatchOutboxState.DEAD else None
+    )
     values: dict[str, Any] = {
         "state": state.value,
         "attempts": attempts,
@@ -343,7 +349,7 @@ async def mark_claim_failed(
             )
             .values(
                 status=ReportRunStatus.FAILED.value,
-                error_class=dispatch_dead_error(error_code),
+                error_class=dead_error_class,
                 finished_at=now,
                 updated_at=now,
             )

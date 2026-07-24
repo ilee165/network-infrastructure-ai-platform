@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -259,7 +260,14 @@ def main() -> int:
         if args.negative_control
         else args.paths or [backend / "app"]
     )
-    violations = scan_paths(paths)
+    try:
+        violations = scan_paths(paths)
+    except Exception as exc:  # noqa: BLE001 - a crash must not look like a result
+        # Exit code 2 is reserved for an internal checker failure so CI can tell a
+        # crash apart from "no violations" (0) or "violations found" (1); without
+        # it an uncaught exception exits 1 and a broken negative control passes.
+        print(f"check_celery_dispatch: internal error: {exc!r}", file=sys.stderr)
+        return 2
     for violation in violations:
         print(f"{violation.kind} {violation.path}:{violation.line} ({violation.symbol})")
     return 1 if violations else 0
