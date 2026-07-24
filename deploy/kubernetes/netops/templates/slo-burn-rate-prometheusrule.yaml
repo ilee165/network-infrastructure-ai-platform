@@ -385,4 +385,55 @@ spec:
               30m window — a sustained SIEM export backlog (§388 G-OBS: export operating
               outside the lag SLO).
             runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-audit-siem-export-lag.md"
+    - name: netops-slo-reconciliation-burn
+      rules:
+        - alert: NetopsConfigBackupCompletenessBurn
+          expr: |
+            (
+              slo:netops_reconciliation:schedule_enabled{reconciliation="config_backup"} == 1
+              and on(reconciliation)
+              (
+                max_over_time(slo:netops_reconciliation:inconsistencies{reconciliation="config_backup"}[5m]) > 0
+                and max_over_time(slo:netops_reconciliation:inconsistencies{reconciliation="config_backup"}[10m]) > 0
+                or slo:netops_reconciliation:query_healthy{reconciliation="config_backup"} == 0
+                or absent(slo:netops_reconciliation:query_healthy{reconciliation="config_backup"})
+                or absent(slo:netops_reconciliation:inconsistencies{reconciliation="config_backup"})
+                or absent(slo:netops_reconciliation:age_seconds{reconciliation="config_backup"})
+                or slo:netops_reconciliation:age_seconds{reconciliation="config_backup"} >= 90000
+              )
+            )
+            or absent(slo:netops_reconciliation:schedule_enabled{reconciliation="config_backup"})
+          for: 1m
+          labels: {severity: page, slo: config_backup_completeness, tier: fast}
+          annotations:
+            summary: "Scheduled configuration backup completeness is burning its zero-error budget"
+            runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-config-backup-completeness.md"
+        - alert: NetopsChangeRequestAuditCompletenessBurn
+          expr: |
+            max_over_time(slo:netops_reconciliation:inconsistencies{reconciliation="change_request_audit"}[5m]) > 0
+            and max_over_time(slo:netops_reconciliation:inconsistencies{reconciliation="change_request_audit"}[10m]) > 0
+            or slo:netops_reconciliation:query_healthy{reconciliation="change_request_audit"} == 0
+            or absent(slo:netops_reconciliation:query_healthy{reconciliation="change_request_audit"})
+            or absent(slo:netops_reconciliation:inconsistencies{reconciliation="change_request_audit"})
+            or absent(slo:netops_reconciliation:age_seconds{reconciliation="change_request_audit"})
+            or slo:netops_reconciliation:age_seconds{reconciliation="change_request_audit"} >= 90000
+          for: 1m
+          labels: {severity: page, slo: change_request_audit_completeness, tier: fast}
+          annotations:
+            summary: "ChangeRequest audit completeness is burning its zero-error budget"
+            runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-change-request-audit-completeness.md"
+        - alert: NetopsReasoningTracePersistenceBurn
+          expr: |
+            max_over_time(slo:netops_reconciliation:inconsistencies{reconciliation="reasoning_trace"}[5m]) > 0
+            and max_over_time(slo:netops_reconciliation:inconsistencies{reconciliation="reasoning_trace"}[10m]) > 0
+            or slo:netops_reconciliation:query_healthy{reconciliation="reasoning_trace"} == 0
+            or absent(slo:netops_reconciliation:query_healthy{reconciliation="reasoning_trace"})
+            or absent(slo:netops_reconciliation:inconsistencies{reconciliation="reasoning_trace"})
+            or absent(slo:netops_reconciliation:age_seconds{reconciliation="reasoning_trace"})
+            or slo:netops_reconciliation:age_seconds{reconciliation="reasoning_trace"} >= 90000
+          for: 1m
+          labels: {severity: page, slo: reasoning_trace_persistence, tier: fast}
+          annotations:
+            summary: "Reasoning-trace persistence is burning its zero-error budget"
+            runbook_url: "https://github.com/ilee165/network-infrastructure-ai-platform/blob/main/docs/runbooks/slo-reasoning-trace-persistence.md"
 {{- end }}

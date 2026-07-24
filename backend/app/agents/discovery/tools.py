@@ -83,7 +83,8 @@ async def trigger_discovery_run(
     # Deferred imports keep the module boundary visible and allow lightweight
     # unit tests that do not need a running DB or Celery.
     from app.engines.discovery.planner import DiscoveryPlan
-    from app.workers.celery_app import QUEUE_DISCOVERY, celery_app
+    from app.workers.celery_app import QUEUE_DISCOVERY
+    from app.workers.dispatch import durable_dispatch
 
     plan = DiscoveryPlan(
         seeds=seeds,
@@ -105,7 +106,9 @@ async def trigger_discovery_run(
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             None,
-            lambda: celery_app.send_task("discovery.run", args=[run_id], queue=QUEUE_DISCOVERY),
+            lambda: durable_dispatch(
+                task_name="discovery.run", args=[run_id], queue=QUEUE_DISCOVERY
+            ),
         )
     except Exception as exc:
         # Broker unreachable / serialization error: mark the already-committed

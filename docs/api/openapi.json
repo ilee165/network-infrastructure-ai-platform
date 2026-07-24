@@ -824,6 +824,7 @@
         "enum": [
           "config",
           "ddi_record",
+          "report_generation",
           "security_remediation"
         ],
         "title": "ChangeRequestKind",
@@ -9302,6 +9303,48 @@
           }
         ],
         "summary": "Request Generation",
+        "tags": [
+          "reports"
+        ]
+      }
+    },
+    "/api/v1/reports/outbox/{dispatch_id}/requeue": {
+      "post": {
+        "description": "Admin-only, audited replay of a validated dead report envelope.",
+        "operationId": "requeue_dead_dispatch_api_v1_reports_outbox__dispatch_id__requeue_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dispatch_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Dispatch Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Requeue Dead Dispatch",
         "tags": [
           "reports"
         ]

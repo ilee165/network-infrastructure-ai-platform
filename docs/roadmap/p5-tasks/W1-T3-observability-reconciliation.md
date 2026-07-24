@@ -5,7 +5,7 @@
 | Owner | `wf-observability` |
 | Depends on | W0 design gate |
 | Review | sonnet spec + quality |
-| Status | Proposed |
+| Status | Implemented |
 
 ## Objective and scope
 
@@ -34,7 +34,13 @@ orphan trace. Run observability gates and full backend gates.
 
 ## Exit criteria
 
-- [ ] Three backed series, alerts, and runbooks ship.
-- [ ] Each planted inconsistency fires; healthy/grace cases remain quiet.
-- [ ] PRODUCTION.md §6 rows 5/6/9 change from deferred to backed in this task.
-- [ ] D16 and promtool pass; one atomic commit.
+- [x] Three backed series, alerts, and runbooks ship.
+- [x] Each planted inconsistency fires; healthy/grace cases remain quiet.
+- [x] PRODUCTION.md §6 rows 5/6/9 change from deferred to backed in this task.
+- [x] D16 and promtool pass; one atomic commit.
+
+Evidence: `backend/tests/services/test_reconciliation.py`,
+`backend/tests/pg/test_reconciliation_pg.py`, and
+`deploy/observability/reconciliation.alerts.test.yaml`; the mutation proof is
+`deploy/observability/run-reconciliation-promtool-bite.sh`. Consolidated
+closeout evidence: `docs/roadmap/P5-W1-HANDOFF.md`.

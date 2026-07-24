@@ -27,33 +27,11 @@
 # labels (`route`, `method`, `model`, `device_id`, raw path). No high-cardinality
 # label leaks into an SLI series.
 #
-# 1:1 ROW <-> RULE, AND THE THREE FLAGGED GAPS (do NOT fabricate)
-# ---------------------------------------------------------------
-# Six of the nine §6 rows have a backing Prometheus series after W3-T0/W3-T1 and get
-# a recording rule below. THREE rows are "reconciliation-job" SLIs — their §6
-# "measured by" column is a daily reconciliation JOB (a COUNT of CRs vs. audit
-# entries / a trace-orphan scan / a config-backup-miss check), NOT a `/metrics`
-# series — so there is NO Prometheus base series to record yet:
-#
-#   * §6 row 5  Scheduled config-backup completeness  — "config queue job metrics":
-#               no backup-completeness / miss counter is emitted today (a
-#               `config_backup_runs` TABLE exists, migration 0013, but no Prometheus
-#               series). FLAGGED to the config-backup metric owner.
-#   * §6 row 6  ChangeRequest exec -> audit completeness — "Daily reconciliation job":
-#               no reconciliation-result series is emitted. FLAGGED.
-#   * §6 row 9  Reasoning-trace persistence — "Reconciliation job (M3 invariant)":
-#               no trace-orphan-count series is emitted. FLAGGED.
-#
-# Per ADR-0046 §1 + the W3-T2 task contract, a §6 SLI with no backing series is a
-# FLAGGED gap, NOT a fabricated rule reading a non-existent series (that would be
-# the exact P1-W4 false-green: a rule green at setup that evaluates to nothing on a
-# real regression). Closing these three needs the owning job to EXPORT a Prometheus
-# series (e.g. `netops_config_backup_runs_total{result}`,
-# `netops_cr_audit_reconcile_total{result}`,
-# `netops_reasoning_trace_orphans`); that instrumentation is out of W3-T2 scope
-# (the task forbids inventing a metric here) and is named-deferred to the
-# reconciliation-job owners. When those series land, this file gains the three
-# remaining rules and the 1:1 row<->rule mapping is complete.
+# 1:1 ROW <-> RULE
+# ----------------
+# P5 W1-T3 closes the former rows 5/6/9 gaps with a bounded reconciliation
+# dimension plus fail-closed query-health/freshness series. All nine §6 rows now
+# have a deployed recording-rule source and semantic firing/healthy controls.
 #
 # GATE
 # ----
@@ -155,3 +133,16 @@ groups:
     rules:
       - record: slo:netops_audit_siem_export_lag:seconds
         expr: audit_export_lag_seconds
+
+  # §6 rows 5/6/9 — 100% completeness (zero-error budget). The jobs emit one
+  # bounded reconciliation label and fail-closed query-health/freshness gauges.
+  - name: netops-slo-reconciliation-completeness
+    rules:
+      - record: slo:netops_reconciliation:inconsistencies
+        expr: netops_reconciliation_inconsistencies
+      - record: slo:netops_reconciliation:query_healthy
+        expr: netops_reconciliation_query_healthy
+      - record: slo:netops_reconciliation:age_seconds
+        expr: time() - netops_reconciliation_last_success_timestamp
+      - record: slo:netops_reconciliation:schedule_enabled
+        expr: netops_reconciliation_schedule_enabled

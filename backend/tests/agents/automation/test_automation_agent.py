@@ -316,7 +316,11 @@ class TestDefinition:
         or vice-versa, would be wrongly refused / fall through to fail-closed)."""
         agent = AutomationAgent(change_request_service=None)  # type: ignore[arg-type]
         executable = {k for k in ChangeRequestKind if agent._executor_for(k) is not None}
-        assert executable == {ChangeRequestKind.CONFIG, ChangeRequestKind.DDI_RECORD}
+        assert executable == {
+            ChangeRequestKind.CONFIG,
+            ChangeRequestKind.DDI_RECORD,
+            ChangeRequestKind.REPORT_GENERATION,
+        }
         # The drafted-but-not-yet-executable kind has no executor.
         assert agent._executor_for(ChangeRequestKind.SECURITY_REMEDIATION) is None
 

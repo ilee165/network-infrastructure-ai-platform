@@ -58,10 +58,10 @@ def _postgres_dialect_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def test_single_head_is_0022() -> None:
+def test_single_head_is_0024() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert heads == ["0022"], f"expected single head 0022, got {heads}"
+    assert heads == ["0024"], f"expected single head 0024, got {heads}"
 
 
 def test_0022_revises_0021() -> None:

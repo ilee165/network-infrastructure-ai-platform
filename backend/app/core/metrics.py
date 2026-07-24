@@ -78,6 +78,14 @@ __all__ = [
     "REPORT_FAILURES_TOTAL",
     "REPORT_GENERATION_SECONDS",
     "REPORT_LAST_SUCCESS_TIMESTAMP",
+    "REPORT_OUTBOX_PENDING",
+    "REPORT_OUTBOX_OLDEST_SECONDS",
+    "REPORT_OUTBOX_EVENTS_TOTAL",
+    "REPORT_OUTBOX_RELAY_LAST_SUCCESS_TIMESTAMP",
+    "RECONCILIATION_HEALTHY",
+    "RECONCILIATION_INCONSISTENCIES",
+    "RECONCILIATION_LAST_SUCCESS_TIMESTAMP",
+    "RECONCILIATION_SCHEDULE_ENABLED",
     "observe_agent_first_token",
     "observe_discovery_run",
     "observe_http_request",
@@ -88,6 +96,12 @@ __all__ = [
     "set_audit_export_lag",
     "set_celery_queue_depth",
     "set_report_last_success",
+    "set_report_outbox_backlog",
+    "set_report_outbox_relay_last_success",
+    "record_report_outbox_event",
+    "set_reconciliation_result",
+    "set_reconciliation_schedule_enabled",
+    "set_reconciliation_unhealthy",
     "set_provider_healthy",
     "set_provider_production_grade",
     "status_class_for",
@@ -240,6 +254,50 @@ try:  # Optional observability dependency (D15) — degrade to no-ops if absent.
         # multiprocess mode (no ``PROMETHEUS_MULTIPROC_DIR``).
         multiprocess_mode="mostrecent",
     )
+    REPORT_OUTBOX_PENDING: Any = Gauge(
+        "netops_report_outbox_pending",
+        "Pending durable report dispatch envelopes.",
+        multiprocess_mode="mostrecent",
+    )
+    REPORT_OUTBOX_OLDEST_SECONDS: Any = Gauge(
+        "netops_report_outbox_oldest_seconds",
+        "Age in seconds of the oldest pending report dispatch envelope.",
+        multiprocess_mode="mostrecent",
+    )
+    REPORT_OUTBOX_EVENTS_TOTAL: Any = Counter(
+        "netops_report_outbox_events_total",
+        "Report outbox lifecycle events by bounded outcome.",
+        ["event"],
+    )
+    REPORT_OUTBOX_RELAY_LAST_SUCCESS_TIMESTAMP: Any = Gauge(
+        "netops_report_outbox_relay_last_success_timestamp",
+        "Unix timestamp of the latest successfully completed relay polling cycle.",
+        multiprocess_mode="mostrecent",
+    )
+    RECONCILIATION_INCONSISTENCIES: Any = Gauge(
+        "netops_reconciliation_inconsistencies",
+        "Current completeness violations by bounded PRODUCTION section 6 row.",
+        ["reconciliation"],
+        multiprocess_mode="mostrecent",
+    )
+    RECONCILIATION_HEALTHY: Any = Gauge(
+        "netops_reconciliation_query_healthy",
+        "1 when the latest reconciliation query completed, 0 on query failure.",
+        ["reconciliation"],
+        multiprocess_mode="mostrecent",
+    )
+    RECONCILIATION_LAST_SUCCESS_TIMESTAMP: Any = Gauge(
+        "netops_reconciliation_last_success_timestamp",
+        "Unix timestamp of the latest successful reconciliation query.",
+        ["reconciliation"],
+        multiprocess_mode="mostrecent",
+    )
+    RECONCILIATION_SCHEDULE_ENABLED: Any = Gauge(
+        "netops_reconciliation_schedule_enabled",
+        "1 when the bounded reconciliation objective is configured, 0 when excluded.",
+        ["reconciliation"],
+        multiprocess_mode="mostrecent",
+    )
 
     _PROM_ENABLED = True
 except ImportError:  # pragma: no cover - exercised only on a slim install
@@ -265,6 +323,13 @@ except ImportError:  # pragma: no cover - exercised only on a slim install
     REPORT_GENERATION_SECONDS = None
     REPORT_FAILURES_TOTAL = None
     REPORT_LAST_SUCCESS_TIMESTAMP = None
+    REPORT_OUTBOX_PENDING = None
+    REPORT_OUTBOX_OLDEST_SECONDS = None
+    REPORT_OUTBOX_EVENTS_TOTAL = None
+    REPORT_OUTBOX_RELAY_LAST_SUCCESS_TIMESTAMP = None
+    RECONCILIATION_INCONSISTENCIES = None
+    RECONCILIATION_HEALTHY = None
+    RECONCILIATION_LAST_SUCCESS_TIMESTAMP = None
     _PROM_ENABLED = False
 
 
@@ -426,6 +491,63 @@ def set_report_last_success(*, report_kind: str, timestamp: float) -> None:
     if not _PROM_ENABLED:
         return
     REPORT_LAST_SUCCESS_TIMESTAMP.labels(report_kind=report_kind).set(timestamp)
+
+
+def set_report_outbox_backlog(*, pending: int, oldest_seconds: float) -> None:
+    """Expose bounded backlog aggregates; never envelope data."""
+    if not _PROM_ENABLED:
+        return
+    REPORT_OUTBOX_PENDING.set(pending)
+    REPORT_OUTBOX_OLDEST_SECONDS.set(oldest_seconds)
+
+
+def record_report_outbox_event(*, event: str) -> None:
+    """Count one bounded relay outcome (claim/retry/dead/recovered/duplicate)."""
+    if event not in {
+        "claimed",
+        "dispatched",
+        "retry",
+        "dead",
+        "recovered",
+        "duplicate_consumer",
+        "consumer_recovered",
+    }:
+        raise ValueError("report_outbox_event_invalid")
+    if not _PROM_ENABLED:
+        return
+    REPORT_OUTBOX_EVENTS_TOTAL.labels(event=event).inc()
+
+
+def set_report_outbox_relay_last_success(*, timestamp: float) -> None:
+    """Expose relay freshness without envelope or error data."""
+    if not _PROM_ENABLED:
+        return
+    REPORT_OUTBOX_RELAY_LAST_SUCCESS_TIMESTAMP.set(timestamp)
+
+
+def set_reconciliation_result(
+    *, reconciliation: str, inconsistencies: int, timestamp: float
+) -> None:
+    """Publish a successful aggregate result using one of three bounded labels."""
+    if not _PROM_ENABLED:
+        return
+    RECONCILIATION_INCONSISTENCIES.labels(reconciliation=reconciliation).set(inconsistencies)
+    RECONCILIATION_HEALTHY.labels(reconciliation=reconciliation).set(1)
+    RECONCILIATION_LAST_SUCCESS_TIMESTAMP.labels(reconciliation=reconciliation).set(timestamp)
+
+
+def set_reconciliation_schedule_enabled(*, reconciliation: str, enabled: bool) -> None:
+    """Publish authoritative configured/excluded state for a bounded objective."""
+    if not _PROM_ENABLED:
+        return
+    RECONCILIATION_SCHEDULE_ENABLED.labels(reconciliation=reconciliation).set(int(enabled))
+
+
+def set_reconciliation_unhealthy(*, reconciliation: str) -> None:
+    """Fail closed without overwriting the last discrepancy count with zero."""
+    if not _PROM_ENABLED:
+        return
+    RECONCILIATION_HEALTHY.labels(reconciliation=reconciliation).set(0)
 
 
 def set_audit_export_lag(*, lag_seconds: float) -> None:

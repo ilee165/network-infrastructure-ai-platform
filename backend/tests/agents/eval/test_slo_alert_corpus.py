@@ -26,11 +26,10 @@ properties that a green-at-setup corpus could otherwise fake:
   ``test_perturbation_bite_is_wired_into_ci`` guards that wiring here. See the module
   docstrings of ``slo-corpus-perturbation.test.yaml`` and the bite script.
 
-Grounding: the six §6 SLI rows with a backing Prometheus series map 1:1 onto the
-declared alert classes; the three reconciliation-job rows (§6 rows 5/6/9) have NO
-metric yet and are FLAGGED-deferred in the recording-rules file — this module asserts
-that named-deferral is still documented (no silent drift), it does NOT fabricate a
-rule for them (the W3-T2 anti-false-green contract).
+Grounding: all nine §6 SLI rows now have backing Prometheus series. The three
+reconciliation-job rows (§6 rows 5/6/9) use the bounded reconciliation label and
+are covered by the real-promtool firing, quiet, absent, stale, and mutation
+fixtures in ``deploy/observability/reconciliation.alerts.test.yaml``.
 
 No external services, no wall-clock: the corpus is synthetic compressed-minute series
 parsed from committed YAML, so this runs deterministically in the backend pytest job
@@ -56,8 +55,31 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _OBS = _REPO_ROOT / "deploy" / "observability"
 _ALERTS_FILE = _OBS / "slo-burn-rate.alerts.yaml"
 _RECORDING_FILE = _OBS / "slo-recording.rules.yaml"
+_HELM_ALERTS_FILE = (
+    _REPO_ROOT / "deploy/kubernetes/netops/templates/slo-burn-rate-prometheusrule.yaml"
+)
 _PERTURBATION_SCRIPT = _OBS / "run-slo-corpus-perturbation-bite.sh"
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "platform-gates.yml"
+
+
+def test_reconciliation_checked_alerts_equal_deployed_helm_source() -> None:
+    """The promtool-checked reconciliation group is exactly what Helm deploys."""
+    checked = yaml.safe_load(_ALERTS_FILE.read_text(encoding="utf-8"))
+    template_yaml = "spec:" + _HELM_ALERTS_FILE.read_text(encoding="utf-8").split("\nspec:", 1)[1]
+    rendered_source = "\n".join(
+        line for line in template_yaml.splitlines() if not line.lstrip().startswith("{{")
+    )
+    deployed = yaml.safe_load(rendered_source)
+    checked_group = next(
+        group for group in checked["groups"] if group["name"] == "netops-slo-reconciliation-burn"
+    )
+    deployed_group = next(
+        group
+        for group in deployed["spec"]["groups"]
+        if group["name"] == "netops-slo-reconciliation-burn"
+    )
+    assert deployed_group == checked_group
+
 
 #: The promtool alert-as-test corpus consolidated into the coverage matrix: the
 #: W3-T3 firing/healthy cases, the W3-T5 fault-injection MTTD cases, the W4-T7
@@ -68,27 +90,30 @@ _CORPUS_FILES = (
     _OBS / "slo-mttd.faultinjection.test.yaml",
     _OBS / "slo-compressed-soak.test.yaml",
     _OBS / "slo-corpus-perturbation.test.yaml",
+    _OBS / "reconciliation.alerts.test.yaml",
 )
 
 # ---------------------------------------------------------------------------
-# PRODUCTION.md §6 grounding (ADR-0046 §1). Six of the nine §6 SLI rows have a
-# backing Prometheus series → one recording rule + one alert class each. The three
-# reconciliation-job rows have NO metric yet and are FLAGGED-deferred, not covered.
+# PRODUCTION.md §6 grounding (ADR-0046 §1). All nine §6 SLI rows are backed.
 # ---------------------------------------------------------------------------
-#: §6-row → ``slo`` label for the six rows with a backing series (the alert classes).
+#: §6-row → ``slo`` label for all backed rows (the alert classes).
 _SECTION6_BACKED_SLO_LABELS = frozenset(
     {
         "api_availability",  # §6 row 1
         "api_read_latency",  # §6 row 2
         "agent_first_token_latency",  # §6 row 3
         "discovery_success",  # §6 row 4
+        "config_backup_completeness",  # §6 row 5
+        "change_request_audit_completeness",  # §6 row 6
         "topology_projection_lag",  # §6 row 7
         "audit_siem_export_lag",  # §6 row 8
+        "reasoning_trace_persistence",  # §6 row 9
     }
 )
 
-#: The seven ``record:`` SLI series names (ADR-0046 §1, one per backed §6 row; API
-#: read latency contributes two — p95 and p99). A renamed/added/dropped rule bites.
+#: The exact ``record:`` SLI series names (ADR-0046 §1, one per backed §6 row;
+#: API read latency and reconciliation contribute supporting series). A
+#: renamed/added/dropped rule bites.
 _EXPECTED_RECORDING_RULES = frozenset(
     {
         "slo:netops_api_availability:ratio_rate5m",
@@ -98,16 +123,11 @@ _EXPECTED_RECORDING_RULES = frozenset(
         "slo:netops_discovery_success:ratio_rate_run",
         "slo:netops_topology_projection_lag:seconds",
         "slo:netops_audit_siem_export_lag:seconds",
+        "slo:netops_reconciliation:inconsistencies",
+        "slo:netops_reconciliation:query_healthy",
+        "slo:netops_reconciliation:age_seconds",
+        "slo:netops_reconciliation:schedule_enabled",
     }
-)
-
-#: The three §6 reconciliation-job rows with no metric yet (rows 5/6/9). The
-#: recording-rules file must still DOCUMENT them as flagged-deferred (no silent
-#: drift): the proposed series names below anchor that named deferral.
-_SECTION6_FLAGGED_GAP_SERIES = (
-    "netops_config_backup_runs_total",  # §6 row 5 — config-backup completeness
-    "netops_cr_audit_reconcile_total",  # §6 row 6 — CR→audit completeness
-    "netops_reasoning_trace_orphans",  # §6 row 9 — reasoning-trace persistence
 )
 
 
@@ -225,16 +245,16 @@ def test_every_section6_alert_has_a_firing_and_a_healthy_case() -> None:
 
 
 def test_coverage_matrix_is_grounded_in_production_section6() -> None:
-    """The declared alert classes map 1:1 onto the six backed §6 SLI rows.
+    """The declared alert classes map 1:1 onto all nine backed §6 SLI rows.
 
     Bites on drift in either direction: a new alert class not tied to a §6 row, or a
-    dropped §6 SLO. The seven recording-rule SLI series are asserted exactly, and the
-    three reconciliation-gap rows must remain documented as flagged-deferred.
+    dropped §6 SLO. The recording-rule SLI series are asserted exactly, and the
+    three reconciliation rows share the bounded aggregate recording series.
     """
     declared = _declared_alerts()
     classes = {meta["slo"] for meta in declared.values()}
     assert classes == set(_SECTION6_BACKED_SLO_LABELS), (
-        "declared alert classes drifted from the six backed PRODUCTION.md §6 SLI rows: "
+        "declared alert classes drifted from the nine backed PRODUCTION.md §6 SLI rows: "
         f"{sorted(classes)} != {sorted(_SECTION6_BACKED_SLO_LABELS)}"
     )
 
@@ -242,20 +262,6 @@ def test_coverage_matrix_is_grounded_in_production_section6() -> None:
         "recording-rule SLI series drifted from the ADR-0046 §1 set: "
         f"{sorted(_recording_rule_names())}"
     )
-
-    # No silent drift: the three §6 reconciliation-job gaps (rows 5/6/9) stay
-    # NAMED-deferred in the recording-rules file, not fabricated into a rule.
-    recording_text = _RECORDING_FILE.read_text(encoding="utf-8")
-    recorded = _recording_rule_names()
-    for series in _SECTION6_FLAGGED_GAP_SERIES:
-        assert series in recording_text, (
-            f"§6 reconciliation-gap series {series!r} is no longer documented as "
-            "flagged-deferred (add its rule + alert, or restore the named deferral)"
-        )
-        assert not any(name.startswith(f"slo:{series}") for name in recorded), (
-            f"§6 gap {series!r} now has a recording rule but no coverage-matrix "
-            "entry — wire its alert + firing/healthy cases before removing the note"
-        )
 
 
 # ===========================================================================

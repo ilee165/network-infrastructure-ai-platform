@@ -1,7 +1,13 @@
 # P5 Build Plan — Vendor Wave 4 (AWS incl. Route53 + Azure) + Hybrid Cloud Topology Stitching + Scale Certification + Dispatch Durability
 
 **Project:** AI Network Operations Platform
-**Status:** **CONTRACTED — W0 design gate authored 2026-07-21.** No implementation wave has started. Entry condition is satisfied: **P4 EXIT 2026-07-21** (`docs/roadmap/P4-RELEASE-READINESS.md` — all P4-scoped §11 gates PASS at final PR HEAD `4707f09a`, run `29840145528`; ADRs 0050–0053 Accepted; squash `77d8dd63`).
+**Status:** **ACTIVE — W0 complete; W1 implemented and verified 2026-07-23.**
+W2–W5 remain pending and P5 is not released. W1 evidence is recorded in
+`docs/roadmap/P5-W1-HANDOFF.md`; ADR-0059 remains Proposed until the W5-T3
+phase-exit audit. Entry condition was satisfied by **P4 EXIT 2026-07-21**
+(`docs/roadmap/P4-RELEASE-READINESS.md` — all P4-scoped §11 gates PASS at final
+PR HEAD `4707f09a`, run `29840145528`; ADRs 0050–0053 Accepted; squash
+`77d8dd63`).
 **Authority:** Bound by `CLAUDE.md`, `docs/architecture/DECISIONS-BRIEF.md` (D1–D16), and `docs/roadmap/PRODUCTION.md` §1 (phase table), §2.5 (Wave 4), §2.6 (per-wave exit criteria), §11 (gates), and the P4 exit marker's **P5 inheritance** paragraph.
 **Scope source:** The recorded P5 inheritance (PRODUCTION.md §1 P4-exit marker + `P4-RELEASE-READINESS.md`) — nothing else rides in:
 

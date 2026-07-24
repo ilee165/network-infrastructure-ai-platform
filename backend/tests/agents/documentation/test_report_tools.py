@@ -20,17 +20,32 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.db as db
+from app.agents.automation import AutomationAgent
+from app.agents.automation.agent import ChangeExecutionRefused
 from app.agents.documentation.tools import (
     get_report_run,
     list_report_runs,
     request_report_generation,
 )
+from app.agents.framework.approval import ApprovalRequiredError, ChangeRequestGate
 from app.agents.framework.read_facade import ReportAccessDeniedError
-from app.agents.framework.tools import agent_run_context
+from app.agents.framework.tools import (
+    AgentRunIdentity,
+    ChangeRequestCreated,
+    ToolClassification,
+    agent_run_context,
+    change_request_gate_context,
+)
 from app.core.security import Role
 from app.engines.reports import deterministic_run_id
 from app.models import AuditLog, Base
+from app.models.change_requests import ChangeRequest, ChangeRequestKind, ChangeRequestState
+from app.models.dispatch_outbox import DispatchOutbox
+from app.models.identity import Role as RoleRow
+from app.models.identity import User
 from app.models.reports import ReportArtifact, ReportKind, ReportRun, ReportRunStatus
+from app.services.change_requests import ChangeRequestService
+from tests.agents.conftest import ApproveAllGate
 
 
 async def _generation_audit_rows() -> list[AuditLog]:
@@ -94,6 +109,128 @@ def engineer_identity() -> Iterator[None]:
         yield
 
 
+@pytest.fixture(autouse=True)
+def approved_report_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Functional report-request tests execute only through an approved gate."""
+    monkeypatch.setattr(request_report_generation, "approval_gate", ApproveAllGate())
+
+
+def test_request_generation_is_state_changing() -> None:
+    assert request_report_generation.classification is ToolClassification.STATE_CHANGING
+
+
+async def test_request_generation_without_approval_persists_nothing(
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(request_report_generation, "approval_gate", None)
+    start = datetime(2026, 6, 1, tzinfo=UTC)
+    end = datetime(2026, 6, 8, tzinfo=UTC)
+    run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+
+    with (
+        agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()),
+        pytest.raises(ApprovalRequiredError),
+    ):
+        await request_report_generation.ainvoke(
+            {
+                "kind": "change",
+                "period_start": start.isoformat(),
+                "period_end": end.isoformat(),
+            }
+        )
+
+    async with db.get_sessionmaker()() as session:
+        assert await session.get(ReportRun, run_id) is None
+        assert (
+            await session.scalar(
+                select(DispatchOutbox).where(DispatchOutbox.aggregate_id == run_id)
+            )
+            is None
+        )
+    assert await _generation_audit_rows() == []
+
+
+async def test_real_gate_approval_executes_report_request_exactly_once(
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production-shaped gate + human approval reaches only the report executor."""
+    monkeypatch.setattr(request_report_generation, "approval_gate", None)
+    maker = db.get_sessionmaker()
+    async with maker() as session:
+        role = RoleRow(name="engineer")
+        session.add(role)
+        await session.flush()
+        requester = User(username="report-requester", password_hash="x", role_id=role.id)
+        approver = User(username="report-approver", password_hash="x", role_id=role.id)
+        session.add_all([requester, approver])
+        await session.commit()
+        requester_id = requester.id
+        approver_id = approver.id
+
+    service = ChangeRequestService(maker)
+    start = datetime(2026, 6, 1, tzinfo=UTC)
+    end = datetime(2026, 6, 8, tzinfo=UTC)
+    expected_run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+
+    def gate_factory(identity: AgentRunIdentity) -> ChangeRequestGate:
+        assert identity.user_id is not None
+        return ChangeRequestGate(
+            service,
+            requester_id=identity.user_id,
+            actor_role=identity.role,
+        )
+
+    with (
+        agent_run_context(role=Role.ENGINEER, user_id=requester_id),
+        change_request_gate_context(gate_factory),
+    ):
+        proposed = await request_report_generation.ainvoke(
+            {
+                "kind": "change",
+                "period_start": start.isoformat(),
+                "period_end": end.isoformat(),
+            }
+        )
+
+    assert isinstance(proposed, ChangeRequestCreated)
+    cr_id = uuid.UUID(proposed.change_request_id)
+    cr = await service.get(cr_id)
+    assert cr.kind is ChangeRequestKind.REPORT_GENERATION
+    assert cr.state is ChangeRequestState.DRAFT
+    async with maker() as session:
+        assert await session.get(ReportRun, expected_run_id) is None
+        assert await session.scalar(select(DispatchOutbox)) is None
+
+    await service.submit(cr_id, actor_id=requester_id, actor_role=Role.ENGINEER)
+    await service.approve(cr_id, actor_id=approver_id, actor_role=Role.ENGINEER)
+
+    class ConfigExecutorMustNotRun:
+        async def apply(self, *_args: Any, **_kwargs: Any) -> Any:
+            pytest.fail("report request was routed to the device config executor")
+
+    result = await AutomationAgent(
+        change_request_service=service,
+        config_executor=ConfigExecutorMustNotRun(),  # type: ignore[arg-type]
+    ).execute(cr_id)
+    assert result.state is ChangeRequestState.COMPLETED
+
+    with pytest.raises(ChangeExecutionRefused):
+        await AutomationAgent(change_request_service=service).execute(cr_id)
+
+    async with maker() as session:
+        run = await session.get(ReportRun, expected_run_id)
+        envelopes = (await session.execute(select(DispatchOutbox))).scalars().all()
+        executed_cr = await session.get(ChangeRequest, cr_id)
+    assert run is not None
+    assert run.requested_by == requester_id
+    assert len(envelopes) == 1
+    assert envelopes[0].aggregate_id == run.id
+    assert executed_cr is not None
+    assert executed_cr.state is ChangeRequestState.COMPLETED
+
+
 async def test_list_excludes_kinds_above_the_invoking_role(
     seeded_db: None, engineer_identity: None
 ) -> None:
@@ -153,12 +290,11 @@ async def test_request_generation_enqueues_under_invoking_user(
 ) -> None:
     from app.workers import celery_app as celery_module
 
-    calls: list[dict[str, Any]] = []
-
-    def _record(name: str, args: list[Any] | None = None, **kwargs: Any) -> None:
-        calls.append({"name": name, "args": list(args or []), **kwargs})
-
-    monkeypatch.setattr(celery_module.celery_app, "send_task", _record)
+    monkeypatch.setattr(
+        celery_module.celery_app,
+        "send_task",
+        lambda *_args, **_kwargs: pytest.fail("agent request reached broker publication"),
+    )
 
     user_id = uuid.uuid4()
     with agent_run_context(role=Role.ENGINEER, user_id=user_id):
@@ -176,18 +312,14 @@ async def test_request_generation_enqueues_under_invoking_user(
         "run_id": str(deterministic_run_id(ReportKind.CHANGE, _START, _END)),
         "status": "queued",
     }
-    assert len(calls) == 1
-    call = calls[0]
-    assert call["name"] == "reports.generate"
-    assert call["queue"] == "docs"
-    # The SAME engine task vector the API uses, with the invoking user recorded.
-    assert call["args"] == [
-        "change",
-        _START.isoformat(),
-        _END.isoformat(),
-        "on_demand",
-        str(user_id),
-    ]
+    async with db.get_sessionmaker()() as session:
+        envelope = (await session.execute(select(DispatchOutbox))).scalar_one()
+        run = await session.get(ReportRun, deterministic_run_id(ReportKind.CHANGE, _START, _END))
+    assert envelope.payload_json == {
+        "dispatch_id": str(envelope.id),
+        "run_id": str(envelope.aggregate_id),
+    }
+    assert run is not None
     # Durable-audit parity with POST /api/v1/reports (PR #166 F3): the agent
     # path records the same committed generation_requested event, attributed
     # to the requesting principal.
@@ -203,22 +335,20 @@ async def test_request_generation_enqueues_under_invoking_user(
     }
 
 
-async def test_request_generation_audit_is_committed_before_dispatch(
+async def test_request_generation_commits_audit_run_and_outbox_without_dispatch(
     seeded_db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The audit row is durable BEFORE the broker call: a dispatch failure can
     never lose the evidence that the generation was requested (PR #166 F3)."""
     from app.workers import celery_app as celery_module
 
-    def _broker_down(*_a: Any, **_kw: Any) -> None:
-        raise RuntimeError("broker unreachable")
-
-    monkeypatch.setattr(celery_module.celery_app, "send_task", _broker_down)
+    monkeypatch.setattr(
+        celery_module.celery_app,
+        "send_task",
+        lambda *_args, **_kwargs: pytest.fail("agent request reached broker publication"),
+    )
     user_id = uuid.uuid4()
-    with (
-        agent_run_context(role=Role.ENGINEER, user_id=user_id),
-        pytest.raises(RuntimeError, match="broker unreachable"),
-    ):
+    with agent_run_context(role=Role.ENGINEER, user_id=user_id):
         await request_report_generation.ainvoke(
             {
                 "kind": "change",
@@ -227,8 +357,55 @@ async def test_request_generation_audit_is_committed_before_dispatch(
             }
         )
     rows = await _generation_audit_rows()
-    assert len(rows) == 1  # committed despite the failed dispatch
+    assert len(rows) == 1
     assert rows[0].actor == f"user:{user_id}"
+    async with db.get_sessionmaker()() as session:
+        assert (await session.execute(select(DispatchOutbox))).scalar_one()
+
+
+async def test_agent_request_rollback_persists_neither_run_outbox_nor_audit(
+    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import audit as audit_service
+
+    real_record = audit_service.record
+
+    async def _fail_after_audit(*args: Any, **kwargs: Any) -> Any:
+        await real_record(*args, **kwargs)
+        raise RuntimeError("transaction aborted")
+
+    monkeypatch.setattr(audit_service, "record", _fail_after_audit)
+    start = datetime(2026, 6, 1, tzinfo=UTC)
+    end = datetime(2026, 6, 8, tzinfo=UTC)
+    run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+    with (
+        agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()),
+        pytest.raises(RuntimeError, match="transaction aborted"),
+    ):
+        await request_report_generation.ainvoke(
+            {
+                "kind": "change",
+                "period_start": start.isoformat(),
+                "period_end": end.isoformat(),
+            }
+        )
+    async with db.get_sessionmaker()() as session:
+        assert await session.get(ReportRun, run_id) is None
+        assert (
+            await session.scalar(
+                select(DispatchOutbox).where(DispatchOutbox.aggregate_id == run_id)
+            )
+            is None
+        )
+        assert (
+            await session.scalar(
+                select(AuditLog).where(
+                    AuditLog.action == "report.generation_requested",
+                    AuditLog.target_id == str(run_id),
+                )
+            )
+            is None
+        )
 
 
 async def test_request_generation_pins_naive_period_as_utc(
@@ -242,12 +419,11 @@ async def test_request_generation_pins_naive_period_as_utc(
     """
     from app.workers import celery_app as celery_module
 
-    calls: list[dict[str, Any]] = []
-
-    def _record(name: str, args: list[Any] | None = None, **kwargs: Any) -> None:
-        calls.append({"name": name, "args": list(args or []), **kwargs})
-
-    monkeypatch.setattr(celery_module.celery_app, "send_task", _record)
+    monkeypatch.setattr(
+        celery_module.celery_app,
+        "send_task",
+        lambda *_args, **_kwargs: pytest.fail("agent request reached broker publication"),
+    )
 
     with agent_run_context(role=Role.ENGINEER, user_id=uuid.uuid4()):
         result = json.loads(
@@ -261,9 +437,9 @@ async def test_request_generation_pins_naive_period_as_utc(
         )
 
     assert result["run_id"] == str(deterministic_run_id(ReportKind.CHANGE, _START, _END))
-    # Serialized aware-UTC, so the worker's _parse_utc derives the SAME id.
-    assert calls[0]["args"][1] == _START.isoformat()
-    assert calls[0]["args"][2] == _END.isoformat()
+    async with db.get_sessionmaker()() as session:
+        envelope = (await session.execute(select(DispatchOutbox))).scalar_one()
+    assert envelope.aggregate_id == deterministic_run_id(ReportKind.CHANGE, _START, _END)
 
 
 async def test_request_generation_rejects_future_period_end(
@@ -358,7 +534,11 @@ async def test_request_generation_accepts_at_cap_span(
             )
         )
     assert result["status"] == "queued"
-    assert calls == [1]
+    assert calls == []
+    async with db.get_sessionmaker()() as session:
+        assert await session.scalar(
+            select(DispatchOutbox).where(DispatchOutbox.aggregate_id == uuid.UUID(result["run_id"]))
+        )
 
 
 async def test_request_generation_rejects_pre_floor_period_start(

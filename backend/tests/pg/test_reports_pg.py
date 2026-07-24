@@ -25,7 +25,9 @@ from sqlalchemy.orm import undefer
 from app.engines.reports import deterministic_run_id
 from app.engines.reports.payloads import ReportPayload, ReportSection
 from app.models import AuditLog
+from app.models.dispatch_outbox import DispatchOutbox
 from app.models.reports import ReportArtifact, ReportKind, ReportRun, ReportRunStatus
+from app.services.report_outbox import enqueue_report
 from app.workers.tasks import reports as report_tasks
 
 pytestmark = pytest.mark.integration
@@ -56,6 +58,30 @@ async def _claim() -> str:
         period_start=_START,
         period_end=_END,
     )
+
+
+async def _enqueue_generation(
+    pg_engine: AsyncEngine, *, trigger: str = "on_demand"
+) -> tuple[str, str]:
+    """Persist the authoritative run + identifier-only dispatch envelope."""
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with maker() as session:
+        await enqueue_report(
+            session,
+            run_id=_RUN_ID,
+            kind=ReportKind.CHANGE,
+            period_start=_START,
+            period_end=_END,
+            trigger=trigger,
+            requested_by=None,
+        )
+        dispatch_id = (
+            await session.execute(
+                select(DispatchOutbox.id).where(DispatchOutbox.aggregate_id == _RUN_ID)
+            )
+        ).scalar_one()
+        await session.commit()
+    return str(dispatch_id), str(_RUN_ID)
 
 
 async def test_concurrent_claims_yield_exactly_one_row(
@@ -91,8 +117,8 @@ async def test_concurrent_generation_yields_exactly_one_generator(
     """Two simultaneous FULL generations for one (kind, period): exactly one
     generates (PR #166 F2).
 
-    The winner claims and generates; the active-claim loser returns
-    ``in_progress`` WITHOUT generating — so there is exactly ONE
+    The winner claims and generates; the active-consumer loser is rejected
+    WITHOUT generating — so there is exactly ONE
     ``report.generated`` audit entry and one csv+pdf artifact pair (no
     duplicate audit, no interleaved artifact delete+insert).
     """
@@ -100,17 +126,27 @@ async def test_concurrent_generation_yields_exactly_one_generator(
     from app.engines.reports import render
 
     monkeypatch.setattr(render, "_render_pdf", lambda payload: b"%PDF-1.7 stub")
+    dispatch_id, run_id = await _enqueue_generation(pg_engine, trigger="scheduled")
+    real_build_payload = report_tasks.build_payload
+    winner_building = asyncio.Event()
+    release_winner = asyncio.Event()
 
-    results = await asyncio.gather(
-        report_tasks._generate_report_core(
-            "change", _START.isoformat(), _END.isoformat(), "scheduled", None
-        ),
-        report_tasks._generate_report_core(
-            "change", _START.isoformat(), _END.isoformat(), "on_demand", None
-        ),
-    )
+    async def _blocked_build_payload(session: AsyncSession, **kwargs: Any) -> ReportPayload:
+        winner_building.set()
+        await release_winner.wait()
+        return await real_build_payload(session, **kwargs)
 
-    assert sorted(r["status"] for r in results) == ["in_progress", "succeeded"]
+    monkeypatch.setattr(report_tasks, "build_payload", _blocked_build_payload)
+    winner = asyncio.create_task(report_tasks._generate_report_core(dispatch_id, run_id))
+    await asyncio.wait_for(winner_building.wait(), timeout=5)
+    try:
+        with pytest.raises(report_tasks.ReportConsumerActive, match="consumer_active"):
+            await report_tasks._generate_report_core(dispatch_id, run_id)
+    finally:
+        release_winner.set()
+    result = await winner
+
+    assert result["status"] == "succeeded"
     maker = async_sessionmaker(pg_engine, expire_on_commit=False)
     async with maker() as session:
         runs = list((await session.execute(select(ReportRun))).scalars())
@@ -227,9 +263,8 @@ async def test_full_generation_and_artifact_bytea_round_trip(
     binary_blob = b"%PDF-1.7 " + bytes(range(256))
     monkeypatch.setattr(render, "_render_pdf", lambda payload: binary_blob)
 
-    result = await report_tasks._generate_report_core(
-        "change", _START.isoformat(), _END.isoformat(), "on_demand", None
-    )
+    dispatch_id, run_id = await _enqueue_generation(pg_engine)
+    result = await report_tasks._generate_report_core(dispatch_id, run_id)
     assert result["status"] == "succeeded"
 
     maker = async_sessionmaker(pg_engine, expire_on_commit=False)
@@ -339,13 +374,8 @@ async def test_redaction_failure_is_fail_closed_on_pg(
     }
     before = REGISTRY.get_sample_value("netops_report_failures_total", labels=failure_labels) or 0.0
 
-    result = await report_tasks._generate_report_core(
-        ReportKind.CHANGE.value,
-        _START.isoformat(),
-        _END.isoformat(),
-        "on_demand",
-        None,
-    )
+    dispatch_id, run_id = await _enqueue_generation(pg_engine)
+    result = await report_tasks._generate_report_core(dispatch_id, run_id)
 
     after = REGISTRY.get_sample_value("netops_report_failures_total", labels=failure_labels) or 0.0
     assert after - before == 1

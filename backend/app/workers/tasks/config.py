@@ -85,6 +85,7 @@ from app.plugins.transport import (
 )
 from app.services import audit, credentials
 from app.workers.celery_app import celery_app
+from app.workers.dispatch import durable_dispatch_canvas
 
 __all__ = ["capture_device", "finalize_backup_wave", "nightly_backup"]
 
@@ -705,7 +706,7 @@ def _dispatch_captures(run_id: str, device_ids: list[str]) -> dict[str, Any]:
         for device_id in device_ids
     )
     body = finalize_backup_wave.s(run_id, list(device_ids))
-    async_result = chord(header)(body)
+    async_result = durable_dispatch_canvas(chord(header, body))
     if celery_app.conf.task_always_eager:
         return dict(async_result.get(disable_sync_subtasks=True))
     return {

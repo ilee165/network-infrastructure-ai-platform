@@ -14,11 +14,10 @@ generates three artifact types on the ``docs`` Celery queue:
    provider (D9 ``local`` default), so no secret value is exposed (ADR-0019 §4,
    ADR-0017 §3).
 
-All tools declared in M4 are READ_ONLY — no write tool may ever appear on this
-agent (enforced by
-:meth:`~app.agents.framework.base.BaseSpecialistAgent.validate_definition` and
-asserted by the test suite). State-changing document actions (if any) are gated
-to M5+ ChangeRequest workflow.
+Artifact rendering and report lookup tools are READ_ONLY. The durable report
+generation request is STATE_CHANGING because it persists a run, dispatch
+envelope, and audit evidence; the framework approval gate intercepts that tool
+before its body can execute.
 
 Module boundary: this agent imports *only* ``agents.framework`` and its own
 ``tools`` submodule.  The tools module is the sole crossing point into data
@@ -49,7 +48,8 @@ class DocumentationAgent(BaseSpecialistAgent):
 
     Generates network inventories (deterministic), topology diagrams (Mermaid),
     and runbooks (template + grounded LLM narrative) from live platform data.
-    All M4 tools are READ_ONLY; no state-changing tool is ever declared.
+    Rendering and lookup tools are READ_ONLY; durable report generation
+    requests are STATE_CHANGING and approval-gated.
 
     The agent can be instantiated fresh for tests — the default no-arg
     constructor produces a valid, fully-functional agent.
@@ -75,8 +75,9 @@ class DocumentationAgent(BaseSpecialistAgent):
             "it does not explain config drift, compliance posture, or policy violations "
             "(that is the configuration specialist's job). It is NOT troubleshooting — "
             "it does not diagnose routing/BGP/OSPF/ACL faults or live control-plane "
-            "problems (that is the troubleshooting specialist). All operations are "
-            "read-only — no device configuration or network state is modified."
+            "problems (that is the troubleshooting specialist). Rendering and lookup "
+            "are read-only. Requesting report generation persists platform state and "
+            "is approval-gated; no device configuration or network state is modified."
         )
 
     @property
@@ -101,11 +102,13 @@ class DocumentationAgent(BaseSpecialistAgent):
             "  include out-of-scope devices.\n"
             "- Report the ``kind``, ``format``, and ``title`` of each generated "
             "  artifact so the caller can persist it in the ``documents`` table.\n"
-            "- You are strictly read-only: you never modify device configuration, "
-            "  network state, or database records.\n"
+            "- You never modify device configuration or network state. Report generation "
+            "  requests persist platform records and must pass the approval gate.\n"
+            "- If the gate returns a draft change request, say it is awaiting human "
+            "  approval; do not claim the report was queued.\n"
         )
 
     @property
     def tools(self) -> Sequence[NetOpsTool]:
-        """READ_ONLY documentation tools (T10 inventory, T11 diagram, T12 runbook)."""
+        """Classified documentation tools, including the gated report request."""
         return DOCUMENTATION_TOOLS

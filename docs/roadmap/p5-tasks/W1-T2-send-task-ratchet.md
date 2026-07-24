@@ -5,7 +5,7 @@
 | Owner | `wf-implementer` |
 | Depends on | W0-T5 / ADR-0059 |
 | Review | sonnet spec + quality |
-| Status | Proposed |
+| Status | Implemented |
 
 ## Objective and scope
 
@@ -33,7 +33,10 @@ fixture fails. Keep the planted-call red evidence.
 
 ## Exit criteria
 
-- [ ] Zero unjustified bare publication sites; routing behavior preserved.
-- [ ] Blocking static gate catches syntax variants and its negative control bites.
-- [ ] Site inventory and wrapper contract are documented.
-- [ ] D16 passes; one atomic commit.
+- [x] Zero unjustified bare publication sites; routing behavior preserved.
+- [x] Blocking static gate catches syntax variants and its negative control bites.
+- [x] Site inventory and wrapper contract are documented.
+- [x] D16 passes; implementation and focused review fix are recorded as atomic
+  commits.
+
+Closeout evidence: `docs/roadmap/P5-W1-HANDOFF.md`.

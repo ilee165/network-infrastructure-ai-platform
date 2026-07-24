@@ -399,6 +399,7 @@ class AutomationAgent(BaseSpecialistAgent):
         return {
             ChangeRequestKind.CONFIG: self._execute_config,
             ChangeRequestKind.DDI_RECORD: self._execute_ddi,
+            ChangeRequestKind.REPORT_GENERATION: self._execute_report_generation,
         }.get(kind)
 
     async def _apply_and_finalize(
@@ -460,6 +461,71 @@ class AutomationAgent(BaseSpecialistAgent):
             after_state=_ddi_after_state(result),
             rollback_succeeded=(result.rolled_back and result.rollback_verified),
         )
+
+    # -- platform operation (durable report request) ------------------------
+
+    async def _execute_report_generation(
+        self, cr: ChangeRequest, trace: ReasoningTrace
+    ) -> ChangeRequestState:
+        """Execute an approved report request without any device executor."""
+        from datetime import datetime
+
+        from app.agents.framework.read_facade import (
+            ensure_report_access,
+            report_generation_args,
+        )
+        from app.agents.framework.report_requests import (
+            record_generation_requested,
+            report_requester_role,
+        )
+
+        payload = cr.payload
+        expected_keys = {"kind", "period_start", "period_end"}
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected_keys
+            or not all(isinstance(payload.get(key), str) for key in expected_keys)
+        ):
+            raise ValueError("invalid_report_request")
+
+        requester_role = await report_requester_role(
+            requester_id=cr.requester_id,
+            sessionmaker=self._svc.sessionmaker,
+        )
+        try:
+            kind = payload["kind"]
+            ensure_report_access(requester_role, kind)
+            run_id, task_args = report_generation_args(
+                kind=kind,
+                period_start=datetime.fromisoformat(payload["period_start"]),
+                period_end=datetime.fromisoformat(payload["period_end"]),
+            )
+        except ValueError:
+            # Never echo CR payload values through an execution exception.
+            raise ValueError("invalid_report_request") from None
+
+        await record_generation_requested(
+            actor=f"user:{cr.requester_id}",
+            run_id=run_id,
+            kind=task_args[0],
+            period_start=task_args[1],
+            period_end=task_args[2],
+            requested_by=cr.requester_id,
+            sessionmaker=self._svc.sessionmaker,
+        )
+        await self._svc.mark_completed(
+            cr.id,
+            principal=self._principal,
+            after_state={"run_id": str(run_id), "status": "queued"},
+        )
+        await self._trace_recorder.record_step(
+            trace.trace_id,
+            TraceStep(
+                kind=TraceStepKind.CONCLUSION,
+                summary=(f"executed approved report request {cr.id}: queued report run {run_id}"),
+            ),
+        )
+        return ChangeRequestState.COMPLETED
 
     # -- shared finalize -----------------------------------------------------
 

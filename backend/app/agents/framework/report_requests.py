@@ -1,20 +1,41 @@
-"""Durable audit for agent-triggered report generation (PR #166 F3).
+"""Durable audit and enqueue for agent-triggered report generation.
 
-The HTTP path (``POST /api/v1/reports``) commits a
-``report.generation_requested`` audit entry BEFORE dispatching the Celery
-task; the agent path must leave the same durable evidence. This framework
-helper owns that write so specialist agents keep reaching ``app.services``
-only through ``app.agents.framework`` (REPO-STRUCTURE §3.3 contract 2 /
-§3.2 row 10 — the ``credential_access`` / ``discovery_jobs`` precedent).
+The HTTP and agent paths persist the ``report.generation_requested`` audit
+entry, report run, and durable dispatch envelope in one transaction.  This
+framework helper owns those writes so specialist agents keep reaching
+``app.services`` only through ``app.agents.framework`` (REPO-STRUCTURE §3.3
+contract 2 / §3.2 row 10 — the ``credential_access`` / ``discovery_jobs``
+precedent).
 """
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from app.core.security import Role
 
 #: Must match ``app.api.v1.reports._GENERATION_REQUESTED`` — the agent and
 #: HTTP triggers write ONE event stream for generation requests.
 GENERATION_REQUESTED_ACTION = "report.generation_requested"
+
+
+async def report_requester_role(
+    *,
+    requester_id: UUID,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> Role | None:
+    """Resolve the current RBAC role for an approved report operation."""
+    from app.core.security import Role
+    from app.models.identity import User
+
+    async with sessionmaker() as session:
+        requester = await session.get(User, requester_id)
+    return Role.from_name(requester.role.name) if requester is not None else None
 
 
 async def record_generation_requested(
@@ -24,17 +45,17 @@ async def record_generation_requested(
     kind: str,
     period_start: str,
     period_end: str,
+    requested_by: UUID | None,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
-    """Commit one ``report.generation_requested`` audit entry.
-
-    Committed on its own session so the evidence is durable BEFORE the caller
-    enqueues the generation task — a broker failure after this returns can
-    never lose the record that *actor* requested the run (PR #166 F3).
-    """
+    """Commit audit, report run, and dispatch envelope in one transaction."""
     import app.db as db
+    from app.models.reports import ReportKind
     from app.services import audit
+    from app.services.report_outbox import enqueue_report
 
-    async with db.get_sessionmaker()() as session:
+    maker = sessionmaker if sessionmaker is not None else db.get_sessionmaker()
+    async with maker() as session:
         await audit.record(
             session,
             actor=actor,
@@ -46,5 +67,14 @@ async def record_generation_requested(
                 "period_start": period_start,
                 "period_end": period_end,
             },
+        )
+        await enqueue_report(
+            session,
+            run_id=run_id,
+            kind=ReportKind(kind),
+            period_start=datetime.fromisoformat(period_start),
+            period_end=datetime.fromisoformat(period_end),
+            trigger="on_demand",
+            requested_by=requested_by,
         )
         await session.commit()

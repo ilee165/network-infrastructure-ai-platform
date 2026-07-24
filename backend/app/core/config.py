@@ -258,6 +258,7 @@ class Settings(BaseSettings):
     #: Nightly config-backup schedule (Celery beat, ADR-0017 §1). UTC hour/minute
     #: the ``config.nightly_backup`` task fires at; operators retune cadence
     #: without code changes. Default 02:00 UTC (a low-traffic window).
+    config_backup_enabled: bool = True
     config_backup_hour: int = 2
     config_backup_minute: int = 0
 
@@ -374,6 +375,7 @@ class Settings(BaseSettings):
     #: entries / interleaved artifact writes). Floor 1s (tests); size it above
     #: the slowest expected generation in production.
     report_claim_timeout_seconds: int = Field(default=900, ge=1)
+    report_outbox_max_batch_size: int = Field(default=50, ge=1, le=500)
     #: Daily UTC schedule of the report-artifact retention purge (ADR-0053 §4).
     report_purge_hour: int = 5
     report_purge_minute: int = 30

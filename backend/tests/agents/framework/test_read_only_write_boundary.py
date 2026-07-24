@@ -620,16 +620,22 @@ def _invocation_fixtures() -> dict[str, dict[str, Any]]:
         "read_live_acls": {"device_id": _UNKNOWN_DEVICE_ID},
         "get_application_impact": {"target": "device:missing"},
         # P4 W3-T1 documentation report tools (ADR-0053 §1): pure reads over
-        # the report tables (SELECT-only) + a Celery job launch (send_task is
-        # stubbed); none may issue relational writes.
+        # the report tables (SELECT-only). The durable generation request is
+        # STATE_CHANGING and deliberately excluded from this direct-call census.
         "list_report_runs": {},
         "get_report_run": {"run_id": _UNKNOWN_DEVICE_ID},
-        "request_report_generation": {
-            "kind": "change",
-            "period_start": "2026-07-01T00:00:00+00:00",
-            "period_end": "2026-07-08T00:00:00+00:00",
-        },
     }
+
+
+def test_report_generation_request_is_state_changing_in_default_registry() -> None:
+    matches = [
+        tool
+        for agent in build_default_registry().list()
+        for tool in agent.tools
+        if tool.name == "request_report_generation"
+    ]
+    assert len(matches) == 1
+    assert matches[0].classification is ToolClassification.STATE_CHANGING
 
 
 @pytest.mark.asyncio
@@ -700,8 +706,8 @@ async def test_every_default_read_only_tool_obeys_relational_write_boundary(
         if tool.classification is ToolClassification.READ_ONLY
     ]
     names = [tool.name for tool in read_only_tool_list]
-    assert len(names) == len(set(names)) == 30, (
-        "default registry must expose exactly 30 uniquely named READ_ONLY tools"
+    assert len(names) == len(set(names)) == 29, (
+        "default registry must expose exactly 29 uniquely named READ_ONLY tools"
     )
     read_only_tools = {tool.name: tool for tool in read_only_tool_list}
     invocations = _invocation_fixtures()
@@ -720,13 +726,10 @@ async def test_every_default_read_only_tool_obeys_relational_write_boundary(
     async with maker() as session:
         assert await session.scalar(select(func.count()).select_from(DiscoveryRun)) == 1
         actions = list((await session.scalars(select(AuditLog.action))).all())
-        assert len(actions) == 7
+        assert len(actions) == 6
         assert actions.count(audit.KEK_UNWRAP) == 3
         assert actions.count(audit.CREDENTIAL_DECRYPTED) == 3
-        # PR #166 F3: the agent generation trigger now records the same durable
-        # report.generation_requested evidence the HTTP path writes — an
-        # append-only audit_log INSERT, permitted by _ALLOWED_WRITES.
-        assert actions.count("report.generation_requested") == 1
+        assert "report.generation_requested" not in actions
 
 
 @pytest.mark.asyncio
