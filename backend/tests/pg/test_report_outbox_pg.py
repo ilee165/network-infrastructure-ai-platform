@@ -28,6 +28,7 @@ from app.services.report_outbox import (
     claim_pending,
     enqueue_report,
     mark_claim_dispatched,
+    mark_claim_failed,
     reap_stale_claims,
     requeue_dead,
 )
@@ -479,6 +480,18 @@ async def test_report_outbox_poison_becomes_dead_and_safe_replay_is_auditable(
     assert row.state == DispatchOutboxState.DEAD.value
     assert row.last_error_code == "invalid_envelope"
     assert "raw-secret-hunter2" not in str(row.last_error_code)
+    run = await pg_session.get(ReportRun, run_id)
+    assert run is not None
+    assert run.status == ReportRunStatus.FAILED.value
+    assert run.error_class == "dispatch_dead:invalid_envelope"
+    dead_audit = await pg_session.scalar(
+        select(AuditLog).where(
+            AuditLog.action == "report.outbox_dead",
+            AuditLog.target_id == str(row.id),
+        )
+    )
+    assert dead_audit is not None
+    assert dead_audit.detail["run_transitioned"] is True
 
     row.payload_json = {"dispatch_id": str(row.id), "run_id": str(run_id)}
     await pg_session.commit()
@@ -504,6 +517,196 @@ async def test_report_outbox_poison_becomes_dead_and_safe_replay_is_auditable(
         )
         == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_dead_replay_resets_retry_budget_and_revives_dispatch_failed_run(
+    pg_session: AsyncSession,
+) -> None:
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 8, tzinfo=UTC)
+    run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+    run = await enqueue_report(
+        pg_session,
+        run_id=run_id,
+        kind=ReportKind.CHANGE,
+        period_start=start,
+        period_end=end,
+        trigger="on_demand",
+        requested_by=uuid.uuid4(),
+    )
+    await pg_session.commit()
+    row = (await claim_pending(pg_session, owner="relay-a", batch_size=1))[0]
+    transition = await mark_claim_failed(
+        pg_session,
+        dispatch_id=row.id,
+        owner="relay-a",
+        attempts=5,
+        error_code="broker_unavailable",
+        retryable=True,
+        max_attempts=5,
+        now=datetime.now(UTC),
+    )
+    await pg_session.commit()
+
+    assert transition is not None
+    assert transition.state is DispatchOutboxState.DEAD
+    assert transition.run_transitioned
+    await pg_session.refresh(run)
+    await pg_session.refresh(row)
+    assert run.status == ReportRunStatus.FAILED.value
+    assert run.error_class == "dispatch_dead:broker_unavailable"
+    assert row.attempts == 5
+
+    assert await requeue_dead(pg_session, row.id) is not None
+    await pg_session.commit()
+    await pg_session.refresh(run)
+    await pg_session.refresh(row)
+    assert row.attempts == 0
+    assert run.status == ReportRunStatus.QUEUED.value
+    assert run.error_class is None
+    assert run.finished_at is None
+
+    claimed = (await claim_pending(pg_session, owner="relay-b", batch_size=1))[0]
+    retry = await mark_claim_failed(
+        pg_session,
+        dispatch_id=claimed.id,
+        owner="relay-b",
+        attempts=1,
+        error_code="broker_unavailable",
+        retryable=True,
+        max_attempts=5,
+        now=datetime.now(UTC),
+    )
+    assert retry is not None
+    assert retry.state is DispatchOutboxState.PENDING
+
+
+@pytest.mark.asyncio
+async def test_dispatch_death_never_clobbers_succeeded_run(
+    pg_session: AsyncSession,
+) -> None:
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 8, tzinfo=UTC)
+    run = await enqueue_report(
+        pg_session,
+        run_id=deterministic_run_id(ReportKind.CHANGE, start, end),
+        kind=ReportKind.CHANGE,
+        period_start=start,
+        period_end=end,
+        trigger="scheduled",
+        requested_by=None,
+    )
+    await pg_session.commit()
+    row = (await claim_pending(pg_session, owner="stale-relay", batch_size=1))[0]
+    run.status = ReportRunStatus.SUCCEEDED.value
+    run.finished_at = datetime.now(UTC)
+    await pg_session.commit()
+
+    transition = await mark_claim_failed(
+        pg_session,
+        dispatch_id=row.id,
+        owner="stale-relay",
+        attempts=5,
+        error_code="broker_unavailable",
+        retryable=True,
+        max_attempts=5,
+        now=datetime.now(UTC),
+    )
+    assert transition is not None
+    assert transition.state is DispatchOutboxState.DEAD
+    assert not transition.run_transitioned
+    await pg_session.commit()
+    await pg_session.refresh(run)
+    assert run.status == ReportRunStatus.SUCCEEDED.value
+    assert run.error_class is None
+
+
+@pytest.mark.asyncio
+async def test_requeue_never_revives_post_consumption_failure(
+    pg_session: AsyncSession,
+) -> None:
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 8, tzinfo=UTC)
+    run = await enqueue_report(
+        pg_session,
+        run_id=deterministic_run_id(ReportKind.CHANGE, start, end),
+        kind=ReportKind.CHANGE,
+        period_start=start,
+        period_end=end,
+        trigger="scheduled",
+        requested_by=None,
+    )
+    row = (await pg_session.execute(select(DispatchOutbox))).scalar_one()
+    run.status = ReportRunStatus.FAILED.value
+    run.error_class = "builder_error"
+    run.finished_at = datetime.now(UTC)
+    row.state = DispatchOutboxState.DEAD.value
+    row.attempts = 5
+    row.last_error_code = "broker_unavailable"
+    await pg_session.commit()
+
+    assert await requeue_dead(pg_session, row.id) is not None
+    await pg_session.commit()
+    await pg_session.refresh(run)
+    assert run.status == ReportRunStatus.FAILED.value
+    assert run.error_class == "builder_error"
+    assert run.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_requeue_and_rerequest_converge_on_stable_dispatch_row(
+    pg_session: AsyncSession,
+) -> None:
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 8, tzinfo=UTC)
+    run_id = deterministic_run_id(ReportKind.CHANGE, start, end)
+    run = await enqueue_report(
+        pg_session,
+        run_id=run_id,
+        kind=ReportKind.CHANGE,
+        period_start=start,
+        period_end=end,
+        trigger="scheduled",
+        requested_by=None,
+    )
+    row = (await pg_session.execute(select(DispatchOutbox))).scalar_one()
+    stable_dispatch_id = row.id
+    run.status = ReportRunStatus.FAILED.value
+    run.error_class = "dispatch_dead:broker_unavailable"
+    run.finished_at = datetime.now(UTC)
+    row.state = DispatchOutboxState.DEAD.value
+    row.attempts = 5
+    row.last_error_code = "broker_unavailable"
+    await pg_session.commit()
+    assert pg_session.bind is not None
+    maker = async_sessionmaker(pg_session.bind, expire_on_commit=False)
+
+    async def _admin_requeue() -> None:
+        async with maker() as session:
+            await requeue_dead(session, stable_dispatch_id)
+            await session.commit()
+
+    async def _user_rerequest() -> None:
+        async with maker() as session:
+            await enqueue_report(
+                session,
+                run_id=run_id,
+                kind=ReportKind.CHANGE,
+                period_start=start,
+                period_end=end,
+                trigger="on_demand",
+                requested_by=uuid.uuid4(),
+            )
+            await session.commit()
+
+    await asyncio.wait_for(asyncio.gather(_admin_requeue(), _user_rerequest()), timeout=10)
+    assert await pg_session.scalar(select(func.count()).select_from(DispatchOutbox)) == 1
+    converged = (await pg_session.execute(select(DispatchOutbox))).scalar_one()
+    await pg_session.refresh(converged)
+    assert converged.id == stable_dispatch_id
+    assert converged.state == DispatchOutboxState.PENDING.value
+    assert converged.attempts == 0
 
 
 @pytest.mark.asyncio

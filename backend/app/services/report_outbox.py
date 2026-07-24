@@ -23,12 +23,37 @@ from app.models.reports import ReportKind, ReportRun, ReportRunStatus
 
 REPORT_TASK = "reports.generate"
 QUEUE_DOCS = "docs"
+DISPATCH_DEAD_PREFIX = "dispatch_dead:"
 _ALLOWED = {(REPORT_TASK, QUEUE_DOCS)}
 _PAYLOAD_KEYS = {"dispatch_id", "run_id"}
 
 
 class InvalidDispatchEnvelope(ValueError):
     """Envelope is not an allowlisted, identifier-only report publication."""
+
+
+@dataclass(frozen=True)
+class ClaimFailureTransition:
+    state: DispatchOutboxState
+    run_transitioned: bool
+
+
+@dataclass(frozen=True)
+class RequeueResult:
+    row: DispatchOutbox
+    run_transitioned: bool
+
+
+def dispatch_dead_error(error_code: str) -> str:
+    """Return the bounded typed ReportRun failure token for relay death."""
+    token = f"{DISPATCH_DEAD_PREFIX}{error_code}"
+    if not error_code or len(token) > 64:
+        raise ValueError("dispatch_error_code_invalid")
+    return token
+
+
+def is_dispatch_dead_error(error_class: str | None) -> bool:
+    return bool(error_class and error_class.startswith(DISPATCH_DEAD_PREFIX))
 
 
 @dataclass(frozen=True)
@@ -174,7 +199,9 @@ async def enqueue_report(
     run = (
         await session.execute(select(ReportRun).where(ReportRun.id == run_id).with_for_update())
     ).scalar_one()
-    fresh_failed_retry = run.status == ReportRunStatus.FAILED.value
+    fresh_failed_retry = run.status == ReportRunStatus.FAILED.value and is_dispatch_dead_error(
+        run.error_class
+    )
     if fresh_failed_retry:
         run.status = ReportRunStatus.QUEUED.value
         run.error_class = None
@@ -276,7 +303,7 @@ async def mark_claim_failed(
     retryable: bool,
     max_attempts: int,
     now: datetime,
-) -> DispatchOutboxState | None:
+) -> ClaimFailureTransition | None:
     state = (
         DispatchOutboxState.PENDING
         if retryable and attempts < max_attempts
@@ -300,7 +327,28 @@ async def mark_claim_failed(
         )
         .values(**values)
     )
-    return state if result.rowcount == 1 else None  # type: ignore[attr-defined]
+    if result.rowcount != 1:  # type: ignore[attr-defined]
+        return None
+    run_transitioned = False
+    if state is DispatchOutboxState.DEAD:
+        row = await session.get(DispatchOutbox, dispatch_id)
+        if row is None:
+            raise InvalidDispatchEnvelope("dispatch_not_found")
+        run_result = await session.execute(
+            update(ReportRun)
+            .where(
+                ReportRun.id == row.aggregate_id,
+                ReportRun.status == ReportRunStatus.QUEUED.value,
+            )
+            .values(
+                status=ReportRunStatus.FAILED.value,
+                error_class=dispatch_dead_error(error_code),
+                finished_at=now,
+                updated_at=now,
+            )
+        )
+        run_transitioned = run_result.rowcount == 1  # type: ignore[attr-defined]
+    return ClaimFailureTransition(state=state, run_transitioned=run_transitioned)
 
 
 async def claim_consumer(
@@ -440,8 +488,20 @@ async def reap_stale_claims(
     return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
 
-async def requeue_dead(session: AsyncSession, dispatch_id: uuid.UUID) -> DispatchOutbox | None:
+async def requeue_dead(session: AsyncSession, dispatch_id: uuid.UUID) -> RequeueResult | None:
     """Revalidate and return one replay-safe dead report envelope to pending."""
+    aggregate_id = await session.scalar(
+        select(DispatchOutbox.aggregate_id).where(DispatchOutbox.id == dispatch_id)
+    )
+    if aggregate_id is None:
+        return None
+    # Match enqueue_report's run -> outbox lock order so concurrent re-request
+    # and admin replay converge without deadlocking.
+    run = (
+        await session.execute(
+            select(ReportRun).where(ReportRun.id == aggregate_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     row = await session.scalar(
         select(DispatchOutbox).where(DispatchOutbox.id == dispatch_id).with_for_update()
     )
@@ -453,8 +513,20 @@ async def requeue_dead(session: AsyncSession, dispatch_id: uuid.UUID) -> Dispatc
     row.claimed_at = None
     row.claim_owner = None
     row.last_error_code = None
+    row.attempts = 0
+    run_transitioned = False
+    if (
+        run is not None
+        and run.status == ReportRunStatus.FAILED.value
+        and is_dispatch_dead_error(run.error_class)
+    ):
+        run.status = ReportRunStatus.QUEUED.value
+        run.error_class = None
+        run.finished_at = None
+        run.updated_at = datetime.now(UTC)
+        run_transitioned = True
     await session.flush()
-    return row
+    return RequeueResult(row=row, run_transitioned=run_transitioned)
 
 
 async def outbox_status(session: AsyncSession, now: datetime) -> tuple[int, float]:

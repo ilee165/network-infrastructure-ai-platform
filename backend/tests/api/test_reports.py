@@ -162,7 +162,7 @@ async def test_generation_request_is_audited(
     assert sent_tasks == []
 
 
-async def test_fresh_request_rearms_failed_run_and_dispatched_envelope(
+async def test_fresh_request_rearms_dispatch_dead_run_and_stable_envelope(
     client: httpx.AsyncClient,
     auth_headers: Callable[[str], dict[str, str]],
     session: AsyncSession,
@@ -176,7 +176,7 @@ async def test_fresh_request_rearms_failed_run_and_dispatched_envelope(
         period_start=_START,
         period_end=_END,
         status=ReportRunStatus.FAILED.value,
-        error_class="builder_error",
+        error_class="dispatch_dead:broker_unavailable",
         regime_tags=[],
         finished_at=_END,
     )
@@ -188,12 +188,11 @@ async def test_fresh_request_rearms_failed_run_and_dispatched_envelope(
         task_name="reports.generate",
         queue="docs",
         payload_json={"dispatch_id": str(dispatch_id), "run_id": str(run_id)},
-        state=DispatchOutboxState.DISPATCHED.value,
-        attempts=1,
+        state=DispatchOutboxState.DEAD.value,
+        attempts=5,
         available_at=_END,
-        consumer_state=DispatchConsumerState.FAILED.value,
-        consumer_finished_at=_END,
-        consumer_error_code="builder_error",
+        consumer_state=DispatchConsumerState.PENDING.value,
+        last_error_code="broker_unavailable",
     )
     session.add_all([run, envelope])
     await session.commit()
@@ -209,6 +208,8 @@ async def test_fresh_request_rearms_failed_run_and_dispatched_envelope(
     assert run.error_class is None
     assert envelope.id == dispatch_id
     assert envelope.state == DispatchOutboxState.PENDING.value
+    assert envelope.attempts == 0
+    assert envelope.last_error_code is None
     assert envelope.consumer_state == DispatchConsumerState.PENDING.value
 
 

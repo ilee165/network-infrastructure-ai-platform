@@ -20,6 +20,7 @@ from app.core.metrics import (
 from app.engines.reports.idempotency import coerce_utc, deterministic_run_id, scheduled_period
 from app.models.dispatch_outbox import DispatchOutbox
 from app.models.reports import ReportKind, ReportRun, ReportTrigger
+from app.services import audit
 from app.services.report_outbox import (
     REPORT_TASK,
     InvalidDispatchEnvelope,
@@ -221,10 +222,23 @@ async def _relay_core(
                 if transition is None:
                     await session.rollback()
                     continue
-                if transition.value == "pending":
+                if transition.state.value == "pending":
                     retried += 1
                     record_report_outbox_event(event="retry")
                 else:
+                    await audit.record(
+                        session,
+                        actor="system:report-outbox-relay",
+                        action="report.outbox_dead",
+                        target_type="dispatch_outbox",
+                        target_id=str(claimed.id),
+                        detail={
+                            "aggregate_id": str(claimed.aggregate_id),
+                            "attempts": claimed.attempts + 1,
+                            "error_code": error_code,
+                            "run_transitioned": transition.run_transitioned,
+                        },
+                    )
                     dead += 1
                     record_report_outbox_event(event="dead")
             await session.commit()

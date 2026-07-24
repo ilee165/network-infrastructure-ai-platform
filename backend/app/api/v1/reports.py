@@ -155,16 +155,21 @@ async def requeue_dead_dispatch(
     admin: Annotated[User, Depends(require_role("admin"))],
 ) -> Response:
     """Admin-only, audited replay of a validated dead report envelope."""
-    row = await requeue_dead(session, dispatch_id)
-    if row is None:
+    result = await requeue_dead(session, dispatch_id)
+    if result is None:
         raise NotFoundError(f"dead report dispatch {dispatch_id} does not exist")
+    row = result.row
     await audit.record(
         session,
         actor=f"user:{admin.username}",
         action=_OUTBOX_REQUEUED,
         target_type="dispatch_outbox",
         target_id=str(dispatch_id),
-        detail={"aggregate_type": row.aggregate_type, "aggregate_id": str(row.aggregate_id)},
+        detail={
+            "aggregate_type": row.aggregate_type,
+            "aggregate_id": str(row.aggregate_id),
+            "run_transitioned": result.run_transitioned,
+        },
     )
     await session.commit()
     return Response(status_code=204)
