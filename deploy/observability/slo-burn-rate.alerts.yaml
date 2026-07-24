@@ -562,7 +562,7 @@ groups:
 
   # §6 rows 5/6/9 are 100% SLOs: error budget is exactly zero. Any settled
   # inconsistency is therefore infinite burn. Fast+slow confirmation uses a 5m
-  # observation and 15m confirmation window; query failure also burns fail-closed.
+  # observation and 10m confirmation window; query failure also burns fail-closed.
   - name: netops-slo-reconciliation-burn
     rules:
       - alert: NetopsConfigBackupCompletenessBurn

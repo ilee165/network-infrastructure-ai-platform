@@ -16,7 +16,7 @@ fixed values no matter how late the worker executes it).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +71,21 @@ def test_disabled_config_backup_retains_reconciliation_schedule(
     assert app.conf.beat_schedule["config-backup-reconcile"]["task"] == (
         "system.reconcile_config_backup"
     )
+
+
+def test_backup_reconciliation_schedule_uses_shared_grace_constant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings().model_copy(
+        update={"config_backup_hour": 2, "config_backup_minute": 0}
+    )
+    monkeypatch.setattr(celery_app_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(celery_app_module, "BACKUP_MISS_GRACE", timedelta(minutes=17))
+
+    app = create_celery_app()
+    schedule = app.conf.beat_schedule["config-backup-reconcile"]["schedule"]
+    assert set(schedule.minute) == {17}
+    assert set(schedule.hour) == {2}
 
 
 def test_beat_dispatch_evaluates_the_period_at_the_dispatch_instant(

@@ -136,6 +136,66 @@ async def test_cr_audit_reconcile_uses_terminal_specific_action_sets_on_pg(
     assert (await reconcile_change_request_audit(pg_session)).inconsistencies == 1
 
 
+async def test_failed_cr_requires_failed_terminal_edge_but_not_rollback_edge(
+    pg_session: AsyncSession,
+) -> None:
+    user_id = uuid4()
+    await _seed_admin_user(
+        pg_session,
+        user_id=user_id,
+        username=f"cr-failed-path-{user_id}",
+    )
+    healthy_id, wrong_terminal_id = uuid4(), uuid4()
+    healthy_trace, wrong_trace = uuid4(), uuid4()
+    await pg_session.execute(
+        text(
+            "INSERT INTO change_requests (id,state,kind,requester_id,four_eyes_required,"
+            "reasoning_trace_id,created_at,updated_at) "
+            "VALUES (:id,'failed','config',:u,true,:trace,now(),now())"
+        ),
+        [
+            {"id": healthy_id, "u": user_id, "trace": healthy_trace},
+            {"id": wrong_terminal_id, "u": user_id, "trace": wrong_trace},
+        ],
+    )
+    common = (
+        "change_request.created",
+        "change_request.draft_to_pending_approval",
+        "change_request.pending_approval_to_approved",
+        "change_request.approved_to_executing",
+    )
+    rows: list[dict[str, object]] = []
+    for ordinal, (cr_id, trace_id, terminal) in enumerate(
+        (
+            (healthy_id, healthy_trace, "change_request.executing_to_failed"),
+            (wrong_terminal_id, wrong_trace, "change_request.executing_to_completed"),
+        )
+    ):
+        for action_index, action in enumerate(common + (terminal,)):
+            rows.append(
+                {
+                    "id": uuid4(),
+                    "seq": 30_000 + ordinal * 10 + action_index,
+                    "action": action,
+                    "target": str(cr_id),
+                    "trace": trace_id,
+                }
+            )
+    await pg_session.execute(
+        text(
+            "INSERT INTO audit_log "
+            "(id,created_at,seq,actor,action,target_type,target_id,reasoning_trace_id,"
+            "prev_hash,entry_hash) VALUES "
+            "(:id,now(),:seq,'test',:action,'change_request',:target,:trace,"
+            "decode(repeat('00',32),'hex'),decode(repeat('00',32),'hex'))"
+        ),
+        rows,
+    )
+    await pg_session.commit()
+
+    assert (await reconcile_change_request_audit(pg_session)).inconsistencies == 1
+
+
 async def test_cr_audit_trace_join_graph_counts_only_missing_or_mismatched_edges(
     pg_session: AsyncSession,
 ) -> None:

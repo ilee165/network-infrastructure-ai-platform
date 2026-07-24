@@ -330,6 +330,7 @@ except ImportError:  # pragma: no cover - exercised only on a slim install
     RECONCILIATION_INCONSISTENCIES = None
     RECONCILIATION_HEALTHY = None
     RECONCILIATION_LAST_SUCCESS_TIMESTAMP = None
+    RECONCILIATION_SCHEDULE_ENABLED = None
     _PROM_ENABLED = False
 
 

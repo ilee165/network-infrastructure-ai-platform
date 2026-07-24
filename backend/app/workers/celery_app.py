@@ -41,6 +41,7 @@ from kombu import Queue
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.engines.reports.idempotency import scheduled_period
+from app.services.reconciliation import BACKUP_MISS_GRACE
 
 _logger = get_logger(__name__)
 
@@ -190,6 +191,7 @@ def _report_schedule_kwargs(cadence: str) -> dict[str, BeatLazyFunc]:
 def create_celery_app() -> Celery:
     """Build the Celery app from settings (broker and backend are Redis)."""
     settings = get_settings()
+    backup_miss_grace_minutes = int(BACKUP_MISS_GRACE.total_seconds() // 60)
     celery = Celery(
         "netops",
         broker=settings.redis_url,
@@ -274,10 +276,13 @@ def create_celery_app() -> Celery:
                 "task": "system.reconcile_config_backup",
                 "schedule": crontab(
                     hour=str(
-                        (settings.config_backup_hour + (settings.config_backup_minute + 15) // 60)
+                        (
+                            settings.config_backup_hour
+                            + (settings.config_backup_minute + backup_miss_grace_minutes) // 60
+                        )
                         % 24
                     ),
-                    minute=str((settings.config_backup_minute + 15) % 60),
+                    minute=str((settings.config_backup_minute + backup_miss_grace_minutes) % 60),
                 ),
             },
             "change-request-audit-reconcile": {

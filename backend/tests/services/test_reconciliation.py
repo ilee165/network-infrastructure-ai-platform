@@ -9,6 +9,7 @@ import pytest
 from app.core import metrics
 from app.models.audit import AuditLog
 from app.models.change_requests import ChangeRequest, ChangeRequestKind, ChangeRequestState
+from app.models.config_mgmt import ConfigBackupRun
 from app.models.identity import Role, User
 from app.services.reconciliation import (
     ReconcileResult,
@@ -87,7 +88,7 @@ async def test_cr_audit_reconcile_validates_actions_for_each_terminal_path(sessi
                     actor="test",
                     action=action,
                     target_type="change_request",
-                    target_id=cr.id.hex,
+                    target_id=str(cr.id),
                     reasoning_trace_id=cr.reasoning_trace_id,
                 )
             )
@@ -103,15 +104,39 @@ def test_backup_reconcile_alerts_within_fifteen_minutes_of_due_miss() -> None:
     assert backup_slot_due(now=due + timedelta(minutes=15), due_at=due)
 
 
-def test_backup_reconcile_excludes_disabled_schedules_and_accepts_terminal_success() -> None:
+def test_backup_reconcile_excludes_disabled_schedules() -> None:
     due = datetime(2026, 7, 23, 2, 0, tzinfo=UTC)
     assert not backup_slot_due(now=due + timedelta(hours=1), due_at=due, enabled=False)
 
 
-def test_backup_reconcile_is_idempotent_at_boundary_times() -> None:
+@pytest.mark.asyncio
+async def test_backup_reconcile_accepts_terminal_success_idempotently(session) -> None:
     due = datetime(2026, 7, 23, 2, 0, tzinfo=UTC)
-    first = backup_slot_due(now=due + timedelta(minutes=15), due_at=due)
-    assert first == backup_slot_due(now=due + timedelta(minutes=15), due_at=due)
+    run = ConfigBackupRun(
+        run_uuid=uuid4(),
+        scheduled_slot="2026-07-23",
+        status="succeeded",
+        started_at=due,
+        finished_at=due + timedelta(minutes=2),
+    )
+    session.add(run)
+    await session.commit()
+
+    first = await reconcile_config_backup(
+        session,
+        slot="2026-07-23",
+        due_at=due,
+        now=due + timedelta(minutes=15),
+    )
+    second = await reconcile_config_backup(
+        session,
+        slot="2026-07-23",
+        due_at=due,
+        now=due + timedelta(hours=1),
+    )
+
+    assert first == second == ReconcileResult(0)
+    assert await session.get(ConfigBackupRun, run.run_uuid) is run
 
 
 def test_backup_slot_after_midnight_uses_most_recent_due_slot_date() -> None:

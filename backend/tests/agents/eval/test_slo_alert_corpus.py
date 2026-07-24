@@ -58,6 +58,9 @@ _RECORDING_FILE = _OBS / "slo-recording.rules.yaml"
 _HELM_ALERTS_FILE = (
     _REPO_ROOT / "deploy/kubernetes/netops/templates/slo-burn-rate-prometheusrule.yaml"
 )
+_HELM_RECORDING_FILE = (
+    _REPO_ROOT / "deploy/kubernetes/netops/templates/slo-recording-prometheusrule.yaml"
+)
 _PERTURBATION_SCRIPT = _OBS / "run-slo-corpus-perturbation-bite.sh"
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "platform-gates.yml"
 
@@ -79,6 +82,19 @@ def test_reconciliation_checked_alerts_equal_deployed_helm_source() -> None:
         if group["name"] == "netops-slo-reconciliation-burn"
     )
     assert deployed_group == checked_group
+
+
+def test_checked_recording_rules_equal_deployed_helm_source() -> None:
+    """Every promtool-checked recording group is exactly what Helm deploys."""
+    checked = yaml.safe_load(_RECORDING_FILE.read_text(encoding="utf-8"))
+    template_yaml = (
+        "spec:" + _HELM_RECORDING_FILE.read_text(encoding="utf-8").split("\nspec:", 1)[1]
+    )
+    rendered_source = "\n".join(
+        line for line in template_yaml.splitlines() if not line.lstrip().startswith("{{")
+    )
+    deployed = yaml.safe_load(rendered_source)
+    assert deployed["spec"]["groups"] == checked["groups"]
 
 
 #: The promtool alert-as-test corpus consolidated into the coverage matrix: the

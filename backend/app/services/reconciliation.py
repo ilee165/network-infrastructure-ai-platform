@@ -100,7 +100,10 @@ def change_request_audit_reconciliation_query() -> Select[tuple[int]]:
         "change_request.executing_to_failed",
         "change_request.failed_to_rolled_back",
     )
-    expected_actions = tuple(dict.fromkeys(expected_completed + expected_rolled_back))
+    expected_failed = expected_completed[:-1] + ("change_request.executing_to_failed",)
+    expected_actions = tuple(
+        dict.fromkeys(expected_completed + expected_failed + expected_rolled_back)
+    )
     audit_counts = (
         select(
             AuditLog.target_id.label("target_id"),
@@ -111,6 +114,9 @@ def change_request_audit_reconciliation_query() -> Select[tuple[int]]:
             func.count(
                 func.distinct(case((AuditLog.action.in_(expected_rolled_back), AuditLog.action)))
             ).label("rolled_back_action_count"),
+            func.count(
+                func.distinct(case((AuditLog.action.in_(expected_failed), AuditLog.action)))
+            ).label("failed_action_count"),
         )
         .where(
             AuditLog.target_type == "change_request",
@@ -121,6 +127,7 @@ def change_request_audit_reconciliation_query() -> Select[tuple[int]]:
     )
     expected_count = case(
         (ChangeRequest.state == ChangeRequestState.COMPLETED, literal(len(expected_completed))),
+        (ChangeRequest.state == ChangeRequestState.FAILED, literal(len(expected_failed))),
         else_=literal(len(expected_rolled_back)),
     )
     terminal_crs = (
@@ -131,7 +138,13 @@ def change_request_audit_reconciliation_query() -> Select[tuple[int]]:
             expected_count.label("expected_count"),
         )
         .where(
-            ChangeRequest.state.in_((ChangeRequestState.COMPLETED, ChangeRequestState.ROLLED_BACK)),
+            ChangeRequest.state.in_(
+                (
+                    ChangeRequestState.COMPLETED,
+                    ChangeRequestState.FAILED,
+                    ChangeRequestState.ROLLED_BACK,
+                )
+            ),
         )
         .cte("terminal_crs")
     )
@@ -139,6 +152,10 @@ def change_request_audit_reconciliation_query() -> Select[tuple[int]]:
         (
             terminal_crs.c.state == ChangeRequestState.COMPLETED,
             audit_counts.c.completed_action_count,
+        ),
+        (
+            terminal_crs.c.state == ChangeRequestState.FAILED,
+            audit_counts.c.failed_action_count,
         ),
         else_=audit_counts.c.rolled_back_action_count,
     )
@@ -148,8 +165,8 @@ def change_request_audit_reconciliation_query() -> Select[tuple[int]]:
             terminal_crs.outerjoin(
                 audit_counts,
                 and_(
-                    audit_counts.c.target_id
-                    == func.cast(terminal_crs.c.id, AuditLog.target_id.type),
+                    func.replace(audit_counts.c.target_id, "-", "")
+                    == func.replace(func.cast(terminal_crs.c.id, AuditLog.target_id.type), "-", ""),
                     audit_counts.c.reasoning_trace_id == terminal_crs.c.reasoning_trace_id,
                 ),
             )
