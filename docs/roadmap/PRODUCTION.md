@@ -446,6 +446,11 @@ D15 gives structlog JSON, Prometheus `/metrics`, OTel tracing, health endpoints.
 | Audit → SIEM export lag | p95 < 60 s | Export pipeline metric |
 | Reasoning-trace persistence | 100% of agent answers have a trace (no orphans) | Backed: `netops_reconciliation_inconsistencies{reconciliation="reasoning_trace"}` over the documented synchronous-commit settlement boundary |
 
+For ChangeRequest audit completeness, “executed” includes all three terminal
+outcomes: `COMPLETED`, permanently `FAILED`, and `ROLLED_BACK`. A `FAILED`
+request requires the `executing_to_failed` edge but does not require the
+inapplicable `failed_to_rolled_back` edge.
+
 Supporting requirements: 100% of containers expose `/metrics` + health endpoints (already D15); OTel tracing on by default in production with 100% sampling of agent runs and ≥10% of API requests; every alert rule links to a runbook (generated and maintained by the Documentation Agent — dogfooding); log retention per the data-retention Consultant answer (**PROPOSED default:** 90 days hot, 1 year archived).
 
 ---

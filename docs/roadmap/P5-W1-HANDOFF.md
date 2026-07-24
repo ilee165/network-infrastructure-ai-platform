@@ -1,9 +1,10 @@
 # P5 W1 handoff — dispatch durability and observability debt
 
-**Verdict:** **IMPLEMENTED / VERIFIED** on `feat/p5-w1` at `263b51e5`
-(2026-07-23). This closes W1 only. W2–W5 remain pending, P5 is not released,
-and ADR-0059 remains Proposed until W5-T3. The final strong whole-branch review
-after `263b51e5` is **APPROVED**.
+**Verdict:** **IMPLEMENTED / PR-REVIEW REMEDIATED** on `feat/p5-w1`. The
+original W1 closeout was verified at `263b51e5`; the PR #169 remediation series
+through `7eb2442b` closes the subsequent durability, authorization, CI, and
+test-proof findings. This closes W1 only. W2–W5 remain pending, P5 is not
+released, and ADR-0059 remains Proposed until W5-T3.
 
 ## Requirement-to-evidence map
 
@@ -19,10 +20,46 @@ after `263b51e5` is **APPROVED**.
 | T3 bounded series, recording/burn/staleness alerts, SLO roster, runbooks, deployed chart seam | `backend/app/core/metrics.py`, `backend/tests/agents/eval/test_slo_alert_corpus.py`, `deploy/observability/slo-recording.rules.yaml`, `deploy/observability/slo-burn-rate.alerts.yaml`, `deploy/kubernetes/netops/templates/slo-recording-prometheusrule.yaml`, `deploy/kubernetes/netops/templates/slo-burn-rate-prometheusrule.yaml`, `docs/runbooks/slo-config-backup-completeness.md`, `docs/runbooks/slo-change-request-audit-completeness.md`, `docs/runbooks/slo-reasoning-trace-persistence.md` | `59e8b7b3`, `2a1a7c4e`, `1db099b8`, `f2607bca`, `263b51e5`; review/fix verifier **VERIFIED** and whole-branch review **APPROVED** |
 | T3 should-fire/quiet cases and mutation bites; PRODUCTION §6 rows 5/6/9 backed | `deploy/observability/reconciliation.alerts.test.yaml`, `deploy/observability/run-reconciliation-promtool-bite.sh`, `docs/roadmap/PRODUCTION.md` | `59e8b7b3`, `2a1a7c4e`, `ba2e60a6`, `1db099b8`, `f2607bca`, `263b51e5`; verifier **VERIFIED** and whole-branch review **APPROVED** |
 
+## PR #169 remediation
+
+The post-closeout review fixes are intentionally split into auditable commits:
+
+- `e08ed112` refreshes the `pyasn1` security floor/lock and regenerated
+  TypeScript OpenAPI client;
+- `75bdc480` synchronizes outbox death/revival with guarded ReportRun
+  transitions, provenance tokens, same-transaction audit evidence, retry-budget
+  reset, and PostgreSQL crash/convergence proofs;
+- `c5a034e1` adds the admin dead-dispatch inventory and typed replay-conflict
+  contract, including OpenAPI responses;
+- `46f8b64a` enforces the engineer request floor before draft persistence and
+  normalizes report-access denial at execution;
+- `e5771f7c` includes permanently `FAILED` CRs in audit reconciliation, closes
+  the slim-metrics and deployed-recording-rule seams, and shares the backup
+  miss grace with beat;
+- `bee5a28a` makes the dispatch negative control distinguish exit `1` from a
+  checker crash and expands the syntax ratchet;
+- `66c81c9b` replaces no-publication/idempotency tautologies with assertion-
+  bearing tests and adds timezone-aware outbox-age coverage; and
+- `7eb2442b` preserves fresh-request retries for genuine execution failures
+  while keeping admin outbox revival restricted to `dispatch_dead:*`.
+
+The deliberate disabled-backup reconciliation schedule remains retained:
+disabled configuration emits the bounded excluded/healthy state and keeps the
+schedule-enabled series fresh. This is the cited rejection of CodeRabbit
+finding #2, not an unhandled alert path.
+
 ## Fresh closeout results
 
 The final cross-task evidence run reported:
 
+- PR-remediation revalidation: **4,556 backend tests passed** in the exact
+  four-worker CI lane; its sole local failure was the pre-existing nested-xdist
+  coverage-contract fixture exceeding its 60-second timeout on DrvFS, and that
+  fixture passed in isolation. The complete live PostgreSQL directory passed
+  **126 tests**; Ruff, format, mypy, import-linter, dispatch ratchet,
+  OpenAPI/config/chart drift, TypeScript compile/client drift, and **544
+  frontend tests** were green. GitHub CI is the authoritative four-worker
+  timing environment for the nested coverage fixture.
 - backend non-integration: **4,412 passed, 30 skipped**;
 - live PostgreSQL W1 suite: **38 passed**;
 - dispatch checker: clean tree green; negative controls reject `send_task`,
