@@ -471,6 +471,7 @@ class AutomationAgent(BaseSpecialistAgent):
         from datetime import datetime
 
         from app.agents.framework.read_facade import (
+            ReportAccessDeniedError,
             ensure_report_access,
             report_generation_args,
         )
@@ -500,7 +501,7 @@ class AutomationAgent(BaseSpecialistAgent):
                 period_start=datetime.fromisoformat(payload["period_start"]),
                 period_end=datetime.fromisoformat(payload["period_end"]),
             )
-        except ValueError:
+        except (ValueError, ReportAccessDeniedError):
             # Never echo CR payload values through an execution exception.
             raise ValueError("invalid_report_request") from None
 

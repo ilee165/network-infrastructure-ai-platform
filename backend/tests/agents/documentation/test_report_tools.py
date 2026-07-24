@@ -32,6 +32,7 @@ from app.agents.framework.read_facade import ReportAccessDeniedError
 from app.agents.framework.tools import (
     AgentRunIdentity,
     ChangeRequestCreated,
+    RbacForbiddenError,
     ToolClassification,
     agent_run_context,
     change_request_gate_context,
@@ -109,7 +110,7 @@ def engineer_identity() -> Iterator[None]:
         yield
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture()
 def approved_report_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """Functional report-request tests execute only through an approved gate."""
     monkeypatch.setattr(request_report_generation, "approval_gate", ApproveAllGate())
@@ -117,6 +118,39 @@ def approved_report_request(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_request_generation_is_state_changing() -> None:
     assert request_report_generation.classification is ToolClassification.STATE_CHANGING
+    assert request_report_generation.min_role is Role.ENGINEER
+
+
+async def test_viewer_is_rejected_before_real_gate_can_persist_draft(
+    seeded_db: None,
+) -> None:
+    maker = db.get_sessionmaker()
+    service = ChangeRequestService(maker)
+    viewer_id = uuid.uuid4()
+
+    def gate_factory(identity: AgentRunIdentity) -> ChangeRequestGate:
+        assert identity.user_id == viewer_id
+        return ChangeRequestGate(
+            service,
+            requester_id=viewer_id,
+            actor_role=identity.role,
+        )
+
+    with (
+        agent_run_context(role=Role.VIEWER, user_id=viewer_id),
+        change_request_gate_context(gate_factory),
+        pytest.raises(RbacForbiddenError),
+    ):
+        await request_report_generation.ainvoke(
+            {
+                "kind": "change",
+                "period_start": _START.isoformat(),
+                "period_end": _END.isoformat(),
+            }
+        )
+
+    async with maker() as session:
+        assert await session.scalar(select(ChangeRequest)) is None
 
 
 async def test_request_generation_without_approval_persists_nothing(
@@ -286,7 +320,9 @@ async def test_get_run_admin_still_sees_above_floor_kinds(seeded_db: None) -> No
 
 
 async def test_request_generation_enqueues_under_invoking_user(
-    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    approved_report_request: None,
 ) -> None:
     from app.workers import celery_app as celery_module
 
@@ -336,7 +372,9 @@ async def test_request_generation_enqueues_under_invoking_user(
 
 
 async def test_request_generation_commits_audit_run_and_outbox_without_dispatch(
-    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    approved_report_request: None,
 ) -> None:
     """The audit row is durable BEFORE the broker call: a dispatch failure can
     never lose the evidence that the generation was requested (PR #166 F3)."""
@@ -364,7 +402,9 @@ async def test_request_generation_commits_audit_run_and_outbox_without_dispatch(
 
 
 async def test_agent_request_rollback_persists_neither_run_outbox_nor_audit(
-    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    approved_report_request: None,
 ) -> None:
     from app.services import audit as audit_service
 
@@ -409,7 +449,9 @@ async def test_agent_request_rollback_persists_neither_run_outbox_nor_audit(
 
 
 async def test_request_generation_pins_naive_period_as_utc(
-    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    approved_report_request: None,
 ) -> None:
     """Naive ISO periods are pinned as UTC — the run id matches the worker's.
 
@@ -443,7 +485,9 @@ async def test_request_generation_pins_naive_period_as_utc(
 
 
 async def test_request_generation_rejects_future_period_end(
-    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    approved_report_request: None,
 ) -> None:
     """A not-yet-complete period is refused before anything is enqueued."""
     from datetime import timedelta
@@ -468,7 +512,9 @@ async def test_request_generation_rejects_future_period_end(
 
 
 async def test_request_generation_denied_below_floor(
-    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    approved_report_request: None,
 ) -> None:
     from app.workers import celery_app as celery_module
 
@@ -487,7 +533,9 @@ async def test_request_generation_denied_below_floor(
 
 
 async def test_request_generation_rejects_over_cap_span(
-    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    approved_report_request: None,
 ) -> None:
     """The facade path enforces the same span cap as the API schema (PR #166
     F3): builders materialize one tuple per period day, so an unbounded span
@@ -513,7 +561,9 @@ async def test_request_generation_rejects_over_cap_span(
 
 
 async def test_request_generation_accepts_at_cap_span(
-    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    approved_report_request: None,
 ) -> None:
     """Exactly 400 days (annual report + slack) is allowed — the cap is a
     boundary, not an off-by-one."""
@@ -542,7 +592,9 @@ async def test_request_generation_accepts_at_cap_span(
 
 
 async def test_request_generation_rejects_pre_floor_period_start(
-    seeded_db: None, monkeypatch: pytest.MonkeyPatch
+    seeded_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    approved_report_request: None,
 ) -> None:
     """A period_start before the platform-epoch floor is refused."""
     from app.workers import celery_app as celery_module
@@ -567,7 +619,7 @@ async def test_unbound_identity_is_denied_by_default(seeded_db: None) -> None:
     """No bound identity -> no visible kinds (deny-by-default, brief §7)."""
     result = json.loads(await list_report_runs.ainvoke({}))
     assert result == {"runs": []}
-    with pytest.raises(ReportAccessDeniedError):
+    with pytest.raises(RbacForbiddenError):
         await request_report_generation.ainvoke(
             {
                 "kind": "change",

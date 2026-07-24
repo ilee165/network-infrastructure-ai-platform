@@ -1212,6 +1212,7 @@ async def get_report_run(
 @netops_tool(
     classification=ToolClassification.STATE_CHANGING,
     change_request_kind=ChangeRequestKind.REPORT_GENERATION,
+    min_role="engineer",
 )
 async def request_report_generation(
     kind: Annotated[

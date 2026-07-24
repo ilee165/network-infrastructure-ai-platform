@@ -280,6 +280,35 @@ async def _approved_ddi_cr(
     return await service.get(cr.id)
 
 
+async def _approved_report_cr(
+    service: ChangeRequestService,
+    maker: async_sessionmaker[AsyncSession],
+) -> ChangeRequest:
+    async with maker() as session:
+        role = RoleRow(name="engineer")
+        session.add(role)
+        await session.flush()
+        requester = User(username="report-requester", password_hash="x", role_id=role.id)
+        approver = User(username="report-approver", password_hash="x", role_id=role.id)
+        session.add_all([requester, approver])
+        await session.commit()
+        requester_id = requester.id
+        approver_id = approver.id
+    cr = await service.create_draft(
+        requester_id=requester_id,
+        actor_role=Role.ENGINEER,
+        kind=ChangeRequestKind.REPORT_GENERATION,
+        payload={
+            "kind": "change",
+            "period_start": "2026-07-01T00:00:00+00:00",
+            "period_end": "2026-07-08T00:00:00+00:00",
+        },
+    )
+    await service.submit(cr.id, actor_id=requester_id, actor_role=Role.ENGINEER)
+    await service.approve(cr.id, actor_id=approver_id, actor_role=Role.ENGINEER)
+    return await service.get(cr.id)
+
+
 # ---------------------------------------------------------------------------
 # 1. Definition / registration / read-only tool contract
 # ---------------------------------------------------------------------------
@@ -323,6 +352,25 @@ class TestDefinition:
         }
         # The drafted-but-not-yet-executable kind has no executor.
         assert agent._executor_for(ChangeRequestKind.SECURITY_REMEDIATION) is None
+
+
+async def test_report_access_denial_is_normalized_without_role_or_kind_detail(
+    service: ChangeRequestService,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.agents.framework import read_facade
+    from app.agents.framework.read_facade import ReportAccessDeniedError
+
+    cr = await _approved_report_cr(service, sessionmaker)
+
+    def _deny(*_args: Any, **_kwargs: Any) -> None:
+        raise ReportAccessDeniedError("secret-report-kind", "secret-role")
+
+    monkeypatch.setattr(read_facade, "ensure_report_access", _deny)
+    with pytest.raises(ValueError, match="^invalid_report_request$") as raised:
+        await AutomationAgent(change_request_service=service).execute(cr.id)
+    assert "secret" not in str(raised.value)
 
 
 # ---------------------------------------------------------------------------
