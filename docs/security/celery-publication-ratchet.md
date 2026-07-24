@@ -41,8 +41,18 @@ Python AST and rejects calls whose final attribute is `send_task`,
 nested attribute paths. It also rejects callable chord/canvas/signature
 publication, including imported or assigned aliases and nested/multiline forms,
 while allowing construction-only `.s`, `.si`, `signature`, and chord forms.
+Star-imports from task modules are rejected because they erase the binding
+information needed to distinguish task calls from ordinary functions. Bare and
+called `@celery_app.task` decorators are both included in the task-symbol census.
 Exceptions, if ever approved, must match resolved path, enclosing symbol, and
 method kind; the committed exception set is empty.
+
+The AST ratchet is an accidental-drift control, not a Python sandbox. Dynamic
+indirection such as `getattr(celery_app, "send_task")`, `functools.partial`,
+assignment expressions, or a function that returns a bound publication method
+cannot be proven exhaustively by static syntax inspection. Such deliberate
+circumvention is prohibited by review policy and remains covered by runtime
+boundary tests and the production publication census.
 
 CI runs the clean-tree check and then the committed syntax fixtures as a
 negative control. Locally, the CI-equivalent gate is:
@@ -50,5 +60,5 @@ negative control. Locally, the CI-equivalent gate is:
 ```bash
 cd backend
 python scripts/check_celery_dispatch.py
-! python scripts/check_celery_dispatch.py --negative-control
+python scripts/check_celery_dispatch.py --negative-control; test $? -eq 1
 ```

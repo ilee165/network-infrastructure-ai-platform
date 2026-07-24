@@ -13,6 +13,7 @@ FORBIDDEN_METHODS = frozenset({"send_task", "apply_async", "delay"})
 TRACK_BOUND_METHOD_ALIAS = True
 TRACK_IMPORTED_TASK_ALIAS = True
 TRACK_IMPORTED_TASK_METHOD = True
+TRACK_TASK_STAR_IMPORT = True
 TRACK_CALLABLE_CANVAS = True
 _CANVAS_CONSTRUCTORS = frozenset({"chord", "chain", "group", "signature"})
 _BACKEND = Path(__file__).resolve().parents[1]
@@ -85,6 +86,8 @@ class _PublicationVisitor(ast.NodeVisitor):
         if node.module is None:
             return
         for imported in node.names:
+            if TRACK_TASK_STAR_IMPORT and imported.name == "*" and node.module in self.task_symbols:
+                self._record(node, "task_star_import")
             bound_name = imported.asname or imported.name
             if (
                 TRACK_CALLABLE_CANVAS
@@ -156,7 +159,7 @@ class _PublicationVisitor(ast.NodeVisitor):
         module = self.imported_task_modules[root]
         return node.attr in self.task_symbols[module]
 
-    def _record(self, node: ast.Call, kind: str) -> None:
+    def _record(self, node: ast.AST, kind: str) -> None:
         scope = ExceptionScope(self.path, self.symbol, kind)
         wrapper_call = self.path == _WRAPPER_PATH and self.symbol in _WRAPPER_SYMBOLS
         if not wrapper_call and scope not in self.exceptions:
@@ -196,24 +199,30 @@ class _PublicationVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+def _task_names(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            (isinstance(decorator, ast.Attribute) and decorator.attr == "task")
+            or (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr == "task"
+            )
+            for decorator in node.decorator_list
+        )
+    }
+
+
 def _task_symbols() -> dict[str, frozenset[str]]:
     task_root = _BACKEND / "app" / "workers" / "tasks"
     symbols: dict[str, frozenset[str]] = {}
     for path in task_root.glob("*.py"):
         module = f"{_TASK_MODULE_PREFIX}.{path.stem}"
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        task_names = {
-            node.name
-            for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and any(
-                isinstance(decorator, ast.Call)
-                and isinstance(decorator.func, ast.Attribute)
-                and decorator.func.attr == "task"
-                for decorator in node.decorator_list
-            )
-        }
-        symbols[module] = frozenset(task_names)
+        symbols[module] = frozenset(_task_names(path))
     return symbols
 
 

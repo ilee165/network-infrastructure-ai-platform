@@ -40,6 +40,14 @@ def test_dispatch_ratchet_rejects_imported_task_object_publication_method() -> N
     assert _kinds("imported_task_method.py") == {"task_call"}
 
 
+def test_dispatch_ratchet_rejects_task_module_star_import() -> None:
+    assert _kinds("task_star_import.py") == {"task_star_import"}
+
+
+def test_dispatch_ratchet_discovers_bare_task_decorator() -> None:
+    assert check_celery_dispatch._task_names(FIXTURES / "bare_task_decorator.py") == {"bare_task"}
+
+
 def test_dispatch_ratchet_rejects_callable_chord_alias_multiline_form() -> None:
     assert _kinds("chord_callable_alias.py") == {"canvas_call"}
 
@@ -50,6 +58,11 @@ def test_dispatch_ratchet_rejects_assigned_chord_constructor_alias() -> None:
 
 def test_dispatch_ratchet_rejects_nested_callable_signature_form() -> None:
     assert _kinds("signature_callable_nested.py") == {"canvas_call"}
+
+
+@pytest.mark.parametrize("fixture", ["chain_callable_nested.py", "group_callable_nested.py"])
+def test_dispatch_ratchet_rejects_callable_chain_and_group(fixture: str) -> None:
+    assert _kinds(fixture) == {"canvas_call"}
 
 
 def test_dispatch_ratchet_allows_canvas_and_signature_construction_only() -> None:
@@ -105,6 +118,7 @@ def test_dispatch_ratchet_wrapper_exemption_requires_exact_canonical_path(
         ("bound_method_alias.py", "bound_method_alias"),
         ("imported_task_alias.py", "imported_task_alias"),
         ("imported_task_method.py", "imported_task_method"),
+        ("task_star_import.py", "task_star_import"),
         ("chord_callable_alias.py", "canvas_call"),
         ("chord_constructor_assignment_alias.py", "canvas_call"),
         ("signature_callable_nested.py", "canvas_call"),
@@ -141,5 +155,11 @@ def test_dispatch_ratchet_blocking_ci_step_executes_the_negative_control() -> No
         text=True,
         check=False,
     )
-    assert result.returncode != 0
-    assert {"send_task", "apply_async", "delay", "canvas_call"} <= set(result.stdout.split())
+    assert result.returncode == 1
+    assert {
+        "send_task",
+        "apply_async",
+        "delay",
+        "canvas_call",
+        "task_star_import",
+    } <= set(result.stdout.split())
