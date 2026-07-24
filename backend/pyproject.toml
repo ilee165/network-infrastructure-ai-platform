@@ -67,6 +67,10 @@ dependencies = [
     # Device transports (D7): SSH CLI + SNMP v2c/v3
     "netmiko",
     "pysnmp",
+    # pysnmp transitive security floor: 0.6.4 fixes CVE-2026-59885 and
+    # CVE-2026-59886 (crafted ASN.1 OID/REAL denial of service). Keep direct so
+    # the hash-pinned lock and image scan cannot regress through resolver drift.
+    "pyasn1>=0.6.4",
     # Virtualization SDK (D7, ADR-0051): pyVmomi is the named VMware transport —
     # the vCenter (SOAP) client behind the `vmware` plugin. Floor + major-cap
     # tracks client-side currency (one pinned client serves mixed vCenter 7/8

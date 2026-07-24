@@ -29,7 +29,10 @@ The final cross-task evidence run reported:
   `apply_async`, `delay`, `task_call`, and three `canvas_call` forms;
 - focused checker, OpenAPI, and migration tests: **35 passed**;
 - D16 lanes: Ruff check/format, mypy, import-linter, static/config/chart drift,
-  OpenAPI drift, and the dispatch checker all clean;
+  backend OpenAPI export, and the dispatch checker all clean. The original
+  closeout did not run the generated-TypeScript leg of `contract-drift`;
+  PR #169 exposed that stale client, which was regenerated from the checked
+  `docs/api/openapi.json` during the PR remediation.
 - Prometheus: **11 recording-rule**, **19 SLO-alert**, and **7 report-rule**
   tests passed, including semantic and both reconciliation/report mutation
   bites;

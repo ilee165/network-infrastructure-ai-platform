@@ -1618,6 +1618,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/reports/outbox/{dispatch_id}/requeue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Requeue Dead Dispatch
+         * @description Admin-only, audited replay of a validated dead report envelope.
+         */
+        post: operations["requeue_dead_dispatch_api_v1_reports_outbox__dispatch_id__requeue_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/reports/{run_id}": {
         parameters: {
             query?: never;
@@ -6705,6 +6725,35 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ReportGenerationQueued"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    requeue_dead_dispatch_api_v1_reports_outbox__dispatch_id__requeue_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                dispatch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
