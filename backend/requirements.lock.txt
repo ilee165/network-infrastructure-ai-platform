@@ -1233,9 +1233,9 @@ langchain-ollama==1.1.0 \
     --hash=sha256:43ac83a6eacb0f43855810739794dd55019e0d9b17bdcf3ecb3b1991ac3b59dd \
     --hash=sha256:f776f56f6782ae4da7692579b94a6575906118318d1023b455d7207f9d059811
     # via netops-backend (pyproject.toml)
-langchain-openai==1.3.3 \
-    --hash=sha256:143769bf943820b80db769e47ca8fd0aac08ed18714519333b044c4431e9aa67 \
-    --hash=sha256:e469659862c8aabba4f6653df973206e7be54f98cf2275c86be7f06b7abe20d7
+langchain-openai==1.4.1 \
+    --hash=sha256:6d16be615d997db80294731b8e768783f1fb8e0313668e64acd50cd68acbad20 \
+    --hash=sha256:8528bb34cc78fdfd2d895573c7917f9441cbb82db5f18ae0e6b3b75d95bdefb3
     # via netops-backend (pyproject.toml)
 langchain-protocol==0.0.18 \
     --hash=sha256:70b53a86fbf9cedc863555effe44da192ab02d556ddbf2cf95b8873adcf41b5a \
