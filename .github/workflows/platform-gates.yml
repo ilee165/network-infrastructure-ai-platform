@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       # W4-T2b (ADR-0046 §4): sync the canonical dashboards-as-code source
       # (deploy/observability/dashboards/*.json) into the chart's own tree
@@ -595,7 +595,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           # The bite-proof / harness scripts run repo-controlled shell right after
           # checkout and need no git auth — do NOT persist the token in .git/config
@@ -649,7 +649,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Set up Helm and promtool
         uses: ./.github/actions/setup-tools
