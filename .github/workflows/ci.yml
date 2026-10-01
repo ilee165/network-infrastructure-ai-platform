@@ -53,7 +53,7 @@ jobs:
         working-directory: frontend
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Set up Node 22
         uses: ./.github/actions/setup-node
@@ -132,7 +132,7 @@ jobs:
     # nothing from backend/frontend — the old edges were pure scheduling.
     steps:
       - name: Checkout (full history)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           # fetch-depth 0 = all history; gitleaks must see every commit, not just
           # HEAD, to catch a secret that was committed and later removed.
@@ -194,16 +194,16 @@ jobs:
       REGISTRY: ghcr.io
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4
 
       # Pinned supply-chain tooling (ADR-0016 §5 — the signer/SBOM generator must
       # not itself be a supply-chain risk). syft + cosign are installed at a
       # pinned version via their official actions, themselves pinned to a release.
       - name: Install syft (SBOM, pinned)
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
         with:
           syft-version: v1.18.1
 
@@ -226,7 +226,7 @@ jobs:
       # docker-publish, so its push build is a near-free cache replay.
       - name: Build backend image
         id: build_backend
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
         with:
           context: .
           file: deploy/docker/backend.Dockerfile
@@ -238,7 +238,7 @@ jobs:
 
       - name: Build frontend image
         id: build_frontend
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
         with:
           context: .
           file: deploy/docker/frontend.Dockerfile
@@ -380,16 +380,16 @@ jobs:
       REGISTRY: ghcr.io
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4
 
       # Pinned supply-chain tooling (ADR-0016 §5 — the signer/SBOM generator must
       # not itself be a supply-chain risk). syft + cosign are installed at a
       # pinned version via their official actions, themselves pinned to a release.
       - name: Install syft (SBOM, pinned)
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
         with:
           syft-version: v1.18.1
 
@@ -408,7 +408,7 @@ jobs:
           echo "frontend_image=${REGISTRY}/${owner}/netops-frontend" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -432,7 +432,7 @@ jobs:
       # digest, so the one signature covers both.
       - name: Build + push backend image
         id: build_backend
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
         with:
           context: .
           file: deploy/docker/backend.Dockerfile
@@ -444,7 +444,7 @@ jobs:
 
       - name: Build + push frontend image
         id: build_frontend
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
         with:
           context: .
           file: deploy/docker/frontend.Dockerfile
@@ -620,7 +620,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       # Static validator — no cluster needed. Asserts the harness artifacts carry
       # every load-bearing invariant (enforcing CNI install, disableDefaultCNI,
@@ -650,7 +650,7 @@ jobs:
       # already provides. The action installs the kind binary; the harness drives
       # create/CNI/self-test/apply/assert/teardown.
       - name: Install kind
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
         with:
           install_only: true
           version: v0.24.0
@@ -729,7 +729,7 @@ jobs:
     timeout-minutes: 35
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           # This job runs the same repo-controlled bite/harness scripts post-checkout
           # and needs no git auth — do NOT persist the token (least privilege).
@@ -866,7 +866,7 @@ jobs:
       # kind brings up the throwaway cluster on the Docker backend the GH runner
       # provides; the HA harness path installs the CNPG operator + KEDA on top.
       - name: Install kind
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
         with:
           install_only: true
           version: v0.24.0
@@ -1002,7 +1002,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Set up Python 3.12
         uses: ./.github/actions/setup-python
@@ -1133,7 +1133,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           # Repo-controlled shell + local docker only; no git auth needed.
           persist-credentials: false
@@ -1316,7 +1316,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout (full history for merge-base)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           fetch-depth: 0
           persist-credentials: false

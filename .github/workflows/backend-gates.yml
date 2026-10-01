@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Set up Python 3.12
         uses: ./.github/actions/setup-python
@@ -203,7 +203,7 @@ jobs:
           --health-retries 10
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Set up Python 3.12
         uses: ./.github/actions/setup-python
@@ -315,7 +315,7 @@ jobs:
           --health-retries 10
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Set up Python 3.12
         uses: ./.github/actions/setup-python
@@ -409,7 +409,7 @@ jobs:
     needs: [backend, pg-integration, graph-integration]
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Set up Python 3.12
         uses: ./.github/actions/setup-python
@@ -418,19 +418,19 @@ jobs:
         run: bash "${GITHUB_WORKSPACE}/ci/scripts/retry-egress.sh" --timeout-seconds 300 -- pip install "coverage==7.14.3"
 
       - name: Download unit raw coverage
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: backend-coverage-unit-raw
           path: backend/.coverage-input/unit
 
       - name: Download pg-integration raw coverage
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: backend-coverage-pg-integration-raw
           path: backend/.coverage-input/pg-integration
 
       - name: Download graph-integration raw coverage
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: backend-coverage-graph-integration-raw
           path: backend/.coverage-input/graph-integration
